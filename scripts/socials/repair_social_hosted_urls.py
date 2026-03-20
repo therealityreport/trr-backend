@@ -252,7 +252,7 @@ def _fetch_rows(
           coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data
         from social.{table} p
         left join core.seasons s on s.id = p.season_id
-        where {' and '.join(filters)}
+        where {" and ".join(filters)}
         order by p.id
         limit %s
         """,
@@ -372,7 +372,7 @@ def _repair_platform(
         cur.execute(
             f"""
             update social.{table}
-            set {', '.join(assignments)}
+            set {", ".join(assignments)}
             where id = %s::uuid
             """,
             tuple(params),

@@ -19,7 +19,10 @@ def override_admin(request):
     if "no_admin_override" in request.fixturenames:
         yield
         return
-    app.dependency_overrides[require_cast_screentime_admin] = lambda: {"id": "service_role:test", "role": "service_role"}
+    app.dependency_overrides[require_cast_screentime_admin] = lambda: {
+        "id": "service_role:test",
+        "role": "service_role",
+    }
     yield
     app.dependency_overrides.pop(require_cast_screentime_admin, None)
 
@@ -188,7 +191,9 @@ def fake_repo(monkeypatch):
         lookup_id = video_asset_id or show_id or season_id or episode_id
         if not lookup_id:
             return []
-        return list_video_asset_cast_candidates(next(iter(store["video_assets"])) if store["video_assets"] else lookup_id)
+        return list_video_asset_cast_candidates(
+            next(iter(store["video_assets"])) if store["video_assets"] else lookup_id
+        )
 
     def create_run(payload):
         run_id = str(uuid4())
@@ -288,10 +293,17 @@ def fake_repo(monkeypatch):
         for row in store["publish_versions"].values():
             if row["video_asset_id"] == video_asset_id and row.get("is_current"):
                 row["is_current"] = False
-        version_number = max(
-            (int(row["version_number"]) for row in store["publish_versions"].values() if row["video_asset_id"] == video_asset_id),
-            default=0,
-        ) + 1
+        version_number = (
+            max(
+                (
+                    int(row["version_number"])
+                    for row in store["publish_versions"].values()
+                    if row["video_asset_id"] == video_asset_id
+                ),
+                default=0,
+            )
+            + 1
+        )
         record = {
             "id": str(uuid4()),
             "video_asset_id": video_asset_id,
@@ -424,13 +436,20 @@ def fake_repo(monkeypatch):
     monkeypatch.setattr(repo, "get_run", get_run)
     monkeypatch.setattr(repo, "get_run_with_video_asset", get_run_with_video_asset)
     monkeypatch.setattr(repo, "update_run", update_run)
+
     def upsert_run_artifacts(run_id, artifacts):
         rows = [{**item, "run_id": run_id} for item in artifacts]
         store["artifacts"][run_id] = rows
         return rows
 
     monkeypatch.setattr(repo, "upsert_run_artifacts", upsert_run_artifacts)
-    monkeypatch.setattr(repo, "get_run_artifact", lambda run_id, artifact_key: next((item for item in store["artifacts"].get(run_id, []) if item["artifact_key"] == artifact_key), None))
+    monkeypatch.setattr(
+        repo,
+        "get_run_artifact",
+        lambda run_id, artifact_key: next(
+            (item for item in store["artifacts"].get(run_id, []) if item["artifact_key"] == artifact_key), None
+        ),
+    )
     monkeypatch.setattr(repo, "replace_cast_screentime_segments", replace_segments)
     monkeypatch.setattr(repo, "replace_cast_screentime_evidence", replace_evidence)
     monkeypatch.setattr(repo, "upsert_cast_screentime_evidence", upsert_cast_screentime_evidence)
@@ -501,7 +520,9 @@ def fake_storage(monkeypatch):
         "_copy_existing_object_to_temp_object",
         lambda **_kwargs: {"bucket": "test-bucket", "content_type": "video/mp4", "etag": "etag-1"},
     )
-    monkeypatch.setattr(router_module, "_read_object_bytes", lambda *_args, **_kwargs: b'{"shots":[{"shot_key":"shot-1"}]}')
+    monkeypatch.setattr(
+        router_module, "_read_object_bytes", lambda *_args, **_kwargs: b'{"shots":[{"shot_key":"shot-1"}]}'
+    )
     monkeypatch.setattr(
         router_module,
         "_youtube_fetch_video_metadata",
@@ -529,7 +550,12 @@ def fake_storage(monkeypatch):
         type(
             "DummyYouTubeScraper",
             (),
-            {"resolve_channel_identity": lambda self, handle, delay=0.25: {"canonical_handle": handle, "channel_id": "official-channel-id"}},
+            {
+                "resolve_channel_identity": lambda self, handle, delay=0.25: {
+                    "canonical_handle": handle,
+                    "channel_id": "official-channel-id",
+                }
+            },
         ),
     )
     monkeypatch.setattr(screenalytics_cast_screentime, "start_run", lambda run_id: {"run_id": run_id, "accepted": True})
@@ -756,7 +782,9 @@ def test_import_external_url_uses_external_import_type_without_youtube_channel_c
 
 
 def test_upload_complete_fails_when_ffprobe_rejects_upload(monkeypatch):
-    monkeypatch.setattr(router_module, "_ffprobe_video", lambda *_args, **_kwargs: {"ok": False, "error": "ffprobe_failed"})
+    monkeypatch.setattr(
+        router_module, "_ffprobe_video", lambda *_args, **_kwargs: {"ok": False, "error": "ffprobe_failed"}
+    )
 
     client = TestClient(app)
     show_id = uuid4()
@@ -785,7 +813,12 @@ def test_internal_finalize_and_reads():
     show_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
-        json={"show_id": str(show_id), "filename": "episode.mp4", "content_type": "video/mp4", "expected_size_bytes": 1024},
+        json={
+            "show_id": str(show_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
     )
     upload_session_id = create_response.json()["upload_session_id"]
     complete_response = client.post(
@@ -845,7 +878,12 @@ def test_review_status_rejects_non_success_run():
     show_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
-        json={"show_id": str(show_id), "filename": "episode.mp4", "content_type": "video/mp4", "expected_size_bytes": 1024},
+        json={
+            "show_id": str(show_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
     )
     upload_session_id = create_response.json()["upload_session_id"]
     complete_response = client.post(
@@ -873,7 +911,12 @@ def test_generate_segment_clip_persists_clip_evidence():
     show_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
-        json={"show_id": str(show_id), "filename": "episode.mp4", "content_type": "video/mp4", "expected_size_bytes": 1024},
+        json={
+            "show_id": str(show_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
     )
     upload_session_id = create_response.json()["upload_session_id"]
     complete_response = client.post(
@@ -903,7 +946,12 @@ def test_reconcile_stale_runs_marks_running_runs_failed():
     show_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
-        json={"show_id": str(show_id), "filename": "episode.mp4", "content_type": "video/mp4", "expected_size_bytes": 1024},
+        json={
+            "show_id": str(show_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
     )
     upload_session_id = create_response.json()["upload_session_id"]
     complete_response = client.post(
@@ -936,7 +984,11 @@ def test_reconcile_stale_runs_marks_running_runs_failed():
 def test_publish_episode_run_creates_current_version_and_rollups(monkeypatch):
     def _read_object_bytes(_bucket, key):
         if key.endswith("reference_fingerprints.json"):
-            return b'[{"scene_key":"scene-1","fingerprint_type":"scene_signature","fingerprint_hash":"hash-1","start_ms":0,"end_ms":1000,"duration_ms":1000,"metadata":{"composition_type":"single_subject"}}]'
+            return (
+                b'[{"scene_key":"scene-1","fingerprint_type":"scene_signature",'
+                b'"fingerprint_hash":"hash-1","start_ms":0,"end_ms":1000,'
+                b'"duration_ms":1000,"metadata":{"composition_type":"single_subject"}}]'
+            )
         return b'{"shots":[{"shot_key":"shot-1"}]}'
 
     monkeypatch.setattr(router_module, "_read_object_bytes", _read_object_bytes)
@@ -945,7 +997,13 @@ def test_publish_episode_run_creates_current_version_and_rollups(monkeypatch):
     episode_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
-        json={"owner_scope": "episode", "owner_id": str(episode_id), "filename": "episode.mp4", "content_type": "video/mp4", "expected_size_bytes": 1024},
+        json={
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
     )
     upload_session_id = create_response.json()["upload_session_id"]
     complete_response = client.post(
@@ -1054,7 +1112,13 @@ def test_suggestion_and_unknown_review_decisions_persist_for_run_context(monkeyp
     episode_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
-        json={"owner_scope": "episode", "owner_id": str(episode_id), "filename": "episode.mp4", "content_type": "video/mp4", "expected_size_bytes": 1024},
+        json={
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
     )
     upload_session_id = create_response.json()["upload_session_id"]
     complete_response = client.post(

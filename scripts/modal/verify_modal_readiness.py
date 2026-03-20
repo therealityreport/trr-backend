@@ -8,14 +8,21 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import Any
-
-from modal.experimental import get_app_objects
 
 DEFAULT_APP_NAME = "trr-backend-jobs"
 DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_API_FUNCTION = "serve_backend_api"
+
+
+def _load_get_app_objects() -> Callable[..., dict[str, Any]]:
+    try:
+        from modal.experimental import get_app_objects as modal_get_app_objects
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Modal experimental helpers are unavailable") from exc
+    return modal_get_app_objects
 
 
 def _parse_args() -> argparse.Namespace:
@@ -28,16 +35,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runtime-secret-name",
         default=(
-            str(os.getenv("TRR_MODAL_RUNTIME_SECRET_NAME") or DEFAULT_RUNTIME_SECRET).strip()
-            or DEFAULT_RUNTIME_SECRET
+            str(os.getenv("TRR_MODAL_RUNTIME_SECRET_NAME") or DEFAULT_RUNTIME_SECRET).strip() or DEFAULT_RUNTIME_SECRET
         ),
         help=f"Runtime secret name to verify (default: {DEFAULT_RUNTIME_SECRET})",
     )
     parser.add_argument(
         "--social-secret-name",
         default=(
-            str(os.getenv("TRR_MODAL_SOCIAL_SECRET_NAME") or DEFAULT_SOCIAL_SECRET).strip()
-            or DEFAULT_SOCIAL_SECRET
+            str(os.getenv("TRR_MODAL_SOCIAL_SECRET_NAME") or DEFAULT_SOCIAL_SECRET).strip() or DEFAULT_SOCIAL_SECRET
         ),
         help=f"Social auth secret name to verify (default: {DEFAULT_SOCIAL_SECRET})",
     )
@@ -126,7 +131,7 @@ def api_function_name() -> str:
 
 
 def get_app_function_handles(*, app_name: str, modal_environment: str = "") -> dict[str, Any]:
-    return get_app_objects(
+    return _load_get_app_objects()(
         app_name,
         environment_name=modal_environment or None,
     )
@@ -230,10 +235,7 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
     print(f"  App: {summary['app_name']}")
     print(f"  Environment: {summary['modal_environment'] or 'default'}")
     print(f"  App deployed: {'yes' if summary['app_found'] else 'no'}")
-    print(
-        "  Named secrets: "
-        f"{summary['runtime_secret_name']}, {summary['social_secret_name']}"
-    )
+    print(f"  Named secrets: {summary['runtime_secret_name']}, {summary['social_secret_name']}")
     if summary["missing_secrets"]:
         print("  Missing secrets: " + ", ".join(summary["missing_secrets"]))
     else:

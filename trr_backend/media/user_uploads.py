@@ -27,12 +27,9 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 from trr_backend.media.s3_mirror import (
-    get_object_storage_bucket,
-    get_object_storage_client,
-    get_public_base_url,
+    get_cdn_base_url,
     get_s3_bucket,
     get_s3_client,
-    get_cdn_base_url,
     guess_ext_from_content_type,
 )
 from trr_backend.observability import inc_suppressed_path_conversion

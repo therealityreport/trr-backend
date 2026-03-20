@@ -128,8 +128,7 @@ def _extract_profile_stats_from_body_text(body_text: str) -> tuple[dict[str, Any
         "sb_rank": _find_line_before(lines, "SB Rank") or _find_line_after(lines, "SB Rank"),
         "followers_rank": _find_line_before(lines, "Followers Rank") or _find_line_after(lines, "Followers Rank"),
         "engagement_rate_rank": (
-            _find_line_before(lines, "Engagement Rate Rank")
-            or _find_line_after(lines, "Engagement Rate Rank")
+            _find_line_before(lines, "Engagement Rate Rank") or _find_line_after(lines, "Engagement Rate Rank")
         ),
     }
 
@@ -221,9 +220,7 @@ def _unwrap_trpc_result(payload: Any, *, endpoint: str, index: int | None = None
     error = item.get("error")
     if error:
         message = (
-            error.get("json", {}).get("message")
-            or error.get("message")
-            or f"SocialBlade tRPC error for {endpoint}"
+            error.get("json", {}).get("message") or error.get("message") or f"SocialBlade tRPC error for {endpoint}"
         )
         raise RuntimeError(str(message))
     result = item.get("result", {}).get("data", {}).get("json")
@@ -242,9 +239,8 @@ def _fetch_trpc_result(page: Any, endpoint: str, *, index: int | None = None) ->
 
 
 def _search_socialblade_profile(page: Any, handle: str) -> dict[str, Any]:
-    endpoint = (
-        "/api/trpc/instagram.search?input="
-        + quote(json.dumps({"json": {"query": handle}}, separators=(",", ":")))
+    endpoint = "/api/trpc/instagram.search?input=" + quote(
+        json.dumps({"json": {"query": handle}}, separators=(",", ":"))
     )
     result = _fetch_trpc_result(page, endpoint)
     profile = result.get("platformResult") if isinstance(result, dict) else None
@@ -254,9 +250,8 @@ def _search_socialblade_profile(page: Any, handle: str) -> dict[str, Any]:
 
 
 def _fetch_socialblade_user(page: Any, creator_id: str) -> dict[str, Any]:
-    endpoint = (
-        "/api/trpc/instagram.user?input="
-        + quote(json.dumps({"json": {"id": creator_id}}, separators=(",", ":")))
+    endpoint = "/api/trpc/instagram.user?input=" + quote(
+        json.dumps({"json": {"id": creator_id}}, separators=(",", ":"))
     )
     result = _fetch_trpc_result(page, endpoint)
     if not isinstance(result, dict):
@@ -265,16 +260,13 @@ def _fetch_socialblade_user(page: Any, creator_id: str) -> dict[str, Any]:
 
 
 def _fetch_socialblade_history(page: Any, creator_id: str, *, limit: int) -> list[dict[str, Any]]:
-    endpoint = (
-        "/api/trpc/instagram.user,instagram.history?batch=1&input="
-        + quote(
-            json.dumps(
-                {
-                    "0": {"json": {"id": creator_id}},
-                    "1": {"json": {"id": creator_id, "limit": limit}},
-                },
-                separators=(",", ":"),
-            )
+    endpoint = "/api/trpc/instagram.user,instagram.history?batch=1&input=" + quote(
+        json.dumps(
+            {
+                "0": {"json": {"id": creator_id}},
+                "1": {"json": {"id": creator_id, "limit": limit}},
+            },
+            separators=(",", ":"),
         )
     )
     result = _fetch_trpc_result(page, endpoint, index=1)
@@ -284,13 +276,10 @@ def _fetch_socialblade_history(page: Any, creator_id: str, *, limit: int) -> lis
 
 
 def _fetch_socialblade_period_deltas(page: Any, creator_id: str, *, period: str) -> list[dict[str, Any]]:
-    endpoint = (
-        "/api/trpc/instagram.monthly?batch=1&input="
-        + quote(
-            json.dumps(
-                {"0": {"json": {"id": creator_id, "period": period}}},
-                separators=(",", ":"),
-            )
+    endpoint = "/api/trpc/instagram.monthly?batch=1&input=" + quote(
+        json.dumps(
+            {"0": {"json": {"id": creator_id, "period": period}}},
+            separators=(",", ":"),
         )
     )
     result = _fetch_trpc_result(page, endpoint, index=0)
@@ -428,6 +417,7 @@ def _build_total_followers_chart_from_daily_deltas(
 # Main scrape function
 # ---------------------------------------------------------------------------
 
+
 def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, Any]:
     """Scrape SocialBlade Instagram data using headless Playwright.
 
@@ -482,10 +472,12 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
             metrics = None
             stats = None
             rankings = None
+            history_source = "unavailable"
 
             authenticated_api_error: Exception | None = None
             try:
                 stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
+                history_source = "authenticated_api"
                 _log(
                     f"Authenticated API scrape: {stats['followers']} followers, "
                     f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
@@ -504,6 +496,7 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
                     if _page_access_denied(body_text):
                         raise RuntimeError("SocialBlade blocked by Cloudflare after login")
                     stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
+                    history_source = "authenticated_api"
                     _log(
                         f"Authenticated API scrape after login: {stats['followers']} followers, "
                         f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
@@ -525,6 +518,7 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
             if not chart_data:
                 chart_data = _followers_chart_from_table(metrics)
                 if chart_data:
+                    history_source = "table_fallback"
                     _log(
                         f"Follower history fallback: {chart_data['total_data_points']} points, "
                         f"{chart_data['date_range']['from']} → {chart_data['date_range']['to']}"
@@ -534,11 +528,7 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
                         _log(f"WARNING: Falling back after authenticated API failure: {authenticated_api_error}")
                     _log("WARNING: Could not derive follower history from authenticated API or daily metrics table")
 
-            stats_refreshed = bool(
-                stats["followers"] > 0
-                and stats["following"] >= 0
-                and metrics["row_count"] > 0
-            )
+            stats_refreshed = bool(stats["followers"] > 0 and stats["following"] >= 0 and metrics["row_count"] > 0)
             if not stats_refreshed:
                 raise RuntimeError("SocialBlade scrape returned incomplete profile stats or table data")
 
@@ -547,9 +537,11 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
                 "platform": "instagram",
                 "scraped_at": datetime.now(tz=UTC).isoformat(),
                 "stats_refreshed": stats_refreshed,
+                "history_source": history_source,
                 "profile_stats": stats,
                 "rankings": rankings,
-                "daily_channel_metrics_60day": metrics or {
+                "daily_channel_metrics_60day": metrics
+                or {
                     "period": "Last 14 Days",
                     "row_count": 0,
                     "headers": [],
@@ -569,14 +561,13 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
 # Login fallback
 # ---------------------------------------------------------------------------
 
+
 def _do_login(page: Any, context: Any) -> None:
     """Attempt SocialBlade login using credentials from environment."""
     email = os.environ.get("SOCIALBLADE_EMAIL", "")
     password = os.environ.get("SOCIALBLADE_PASSWORD", "")
     if not email or not password:
-        raise RuntimeError(
-            "SocialBlade login required but SOCIALBLADE_EMAIL / SOCIALBLADE_PASSWORD not set"
-        )
+        raise RuntimeError("SocialBlade login required but SOCIALBLADE_EMAIL / SOCIALBLADE_PASSWORD not set")
 
     _log("Navigating to SocialBlade login page...")
     page.goto("https://socialblade.com/login", wait_until="domcontentloaded", timeout=30_000)

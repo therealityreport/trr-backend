@@ -292,15 +292,18 @@ def test_list_logo_option_sources_groups_counts() -> None:
 
 
 def test_list_logo_option_sources_falls_back_without_related_on_variant_error() -> None:
-    with patch(
-        "api.routers.admin_brands._list_logo_options",
-        side_effect=[
-            RuntimeError('column "hosted_logo_black_url" does not exist'),
-            {"rows": [{"source_provider": "wikimedia_commons"}], "count": 1},
-        ],
-    ) as options_mock, patch(
-        "api.routers.admin_brands._load_logo_source_query_overrides",
-        return_value={},
+    with (
+        patch(
+            "api.routers.admin_brands._list_logo_options",
+            side_effect=[
+                RuntimeError('column "hosted_logo_black_url" does not exist'),
+                {"rows": [{"source_provider": "wikimedia_commons"}], "count": 1},
+            ],
+        ) as options_mock,
+        patch(
+            "api.routers.admin_brands._load_logo_source_query_overrides",
+            return_value={},
+        ),
     ):
         payload = admin_brands._list_logo_option_sources(
             target_type="publication",
@@ -549,7 +552,9 @@ def test_select_logo_option_skips_feature_selection_when_set_featured_false() ->
     }
 
     with (
-        patch("api.routers.admin_brands._fetch_logo_option_row", side_effect=[selected_row, selected_row, selected_row]),
+        patch(
+            "api.routers.admin_brands._fetch_logo_option_row", side_effect=[selected_row, selected_row, selected_row]
+        ),
         patch("api.routers.admin_brands._set_brand_role_selection") as set_brand_mock,
         patch("api.routers.admin_brands._set_network_role_selection") as set_network_mock,
         patch(

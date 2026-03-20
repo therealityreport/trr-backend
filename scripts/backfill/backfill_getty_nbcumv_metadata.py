@@ -15,7 +15,6 @@ Default mode is dry-run. Use --apply to write changes.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from typing import Any
@@ -23,12 +22,19 @@ from typing import Any
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.utils.env import load_env
 
-
 # ── People-count word map (mirrors getty.py) ──
 
 _PEOPLE_COUNT_WORDS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
 }
 
 
@@ -159,9 +165,7 @@ def _compute_flat_keys(metadata: dict[str, Any], *, table: str) -> dict[str, Any
 
     # season_number — from NBCUMV lbx_seasonNumber/lbx_season or Getty tags
     season_number = (
-        _int(nbcumv.get("lbx_seasonNumber"))
-        or _int(nbcumv.get("lbx_season"))
-        or _parse_season_from_tags(getty_tags)
+        _int(nbcumv.get("lbx_seasonNumber")) or _int(nbcumv.get("lbx_season")) or _parse_season_from_tags(getty_tags)
     )
     # Filter out negative sentinel values (NBCUMV uses -2 for "unknown")
     if season_number is not None and season_number < 0:
@@ -181,11 +185,7 @@ def _compute_flat_keys(metadata: dict[str, Any], *, table: str) -> dict[str, Any
     _set_if_missing("episode_title", episode_title)
 
     # photographer — from NBCUMV or Getty
-    photographer = (
-        _str(nbcumv.get("lbx_photographer"))
-        or _str(nbcumv.get("lbx_credit"))
-        or _str(getty.get("credit"))
-    )
+    photographer = _str(nbcumv.get("lbx_photographer")) or _str(nbcumv.get("lbx_credit")) or _str(getty.get("credit"))
     getty_details = metadata.get("getty_details") or {}
     if isinstance(getty_details, dict) and not photographer:
         photographer = _str(getty_details.get("credit_display")) or _str(getty_details.get("credit"))
@@ -211,10 +211,7 @@ def _compute_flat_keys(metadata: dict[str, Any], *, table: str) -> dict[str, Any
     _set_if_missing("people_names", people_names if people_names else None)
 
     # people_count — from Getty keywords or len(people)
-    people_count = (
-        _int(metadata.get("people_count"))
-        or _infer_people_count(getty_tags)
-    )
+    people_count = _int(metadata.get("people_count")) or _infer_people_count(getty_tags)
     if people_count is None and people_names:
         people_count = len(people_names)
     _set_if_missing("people_count", people_count)
@@ -248,13 +245,7 @@ def _fetch_rows(db, *, table: str, sources: list[str], limit: int | None) -> lis
 
 
 def _update_metadata(db, *, table: str, row_id: str, metadata: dict[str, Any]) -> bool:
-    response = (
-        db.schema("core")
-        .table(table)
-        .update({"metadata": metadata})
-        .eq("id", row_id)
-        .execute()
-    )
+    response = db.schema("core").table(table).update({"metadata": metadata}).eq("id", row_id).execute()
     if getattr(response, "error", None):
         print(f"  ERROR updating {table} {row_id}: {response.error}", file=sys.stderr)
         return False

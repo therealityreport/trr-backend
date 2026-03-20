@@ -5069,7 +5069,9 @@ def _discover_people_links(
                 if not canonical_fandom_url:
                     continue
                 fandom_host = str(urlparse(canonical_fandom_url).hostname or "").strip().lower()
-                fandom_owner = _normalized_person_name(_extract_person_name_from_fandom_url(canonical_fandom_url) or name)
+                fandom_owner = _normalized_person_name(
+                    _extract_person_name_from_fandom_url(canonical_fandom_url) or name
+                )
                 related_cache_key = (fandom_host, fandom_owner)
                 related_fandom_urls = related_fandom_urls_by_key.get(related_cache_key)
                 if related_fandom_urls is None:
@@ -5106,7 +5108,9 @@ def _discover_people_links(
                         continue
                     seen_fandom_urls.add(dedupe_key)
                     fandom_title = _extract_fandom_page_title_from_url(canonical_related_url)
-                    source_value = base_source if canonical_related_url == canonical_fandom_url else f"{base_source}:related_page"
+                    source_value = (
+                        base_source if canonical_related_url == canonical_fandom_url else f"{base_source}:related_page"
+                    )
                     append_person_row(
                         _build_person_link_row(
                             person_id=person_id,

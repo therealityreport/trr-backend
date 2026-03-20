@@ -461,3 +461,49 @@ def test_list_cast_with_roles_emits_perf_logs_when_enabled() -> None:
     assert payload[0]["person_id"] == "person-lisa"
     assert logger_info.call_count == 1
     assert "cast-role-members timings" in str(logger_info.call_args.args[0])
+
+
+def test_list_cast_with_roles_excludes_zero_episode_members_after_scoping() -> None:
+    show_id = str(uuid4())
+
+    rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-friend",
+            "person_name": "Friend Of",
+            "total_episodes": 20,
+            "archive_episodes": 0,
+            "seasons_appeared": 3,
+            "season_numbers": [4, 5, 6],
+            "latest_season": 6,
+            "roles": ["Friend"],
+            "photo_url": "https://cdn.example/friend.jpg",
+        }
+    ]
+    role_rows = [
+        {
+            "person_id": "person-friend",
+            "role_names": ["Friend"],
+            "assignment_seasons": [6],
+        }
+    ]
+    scoped_episode_rows = [{"person_id": "person-friend", "total_episodes": 0}]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch(
+            "api.routers.admin_show_roles.pg.fetch_all",
+            side_effect=[rows, role_rows, scoped_episode_rows],
+        ):
+            payload = list_cast_with_roles(
+                UUID(show_id),
+                {},
+                sort_by="episodes",
+                order="desc",
+                seasons="6",
+                roles=None,
+                has_image=None,
+                exclude_zero_episode_members=True,
+                archive_mode="all",
+            )
+
+    assert payload == []

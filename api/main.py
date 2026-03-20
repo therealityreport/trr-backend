@@ -76,7 +76,7 @@ async def _run_cast_screentime_stale_sweeper(stop_event: asyncio.Event) -> None:
             logger.exception("[cast-screentime] stale-run sweeper failed")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             continue
 
 
@@ -103,7 +103,10 @@ def _validate_startup_config() -> None:
     if not admin_shared_secret:
         logger.warning("[startup-config] TRR_INTERNAL_ADMIN_SHARED_SECRET missing; admin proxy auth may fail")
     if not service_token:
-        logger.warning("[startup-config] SCREENALYTICS_SERVICE_TOKEN missing; /api/v1/screenalytics auth may fail")
+        logger.warning(
+            "[startup-config] SCREENALYTICS_SERVICE_TOKEN missing; only /api/v1/screenalytics auth-protected "
+            "requests are affected and backend startup continues normally"
+        )
 
 
 def get_cors_origins() -> list[str]:
@@ -142,7 +145,7 @@ async def lifespan(app: FastAPI):
     if stale_sweeper_task is not None:
         try:
             await asyncio.wait_for(stale_sweeper_task, timeout=5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             stale_sweeper_task.cancel()
     await shutdown_broker()
 
@@ -201,8 +204,8 @@ from api.routers import (  # noqa: E402
     admin_asset_flags,
     admin_brands,
     admin_cast,
-    admin_cast_screentime,
     admin_cast_photos,
+    admin_cast_screentime,
     admin_fandom_sync,
     admin_image_counts,
     admin_media_assets,
@@ -210,7 +213,6 @@ from api.routers import (  # noqa: E402
     admin_operations,
     admin_person_images,
     admin_scrape,
-    admin_socialblade,
     admin_show_bravo,
     admin_show_icons,
     admin_show_images,
@@ -218,6 +220,7 @@ from api.routers import (  # noqa: E402
     admin_show_news,
     admin_show_roles,
     admin_show_sync,
+    admin_socialblade,
     discussions,
     dms,
     screenalytics,

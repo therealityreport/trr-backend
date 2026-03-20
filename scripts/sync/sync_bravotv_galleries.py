@@ -51,7 +51,7 @@ _SETTINGS_RE = re.compile(
 
 # Image URL extraction from gallery slideshow HTML
 _GALLERY_IMG_RE = re.compile(
-    r'/sites/bravo/files/(?:styles/media_gallery_computer/public/)?'
+    r"/sites/bravo/files/(?:styles/media_gallery_computer/public/)?"
     r'((?:field_media_items|legacy/(?:photos|images/photo))/[^\s"\'?]+\.(?:jpg|jpeg|png))',
     re.IGNORECASE,
 )
@@ -67,10 +67,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--apply", action="store_true", help="Write changes to the database.")
     p.add_argument("--show", type=str, required=True, help="Show name to sync (exact match in DB).")
-    p.add_argument("--person-uuid", type=str, default=None,
-                   help="BravoTV person node UUID (from JSON API). If provided, fetches galleries tagged with this person.")
-    p.add_argument("--person-name", type=str, default=None,
-                   help="Person name to search on BravoTV (e.g. 'Brandi Glanville'). Used to find the person UUID.")
+    p.add_argument(
+        "--person-uuid",
+        type=str,
+        default=None,
+        help=("BravoTV person node UUID (from JSON API). If provided, fetches galleries tagged with this person."),
+    )
+    p.add_argument(
+        "--person-name",
+        type=str,
+        default=None,
+        help="Person name to search on BravoTV (e.g. 'Brandi Glanville'). Used to find the person UUID.",
+    )
     p.add_argument("--limit", type=int, default=None, help="Max galleries to process.")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
@@ -96,10 +104,14 @@ def _get_html(client: httpx.Client, url: str) -> str:
 
 def find_person_uuid(client: httpx.Client, name: str) -> str | None:
     """Find a person's UUID on BravoTV by name."""
-    data = _get_json(client, f"{_JSONAPI_BASE}/node/person", params={
-        "filter[title]": name,
-        "page[limit]": "1",
-    })
+    data = _get_json(
+        client,
+        f"{_JSONAPI_BASE}/node/person",
+        params={
+            "filter[title]": name,
+            "page[limit]": "1",
+        },
+    )
     entries = data.get("data", [])
     if not entries:
         return None
@@ -118,23 +130,29 @@ def fetch_tagged_galleries(
     page_size = 50
 
     while True:
-        data = _get_json(client, f"{_JSONAPI_BASE}/node/media_gallery", params={
-            "filter[field_cast.id]": person_uuid,
-            "page[limit]": str(page_size),
-            "page[offset]": str(offset),
-        })
+        data = _get_json(
+            client,
+            f"{_JSONAPI_BASE}/node/media_gallery",
+            params={
+                "filter[field_cast.id]": person_uuid,
+                "page[limit]": str(page_size),
+                "page[offset]": str(offset),
+            },
+        )
         entries = data.get("data", [])
         for entry in entries:
             attrs = entry.get("attributes", {})
             path_obj = attrs.get("path")
             alias = path_obj.get("alias") if isinstance(path_obj, dict) else None
-            galleries.append({
-                "uuid": entry.get("id"),
-                "title": attrs.get("title"),
-                "nid": attrs.get("drupal_internal__nid"),
-                "path": alias,
-                "created": attrs.get("created"),
-            })
+            galleries.append(
+                {
+                    "uuid": entry.get("id"),
+                    "title": attrs.get("title"),
+                    "nid": attrs.get("drupal_internal__nid"),
+                    "path": alias,
+                    "created": attrs.get("created"),
+                }
+            )
 
         if len(entries) < page_size:
             break
@@ -190,7 +208,7 @@ def extract_gallery_metadata(settings: dict[str, Any]) -> dict[str, Any]:
 
     # Slide count from viewsSlideshowCycle
     cycle = settings.get("viewsSlideshowCycle", {})
-    for key, val in cycle.items():
+    for _key, val in cycle.items():
         if isinstance(val, dict) and "num_divs" in val:
             meta["slide_count"] = val["num_divs"]
             break
@@ -323,16 +341,18 @@ def process_gallery(
             show_context["season_number"] = season_number
 
         show_link_id = _link_id("show", show_id, aid, "gallery", show_context)
-        links.append({
-            "id": show_link_id,
-            "entity_type": "show",
-            "entity_id": show_id,
-            "media_asset_id": aid,
-            "kind": "gallery",
-            "position": position,
-            "is_primary": False,
-            "context": show_context,
-        })
+        links.append(
+            {
+                "id": show_link_id,
+                "entity_type": "show",
+                "entity_id": show_id,
+                "media_asset_id": aid,
+                "kind": "gallery",
+                "position": position,
+                "is_primary": False,
+                "context": show_context,
+            }
+        )
 
         # Link to season (if resolved)
         if season_id:
@@ -343,16 +363,18 @@ def process_gallery(
                 "season_number": season_number,
             }
             season_link_id = _link_id("season", season_id, aid, "gallery", season_context)
-            links.append({
-                "id": season_link_id,
-                "entity_type": "season",
-                "entity_id": season_id,
-                "media_asset_id": aid,
-                "kind": "gallery",
-                "position": position,
-                "is_primary": False,
-                "context": season_context,
-            })
+            links.append(
+                {
+                    "id": season_link_id,
+                    "entity_type": "season",
+                    "entity_id": season_id,
+                    "media_asset_id": aid,
+                    "kind": "gallery",
+                    "position": position,
+                    "is_primary": False,
+                    "context": season_context,
+                }
+            )
 
     return assets, links
 
@@ -386,10 +408,7 @@ def upsert_assets_and_links(
     for chunk in _chunked(deduped_assets, 100):
         try:
             resp = (
-                db.schema("core")
-                .table("media_assets")
-                .upsert(chunk, on_conflict="id", default_to_null=False)
-                .execute()
+                db.schema("core").table("media_assets").upsert(chunk, on_conflict="id", default_to_null=False).execute()
             )
             if hasattr(resp, "error") and resp.error:
                 print(f"  ERROR upserting assets: {resp.error}", file=sys.stderr)
@@ -403,10 +422,7 @@ def upsert_assets_and_links(
     for chunk in _chunked(all_links, 100):
         try:
             resp = (
-                db.schema("core")
-                .table("media_links")
-                .upsert(chunk, on_conflict="id", default_to_null=False)
-                .execute()
+                db.schema("core").table("media_links").upsert(chunk, on_conflict="id", default_to_null=False).execute()
             )
             if hasattr(resp, "error") and resp.error:
                 print(f"  ERROR upserting links: {resp.error}", file=sys.stderr)
@@ -438,8 +454,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Build season map
     seasons = (
-        db.schema("core").table("seasons").select("id,season_number")
-        .eq("show_id", show_id).order("season_number").execute()
+        db.schema("core")
+        .table("seasons")
+        .select("id,season_number")
+        .eq("show_id", show_id)
+        .order("season_number")
+        .execute()
     )
     season_map: dict[int, str] = {}
     for s in seasons.data or []:
@@ -449,9 +469,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Seasons in DB: {sorted(season_map.keys())}")
 
     # Resolve BravoTV person UUID
-    client = httpx.Client(timeout=30, follow_redirects=True, headers={
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    })
+    client = httpx.Client(
+        timeout=30,
+        follow_redirects=True,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        },
+    )
 
     person_uuid = args.person_uuid
     if not person_uuid and args.person_name:
@@ -472,16 +496,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Found {len(galleries)} galleries")
 
     # Filter to show-specific galleries
-    show_slug = args.show.lower().replace(" ", "-").replace("the-", "")
+    args.show.lower().replace(" ", "-").replace("the-", "")
     show_galleries = [
-        g for g in galleries
-        if g.get("path") and args.show.split()[-1].lower() in (g.get("path") or "").lower()
+        g for g in galleries if g.get("path") and args.show.split()[-1].lower() in (g.get("path") or "").lower()
     ]
     # Include WWHL appearances too
-    all_galleries = [
-        g for g in galleries
-        if g.get("path")
-    ]
+    all_galleries = [g for g in galleries if g.get("path")]
     print(f"  Show-related galleries: {len(show_galleries)}")
     print(f"  All galleries with paths: {len(all_galleries)}")
 
@@ -494,11 +514,15 @@ def main(argv: list[str] | None = None) -> int:
 
     for i, gallery in enumerate(all_galleries):
         if args.verbose:
-            print(f"\n  [{i+1}/{len(all_galleries)}] {gallery['title']}")
+            print(f"\n  [{i + 1}/{len(all_galleries)}] {gallery['title']}")
             print(f"    path: {gallery['path']}")
 
         assets, links = process_gallery(
-            client, gallery, show_id=show_id, season_map=season_map, verbose=args.verbose,
+            client,
+            gallery,
+            show_id=show_id,
+            season_map=season_map,
+            verbose=args.verbose,
         )
 
         if assets:
@@ -536,13 +560,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"By season: {dict(sorted(season_counts.items()))}")
 
     if args.apply:
-        print(f"\nWriting to database...")
+        print("\nWriting to database...")
         stats = upsert_assets_and_links(db, all_assets, all_links, verbose=args.verbose)
         print(f"  Assets upserted: {stats['assets_upserted']}")
         print(f"  Links upserted: {stats['links_upserted']}")
         print(f"  Errors: {stats['errors']}")
     else:
-        print(f"\nDry run only. Re-run with --apply to write changes.")
+        print("\nDry run only. Re-run with --apply to write changes.")
 
     return 0
 

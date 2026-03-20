@@ -168,7 +168,8 @@ def test_extract_official_logo_candidates_tries_fandom_home_page_for_community_l
                 text=(
                     "<html><body>"
                     '<a class="fandom-community-header__image" href="/wiki/Home_Page">'
-                    '<img src="https://static.wikia.nocookie.net/real-housewives/images/e/e6/Site-logo.png/revision/latest?cb=20220212235127" '
+                    '<img src="https://static.wikia.nocookie.net/real-housewives/images/e/e6/'
+                    'Site-logo.png/revision/latest?cb=20220212235127" '
                     'alt="The Real Housewives Wiki" data-test="fandom-community-header-community-logo" />'
                     "</a>"
                     "</body></html>"
@@ -236,7 +237,8 @@ def test_extract_official_logo_candidates_uses_fandom_parse_api_when_html_is_blo
                             "*": (
                                 "<html><head>"
                                 '<meta property="og:image" '
-                                'content="https://static.wikia.nocookie.net/real-housewives/images/e/e6/Site-logo.png/revision/latest?cb=20220212235127" />'
+                                'content="https://static.wikia.nocookie.net/real-housewives/images/e/e6/'
+                                'Site-logo.png/revision/latest?cb=20220212235127" />'
                                 "</head></html>"
                             )
                         }
@@ -734,9 +736,7 @@ def test_collect_free_logo_candidates_passes_exact_logos_fandom_page_slug_to_log
         ),
         patch(
             "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
-            return_value=[
-                "https://static.wikia.nocookie.net/logopedia/images/1/11/Peacock_2020.svg/revision/latest"
-            ],
+            return_value=["https://static.wikia.nocookie.net/logopedia/images/1/11/Peacock_2020.svg/revision/latest"],
         ) as fandom_mock,
         patch(
             "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",
@@ -793,9 +793,7 @@ def test_collect_free_logo_candidates_preserves_explicit_logos_fandom_search_url
         ),
         patch(
             "trr_backend.integrations.free_logo_sources.fetch_logopedia_logo_candidates",
-            return_value=[
-                "https://static.wikia.nocookie.net/logopedia/images/1/11/Peacock_2020.svg/revision/latest"
-            ],
+            return_value=["https://static.wikia.nocookie.net/logopedia/images/1/11/Peacock_2020.svg/revision/latest"],
         ),
         patch(
             "trr_backend.integrations.free_logo_sources.search_1000logos_logo_candidates",

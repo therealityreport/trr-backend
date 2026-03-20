@@ -222,7 +222,7 @@ def _load_candidate_rows(
           p.profile_pic_mirror_status,
           p.profile_pic_mirror_error
         from social.instagram_posts p
-        where {' and '.join(filters)}
+        where {" and ".join(filters)}
         order by coalesce(p.posted_at, p.scraped_at) desc, p.id desc
         limit %s
         """,

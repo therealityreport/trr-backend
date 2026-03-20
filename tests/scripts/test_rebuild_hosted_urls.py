@@ -17,10 +17,13 @@ def stub_build_hosted_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_desired_hosted_url_prefers_hosted_key() -> None:
-    assert mod.resolve_desired_hosted_url(
-        hosted_key="media-variants/asset-1/base/card.webp",
-        current_url="https://d1fmdyqfafwim3.cloudfront.net/media-variants/asset-1/base/card.webp",
-    ) == "https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev/media-variants/asset-1/base/card.webp"
+    assert (
+        mod.resolve_desired_hosted_url(
+            hosted_key="media-variants/asset-1/base/card.webp",
+            current_url="https://d1fmdyqfafwim3.cloudfront.net/media-variants/asset-1/base/card.webp",
+        )
+        == "https://pub-a3c452f3df0d40319f7c585253a4776c.r2.dev/media-variants/asset-1/base/card.webp"
+    )
 
 
 def test_rewrite_metadata_urls_rewrites_nested_legacy_gallery_hosts() -> None:
@@ -79,9 +82,7 @@ def test_rewrite_metadata_urls_rewrites_face_crop_hosts() -> None:
     metadata = {
         "face_crops": [
             {
-                "variant_url": (
-                    "https://d1fmdyqfafwim3.cloudfront.net/face-crops/cast_photo/asset-1/example.jpg"
-                ),
+                "variant_url": ("https://d1fmdyqfafwim3.cloudfront.net/face-crops/cast_photo/asset-1/example.jpg"),
             }
         ]
     }

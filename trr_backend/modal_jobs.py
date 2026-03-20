@@ -8,10 +8,11 @@ import socket
 import uuid
 from typing import Final
 
-try:
-    import modal
-except ModuleNotFoundError:  # pragma: no cover - exercised by local/test imports without modal installed
+from trr_backend.observability import configure_runtime_observability
+from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
+
+def _build_modal_stub_module():
     class _ModalImage:
         @classmethod
         def debian_slim(cls, **_kwargs):
@@ -75,10 +76,24 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by local/test import
 
             return _decorator
 
-    modal = _ModalModule()
+    return _ModalModule()
 
-from trr_backend.observability import configure_runtime_observability
-from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+
+def _modal_module_is_usable(module: object) -> bool:
+    return all(hasattr(module, attribute) for attribute in ("Image", "Secret", "Cron", "App", "asgi_app"))
+
+
+def _load_modal_module():
+    try:
+        import modal as imported_modal
+    except ModuleNotFoundError:  # pragma: no cover - exercised by local/test imports without modal installed
+        return _build_modal_stub_module()
+    if not _modal_module_is_usable(imported_modal):
+        return _build_modal_stub_module()
+    return imported_modal
+
+
+modal = _load_modal_module()
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _APP_NAME = str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs"

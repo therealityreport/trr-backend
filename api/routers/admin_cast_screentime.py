@@ -333,11 +333,15 @@ def _aggregate_rollup(
 
 
 def _owner_scope_entity_id_for_run(run: dict[str, Any], decision_scope: str | None) -> tuple[str, str]:
-    effective_scope = str(decision_scope or _derive_owner_scope(
-        str(run.get("show_id") or "") or None,
-        str(run.get("season_id") or "") or None,
-        str(run.get("episode_id") or "") or None,
-    ) or "season")
+    effective_scope = str(
+        decision_scope
+        or _derive_owner_scope(
+            str(run.get("show_id") or "") or None,
+            str(run.get("season_id") or "") or None,
+            str(run.get("episode_id") or "") or None,
+        )
+        or "season"
+    )
     if effective_scope == "episode":
         owner_entity_id = str(run.get("episode_id") or "").strip()
     elif effective_scope == "show":
@@ -426,9 +430,7 @@ def _youtube_identity_matches(
     if not expected_handle:
         return True
     owner_candidates = {
-        handle
-        for handle in (_extract_youtube_handle_from_value(value) for value in actual_candidates)
-        if handle
+        handle for handle in (_extract_youtube_handle_from_value(value) for value in actual_candidates) if handle
     }
     if owner_candidates:
         return any(_youtube_handles_match(expected_handle, candidate) for candidate in owner_candidates)
@@ -765,7 +767,9 @@ def _mirror_remote_video_to_temp_object(
     bucket = get_s3_bucket()
     with requests.get(source_url, stream=True, timeout=(10, 180)) as response:
         response.raise_for_status()
-        content_type = str(response.headers.get("Content-Type") or content_type_hint or "video/mp4").split(";", 1)[0].strip()
+        content_type = (
+            str(response.headers.get("Content-Type") or content_type_hint or "video/mp4").split(";", 1)[0].strip()
+        )
         client = get_s3_client()
         response.raw.decode_content = True
         client.upload_fileobj(
@@ -890,11 +894,15 @@ def _promote_session_to_video_asset(
         }
     )
 
-    owner_scope = str(session.get("owner_scope") or _derive_owner_scope(
-        str(session.get("show_id") or "") or None,
-        str(session.get("season_id") or "") or None,
-        str(session.get("episode_id") or "") or None,
-    ) or "season")
+    owner_scope = str(
+        session.get("owner_scope")
+        or _derive_owner_scope(
+            str(session.get("show_id") or "") or None,
+            str(session.get("season_id") or "") or None,
+            str(session.get("episode_id") or "") or None,
+        )
+        or "season"
+    )
     video_class = str(session.get("video_class") or "episode")
     promo_subtype = str(session.get("promo_subtype") or "").strip() or None
     source_import_type = str(session.get("source_import_type") or "upload")
@@ -1035,7 +1043,9 @@ def _stale_after_seconds() -> int:
     return _DEFAULT_STALE_AFTER_SECONDS
 
 
-def reconcile_stale_runs_once(*, show_id: str | None = None, stale_after_seconds: int | None = None) -> list[dict[str, Any]]:
+def reconcile_stale_runs_once(
+    *, show_id: str | None = None, stale_after_seconds: int | None = None
+) -> list[dict[str, Any]]:
     return cast_screentime.reconcile_stale_runs(
         stale_after_seconds=stale_after_seconds or _stale_after_seconds(),
         show_id=show_id,
@@ -1225,7 +1235,11 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
-                        **(session.get("verification_json") if isinstance(session.get("verification_json"), dict) else {}),
+                        **(
+                            session.get("verification_json")
+                            if isinstance(session.get("verification_json"), dict)
+                            else {}
+                        ),
                         "mirror": mirror_meta,
                         "source_provenance": source_provenance,
                     },
@@ -1233,7 +1247,9 @@ def import_video_asset(
             )
         elif request.source_mode == "social_youtube_row":
             if not request.social_youtube_video_id:
-                raise HTTPException(status_code=400, detail="social_youtube_video_id is required for social_youtube_row imports")
+                raise HTTPException(
+                    status_code=400, detail="social_youtube_video_id is required for social_youtube_row imports"
+                )
             row = cast_screentime.get_social_youtube_video(str(request.social_youtube_video_id))
             if not row:
                 raise HTTPException(status_code=404, detail="Social YouTube video row not found")
@@ -1254,7 +1270,9 @@ def import_video_asset(
                 expected_owners=expected_owners,
             )
             hosted_media_urls = row.get("hosted_media_urls") if isinstance(row.get("hosted_media_urls"), list) else []
-            preferred_hosted_url = _preferred_video_url([str(url).strip() for url in hosted_media_urls if str(url).strip()])
+            preferred_hosted_url = _preferred_video_url(
+                [str(url).strip() for url in hosted_media_urls if str(url).strip()]
+            )
             hosted_object_key = _public_url_to_object_key(preferred_hosted_url)
             if hosted_object_key:
                 mirror_meta = _copy_existing_object_to_temp_object(
@@ -1283,7 +1301,11 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
-                        **(session.get("verification_json") if isinstance(session.get("verification_json"), dict) else {}),
+                        **(
+                            session.get("verification_json")
+                            if isinstance(session.get("verification_json"), dict)
+                            else {}
+                        ),
                         "mirror": mirror_meta,
                         "source_provenance": source_provenance,
                     },
@@ -1308,7 +1330,11 @@ def import_video_asset(
                     "status": "uploaded",
                     "content_type": mirror_meta.get("content_type"),
                     "verification_json": {
-                        **(session.get("verification_json") if isinstance(session.get("verification_json"), dict) else {}),
+                        **(
+                            session.get("verification_json")
+                            if isinstance(session.get("verification_json"), dict)
+                            else {}
+                        ),
                         "mirror": mirror_meta,
                         "source_provenance": source_provenance,
                     },
@@ -1489,15 +1515,18 @@ def set_review_status(
     next_status = request.review_status
     if next_status not in allowed.get(current, set()):
         raise HTTPException(status_code=409, detail=f"Invalid review status transition: {current} -> {next_status}")
-    return cast_screentime.update_run(
-        str(run_id),
-        {
-            "review_status": next_status,
-            "reviewed_at": datetime.now(UTC).isoformat(),
-            "reviewed_by": str(admin_user.get("id") or ""),
-            "review_notes_json": request.notes,
-        },
-    ) or {}
+    return (
+        cast_screentime.update_run(
+            str(run_id),
+            {
+                "review_status": next_status,
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "reviewed_by": str(admin_user.get("id") or ""),
+                "review_notes_json": request.notes,
+            },
+        )
+        or {}
+    )
 
 
 @router.post("/admin/cast-screentime/runs/{run_id}/publish")
@@ -1529,7 +1558,9 @@ def publish_run(
     )
 
     raw_reference_fingerprints = _artifact_payload_or_default(str(run_id), "reference_fingerprints.json", default=[])
-    raw_title_card_references = _artifact_payload_or_default(str(run_id), "title_card_reference_signatures.json", default=[])
+    raw_title_card_references = _artifact_payload_or_default(
+        str(run_id), "title_card_reference_signatures.json", default=[]
+    )
     if not isinstance(raw_reference_fingerprints, list):
         raise HTTPException(status_code=500, detail="reference_fingerprints.json must be a JSON array")
     if not isinstance(raw_title_card_references, list):
@@ -1688,11 +1719,7 @@ def set_unknown_review_decision(
     if not isinstance(queues_payload, list):
         raise HTTPException(status_code=500, detail="unknown_review_queues.json must be a JSON array")
     queue = next(
-        (
-            item
-            for item in queues_payload
-            if isinstance(item, dict) and str(item.get("queue_key") or "") == queue_key
-        ),
+        (item for item in queues_payload if isinstance(item, dict) and str(item.get("queue_key") or "") == queue_key),
         None,
     )
     if not queue:
@@ -1796,7 +1823,9 @@ def replace_segments(
 ) -> list[dict[str, Any]]:
     run = _assert_cast_screentime_run(cast_screentime.get_run(str(run_id)))
     _assert_mutable_run(run)
-    return cast_screentime.replace_cast_screentime_segments(str(run_id), [item.model_dump() for item in request.segments])
+    return cast_screentime.replace_cast_screentime_segments(
+        str(run_id), [item.model_dump() for item in request.segments]
+    )
 
 
 @router.post("/internal/screenalytics/cast-screentime/runs/{run_id}/evidence:replace")
@@ -1807,7 +1836,9 @@ def replace_evidence(
 ) -> list[dict[str, Any]]:
     run = _assert_cast_screentime_run(cast_screentime.get_run(str(run_id)))
     _assert_mutable_run(run)
-    return cast_screentime.replace_cast_screentime_evidence(str(run_id), [item.model_dump() for item in request.evidence])
+    return cast_screentime.replace_cast_screentime_evidence(
+        str(run_id), [item.model_dump() for item in request.evidence]
+    )
 
 
 @router.post("/internal/screenalytics/cast-screentime/runs/{run_id}/excluded-sections:replace")

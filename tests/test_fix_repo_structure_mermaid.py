@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import sys
+import importlib.util
 from pathlib import Path
 
-# Add scripts directory to Python path for imports
-scripts_dir = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(scripts_dir))
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "fix_repo_structure_mermaid.py"
+SPEC = importlib.util.spec_from_file_location("fix_repo_structure_mermaid", SCRIPT_PATH)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
 
-from fix_repo_structure_mermaid import find_subgraph_ids, fix_node_conflicts  # noqa: E402
+find_subgraph_ids = MODULE.find_subgraph_ids
+fix_node_conflicts = MODULE.fix_node_conflicts
 
 
 def test_find_subgraph_ids():

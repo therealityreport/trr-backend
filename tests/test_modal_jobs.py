@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
+import types
 
 import pytest
 
@@ -204,14 +206,10 @@ def test_build_social_image_base_includes_shared_script_payloads() -> None:
     image = modal_jobs._build_social_image_base(image_factory=_FakeImage)
 
     added_files = {
-        args[0]: kwargs["remote_path"]
-        for op_name, args, kwargs in image.operations
-        if op_name == "add_local_file"
+        args[0]: kwargs["remote_path"] for op_name, args, kwargs in image.operations if op_name == "add_local_file"
     }
     added_dirs = {
-        args[0]: kwargs["remote_path"]
-        for op_name, args, kwargs in image.operations
-        if op_name == "add_local_dir"
+        args[0]: kwargs["remote_path"] for op_name, args, kwargs in image.operations if op_name == "add_local_dir"
     }
 
     assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
@@ -231,3 +229,20 @@ def test_build_social_image_base_adds_browser_runtime_when_requested() -> None:
 def test_run_social_job_uses_browser_capable_image_binding() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"] is modal_jobs._browser_image
+
+
+def test_reload_falls_back_to_stub_when_modal_module_is_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial_modal = types.ModuleType("modal")
+    monkeypatch.setitem(sys.modules, "modal", partial_modal)
+
+    reloaded = importlib.reload(modal_jobs)
+    try:
+        assert hasattr(reloaded.modal, "Image")
+        assert hasattr(reloaded.modal, "Secret")
+        assert hasattr(reloaded.modal, "App")
+        assert hasattr(reloaded.modal, "asgi_app")
+    finally:
+        monkeypatch.delitem(sys.modules, "modal", raising=False)
+        importlib.reload(modal_jobs)

@@ -187,10 +187,15 @@ class InstagramScraper:
     COMMENT_REPLIES_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/{comment_id}/child_comments/"
     PROFILE_POSTS_DOC_IDS = (
         # Current doc_id observed in live web requests.
+        "25645538101792896",
+        # Legacy doc_ids still accepted by the public web GraphQL endpoint.
         "26035927152742158",
-        # Backward fallback used by older sessions.
         "33944389991841132",
     )
+    WEB_X_ASBD_ID = "359341"
+    PROFILE_POSTS_PAGE_SIZE = 33
+    _PROFILE_PAGE_LSD_RE = re.compile(r'"LSD",\[\],\{"token":"(?P<token>[^"]+)"\}')
+    _PROFILE_PAGE_BLOKS_VERSION_RE = re.compile(r"bloks_version[^0-9a-fA-F]+(?P<token>[0-9a-fA-F]{32,})")
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
@@ -235,6 +240,7 @@ class InstagramScraper:
         self._request_count = 0
         self._last_429_at: float = 0.0
         self._consecutive_success: int = 0
+        self._profile_page_context_cache: dict[str, dict[str, str]] = {}
         self.last_retrieval_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self.last_comment_fetch_reason: str | None = None
@@ -253,6 +259,16 @@ class InstagramScraper:
             if doc_id not in ids:
                 ids.append(doc_id)
         return ids
+
+    def _resolve_graphql_cursor_retry_attempts(self, cursor: str | None) -> int:
+        default_attempts = 3 if cursor else 1
+        raw = (os.getenv("SOCIAL_INSTAGRAM_CURSOR_RETRY_ATTEMPTS") or "").strip()
+        if not raw:
+            return default_attempts
+        try:
+            return max(1, min(int(raw), 5))
+        except ValueError:
+            return default_attempts
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -335,8 +351,20 @@ class InstagramScraper:
         connect_timeout = max(3, int(self.REQUEST_CONNECT_TIMEOUT_SECONDS))
         return (connect_timeout, read_timeout)
 
+    def _request_cookies(self) -> dict[str, str]:
+        """Merge any fresh session cookies back into the request cookie payload."""
+        merged = {str(key): str(value) for key, value in (self.cookies or {}).items() if value is not None}
+        session_cookies = self.session.cookies.get_dict()
+        for key, value in session_cookies.items():
+            if value is None:
+                continue
+            merged[str(key)] = str(value)
+        self.cookies = merged
+        return merged
+
     def _get_headers(self, referer: str | None = None) -> dict:
         """Get request headers."""
+        request_cookies = self._request_cookies()
         headers = {
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9",
@@ -353,9 +381,56 @@ class InstagramScraper:
             "x-ig-app-id": "936619743392459",
             "x-requested-with": "XMLHttpRequest",
         }
-        if self.cookies.get("csrftoken"):
-            headers["x-csrftoken"] = self.cookies["csrftoken"]
+        if request_cookies.get("csrftoken"):
+            headers["x-csrftoken"] = request_cookies["csrftoken"]
         return headers
+
+    def _extract_profile_page_context(self, html: str) -> dict[str, str]:
+        context: dict[str, str] = {}
+        if not html:
+            return context
+        lsd_match = self._PROFILE_PAGE_LSD_RE.search(html)
+        if lsd_match:
+            context["lsd"] = str(lsd_match.group("token") or "").strip()
+        bloks_match = self._PROFILE_PAGE_BLOKS_VERSION_RE.search(html)
+        if bloks_match:
+            context["bloks_version"] = str(bloks_match.group("token") or "").strip()
+        return {key: value for key, value in context.items() if value}
+
+    def _warm_profile_request_context(
+        self,
+        username: str,
+        *,
+        timeout: tuple[int, int] | float | None = None,
+        force: bool = False,
+    ) -> dict[str, str]:
+        cached = self._profile_page_context_cache.get(username) or {}
+        if cached and not force:
+            return dict(cached)
+
+        warm_headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+            "referer": "https://www.instagram.com/",
+            "user-agent": self._get_headers().get("user-agent", "Mozilla/5.0"),
+        }
+        try:
+            response = self._get(
+                f"https://www.instagram.com/{username}/",
+                headers=warm_headers,
+                cookies=self._request_cookies(),
+                timeout=timeout or self.request_timeout,
+            )
+        except requests.exceptions.RequestException:
+            logger.debug("Failed warming Instagram profile context for %s", username, exc_info=True)
+            return dict(cached)
+
+        context = self._extract_profile_page_context(response.text or "")
+        if response.cookies:
+            self._request_cookies()
+        if context:
+            self._profile_page_context_cache[username] = dict(context)
+        return dict(context or cached)
 
     def _rate_limit(self, delay: float):
         """Apply adaptive rate limiting between requests.
@@ -1242,20 +1317,30 @@ class InstagramScraper:
         """Fetch profile info using public API (limited to ~12 posts)."""
         self._rate_limit(delay)
         url = f"{self.PROFILE_INFO_URL}?username={username}"
-        headers = self._get_headers(f"https://www.instagram.com/{username}/")
+        timeout = request_timeout or self.request_timeout
+        if not self.session.cookies.get("csrftoken"):
+            self._warm_profile_request_context(username, timeout=timeout)
 
-        try:
-            response = self._get(
-                url,
-                headers=headers,
-                cookies=self.cookies,
-                timeout=request_timeout or self.request_timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to fetch profile info for {username}: {e}")
-            return None
+        attempts_remaining = 2
+        last_error: requests.exceptions.RequestException | None = None
+        while attempts_remaining > 0:
+            attempts_remaining -= 1
+            try:
+                response = self._get(
+                    url,
+                    headers=self._get_headers(f"https://www.instagram.com/{username}/"),
+                    cookies=self._request_cookies(),
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                if attempts_remaining <= 0:
+                    break
+                self._warm_profile_request_context(username, timeout=timeout, force=True)
+        logger.error(f"Failed to fetch profile info for {username}: {last_error}")
+        return None
 
     def fetch_posts_graphql(
         self,
@@ -1267,60 +1352,96 @@ class InstagramScraper:
     ) -> dict | None:
         """Fetch posts using GraphQL (requires auth for full access)."""
         self._rate_limit(delay)
+        timeout = request_timeout or self.request_timeout
+        attempt_limit = self._resolve_graphql_cursor_retry_attempts(cursor)
+        last_error: requests.exceptions.RequestException | None = None
+        for attempt_index in range(attempt_limit):
+            # Cursor pages are more fragile on remote executors. Refreshing the
+            # profile context before each cursor-page request keeps the public
+            # GraphQL cookies/LSD token fresh enough to continue pagination.
+            page_context = self._warm_profile_request_context(
+                username,
+                timeout=timeout,
+                force=bool(cursor) or attempt_index > 0,
+            )
+            request_cookies = self._request_cookies()
+            viewer_id = str(request_cookies.get("ds_user_id") or self.cookies.get("ds_user_id") or "0")
 
-        variables = {
-            "after": cursor,
-            "before": None,
-            "data": {
-                "count": 12,
-                "include_reel_media_seen_timestamp": True,
-                "include_relationship_info": True,
-                "latest_besties_reel_media": True,
-                "latest_reel_media": True,
-            },
-            "first": 12,
-            "last": None,
-            "username": username,
-        }
+            variables = {
+                "after": cursor,
+                "before": None,
+                "data": {
+                    "count": self.PROFILE_POSTS_PAGE_SIZE,
+                    "include_reel_media_seen_timestamp": True,
+                    "include_relationship_info": True,
+                    "latest_besties_reel_media": True,
+                    "latest_reel_media": True,
+                },
+                "first": self.PROFILE_POSTS_PAGE_SIZE,
+                "last": None,
+                "username": username,
+            }
 
-        data = {
-            "av": self.cookies.get("ds_user_id", "17841454077505205"),
-            "__d": "www",
-            "__user": self.cookies.get("ds_user_id", "0"),
-            "__a": "1",
-            "__req": "1",
-            "__comet_req": "7",
-            "fb_api_caller_class": "RelayModern",
-            "fb_api_req_friendly_name": "PolarisProfilePostsTabContentQuery_connection",
-            "variables": json.dumps(variables),
-            "server_timestamps": "true",
-        }
+            data = {
+                "av": viewer_id,
+                "__d": "www",
+                "__user": viewer_id,
+                "__a": "1",
+                "__req": "1",
+                "__comet_req": "7",
+                "fb_api_caller_class": "RelayModern",
+                "fb_api_req_friendly_name": "PolarisProfilePostsTabContentQuery_connection",
+                "variables": json.dumps(variables),
+                "server_timestamps": "true",
+            }
 
-        headers = self._get_headers(f"https://www.instagram.com/{username}/")
-        headers["content-type"] = "application/x-www-form-urlencoded"
-        headers["x-fb-friendly-name"] = "PolarisProfilePostsTabContentQuery_connection"
-        if self.cookies.get("lsd"):
-            headers["x-fb-lsd"] = self.cookies["lsd"]
+            headers = self._get_headers(f"https://www.instagram.com/{username}/")
+            headers["content-type"] = "application/x-www-form-urlencoded"
+            headers["x-fb-friendly-name"] = "PolarisProfilePostsTabContentQuery_connection"
+            headers["x-asbd-id"] = str(os.getenv("INSTAGRAM_WEB_X_ASBD_ID") or self.WEB_X_ASBD_ID)
+            lsd_token = str(page_context.get("lsd") or request_cookies.get("lsd") or "").strip()
+            if lsd_token:
+                headers["x-fb-lsd"] = lsd_token
+            bloks_version = str(
+                os.getenv("INSTAGRAM_WEB_BLOKS_VERSION_ID") or page_context.get("bloks_version") or ""
+            ).strip()
+            if bloks_version:
+                headers["x-bloks-version-id"] = bloks_version
 
-        for doc_id in self._profile_posts_doc_ids():
-            data["doc_id"] = doc_id
-            try:
-                response = self._post(
-                    self.GRAPHQL_URL,
-                    data=data,
-                    headers=headers,
-                    cookies=self.cookies,
-                    timeout=request_timeout or self.request_timeout,
+            saw_request_error = False
+            for doc_id in self._profile_posts_doc_ids():
+                data["doc_id"] = doc_id
+                try:
+                    response = self._post(
+                        self.GRAPHQL_URL,
+                        data=data,
+                        headers=headers,
+                        cookies=request_cookies,
+                        timeout=timeout,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+                    if connection:
+                        return payload
+                    logger.warning("Instagram GraphQL doc_id %s returned no connection data; trying fallback", doc_id)
+                except requests.exceptions.RequestException as e:
+                    last_error = e
+                    saw_request_error = True
+                    logger.warning("GraphQL request failed for doc_id %s: %s", doc_id, e)
+                    continue
+
+            if cursor and attempt_index + 1 < attempt_limit and saw_request_error:
+                logger.warning(
+                    "Instagram GraphQL cursor page failed for @%s; refreshing profile context and retrying (%d/%d)",
+                    username,
+                    attempt_index + 1,
+                    attempt_limit,
                 )
-                response.raise_for_status()
-                payload = response.json()
-                connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
-                if connection:
-                    return payload
-                logger.warning("Instagram GraphQL doc_id %s returned no connection data; trying fallback", doc_id)
-            except requests.exceptions.RequestException as e:
-                logger.warning("GraphQL request failed for doc_id %s: %s", doc_id, e)
                 continue
+            break
+        if last_error is not None and cursor:
+            logger.warning("Instagram GraphQL exhausted cursor retries for @%s after cursor=%s", username, cursor)
         return None
 
     def _iter_posts_from_profile_info(self, data: dict) -> Iterator[tuple[dict, dict]]:
@@ -1341,6 +1462,16 @@ class InstagramScraper:
 
         for edge in edges:
             yield edge.get("node", {}), page_info
+
+    def _extract_profile_total_posts(self, data: dict[str, Any], *, source: str) -> int | None:
+        if source == "profile_info":
+            user = data.get("data", {}).get("user", {})
+            timeline = user.get("edge_owner_to_timeline_media", {})
+            total_posts = self._coerce_int(timeline.get("count"), default=0)
+            return total_posts if total_posts > 0 else None
+        connection = data.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+        total_posts = self._coerce_int(connection.get("count"), default=0)
+        return total_posts if total_posts > 0 else None
 
     def _shortcode_to_media_id(self, shortcode: str) -> str:
         """Convert Instagram shortcode to media ID."""
@@ -1372,7 +1503,7 @@ class InstagramScraper:
                     session=self.session,
                     timeout=self.request_timeout,
                     headers=headers,
-                    cookies=self.cookies,
+                    cookies=self._request_cookies(),
                 )
             except Exception:
                 media_item = None
@@ -1383,7 +1514,7 @@ class InstagramScraper:
             return None
 
         try:
-            response = self._get(url, headers=headers, cookies=self.cookies)
+            response = self._get(url, headers=headers, cookies=self._request_cookies())
             response.raise_for_status()
             content_type = str(response.headers.get("content-type") or "").lower()
             if "text/html" in content_type:
@@ -1445,7 +1576,7 @@ class InstagramScraper:
             headers = self._get_headers(post_url)
 
             try:
-                response = self._get(url, params=params, headers=headers, cookies=self.cookies)
+                response = self._get(url, params=params, headers=headers, cookies=self._request_cookies())
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "")
                 if "text/html" in content_type:
@@ -1558,7 +1689,7 @@ class InstagramScraper:
             headers = self._get_headers(post_url)
 
             try:
-                response = self._get(url, params=params, headers=headers, cookies=self.cookies)
+                response = self._get(url, params=params, headers=headers, cookies=self._request_cookies())
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "")
                 if "text/html" in content_type:
@@ -1857,18 +1988,20 @@ class InstagramScraper:
         pages_scanned: int,
         posts_checked: int,
         matched_posts: int,
+        total_posts: int | None = None,
     ) -> None:
         if not progress_cb:
             return
         try:
-            progress_cb(
-                {
-                    "phase": phase,
-                    "pages_scanned": max(0, int(pages_scanned)),
-                    "posts_checked": max(0, int(posts_checked)),
-                    "matched_posts": max(0, int(matched_posts)),
-                }
-            )
+            payload = {
+                "phase": phase,
+                "pages_scanned": max(0, int(pages_scanned)),
+                "posts_checked": max(0, int(posts_checked)),
+                "matched_posts": max(0, int(matched_posts)),
+            }
+            if total_posts is not None:
+                payload["total_posts"] = max(0, int(total_posts))
+            progress_cb(payload)
         except Exception:
             logger.debug("Instagram scrape progress callback raised", exc_info=True)
 
@@ -2083,6 +2216,7 @@ class InstagramScraper:
 
         posts = []
         posts_checked = 0
+        total_posts = self._extract_profile_total_posts(data, source="profile_info")
         for node, _ in self._iter_posts_from_profile_info(data):
             posts_checked += 1
             timestamp = self._extract_timestamp(node)
@@ -2106,6 +2240,7 @@ class InstagramScraper:
                 pages_scanned=1,
                 posts_checked=posts_checked,
                 matched_posts=len(posts),
+                total_posts=total_posts,
             )
 
         profile_avatar_backfilled_posts = self._backfill_post_owner_profile_pic(
@@ -2120,6 +2255,8 @@ class InstagramScraper:
             "initial_page_failed": False,
             "profile_avatar_backfilled_posts": profile_avatar_backfilled_posts,
         }
+        if total_posts:
+            self.last_retrieval_meta["total_posts"] = total_posts
         return posts
 
     def _scrape_graphql(
@@ -2135,6 +2272,8 @@ class InstagramScraper:
         cursor = None
         page_num = 0
         posts_checked = 0
+        total_posts: int | None = None
+        profile_info_total_posts: int | None = None
         reached_date_limit = False
         initial_page_failed = False
         failure_reason: str | None = None
@@ -2142,6 +2281,12 @@ class InstagramScraper:
         no_match_pages = 0
         no_match_page_limit = self._resolve_no_match_page_limit(config)
         seen_cursors: set[str] = set()
+
+        profile_info_data = self.fetch_profile_info(config.username, config.delay_seconds)
+        if profile_info_data:
+            profile_info_total_posts = self._extract_profile_total_posts(profile_info_data, source="profile_info")
+            if profile_info_total_posts is not None:
+                total_posts = profile_info_total_posts
 
         while not reached_date_limit:
             page_num += 1
@@ -2158,6 +2303,9 @@ class InstagramScraper:
                     failure_reason = "graphql_empty_or_error"
                 stop_reason = "graphql_empty_or_error"
                 break
+
+            if total_posts is None:
+                total_posts = self._extract_profile_total_posts(data, source="graphql") or profile_info_total_posts
 
             page_info = {}
             posts_on_page = 0
@@ -2196,6 +2344,7 @@ class InstagramScraper:
                 pages_scanned=page_num,
                 posts_checked=posts_checked,
                 matched_posts=len(posts),
+                total_posts=total_posts,
             )
 
             if posts_on_page == 0:
@@ -2239,7 +2388,7 @@ class InstagramScraper:
         logger.info(f"Scrape complete: checked {posts_checked} posts, found {len(posts)} matches")
         profile_avatar_backfilled_posts = 0
         if posts and any(not getattr(post, "owner_profile_pic_url", None) for post in posts):
-            profile_data = self.fetch_profile_info(config.username, config.delay_seconds)
+            profile_data = profile_info_data or self.fetch_profile_info(config.username, config.delay_seconds)
             profile_avatar_backfilled_posts = self._backfill_post_owner_profile_pic(
                 posts,
                 profile_pic_url=self._extract_profile_avatar_from_profile_payload(profile_data),
@@ -2256,6 +2405,8 @@ class InstagramScraper:
             "no_match_page_limit": no_match_page_limit,
             "profile_avatar_backfilled_posts": profile_avatar_backfilled_posts,
         }
+        if total_posts:
+            self.last_retrieval_meta["total_posts"] = total_posts
         return posts
 
 

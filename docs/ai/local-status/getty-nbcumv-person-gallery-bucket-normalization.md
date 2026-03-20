@@ -1,15 +1,15 @@
 # Getty/NBCUMV person-gallery bucket normalization
 
-Last updated: 2026-03-17
+Last updated: 2026-03-20
 
 ## Handoff Snapshot
 ```yaml
 handoff:
   include: true
   state: active
-  last_updated: 2026-03-17
-  current_phase: "Getty/NBCUMV person refresh now classifies shared NBCUMV-preferred, NBCUMV-only, and Getty-only rows explicitly in metadata and job summaries"
-  next_action: "Rerun Lisa Barlow Get Images and verify the live counts now break out shared, NBCUMV-only, and Getty-only assets correctly"
+  last_updated: 2026-03-20
+  current_phase: "Getty/NBCUMV person refresh classification is in place, with remaining work limited to occasional targeted validation of shared-versus-NBCUMV-only counts"
+  next_action: "Only rerun Lisa Barlow or another affected person refresh if a live gallery/regression shows the shared, NBCUMV-only, and Getty-only counters drifting again; otherwise archive this item in the next cleanup pass"
   detail: self
 ```
 

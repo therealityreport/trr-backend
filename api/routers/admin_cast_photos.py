@@ -61,9 +61,9 @@ class GenerateCastPhotoVariantsResponse(BaseModel):
 @router.post("/cast-photos/{photo_id}/mirror", response_model=MirrorCastPhotoResponse)
 def mirror_cast_photo(
     photo_id: UUID,
+    db: SupabaseAdminClient,
+    _: AdminUser,
     force: bool = Query(default=False),
-    db: SupabaseAdminClient = None,
-    _: AdminUser = None,
 ) -> MirrorCastPhotoResponse:
     response = (
         db.schema("core")
@@ -105,9 +105,9 @@ def mirror_cast_photo(
 @router.post("/cast-photos/{photo_id}/detect-text-overlay", response_model=DetectTextOverlayResponse)
 def detect_text_overlay_cast_photo(
     photo_id: UUID,
+    db: SupabaseAdminClient,
+    _: AdminUser,
     force: bool = Query(default=False),
-    db: SupabaseAdminClient = None,
-    _: AdminUser = None,
 ) -> DetectTextOverlayResponse:
     """
     Detect whether a cast photo contains overlaid text and persist results to core.cast_photos.metadata.
@@ -167,9 +167,9 @@ def detect_text_overlay_cast_photo(
 @router.post("/cast-photos/{photo_id}/variants", response_model=GenerateCastPhotoVariantsResponse)
 def generate_variants_for_cast_photo(
     photo_id: UUID,
+    db: SupabaseAdminClient,
+    _: AdminUser,
     payload: GenerateCastPhotoVariantsRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: AdminUser = None,
 ) -> GenerateCastPhotoVariantsResponse:
     photo_id_str = str(photo_id)
     payload = payload or GenerateCastPhotoVariantsRequest()

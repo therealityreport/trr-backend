@@ -29,6 +29,18 @@ _DETAIL_SECTION_STOP_MARKERS = {
     "More images from this event",
     "Similar images",
     "Related searches",
+    "CONTENT",
+    "SOLUTIONS",
+    "TOOLS & SERVICES",
+    "COMPANY",
+    "Royalty-free",
+    "Creative Video",
+    "Editorial",
+    "Archive",
+    "Custom Content",
+    "Creative Collections",
+    "Contributor support",
+    "Apply to be a contributor",
 }
 _DETAIL_FIELD_LABELS = {
     "Restrictions:": "restrictions",
@@ -156,6 +168,7 @@ def search_grouped_events(
     minimum_grouped_image_count: int | None = None,
     event_detail_sample_limit: int = DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT,
     source_query_scope: str | None = None,
+    full_scan_person_assets: bool = False,
 ) -> list[dict[str, Any]]:
     cleaned = str(phrase or "").strip()
     if not cleaned:
@@ -201,6 +214,23 @@ def search_grouped_events(
             grouped_event,
             source_query_scope=source_query_scope,
         )
+        if full_scan_person_assets and person_name:
+            scan_result = scan_event_page_for_person(
+                event_url,
+                person_name=person_name,
+                session=session,
+                progress_cb=progress_cb,
+            )
+            if scan_result and scan_result.get("matched_assets"):
+                merged["matched_assets_list"] = scan_result["matched_assets"]
+                merged["person_image_count"] = scan_result["person_image_count"]
+                merged["event_asset_count_scanned"] = scan_result["total_scanned"]
+                merged["matched_asset"] = scan_result["matched_assets"][0]
+                merged["representative_asset"] = scan_result["representative_asset"]
+            elif scan_result:
+                merged["matched_assets_list"] = []
+                merged["person_image_count"] = 0
+                merged["event_asset_count_scanned"] = scan_result["total_scanned"]
         if person_match_required and not merged.get("matched_asset"):
             if progress_cb:
                 progress_cb(
@@ -739,17 +769,17 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
         "date_created",
     )
     result["getty_event_group_title"] = result["event_name"]
-    result["thumb_url"] = _first_present(asset_json, "thumbUrl")
-    result["comp_url"] = _first_present(asset_json, "compUrl")
-    result["preview_image_url"] = _first_present(
-        asset_json,
-        "downloadableCompUrl",
-        "galleryHighResCompUrl",
-        "highResCompUrl",
-        "galleryComp1024Url",
-        "compUrl",
-        "mainImageUrl",
-        "thumbUrl",
+    image_urls = _extract_best_image_urls(asset_json)
+    result["thumb_url"] = image_urls.get("thumbUrl") or _first_present(asset_json, "thumbUrl")
+    result["comp_url"] = image_urls.get("compUrl") or _first_present(asset_json, "compUrl")
+    result["preview_image_url"] = (
+        image_urls.get("downloadableCompUrl")
+        or image_urls.get("galleryHighResCompUrl")
+        or image_urls.get("highResCompUrl")
+        or image_urls.get("galleryComp1024Url")
+        or image_urls.get("compUrl")
+        or image_urls.get("mainImageUrl")
+        or image_urls.get("thumbUrl")
     )
     result["keywords"] = asset_json.get("keywords") if isinstance(asset_json.get("keywords"), list) else []
     result["keyword_texts"] = keyword_texts
@@ -779,6 +809,42 @@ def _extract_asset_detail_json(soup: BeautifulSoup) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+def _extract_best_image_urls(asset_json: dict[str, Any]) -> dict[str, str]:
+    """Extract all available image URLs from asset JSON, including nested displaySizes."""
+    urls: dict[str, str] = {}
+    for key in (
+        "downloadableCompUrl",
+        "galleryHighResCompUrl",
+        "highResCompUrl",
+        "galleryComp1024Url",
+        "compUrl",
+        "mainImageUrl",
+        "thumbUrl",
+    ):
+        value = str(asset_json.get(key) or "").strip()
+        if value:
+            urls[key] = value
+
+    display_sizes = asset_json.get("displaySizes")
+    if isinstance(display_sizes, list):
+        for entry in display_sizes:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip().lower()
+            uri = str(entry.get("uri") or entry.get("url") or "").strip()
+            if uri:
+                if name == "high_res_comp" and "highResCompUrl" not in urls:
+                    urls["highResCompUrl"] = uri
+                elif name == "comp" and "compUrl" not in urls:
+                    urls["compUrl"] = uri
+                elif name == "thumb" and "thumbUrl" not in urls:
+                    urls["thumbUrl"] = uri
+                elif name == "preview" and "downloadableCompUrl" not in urls:
+                    urls["downloadableCompUrl"] = uri
+
+    return urls
 
 
 def _extract_object_name(html: str, asset_json: dict[str, Any]) -> str | None:
@@ -839,6 +905,10 @@ def _extract_detail_section_fields(soup: BeautifulSoup) -> dict[str, str]:
             cursor += 1
         cleaned = " ".join(part.strip() for part in collected if part.strip()).strip()
         if cleaned:
+            if field_name == "object_name_display" and " " in cleaned:
+                first_token = cleaned.split()[0]
+                if re.search(r"\.\w{2,4}$", first_token):
+                    cleaned = first_token
             results[field_name] = cleaned
     return results
 

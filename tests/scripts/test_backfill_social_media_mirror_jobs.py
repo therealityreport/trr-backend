@@ -273,13 +273,19 @@ def test_parse_repair_reasons_accepts_legacy_host_alias() -> None:
 
 def test_row_matches_mode_distinguishes_normalize_only_rows() -> None:
     assert mod._row_matches_mode(["legacy_hosted_url"], normalize_only=True, mirror_only=False) is True
-    assert mod._row_matches_mode(
-        ["legacy_hosted_url", "missing_hosted_media"],
-        normalize_only=True,
-        mirror_only=False,
-    ) is False
-    assert mod._row_matches_mode(
-        ["legacy_hosted_url", "missing_hosted_avatar"],
-        normalize_only=False,
-        mirror_only=True,
-    ) is True
+    assert (
+        mod._row_matches_mode(
+            ["legacy_hosted_url", "missing_hosted_media"],
+            normalize_only=True,
+            mirror_only=False,
+        )
+        is False
+    )
+    assert (
+        mod._row_matches_mode(
+            ["legacy_hosted_url", "missing_hosted_avatar"],
+            normalize_only=False,
+            mirror_only=True,
+        )
+        is True
+    )

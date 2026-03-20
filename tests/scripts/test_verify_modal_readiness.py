@@ -78,6 +78,33 @@ def test_verify_modal_readiness_reports_missing_secret_and_function(monkeypatch:
     assert summary["missing_web_endpoints"] == ["serve_backend_api"]
 
 
+def test_verify_modal_readiness_handles_missing_modal_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+
+    def _raise_modal_error(*, app_name: str, modal_environment: str = "") -> dict[str, object]:
+        raise RuntimeError("Modal experimental helpers are unavailable")
+
+    monkeypatch.setattr(cli, "get_app_function_handles", _raise_modal_error)
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=("serve_backend_api",),
+    )
+
+    assert summary["ok"] is False
+    assert summary["app_found"] is True
+    assert summary["missing_functions"] == ["serve_backend_api"]
+
+
 def test_main_emits_json_and_returns_nonzero_when_not_ready(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

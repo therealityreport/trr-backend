@@ -6,9 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 
+from trr_backend.modal_dispatch import dispatch_socialblade_scrape_sync
 from trr_backend.repositories.socialblade_growth import get_growth_data
 from trr_backend.socials.socialblade.service import SocialBladeRefreshError, refresh_and_persist_socialblade
-from trr_backend.modal_dispatch import dispatch_socialblade_scrape_sync
 
 
 def _parse_args() -> argparse.Namespace:

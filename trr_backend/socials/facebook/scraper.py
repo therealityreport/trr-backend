@@ -13,7 +13,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse, urlunparse, unquote
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -99,7 +99,9 @@ _FB_PERMALINK_URL_RE = re.compile(r'"permalink_url":"((?:[^"\\]|\\.)*)"')
 # Facebook rarely includes <meta article:published_time>, but almost always
 # embeds "creation_time":<epoch> in inline script JSON for the primary post.
 _FB_CREATION_TIME_RE = re.compile(r'"creation_time"\s*:\s*(\d{10})')
-_FB_DURATION_MS_RE = re.compile(r'"(?:playable_duration_in_ms|playable_duration_ms|video_duration_ms)"\s*:\s*([0-9]{2,})')
+_FB_DURATION_MS_RE = re.compile(
+    r'"(?:playable_duration_in_ms|playable_duration_ms|video_duration_ms)"\s*:\s*([0-9]{2,})'
+)
 _FB_DURATION_SECONDS_RE = re.compile(
     r'"(?:duration_in_sec|duration_seconds|playable_duration(?:_in_seconds)?)"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
 )
@@ -114,7 +116,10 @@ _FB_OWNER_PROFILE_PIC_URL_RE = re.compile(
     r'"(?:owner_as_page|owner)":\{[^{}]*?"(?:profile_pic_url|profilePicUrl|profile_image_url)":"((?:[^"\\]|\\.)*)"',
 )
 _FB_INSTAGRAM_URL_RE = re.compile(
-    r"https?://(?:l\.facebook\.com/l\.php\?(?:[^\"' >]*[?&](?:u|url)=)?|www\.)?instagram\.com/(?:p|reel|tv)/[A-Za-z0-9_-]+/?(?:\?[^\"' >]*)?",
+    (
+        r"https?://(?:l\.facebook\.com/l\.php\?(?:[^\"' >]*[?&](?:u|url)=)?|www\.)?"
+        r"instagram\.com/(?:p|reel|tv)/[A-Za-z0-9_-]+/?(?:\?[^\"' >]*)?"
+    ),
     re.IGNORECASE,
 )
 _FB_INSTAGRAM_EMBEDDED_URL_RE = re.compile(
@@ -472,7 +477,7 @@ class FacebookScraper:
 
     @staticmethod
     def _build_search_url(config: FacebookSearchConfig) -> str:
-        query = quote(config.normalized_query)
+        quote(config.normalized_query)
         if config.search_url:
             parsed = urlparse(config.search_url)
             params = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -777,7 +782,9 @@ class FacebookScraper:
             try:
                 page.goto(post_url, wait_until="domcontentloaded", timeout=45_000)
                 page.wait_for_timeout(max(750, int(delay_seconds * 1000)))
-                share_locator = page.locator('[role="button"], [role="link"]').filter(has_text=re.compile(r"\bshares?\b", re.I))
+                share_locator = page.locator('[role="button"], [role="link"]').filter(
+                    has_text=re.compile(r"\bshares?\b", re.I)
+                )
                 if share_locator.count() == 0:
                     return []
                 share_locator.first.click(timeout=5_000)
@@ -800,7 +807,9 @@ class FacebookScraper:
                     prior_count = len(collected)
                     page.evaluate(
                         """() => {
-                            const dialog = document.querySelector('[role="dialog"][aria-label="People who shared this"]');
+                            const dialog = document.querySelector(
+                              '[role="dialog"][aria-label="People who shared this"]'
+                            );
                             if (!dialog) return;
                             const candidates = Array.from(dialog.querySelectorAll('div'))
                               .filter((el) => el.scrollHeight > el.clientHeight + 20);

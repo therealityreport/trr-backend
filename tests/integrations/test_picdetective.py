@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from trr_backend.integrations.picdetective import (
-    ReverseImageCandidate,
     parse_search_response,
     search_by_image_url,
 )
-
 
 SAMPLE_RESPONSE = {
     "exact_matches": [
@@ -106,7 +103,9 @@ def test_search_by_image_url_calls_api(monkeypatch) -> None:
     mock_get = MagicMock(return_value=mock_response)
     monkeypatch.setattr("trr_backend.integrations.picdetective.requests.get", mock_get)
 
-    candidates = search_by_image_url("https://media.gettyimages.com/id/467051416/photo/test.jpg?s=2048x2048&w=gi&k=20&c=abc")
+    candidates = search_by_image_url(
+        "https://media.gettyimages.com/id/467051416/photo/test.jpg?s=2048x2048&w=gi&k=20&c=abc"
+    )
 
     mock_get.assert_called_once()
     call_args = mock_get.call_args

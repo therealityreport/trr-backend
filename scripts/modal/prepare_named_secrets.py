@@ -51,6 +51,8 @@ SOCIAL_AUTH_EXACT_KEYS = {
     "SOCIALBLADE_EMAIL",
     "SOCIALBLADE_PASSWORD",
 }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

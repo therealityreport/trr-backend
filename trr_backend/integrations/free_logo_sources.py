@@ -693,7 +693,9 @@ def build_source_query_profile(
         }
 
     default_query_value = brand_query_term
-    default_query_values = _default_logos_fandom_query_values(target_label, target_key) if provider == "logos_fandom" else []
+    default_query_values = (
+        _default_logos_fandom_query_values(target_label, target_key) if provider == "logos_fandom" else []
+    )
     if provider == "logos_fandom" and default_query_values:
         default_query_value = default_query_values[0]
     raw_query_values = _preserve_query_override_values(query_override) if provider == "logos_fandom" else []
@@ -1861,9 +1863,7 @@ def collect_free_logo_candidates(
         if query_override is not None
         else []
     )
-    normalized_query_values = (
-        _normalize_source_query_values(normalized_provider, query_override) if normalized_provider else []
-    )
+    (_normalize_source_query_values(normalized_provider, query_override) if normalized_provider else [])
     if normalized_provider and len(raw_query_values) > 1:
         candidates: list[FreeLogoCandidate] = []
         for query_value in raw_query_values:

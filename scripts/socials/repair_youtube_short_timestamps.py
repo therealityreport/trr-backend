@@ -121,7 +121,7 @@ def _fetch_epoch_short_rows(
           coalesce(v.source_surface, '') as source_surface
         from social.youtube_videos v
         left join core.seasons s on s.id = v.season_id
-        where {' and '.join(filters)}
+        where {" and ".join(filters)}
         order by v.id
         limit %s
         """,

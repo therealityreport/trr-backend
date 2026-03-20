@@ -65,20 +65,26 @@ def _base_row(**overrides):
 
 def test_needs_avatar_backfill_detects_missing_owner_or_tagged_targets() -> None:
     assert mod._needs_avatar_backfill(_base_row()) is True
-    assert mod._needs_avatar_backfill(
-        _base_row(
-            hosted_owner_profile_pic_url="https://cdn.test/avatar.jpg",
-            profile_pic_mirror_status="mirrored",
+    assert (
+        mod._needs_avatar_backfill(
+            _base_row(
+                hosted_owner_profile_pic_url="https://cdn.test/avatar.jpg",
+                profile_pic_mirror_status="mirrored",
+            )
         )
-    ) is False
-    assert mod._needs_avatar_backfill(
-        _base_row(
-            hosted_owner_profile_pic_url="https://cdn.test/avatar.jpg",
-            profile_pic_mirror_status="mirrored",
-            mentions=["@andycohen"],
-            hosted_tagged_profile_pics={},
+        is False
+    )
+    assert (
+        mod._needs_avatar_backfill(
+            _base_row(
+                hosted_owner_profile_pic_url="https://cdn.test/avatar.jpg",
+                profile_pic_mirror_status="mirrored",
+                mentions=["@andycohen"],
+                hosted_tagged_profile_pics={},
+            )
         )
-    ) is True
+        is True
+    )
 
 
 def test_main_dry_run_skips_preflight_and_reports_counts(monkeypatch, capsys) -> None:

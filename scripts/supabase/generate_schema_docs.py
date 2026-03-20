@@ -21,8 +21,9 @@ except ImportError as exc:  # pragma: no cover - depends on local environment
 
 try:
     from dotenv import load_dotenv
-except ImportError as exc:  # pragma: no cover - depends on local environment
-    raise SystemExit("Missing python-dotenv; install dev deps (e.g., `pip install -r requirements.txt`).") from exc
+except ImportError:  # pragma: no cover - optional in lightweight CI environments
+    def load_dotenv(*_args: Any, **_kwargs: Any) -> bool:
+        return False
 
 _OUTPUT_DIR = Path("supabase/schema_docs")
 _DIAGRAM_DIR = _OUTPUT_DIR / "diagrams"
