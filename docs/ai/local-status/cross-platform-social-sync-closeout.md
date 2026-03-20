@@ -1,15 +1,15 @@
 # Cross-platform social sync closeout
 
-Last updated: 2026-03-16
+Last updated: 2026-03-20
 
 ## Handoff Snapshot
 ```yaml
 handoff:
   include: true
   state: active
-  last_updated: 2026-03-16
-  current_phase: "schema fixed, API readiness verified, active-season repair still partial"
-  next_action: "Re-run season-wide comments and mirror coverage after the latest active-season repair pass settles, then decide whether a dedicated comment/comment-media follow-up loop is still required"
+  last_updated: 2026-03-20
+  current_phase: "schema fixed, API readiness verified, and the remaining social sync closeout work is limited to targeted follow-up validation rather than platform-wide repair"
+  next_action: "Only rerun focused season or media/comment follow-up slices if a live admin summary shows residual completeness gaps; otherwise archive this handoff during the next cleanup pass"
   detail: self
 ```
 

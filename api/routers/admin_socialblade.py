@@ -15,6 +15,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/people", tags=["admin-socialblade"])
 
 
+def _scrape_socialblade_person_page(handle: str) -> dict[str, Any]:
+    from trr_backend.modal_dispatch import dispatch_socialblade_scrape_sync
+    from trr_backend.socials.socialblade.auth import (
+        load_socialblade_cookies_from_sources,
+        refresh_socialblade_cookies,
+    )
+    from trr_backend.socials.socialblade.scraper import scrape_socialblade
+
+    try:
+        refresh_socialblade_cookies("person_page_refresh")
+        cookies = load_socialblade_cookies_from_sources()
+        return scrape_socialblade(handle, cookies)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Local SocialBlade scrape unavailable; falling back to Modal",
+            extra={"handle": handle},
+            exc_info=True,
+        )
+        return dispatch_socialblade_scrape_sync(handle=handle)
+
+
 class SocialBladeRefreshRequest(BaseModel):
     handle: str
     force: bool = False
@@ -65,8 +86,7 @@ async def refresh_socialblade_data(
     body: SocialBladeRefreshRequest,
     _admin: AdminUser,
 ) -> dict[str, Any]:
-    """Trigger a fresh SocialBlade scrape via Modal, merge with existing data."""
-    from trr_backend.modal_dispatch import dispatch_socialblade_scrape_sync
+    """Trigger a fresh SocialBlade scrape, preferring the local shared-browser path."""
     from trr_backend.socials.socialblade.service import (
         SocialBladeRefreshError,
         refresh_and_persist_socialblade,
@@ -81,7 +101,7 @@ async def refresh_socialblade_data(
         return refresh_and_persist_socialblade(
             person_id=person_id,
             handle=safe_handle,
-            scraper=lambda handle_value: dispatch_socialblade_scrape_sync(handle=handle_value),
+            scraper=_scrape_socialblade_person_page,
             source="person_page",
             force=body.force,
         )
@@ -94,10 +114,12 @@ async def refresh_socialblade_data_batch(
     body: SocialBladeBatchRefreshRequest,
     _admin: AdminUser,
 ) -> dict[str, Any]:
-    """Dispatch non-blocking SocialBlade refresh jobs for multiple cast members."""
+    """Refresh SocialBlade rows for multiple cast members."""
     from trr_backend.modal_dispatch import dispatch_socialblade_scrape
     from trr_backend.socials.socialblade.service import (
+        SocialBladeRefreshError,
         queue_refresh_decision,
+        refresh_and_persist_socialblade,
         sanitize_socialblade_handle,
         socialblade_auto_refresh_enabled,
     )
@@ -172,6 +194,35 @@ async def refresh_socialblade_data_batch(
                     "reason": reason,
                     "scrapedAt": existing.get("scraped_at") if existing else None,
                     "freshnessStatus": existing.get("freshness_status") if existing else "missing",
+                }
+            )
+            continue
+
+        if source == "cast_comparison":
+            try:
+                refreshed = refresh_and_persist_socialblade(
+                    person_id=item.person_id,
+                    handle=safe_handle,
+                    scraper=_scrape_socialblade_person_page,
+                    source=source,
+                    force=body.force,
+                )
+            except SocialBladeRefreshError as exc:
+                errors.append(
+                    {
+                        "personId": item.person_id,
+                        "handle": safe_handle,
+                        "reason": str(exc),
+                    }
+                )
+                continue
+
+            accepted.append(
+                {
+                    "personId": item.person_id,
+                    "handle": safe_handle,
+                    "refreshStatus": refreshed.get("refresh_status"),
+                    "scrapedAt": refreshed.get("scraped_at"),
                 }
             )
             continue

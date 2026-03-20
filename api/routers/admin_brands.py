@@ -1021,7 +1021,11 @@ def _list_brand_logos(
               is_primary,
               mirror_status,
               failure_reason,
-              coalesce(hosted_logo_content_type, hosted_logo_black_content_type, hosted_logo_white_content_type) as content_type,
+              coalesce(
+                hosted_logo_content_type,
+                hosted_logo_black_content_type,
+                hosted_logo_white_content_type
+              ) as content_type,
               null::int as width,
               null::int as height,
               metadata,
@@ -2083,7 +2087,11 @@ def _fetch_logo_option_row(
               is_primary,
               mirror_status,
               failure_reason,
-              coalesce(hosted_logo_content_type, hosted_logo_black_content_type, hosted_logo_white_content_type) as content_type,
+              coalesce(
+                hosted_logo_content_type,
+                hosted_logo_black_content_type,
+                hosted_logo_white_content_type
+              ) as content_type,
               null::int as width,
               null::int as height,
               metadata,
@@ -2303,7 +2311,9 @@ def _set_brand_role_selection(
         if role == "wordmark" and not isinstance(metadata, dict):
             role = "wordmark" if bool(row.get("is_primary")) else "icon"
         manages_new_role = role == logo_role
-        manages_previous_role = bool(selected_previous_role and selected_previous_role != logo_role and role == selected_previous_role)
+        manages_previous_role = bool(
+            selected_previous_role and selected_previous_role != logo_role and role == selected_previous_role
+        )
         if current_id == asset_id:
             manages_new_role = True
             manages_previous_role = False
@@ -2711,7 +2721,8 @@ def _delete_saved_logo_option(
         )
         if hasattr(response, "error") and response.error:
             raise RuntimeError(f"Failed to delete saved network logo option: {response.error}")
-        if bool(normalized_row.get("is_selected_for_role")) and _normalize_logo_role(normalized_row.get("logo_role")) == "wordmark":
+        selected_role = _normalize_logo_role(normalized_row.get("logo_role"))
+        if bool(normalized_row.get("is_selected_for_role")) and selected_role == "wordmark":
             _ensure_network_wordmark_selection(
                 db=db,
                 target_type=target_type,

@@ -11,7 +11,6 @@ Provides a streaming endpoint that:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import time
@@ -25,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient
+from trr_backend.media.getty_replacement import is_bravo_network_name, resolve_best_public_replacement
 
 logger = logging.getLogger(__name__)
 
@@ -44,20 +44,22 @@ def _sse_event(event_type: str, data: dict[str, Any]) -> str:
 
 
 def _fetch_show(db: SupabaseAdminClient, show_id: str) -> dict[str, Any]:
-    response = (
-        db.schema("core")
-        .table("shows")
-        .select("id, name")
-        .eq("id", show_id)
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("shows").select("id, name, networks").eq("id", show_id).limit(1).execute()
     if hasattr(response, "error") and response.error:
         raise HTTPException(status_code=502, detail=f"Failed to fetch show: {response.error}")
     rows = response.data or []
     if not rows:
         raise HTTPException(status_code=404, detail=f"Show not found: {show_id}")
     return rows[0]
+
+
+def _show_is_bravo_family(show_row: dict[str, Any] | None) -> bool:
+    if not isinstance(show_row, dict):
+        return False
+    networks = show_row.get("networks")
+    if not isinstance(networks, list):
+        return False
+    return any(is_bravo_network_name(network) for network in networks)
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:
@@ -77,6 +79,7 @@ def _import_show_images(
     *,
     show_id: str,
     show_name: str,
+    show_is_bravo: bool,
     limit: int | None,
     getty_limit: int,
     progress_cb: Any | None = None,
@@ -85,20 +88,11 @@ def _import_show_images(
     from api.routers.admin_nbcumv import (
         NbcumvImportItem,
         _ensure_sources,
-        _extract_tagged_people,
         _import_single_item,
         _load_eligible_people_index,
         _match_people_names,
     )
     from trr_backend.integrations import getty, nbcumv
-    from trr_backend.media.s3_mirror import (
-        build_hosted_url,
-        build_shared_media_s3_key,
-        get_s3_bucket,
-        get_s3_client,
-        guess_ext_from_content_type,
-        upload_bytes_to_s3,
-    )
     from trr_backend.repositories.media_assets import asset_id_for
     from trr_backend.repositories.web_scrape_images import create_media_link_for_entity
 
@@ -302,9 +296,15 @@ def _import_show_images(
         # No NBCUMV match — create media_asset from Getty preview URL
         preview_url = None
         for key in (
-            "preview_image_url", "downloadableCompUrl", "galleryHighResCompUrl",
-            "highResCompUrl", "galleryComp1024Url", "compUrl", "mainImageUrl",
-            "thumbUrl", "thumb_url",
+            "preview_image_url",
+            "downloadableCompUrl",
+            "galleryHighResCompUrl",
+            "highResCompUrl",
+            "galleryComp1024Url",
+            "compUrl",
+            "mainImageUrl",
+            "thumbUrl",
+            "thumb_url",
         ):
             value = str(asset.get(key) or "").strip()
             if value:
@@ -345,13 +345,51 @@ def _import_show_images(
                 result["getty_failed"] += 1
                 continue
 
+            # Determine dimensions
+            width = None
+            height = None
+            for dim_field in ("assetDimensions", "actualMaxDimensions"):
+                candidate = asset.get(dim_field)
+                if isinstance(candidate, dict):
+                    w, h = candidate.get("width"), candidate.get("height")
+                    if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+                        width, height = w, h
+                        break
+
+            public_replacement = None
+            detail_url = str(asset.get("detail_url") or "").strip() or None
+            if show_is_bravo:
+                try:
+                    public_replacement = resolve_best_public_replacement(
+                        preview_url,
+                        expected_width=width,
+                        expected_height=height,
+                        bravo_only=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Auto Getty replacement lookup failed for show_id=%s editorial_id=%s: %s",
+                        show_id,
+                        editorial_id,
+                        exc,
+                    )
+
+            resolved_source_url = str(public_replacement.image_url).strip() if public_replacement else preview_url
+            resolved_width = public_replacement.width if public_replacement and public_replacement.width else width
+            resolved_height = public_replacement.height if public_replacement and public_replacement.height else height
+
             # Build metadata
             getty_tags = list(asset.get("keyword_texts") or []) if isinstance(asset.get("keyword_texts"), list) else []
             metadata: dict[str, Any] = {
                 "getty": dict(asset),
-                "getty_only_fallback": True,
-                "source_page_url": str(asset.get("detail_url") or ""),
-                "source_resolution": "getty_watermark_fallback",
+                "getty_only_fallback": public_replacement is None,
+                "source_domain": public_replacement.source_domain if public_replacement else "gettyimages.com",
+                "source_url": resolved_source_url,
+                "source_page_url": str(public_replacement.page_url).strip() if public_replacement else detail_url,
+                "original_source": "getty",
+                "original_source_url": preview_url,
+                "original_source_page_url": detail_url,
+                "source_resolution": public_replacement.mode if public_replacement else "getty_watermark_fallback",
                 "getty_details": dict(asset.get("details") or {}) if isinstance(asset.get("details"), dict) else {},
                 "getty_tags": getty_tags,
                 "getty_event_title": str(asset.get("event_name") or "").strip() or None,
@@ -369,17 +407,15 @@ def _import_show_images(
                 "people_count": len(tagged_people) if tagged_people else None,
                 "created_at": str(asset.get("date_created") or "").strip() or None,
             }
-
-            # Determine dimensions
-            width = None
-            height = None
-            for dim_field in ("assetDimensions", "actualMaxDimensions"):
-                candidate = asset.get(dim_field)
-                if isinstance(candidate, dict):
-                    w, h = candidate.get("width"), candidate.get("height")
-                    if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
-                        width, height = w, h
-                        break
+            if public_replacement:
+                metadata["replaced_from"] = {
+                    "url": public_replacement.page_url,
+                    "domain": public_replacement.source_domain,
+                    "image_url": public_replacement.image_url,
+                    "width": public_replacement.width,
+                    "height": public_replacement.height,
+                    "mode": public_replacement.mode,
+                }
 
             now = datetime.now(UTC).isoformat()
 
@@ -400,9 +436,9 @@ def _import_show_images(
                 "media_type": "image",
                 "source": _GETTY_SOURCE,
                 "source_asset_id": editorial_id,
-                "source_url": preview_url,
-                "width": width,
-                "height": height,
+                "source_url": resolved_source_url,
+                "width": resolved_width,
+                "height": resolved_height,
                 "caption": str(asset.get("caption") or "").strip() or None,
                 "metadata": metadata,
                 "fetched_at": now,
@@ -492,19 +528,22 @@ async def get_show_images_stream(
     request = request or ShowGetImagesRequest()
     show = _fetch_show(db, str(show_id))
     show_name = str(show.get("name") or "")
+    show_is_bravo = _show_is_bravo_family(show)
     if not show_name:
         raise HTTPException(status_code=400, detail="Show has no name")
 
     progress_events: list[dict[str, Any]] = []
 
     def progress_cb(stage: str, current: int, total: int, message: str) -> None:
-        progress_events.append({
-            "stage": stage,
-            "current": current,
-            "total": total,
-            "message": message,
-            "ts": time.time(),
-        })
+        progress_events.append(
+            {
+                "stage": stage,
+                "current": current,
+                "total": total,
+                "message": message,
+                "ts": time.time(),
+            }
+        )
 
     async def event_generator():
         import_task = asyncio.create_task(
@@ -513,6 +552,7 @@ async def get_show_images_stream(
                 db,
                 show_id=str(show_id),
                 show_name=show_name,
+                show_is_bravo=show_is_bravo,
                 limit=request.limit,
                 getty_limit=request.getty_limit,
                 progress_cb=progress_cb,
@@ -535,10 +575,13 @@ async def get_show_images_stream(
             yield _sse_event("complete", final_result)
         except Exception as exc:
             logger.exception("Show get-images failed for %s", show_id)
-            yield _sse_event("error", {
-                "message": str(exc),
-                "is_terminal": True,
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "message": str(exc),
+                    "is_terminal": True,
+                },
+            )
 
     return StreamingResponse(
         event_generator(),

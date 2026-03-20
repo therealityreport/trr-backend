@@ -390,9 +390,7 @@ def _run_error_codes(run_id: str) -> set[str]:
         [run_id],
     )
     return {
-        str(row.get("error_code") or "").strip().upper()
-        for row in rows
-        if str(row.get("error_code") or "").strip()
+        str(row.get("error_code") or "").strip().upper() for row in rows if str(row.get("error_code") or "").strip()
     }
 
 
@@ -524,10 +522,7 @@ def _build_avatar_coverage_snapshot(
                 source_avatar = str(post_json.get("user_avatar_url") or "").strip()
                 hosted_avatar = str(post_json.get("hosted_user_avatar_url") or "").strip()
                 account_handle = str(
-                    post_json.get("username")
-                    or post_json.get("channel_title")
-                    or post_json.get("source_account")
-                    or ""
+                    post_json.get("username") or post_json.get("channel_title") or post_json.get("source_account") or ""
                 ).strip()
                 if source_avatar and not hosted_avatar:
                     if (platform, account_handle.lstrip("@").lower(), source_avatar) not in completed_avatar_keys:
@@ -812,11 +807,7 @@ def _coverage_dimension_payload(
             "pending_count": int(coverage.get("pending_count") or 0),
         }
     if dimension == "avatars" and not payload:
-        payload = (
-            dict(by_platform.get(platform))
-            if isinstance(by_platform.get(platform), dict)
-            else {}
-        )
+        payload = dict(by_platform.get(platform)) if isinstance(by_platform.get(platform), dict) else {}
     if dimension == "comments":
         saved_comments = int(payload.get("saved_comments") or 0)
         reported_comments = int(payload.get("reported_comments") or 0)
@@ -825,9 +816,7 @@ def _coverage_dimension_payload(
             payload["reported_comments_raw"] = reported_comments
             payload["reported_comments"] = effective_reported_comments
         comment_sync_status = (
-            dict(payload.get("comment_sync_status"))
-            if isinstance(payload.get("comment_sync_status"), dict)
-            else {}
+            dict(payload.get("comment_sync_status")) if isinstance(payload.get("comment_sync_status"), dict) else {}
         )
         if comment_sync_status:
             expected_count = int(comment_sync_status.get("expected_count") or 0)
@@ -949,9 +938,7 @@ def _build_platform_diagnostics(
             "queue_cap": queue_cap,
             "queue_wait_state": queue_state,
             "queue_age_seconds": (
-                int(worker_health.get("oldest_queued_age_seconds") or 0)
-                if isinstance(worker_health, dict)
-                else None
+                int(worker_health.get("oldest_queued_age_seconds") or 0) if isinstance(worker_health, dict) else None
             ),
             "queue_enabled": queue_enabled,
             "worker_required": platform in {"instagram", "tiktok"},
@@ -1155,7 +1142,7 @@ def _build_missing_detail_target_groups(
                 where root.season_id = %s::uuid
                   and root.{posted_at_column} >= %s
                   and root.{posted_at_column} <= %s
-                  {account_filter.replace('p.', 'root.')}
+                  {account_filter.replace("p.", "root.")}
                   and jsonb_array_length(coalesce(c.media_urls, '[]'::jsonb)) > 0
                   and (
                     coalesce(c.media_mirror_status, '') in ('pending', 'partial', 'failed')
@@ -1247,9 +1234,7 @@ def _build_missing_detail_target_groups(
             _add_group_target("comment_media", platform, str(comment_row.get("source_id") or "").strip())
     return {
         group: {
-            platform_name: sorted(source_ids)
-            for platform_name, source_ids in platform_targets.items()
-            if source_ids
+            platform_name: sorted(source_ids) for platform_name, source_ids in platform_targets.items() if source_ids
         }
         for group, platform_targets in grouped_targets.items()
     }
@@ -1360,9 +1345,7 @@ def _build_missing_comment_targets(
             params,
         )
         source_ids = [
-            str(row.get("source_id") or "").strip()
-            for row in rows
-            if str(row.get("source_id") or "").strip()
+            str(row.get("source_id") or "").strip() for row in rows if str(row.get("source_id") or "").strip()
         ]
         if source_ids:
             targets[platform] = source_ids
@@ -1410,8 +1393,7 @@ def _expected_after_current_pass(pass_kind: str | None) -> str | None:
     normalized_pass_kind = str(pass_kind or "").strip().lower()
     if normalized_pass_kind == "posts_and_comments":
         return (
-            "Posts and comments are acquired here; media, comment media, avatars, "
-            "and detail repairs can still remain."
+            "Posts and comments are acquired here; media, comment media, avatars, and detail repairs can still remain."
         )
     if normalized_pass_kind == "comments_only":
         return "Only comment and reply gaps should close in this pass."

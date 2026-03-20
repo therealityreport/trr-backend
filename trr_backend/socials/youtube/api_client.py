@@ -78,9 +78,7 @@ class YouTubeDataApiClient:
         snippet = item.get("snippet") if isinstance(item.get("snippet"), dict) else {}
         content_details = item.get("contentDetails") if isinstance(item.get("contentDetails"), dict) else {}
         related = (
-            content_details.get("relatedPlaylists")
-            if isinstance(content_details.get("relatedPlaylists"), dict)
-            else {}
+            content_details.get("relatedPlaylists") if isinstance(content_details.get("relatedPlaylists"), dict) else {}
         )
         return {
             "channel_id": str(item.get("id") or "").strip() or None,

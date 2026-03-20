@@ -483,12 +483,15 @@ def test_previewable_logo_url_accepts_logopedia_revision_latest_urls() -> None:
     assert admin_brands._is_previewable_logo_url(
         "https://static.wikia.nocookie.net/logopedia/images/0/00/Bravo_%282005%29_%28Print%29.svg/revision/latest?cb=20250725204030"
     )
-    assert admin_brands._infer_logo_file_type(
-        source_url=(
-            "https://static.wikia.nocookie.net/logopedia/images/7/78/Bravo_2005_small.png/revision/latest?cb=20250725213343"
-        ),
-        content_type=None,
-    ) == "png"
+    assert (
+        admin_brands._infer_logo_file_type(
+            source_url=(
+                "https://static.wikia.nocookie.net/logopedia/images/7/78/Bravo_2005_small.png/revision/latest?cb=20250725213343"
+            ),
+            content_type=None,
+        )
+        == "png"
+    )
 
 
 def test_discover_logo_candidates_by_source_includes_logopedia_revision_latest_candidates() -> None:
@@ -550,10 +553,7 @@ def test_seed_logo_targets_from_entity_links_adds_fandom_publication_fallback() 
     with patch("api.routers.admin_brands.pg.fetch_all", return_value=rows):
         seeded = admin_brands._seed_logo_targets_from_entity_links(show_id="show-1")
 
-    by_key = {
-        (str(row.get("target_type")), str(row.get("target_key"))): row
-        for row in seeded
-    }
+    by_key = {(str(row.get("target_type")), str(row.get("target_key"))): row for row in seeded}
     assert ("publication", "real-housewives.fandom.com") in by_key
     assert ("publication", "fandom.com") in by_key
 

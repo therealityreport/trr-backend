@@ -149,9 +149,7 @@ def test_append_operation_event_retries_on_unique_sequence_conflict() -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise RuntimeError(
-                'duplicate key value violates unique constraint "admin_operation_events_op_seq_unique"'
-            )
+            raise RuntimeError('duplicate key value violates unique constraint "admin_operation_events_op_seq_unique"')
         return {
             "operation_id": operation_id,
             "event_seq": 2,

@@ -414,10 +414,7 @@ def test_scan_event_page_for_person_returns_all_matching_assets(monkeypatch) -> 
 
 def test_scan_event_page_for_person_respects_limit(monkeypatch) -> None:
     """scan_event_page_for_person should stop after scanning scan_limit assets."""
-    fake_candidates = [
-        {"detail_url": f"https://www.gettyimages.com/detail/news-photo/img/{i}"}
-        for i in range(1, 201)
-    ]
+    fake_candidates = [{"detail_url": f"https://www.gettyimages.com/detail/news-photo/img/{i}"} for i in range(1, 201)]
 
     def fake_search_candidates(phrase, *, limit, session=None, query_params=None):
         return list(fake_candidates)
@@ -480,8 +477,7 @@ def test_search_grouped_events_full_scan_returns_multiple_matched_assets(monkeyp
             "total_scanned": 50,
             "person_image_count": 5,
             "matched_assets": [
-                {"editorial_id": str(i), "object_name": f"OBJ_{i}", "caption": "Brandi Glanville"}
-                for i in range(1, 6)
+                {"editorial_id": str(i), "object_name": f"OBJ_{i}", "caption": "Brandi Glanville"} for i in range(1, 6)
             ],
             "representative_asset": {"editorial_id": "1", "object_name": "OBJ_1"},
         },
@@ -547,9 +543,7 @@ def test_fetch_asset_detail_prefers_largest_image_url(monkeypatch) -> None:
 
     result = getty.fetch_asset_detail("https://www.gettyimages.com/detail/news-photo/test/123")
     assert result is not None
-    assert "2048x2048" in result["preview_image_url"], (
-        f"Expected largest URL, got: {result['preview_image_url']}"
-    )
+    assert "2048x2048" in result["preview_image_url"], f"Expected largest URL, got: {result['preview_image_url']}"
 
 
 def test_extract_best_image_urls_from_display_sizes() -> None:

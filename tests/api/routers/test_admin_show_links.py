@@ -2315,6 +2315,7 @@ def test_discover_people_links_expands_matching_fandom_person_related_pages() ->
             return_value=("real-housewives.fandom.com",),
         ):
             with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+
                 def _fetch_all(query: str, params=None):
                     if "FROM core.show_cast_role_assignments" in query:
                         return []
@@ -2357,7 +2358,9 @@ def test_discover_people_links_expands_matching_fandom_person_related_pages() ->
                     ):
                         with patch(
                             "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind == "fandom" else None
+                            ),
                         ):
                             links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 

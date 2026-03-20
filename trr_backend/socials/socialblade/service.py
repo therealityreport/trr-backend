@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable
+from typing import Any
 
 from trr_backend.repositories.socialblade_growth import (
     get_growth_data,
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 SocialBladeScraper = Callable[[str], dict[str, Any]]
 _DEFAULT_FRESHNESS_HOURS = 24
+_DEFAULT_MIN_REUSABLE_CHART_POINTS = 30
 
 
 class SocialBladeRefreshError(RuntimeError):
@@ -75,6 +77,18 @@ def is_growth_data_fresh(
     scraped_at = get_scraped_at_datetime(data)
     if scraped_at is None:
         return False
+    history_source = str((data or {}).get("history_source") or "").strip().lower()
+    if history_source and history_source != "authenticated_api":
+        return False
+    if not history_source:
+        chart = ((data or {}).get("daily_total_followers_chart") or {}) if isinstance(data, dict) else {}
+        points = chart.get("total_data_points") if isinstance(chart, dict) else None
+        try:
+            point_count = int(points or 0)
+        except (TypeError, ValueError):
+            point_count = 0
+        if point_count < _DEFAULT_MIN_REUSABLE_CHART_POINTS:
+            return False
     ttl = timedelta(hours=freshness_hours or socialblade_freshness_hours())
     return datetime.now(tz=UTC) - scraped_at <= ttl
 

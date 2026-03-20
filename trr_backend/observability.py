@@ -101,9 +101,7 @@ def _resolve_better_stack_endpoint() -> str:
 def _build_better_stack_event(record: logging.LogRecord, *, service_name: str) -> dict[str, Any]:
     trace_id = get_trace_id()
     event: dict[str, Any] = {
-        "dt": datetime.fromtimestamp(record.created, tz=UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z"),
+        "dt": datetime.fromtimestamp(record.created, tz=UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "message": record.getMessage(),
         "level": record.levelname,
         "logger_name": record.name,
@@ -177,8 +175,7 @@ class BetterStackHTTPHandler(logging.Handler):
             self._muted_until = max(self._muted_until, created + self.failure_cooldown_seconds)
         try:
             sys.stderr.write(
-                f"[observability] Better Stack log shipping muted for "
-                f"{int(self.failure_cooldown_seconds)}s: {exc}\n"
+                f"[observability] Better Stack log shipping muted for {int(self.failure_cooldown_seconds)}s: {exc}\n"
             )
         except Exception:  # pragma: no cover - stderr failure is non-fatal
             pass

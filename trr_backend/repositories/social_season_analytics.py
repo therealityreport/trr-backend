@@ -25,7 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
-from typing import Any, Literal, Mapping, Sequence, cast
+from typing import Any, Literal, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -58,6 +58,9 @@ from trr_backend.socials.crawlee_runtime import (
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
+
+_SOCIAL_PROFILE_TOTAL_POSTS_CACHE: dict[tuple[str, str], tuple[float, int | None]] = {}
+_SOCIAL_PROFILE_TOTAL_POSTS_CACHE_LOCK = Lock()
 
 SUPPORTED_PLATFORMS = SOCIAL_SUPPORTED_PLATFORMS
 SUPPORTED_SCOPES = ("bravo", "creator", "community")
@@ -101,6 +104,7 @@ SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS_DEFAULT = 300
 SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS_DEFAULT = 100
 SOCIAL_DB_UPSERT_BATCH_SIZE_MAX = 1000
 SOCIAL_RUN_IN_FLIGHT_CAP_DEFAULT = 12
+SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP_DEFAULT = 16
 SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT = 20
 SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT = 5
 SOCIAL_INSTAGRAM_COOKIE_VALIDATION_TTL_SECONDS_DEFAULT = 900
@@ -110,7 +114,13 @@ SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT = 100
 SOCIAL_MODAL_DISPATCH_RETRY_DELAY_SECONDS_DEFAULT = 120
 SOCIAL_MODAL_DISPATCH_LIMIT_DEFAULT = 25
 SOCIAL_MODAL_MIRROR_LAG_AGE_SECONDS_DEFAULT = 900
+CATALOG_BACKFILL_MULTI_RUNNER_COUNT = 2
+CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT = 4
+CATALOG_FULL_HISTORY_PARTITION_STATUSES = ("discovered", "queued", "running", "completed", "failed", "cancelled")
+CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY = "cursor_breakpoints"
+CATALOG_FULL_HISTORY_DATE_WINDOW_PARTITION_STRATEGY = "date_window"
 SOCIAL_MODAL_MIRROR_LAG_PENDING_DEFAULT = 500
+SOCIAL_PROFILE_TOTAL_POSTS_CACHE_TTL_SECONDS_DEFAULT = 300
 QUEUE_STATUS_STAGES = ("queued", "pending", "running", "retrying", "cancelling", "failed", "cancelled", "completed")
 SOCIAL_DEBUG_OPENAI_MODEL_DEFAULT = "gpt-5.3-codex"
 SOCIAL_DEBUG_OPENAI_FALLBACK_MODEL_DEFAULT = "gpt-5.2-codex"
@@ -125,12 +135,23 @@ SOCIAL_YOUTUBE_TRANSCRIPT_INGEST_ENABLED_DEFAULT = True
 INSTAGRAM_MEDIA_MIRROR_STAGE = "media_mirror"
 COMMENT_MEDIA_MIRROR_STAGE = "comment_media_mirror"
 SHARED_ACCOUNT_POSTS_STAGE = "shared_account_posts"
+SHARED_ACCOUNT_DISCOVERY_STAGE = "shared_account_discovery"
 POST_CLASSIFY_STAGE = "post_classify"
 SEASON_MATERIALIZE_STAGE = "season_materialize"
 ANALYTICS_REFRESH_STAGE = "analytics_refresh"
+ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES = (
+    SHARED_ACCOUNT_DISCOVERY_STAGE,
+    SHARED_ACCOUNT_POSTS_STAGE,
+    POST_CLASSIFY_STAGE,
+    SEASON_MATERIALIZE_STAGE,
+    ANALYTICS_REFRESH_STAGE,
+)
 LEGACY_SEASON_TARGETED_INGEST_MODE = "legacy_season_targeted"
 SHARED_ACCOUNT_ASYNC_INGEST_MODE = "shared_account_async"
 SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE = "shared_account_catalog_backfill"
+TRUSTED_LOCAL_WORKER_LANE = "trusted_local"
+INSTAGRAM_REMOTE_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_remote_executor_blocked"
+INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_local_executor_blocked"
 INSTAGRAM_MEDIA_MIRROR_JOB_TYPE = "instagram_media_mirror"
 TIKTOK_MEDIA_MIRROR_JOB_TYPE = "tiktok_media_mirror"
 YOUTUBE_MEDIA_MIRROR_JOB_TYPE = "youtube_media_mirror"
@@ -144,6 +165,7 @@ TWITTER_COMMENT_MEDIA_MIRROR_JOB_TYPE = "twitter_comment_media_mirror"
 FACEBOOK_COMMENT_MEDIA_MIRROR_JOB_TYPE = "facebook_comment_media_mirror"
 THREADS_COMMENT_MEDIA_MIRROR_JOB_TYPE = "threads_comment_media_mirror"
 SHARED_ACCOUNT_POSTS_JOB_TYPE = "shared_account_posts"
+SHARED_ACCOUNT_DISCOVERY_JOB_TYPE = "shared_account_discovery"
 POST_CLASSIFY_JOB_TYPE = "post_classify"
 SEASON_MATERIALIZE_JOB_TYPE = "season_materialize"
 ANALYTICS_REFRESH_JOB_TYPE = "analytics_refresh"
@@ -229,6 +251,34 @@ class SocialIngestValidationError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = str(code or "").strip().upper() or "BAD_REQUEST"
+
+
+class SocialIngestConflictError(ValueError):
+    """Raised when an ingest request conflicts with existing active work."""
+
+    def __init__(self, code: str, message: str, *, detail: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.code = str(code or "").strip().upper() or "CONFLICT"
+        self.detail = dict(detail or {})
+
+
+class SharedStageRuntimeError(RuntimeError):
+    """Raised when a shared-account stage should fail or retry with structured metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        retryable: bool = False,
+        error_class: str | None = None,
+        runtime_metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = str(error_code or "").strip().lower() or "shared_stage_failed"
+        self.error_class = str(error_class or self.__class__.__name__).strip() or self.__class__.__name__
+        self.retryable = bool(retryable)
+        self.runtime_metadata = dict(runtime_metadata or {})
 
 
 def register_week_detail_cache_invalidator(callback: Callable[[], None] | None) -> None:
@@ -508,6 +558,19 @@ class IngestShardSchedule:
     day_weights: dict[int, float]
 
 
+@dataclass(slots=True)
+class SharedAccountCursorPartition:
+    partition_key: str
+    shard_index: int
+    shard_total: int
+    runner_lane: str
+    cursor_start: str | None
+    cursor_end: str | None
+    boundary_start_at: datetime | None
+    boundary_end_at: datetime | None
+    metadata: dict[str, Any]
+
+
 def _normalize_runner_strategy(value: str | None) -> str:
     normalized = str(value or "").strip().lower() or DEFAULT_RUNNER_STRATEGY
     if normalized not in SUPPORTED_RUNNER_STRATEGIES:
@@ -540,6 +603,99 @@ def _resolve_runner_count(value: int | None) -> int:
     if value is None:
         return DEFAULT_RUNNER_COUNT
     return max(1, min(int(value), 2))
+
+
+def _catalog_backfill_run_scheduler_lanes(runner_count: int) -> list[str]:
+    safe_runner_count = max(1, int(runner_count or 1))
+    return [chr(65 + index) for index in range(min(safe_runner_count, 26))]
+
+
+def _catalog_full_history_partition_supported(platform: str | None) -> bool:
+    return (_normalize_platform_name(platform) or "") in {"instagram", "tiktok"}
+
+
+def _catalog_full_history_posts_per_shard(platform: str | None) -> int:
+    normalized_platform = _normalize_platform_name(platform)
+    if normalized_platform == "instagram":
+        return 900
+    if normalized_platform == "tiktok":
+        return 1200
+    return 2000
+
+
+def _catalog_backfill_window_shard_days(platform: str, *, span_days: int | None) -> int | None:
+    normalized_platform = _normalize_platform_name(platform)
+    if span_days is None or span_days <= 2:
+        return None
+    if normalized_platform in {"instagram", "tiktok"}:
+        if span_days <= 14:
+            return 2
+        if span_days <= 45:
+            return 3
+        if span_days <= 120:
+            return 5
+        return 7
+    if normalized_platform in {"twitter", "threads"}:
+        if span_days <= 14:
+            return 3
+        if span_days <= 45:
+            return 5
+        if span_days <= 120:
+            return 7
+        return 10
+    return None
+
+
+def _build_catalog_backfill_shards(
+    *,
+    platform: str,
+    date_start: datetime | None,
+    date_end: datetime | None,
+    runner_count: int,
+) -> list[IngestTimeShard]:
+    start_dt = _coerce_dt(date_start)
+    end_dt = _coerce_dt(date_end)
+    span_days = _window_span_days(date_start=start_dt, date_end=end_dt)
+    shard_days = _catalog_backfill_window_shard_days(platform, span_days=span_days)
+    if start_dt is None or end_dt is None or end_dt < start_dt or shard_days is None:
+        return [
+            IngestTimeShard(
+                shard_index=0,
+                window_start=start_dt or end_dt or _now_utc(),
+                window_end=end_dt or start_dt or _now_utc(),
+                runner_lane="A",
+                priority_score=0.0,
+                day_offset=0,
+                day_weight=1.0,
+            )
+        ]
+
+    shard_delta = timedelta(days=shard_days)
+    cursor = start_dt
+    shard_index = 0
+    lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
+    shards: list[IngestTimeShard] = []
+    while cursor <= end_dt:
+        window_end = min(cursor + shard_delta - timedelta(microseconds=1), end_dt)
+        if window_end < cursor:
+            window_end = cursor
+        day_offset = max(0, (cursor.date() - start_dt.date()).days)
+        shards.append(
+            IngestTimeShard(
+                shard_index=shard_index,
+                window_start=cursor,
+                window_end=window_end,
+                runner_lane=lanes[shard_index % len(lanes)],
+                priority_score=float(shard_index),
+                day_offset=day_offset,
+                day_weight=1.0,
+            )
+        )
+        if window_end >= end_dt:
+            break
+        cursor = window_end + timedelta(microseconds=1)
+        shard_index += 1
+    return shards
 
 
 def _resolve_window_shard_hours(value: int | None) -> int:
@@ -919,6 +1075,7 @@ def _normalize_worker_stage(stage: str | None) -> str:
         "comments",
         INSTAGRAM_MEDIA_MIRROR_STAGE,
         COMMENT_MEDIA_MIRROR_STAGE,
+        SHARED_ACCOUNT_DISCOVERY_STAGE,
         SHARED_ACCOUNT_POSTS_STAGE,
         POST_CLASSIFY_STAGE,
         SEASON_MATERIALIZE_STAGE,
@@ -940,6 +1097,88 @@ def _configured_execution_metadata() -> dict[str, Any]:
     return dict(execution_metadata())
 
 
+def _shared_account_expected_total_posts_key(platform: Any, account_handle: Any) -> str:
+    normalized_platform = _normalize_platform_name(platform) or str(platform or "").strip().lower()
+    normalized_account = _normalize_account_handle(account_handle) or str(account_handle or "").strip().lower()
+    return f"{normalized_platform}:{normalized_account}"
+
+
+def _catalog_backfill_has_bounded_window(*, date_start: datetime | None, date_end: datetime | None) -> bool:
+    bounded_start = _coerce_dt(date_start)
+    bounded_end = _coerce_dt(date_end)
+    return bounded_start is not None and bounded_end is not None and bounded_end >= bounded_start
+
+
+def _shared_account_catalog_requires_modal_executor(
+    *,
+    platform: Any,
+    pipeline_ingest_mode: str | None,
+) -> bool:
+    normalized_platform = _normalize_platform_name(platform)
+    normalized_ingest_mode = str(pipeline_ingest_mode or SHARED_ACCOUNT_ASYNC_INGEST_MODE).strip().lower()
+    return normalized_platform == "instagram" and normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+
+
+def _shared_account_catalog_requires_trusted_local_worker_lane(
+    *,
+    platform: Any,
+    pipeline_ingest_mode: str | None,
+    date_start: datetime | None = None,
+    date_end: datetime | None = None,
+) -> bool:
+    del platform, pipeline_ingest_mode, date_start, date_end
+    return False
+
+
+def _job_required_execution_backend(job_config: Mapping[str, Any] | None, *, platform: Any = None) -> str | None:
+    if not isinstance(job_config, Mapping):
+        return None
+    explicit_backend = str(job_config.get("required_execution_backend") or "").strip().lower()
+    if explicit_backend:
+        return explicit_backend
+    if _shared_account_catalog_requires_modal_executor(
+        platform=platform or job_config.get("platform"),
+        pipeline_ingest_mode=str(job_config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE),
+    ):
+        return "modal"
+    return None
+
+
+def _job_requires_modal_executor(job_config: Mapping[str, Any] | None, *, platform: Any = None) -> bool:
+    return _job_required_execution_backend(job_config, platform=platform) == "modal"
+
+
+def _job_requires_trusted_local_worker_lane(job_config: Mapping[str, Any] | None, *, platform: Any = None) -> bool:
+    if not isinstance(job_config, Mapping):
+        return False
+    required_lane = str(job_config.get("required_worker_lane") or "").strip().lower()
+    if required_lane == TRUSTED_LOCAL_WORKER_LANE:
+        return True
+    return _shared_account_catalog_requires_trusted_local_worker_lane(
+        platform=platform or job_config.get("platform"),
+        pipeline_ingest_mode=str(job_config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE),
+        date_start=_coerce_dt(job_config.get("date_start")),
+        date_end=_coerce_dt(job_config.get("date_end")),
+    )
+
+
+def _shared_account_expected_total_posts_from_config(
+    config: Mapping[str, Any] | None,
+    *,
+    platform: Any,
+    account_handle: Any,
+) -> int:
+    metadata = _metadata_dict(config)
+    direct_total = _normalize_non_negative_int(metadata.get("expected_total_posts"))
+    if direct_total > 0:
+        return direct_total
+    by_account = _metadata_dict(metadata.get("expected_total_posts_by_account"))
+    keyed_total = _normalize_non_negative_int(
+        by_account.get(_shared_account_expected_total_posts_key(platform, account_handle))
+    )
+    return keyed_total
+
+
 def _modal_social_dispatcher_worker_id() -> str:
     return "modal:social-dispatcher"
 
@@ -957,7 +1196,8 @@ def _modal_dispatch_stage_global_cap(stage: str | None) -> int:
     env_map = {
         "posts": ("SOCIAL_WORKER_POOL_POSTS", 8),
         "comments": ("SOCIAL_WORKER_POOL_COMMENTS", 8),
-        SHARED_ACCOUNT_POSTS_STAGE: ("SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS", 6),
+        SHARED_ACCOUNT_DISCOVERY_STAGE: ("SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY", 4),
+        SHARED_ACCOUNT_POSTS_STAGE: ("SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS", 8),
         POST_CLASSIFY_STAGE: ("SOCIAL_WORKER_POOL_POST_CLASSIFY", 10),
         SEASON_MATERIALIZE_STAGE: ("SOCIAL_WORKER_POOL_SEASON_MATERIALIZE", 10),
         ANALYTICS_REFRESH_STAGE: ("SOCIAL_WORKER_POOL_ANALYTICS_REFRESH", 4),
@@ -983,6 +1223,28 @@ def _modal_dispatch_platform_cap(stage: str | None, platform: str | None) -> int
             "threads": 1,
         }
         env_name = f"SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_{normalized_platform.upper()}"
+        return _resolve_positive_int_env(env_name, defaults.get(normalized_platform, 1), minimum=1)
+    if normalized_stage == SHARED_ACCOUNT_POSTS_STAGE:
+        defaults = {
+            "instagram": 4,
+            "tiktok": 4,
+            "twitter": 3,
+            "threads": 3,
+            "youtube": 1,
+            "facebook": 1,
+        }
+        env_name = f"SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_{normalized_platform.upper()}"
+        return _resolve_positive_int_env(env_name, defaults.get(normalized_platform, 1), minimum=1)
+    if normalized_stage == SHARED_ACCOUNT_DISCOVERY_STAGE:
+        defaults = {
+            "instagram": 2,
+            "tiktok": 2,
+            "twitter": 1,
+            "threads": 1,
+            "youtube": 1,
+            "facebook": 1,
+        }
+        env_name = f"SOCIAL_SHARED_ACCOUNT_DISCOVERY_PLATFORM_CAP_{normalized_platform.upper()}"
         return _resolve_positive_int_env(env_name, defaults.get(normalized_platform, 1), minimum=1)
     if normalized_stage in {INSTAGRAM_MEDIA_MIRROR_STAGE, COMMENT_MEDIA_MIRROR_STAGE}:
         return _resolve_positive_int_env("SOCIAL_MIRROR_PLATFORM_CAP", 2, minimum=1)
@@ -1448,6 +1710,61 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     return copy.deepcopy(payload)
 
 
+def _worker_uses_modal_backend(worker: Mapping[str, Any]) -> bool:
+    worker_id = str(worker.get("worker_id") or "").strip().lower()
+    metadata = _metadata_dict(worker.get("metadata"))
+    execution_backend = str(metadata.get("execution_backend_canonical") or "").strip().lower()
+    dispatcher_name = str(metadata.get("dispatcher_name") or "").strip().lower()
+    return worker_id.startswith("modal:") or execution_backend == "modal" or dispatcher_name == "social"
+
+
+def get_trusted_local_worker_health(
+    *,
+    platform: str | None = None,
+    stale_after_seconds: int | None = None,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_platform_name(platform) if platform else None
+    base_payload = _query_worker_health(stale_after_seconds=stale_after_seconds)
+    workers = [
+        worker
+        for worker in list(base_payload.get("workers") or [])
+        if not _worker_uses_modal_backend(worker)
+        and (
+            normalized_platform is None
+            or normalized_platform
+            in {
+                _normalize_platform_name(item)
+                for item in (worker.get("supported_platforms") or [])
+                if _normalize_platform_name(item)
+            }
+        )
+    ]
+    healthy_workers = sum(1 for worker in workers if bool(worker.get("is_healthy")))
+    fresh_workers = sum(1 for worker in workers if bool(worker.get("is_fresh")))
+    active_workers = sum(1 for worker in workers if str(worker.get("status") or "").strip().lower() == "working")
+    payload = {
+        **base_payload,
+        "healthy": healthy_workers > 0,
+        "healthy_workers": healthy_workers,
+        "fresh_workers": fresh_workers,
+        "stale_workers": max(0, len(workers) - fresh_workers),
+        "stale_hidden_count": 0,
+        "active_workers": active_workers,
+        "total_workers": len(workers),
+        "workers": workers,
+        "executor_backend": "local",
+        "required_worker_lane": TRUSTED_LOCAL_WORKER_LANE,
+        "platform_filter": normalized_platform,
+    }
+    if len(workers) <= 0:
+        payload["reason"] = "no_local_workers"
+    elif healthy_workers <= 0:
+        payload["reason"] = "no_healthy_local_workers"
+    else:
+        payload["reason"] = None
+    return payload
+
+
 def _metadata_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -1704,7 +2021,12 @@ def purge_inactive_workers(*, stale_after_seconds: int | None = None) -> dict[st
     }
 
 
-def assert_worker_available_when_queue_enabled() -> dict[str, Any]:
+def assert_worker_available_when_queue_enabled(
+    *,
+    required_worker_lane: str | None = None,
+    required_execution_backend: str | None = None,
+    platform: str | None = None,
+) -> dict[str, Any]:
     if not is_queue_enabled():
         return {
             "healthy": True,
@@ -1714,6 +2036,31 @@ def assert_worker_available_when_queue_enabled() -> dict[str, Any]:
             "workers": [],
             "reason": "queue_disabled",
         }
+
+    if str(required_worker_lane or "").strip().lower() == TRUSTED_LOCAL_WORKER_LANE:
+        health = get_trusted_local_worker_health(platform=platform)
+        if bool(health.get("healthy")):
+            return health
+        raise SocialWorkerUnavailableError(
+            "No healthy trusted-local social ingest workers are reporting heartbeats.",
+            worker_health=health,
+        )
+
+    if str(required_execution_backend or "").strip().lower() == "modal":
+        ready, reason = _modal_social_dispatch_ready()
+        if not (is_modal_remote_executor_enabled() and ready):
+            payload = _build_modal_executor_health_payload(reason=reason or "modal_executor_required")
+            raise SocialWorkerUnavailableError(
+                "Modal social dispatch is required for this social ingest job.",
+                worker_health=payload,
+            )
+        _touch_modal_social_dispatcher_heartbeat(
+            metadata_updates={
+                "dispatch_enabled": True,
+                "last_dispatch_success_at": _iso(_now_utc()),
+            }
+        )
+        return _build_modal_executor_health_payload(reason="modal_executor_ready")
 
     if is_modal_remote_executor_enabled():
         ready, reason = _modal_social_dispatch_ready()
@@ -1924,6 +2271,11 @@ def _count_stuck_jobs() -> int:
 
 
 _ACTIVE_CANCEL_JOB_STATUSES = ("queued", "pending", "retrying", "running", "cancelling")
+_RECENT_FAILURE_TERMINAL_STATUSES = ("failed", "retrying")
+_RECENT_FAILURE_DISMISSED_AT_KEY = "failure_dismissed_at"
+_RECENT_FAILURE_DISMISSED_BY_KEY = "failure_dismissed_by"
+_RUN_FAILURE_DISMISSED_AT_KEY = "failure_dismissed_at"
+_RUN_FAILURE_DISMISSED_BY_KEY = "failure_dismissed_by"
 
 
 def _count_active_jobs() -> int:
@@ -1941,11 +2293,89 @@ def _count_active_jobs() -> int:
     return int(row.get("total") or 0)
 
 
+def _recent_failure_not_dismissed_sql(table_alias: str = "j") -> str:
+    return f"nullif(coalesce({table_alias}.metadata->>'{_RECENT_FAILURE_DISMISSED_AT_KEY}', ''), '') is null"
+
+
+def _run_failure_not_dismissed_sql(table_alias: str = "r") -> str:
+    return f"nullif(coalesce({table_alias}.config->>'{_RUN_FAILURE_DISMISSED_AT_KEY}', ''), '') is null"
+
+
+def _count_recent_failures() -> int:
+    row = (
+        pg.fetch_one(
+            f"""
+        select count(*)::int as total
+        from social.scrape_jobs j
+        where j.status = any(%s::text[])
+          and {_recent_failure_not_dismissed_sql("j")}
+        """,
+            [list(_RECENT_FAILURE_TERMINAL_STATUSES)],
+        )
+        or {}
+    )
+    return int(row.get("total") or 0)
+
+
+def _count_visible_failed_runs() -> int:
+    run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
+    row = (
+        pg.fetch_one(
+            f"""
+        select count(*)::int as total
+        from social.scrape_runs r
+        where r.status = 'failed'
+          and {run_failure_not_dismissed_sql}
+        """
+        )
+        or {}
+    )
+    return int(row.get("total") or 0)
+
+
 def _invalidate_queue_status_cache() -> None:
     global _queue_status_cache, _queue_status_last_good_cache
     with _queue_status_cache_lock:
         _queue_status_cache = None
         _queue_status_last_good_cache = None
+
+
+def _reconcile_active_queue_runs(*, limit: int = 100) -> list[str]:
+    if not _relation_exists("social.scrape_runs"):
+        return []
+
+    safe_limit = max(1, min(int(limit), 500))
+    grace_seconds = _resolve_positive_int_env(
+        "SOCIAL_QUEUE_STATUS_RECONCILE_GRACE_SECONDS",
+        60,
+        minimum=5,
+    )
+    cutoff = _now_utc() - timedelta(seconds=grace_seconds)
+    candidate_rows = pg.fetch_all(
+        """
+        select
+          id::text as id,
+          created_at,
+          started_at
+        from social.scrape_runs
+        where status = any(%s::text[])
+        order by created_at desc
+        limit %s
+        """,
+        [list(_RUN_PROGRESS_ACTIVE_JOB_STATUSES), safe_limit],
+    )
+
+    reconciled: list[str] = []
+    for row in candidate_rows:
+        run_id = str(row.get("id") or "").strip()
+        if not run_id:
+            continue
+        activity_anchor = _coerce_dt(row.get("started_at") or row.get("created_at"))
+        if activity_anchor is not None and activity_anchor > cutoff:
+            continue
+        _finalize_run_status(run_id, force_recompute=True)
+        reconciled.append(run_id)
+    return reconciled
 
 
 def get_queue_status(
@@ -2019,6 +2449,7 @@ def get_queue_status(
         "by_stage_platform": {},
         "by_platform": {},
         "by_job_type": {},
+        "running_jobs": [],
         "recent_failures": [],
         "stuck_jobs": [],
         "stuck_jobs_total": 0,
@@ -2047,28 +2478,43 @@ def get_queue_status(
         errors.append(f"scrape_jobs_relation_check_failed: {exc}")
 
     try:
+        _reconcile_active_queue_runs(limit=200)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status active-run reconciliation failed: %s", exc)
+        errors.append(f"queue_run_reconciliation_failed: {exc}")
+
+    try:
         with pg.db_connection() as conn:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
                 aggregate_rows = pg.fetch_all_with_cursor(
                     cur,
                     """
+                    with active_runs as (
+                      select id
+                      from social.scrape_runs
+                      where status = any(%s::text[])
+                    )
                     select
-                      coalesce(platform, 'unknown') as platform,
-                      coalesce(job_type, 'unknown') as job_type,
-                      coalesce(status, 'unknown') as status,
+                      coalesce(j.platform, 'unknown') as platform,
+                      coalesce(j.job_type, 'unknown') as job_type,
+                      coalesce(j.status, 'unknown') as status,
                       lower(
                         coalesce(
-                          nullif(config->>'stage', ''),
-                          nullif(metadata->>'stage', ''),
-                          nullif(job_type, ''),
+                          nullif(j.config->>'stage', ''),
+                          nullif(j.metadata->>'stage', ''),
+                          nullif(j.job_type, ''),
                           'unknown'
                         )
                       ) as stage,
                       count(*)::bigint as total
-                    from social.scrape_jobs
+                    from social.scrape_jobs j
+                    left join active_runs ar on ar.id = j.run_id
+                    where j.status = any(%s::text[])
+                       or ar.id is not null
                     group by 1, 2, 3, 4
                     """,
+                    [list(_RUN_PROGRESS_ACTIVE_JOB_STATUSES), list(_RUN_PROGRESS_ACTIVE_JOB_STATUSES)],
                 )
         by_status = _empty_queue_status_counts()
         by_stage: dict[str, dict[str, int]] = {}
@@ -2102,6 +2548,53 @@ def get_queue_status(
         logger.warning("Queue status aggregate query failed: %s", exc)
         errors.append(f"queue_aggregate_query_failed: {exc}")
 
+    try:
+        running_jobs = pg.fetch_all(
+            """
+            select
+              j.id::text as id,
+              j.run_id::text as run_id,
+              j.platform,
+              j.job_type,
+              lower(
+                coalesce(
+                  nullif(j.config->>'stage', ''),
+                  nullif(j.metadata->>'stage', ''),
+                  nullif(j.job_type, ''),
+                  'unknown'
+                )
+              ) as stage,
+              nullif(coalesce(j.config->>'account', j.metadata->>'account', ''), '') as account_handle,
+              j.worker_id,
+              j.started_at,
+              j.heartbeat_at,
+              nullif(coalesce(j.metadata->'dispatch'->>'dispatch_backend', ''), '') as dispatch_backend,
+              nullif(coalesce(j.config->>'required_execution_backend', ''), '') as required_execution_backend
+            from social.scrape_jobs j
+            where j.status = 'running'
+            order by coalesce(j.heartbeat_at, j.started_at, j.created_at) desc, j.created_at desc
+            """
+        )
+        queue_payload["running_jobs"] = [
+            {
+                "id": str(row.get("id") or ""),
+                "run_id": str(row.get("run_id") or "").strip() or None,
+                "platform": str(row.get("platform") or "").strip().lower() or "unknown",
+                "job_type": str(row.get("job_type") or "").strip().lower() or "unknown",
+                "stage": _normalize_social_job_stage_for_stale(row.get("stage")) or "unknown",
+                "account_handle": str(row.get("account_handle") or "").strip() or None,
+                "worker_id": str(row.get("worker_id") or "").strip() or None,
+                "started_at": _iso(_coerce_dt(row.get("started_at"))),
+                "heartbeat_at": _iso(_coerce_dt(row.get("heartbeat_at"))),
+                "dispatch_backend": str(row.get("dispatch_backend") or "").strip().lower() or None,
+                "required_execution_backend": str(row.get("required_execution_backend") or "").strip().lower() or None,
+            }
+            for row in running_jobs
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status running-jobs query failed: %s", exc)
+        errors.append(f"queue_running_jobs_query_failed: {exc}")
+
     if safe_include_recent_failures:
         try:
             features = _scrape_jobs_features()
@@ -2131,11 +2624,12 @@ def get_queue_status(
                           created_at,
                           completed_at
                         from social.scrape_jobs
-                        where status in ('failed', 'retrying')
+                        where status = any(%s::text[])
+                          and {_recent_failure_not_dismissed_sql("social.scrape_jobs")}
                         order by coalesce(completed_at, created_at) desc
                         limit %s
                         """,
-                        [safe_recent_failures_limit],
+                        [list(_RECENT_FAILURE_TERMINAL_STATUSES), safe_recent_failures_limit],
                     )
             queue_payload["recent_failures"] = [
                 {
@@ -2184,16 +2678,21 @@ def get_queue_status(
     if safe_include_runs_summary:
         try:
             if _relation_exists("social.scrape_runs"):
+                run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
                 with pg.db_connection() as conn:
                     with pg.db_cursor(conn=conn) as cur:
                         cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
                         run_rows = pg.fetch_all_with_cursor(
                             cur,
-                            """
+                            f"""
                             select
                               coalesce(status, 'unknown') as status,
                               count(*)::bigint as total
-                            from social.scrape_runs
+                            from social.scrape_runs r
+                            where (
+                              coalesce(r.status, 'unknown') not in ('failed', 'retrying')
+                              or {run_failure_not_dismissed_sql}
+                            )
                             group by 1
                             """,
                         )
@@ -2403,6 +2902,138 @@ def cancel_active_jobs(
         "cancelled_job_ids": cancelled_job_ids,
         "affected_run_ids": affected_run_ids,
         "active_jobs_remaining": _count_active_jobs(),
+    }
+
+
+def dismiss_recent_failures(
+    *,
+    job_ids: list[str] | None = None,
+    dismissed_by: str | None = None,
+) -> dict[str, Any]:
+    _assert_social_queue_schema_ready()
+    if not _relation_exists("social.scrape_jobs"):
+        raise ValueError("scrape_jobs table not found")
+
+    requested_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for raw in job_ids or []:
+        value = str(raw or "").strip()
+        if not value or value in seen_ids:
+            continue
+        seen_ids.add(value)
+        requested_ids.append(value)
+
+    if not requested_ids:
+        return {
+            "requested_job_ids_count": 0,
+            "dismissed_jobs": 0,
+            "dismissed_job_ids": [],
+            "recent_failures_remaining": _count_recent_failures(),
+        }
+
+    metadata_payload = {
+        _RECENT_FAILURE_DISMISSED_AT_KEY: _iso(_now_utc()),
+        _RECENT_FAILURE_DISMISSED_BY_KEY: dismissed_by,
+    }
+    updated_rows = pg.fetch_all(
+        f"""
+        with candidate_jobs as (
+          select j.id
+          from social.scrape_jobs j
+          where j.id = any(%s::uuid[])
+            and j.status = any(%s::text[])
+            and {_recent_failure_not_dismissed_sql("j")}
+          for update skip locked
+        )
+        update social.scrape_jobs as j
+        set metadata = coalesce(j.metadata, '{{}}'::jsonb) || %s::jsonb
+        from candidate_jobs c
+        where j.id = c.id
+        returning j.id::text as id
+        """,
+        [
+            requested_ids,
+            list(_RECENT_FAILURE_TERMINAL_STATUSES),
+            json.dumps(metadata_payload),
+        ],
+    )
+    dismissed_job_ids = [str(row.get("id") or "") for row in updated_rows if str(row.get("id") or "").strip()]
+    _invalidate_queue_status_cache()
+    return {
+        "requested_job_ids_count": len(requested_ids),
+        "dismissed_jobs": len(dismissed_job_ids),
+        "dismissed_job_ids": dismissed_job_ids,
+        "recent_failures_remaining": _count_recent_failures(),
+    }
+
+
+def reset_social_ingest_health(
+    *,
+    reset_by: str | None = None,
+) -> dict[str, Any]:
+    cancel_result = cancel_active_jobs(cancelled_by=reset_by)
+
+    failure_metadata = {
+        _RECENT_FAILURE_DISMISSED_AT_KEY: _iso(_now_utc()),
+        _RECENT_FAILURE_DISMISSED_BY_KEY: reset_by,
+    }
+    dismissed_failure_rows = pg.fetch_all(
+        f"""
+        with candidate_jobs as (
+          select j.id
+          from social.scrape_jobs j
+          where j.status = any(%s::text[])
+            and {_recent_failure_not_dismissed_sql("j")}
+          for update skip locked
+        )
+        update social.scrape_jobs as j
+        set metadata = coalesce(j.metadata, '{{}}'::jsonb) || %s::jsonb
+        from candidate_jobs c
+        where j.id = c.id
+        returning j.id::text as id
+        """,
+        [list(_RECENT_FAILURE_TERMINAL_STATUSES), json.dumps(failure_metadata)],
+    )
+
+    run_metadata = {
+        _RUN_FAILURE_DISMISSED_AT_KEY: _iso(_now_utc()),
+        _RUN_FAILURE_DISMISSED_BY_KEY: reset_by,
+    }
+    run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
+    dismissed_run_rows = pg.fetch_all(
+        f"""
+        with candidate_runs as (
+          select r.id
+          from social.scrape_runs r
+          where r.status in ('failed', 'retrying')
+            and {run_failure_not_dismissed_sql}
+          for update skip locked
+        )
+        update social.scrape_runs as r
+        set config = coalesce(r.config, '{{}}'::jsonb) || %s::jsonb
+        from candidate_runs c
+        where r.id = c.id
+        returning r.id::text as id
+        """,
+        [json.dumps(run_metadata)],
+    )
+
+    _invalidate_queue_status_cache()
+    return {
+        "cancelled_jobs": int(cancel_result.get("cancelled_jobs") or 0),
+        "cancelled_job_ids": list(cancel_result.get("cancelled_job_ids") or []),
+        "affected_run_ids": list(cancel_result.get("affected_run_ids") or []),
+        "dismissed_failures": len(dismissed_failure_rows),
+        "dismissed_failure_job_ids": [
+            str(row.get("id") or "") for row in dismissed_failure_rows if str(row.get("id") or "").strip()
+        ],
+        "dismissed_failed_runs": len(dismissed_run_rows),
+        "dismissed_failed_run_ids": [
+            str(row.get("id") or "") for row in dismissed_run_rows if str(row.get("id") or "").strip()
+        ],
+        "active_jobs_remaining": _count_active_jobs(),
+        "recent_failures_remaining": _count_recent_failures(),
+        "failed_runs_remaining": _count_visible_failed_runs(),
     }
 
 
@@ -7049,6 +7680,12 @@ def _finish_job(
             status="working",
             metadata={"source": "job_finish", "job_status": status},
         )
+    if status in {"retrying", "running", "completed", "failed", "cancelled"}:
+        _update_shared_account_partition_status_for_job(
+            job_id=job_id,
+            status="queued" if status == "retrying" else status,
+            metadata_updates={"source": "job_finish", "job_status": status},
+        )
 
 
 def _create_run(
@@ -7595,7 +8232,7 @@ def _build_progress_activity_payload(activity: dict[str, Any] | None, *, now: da
         return payload
     if activity.get("phase"):
         payload["phase"] = str(activity.get("phase"))
-    for field in ("pages_scanned", "posts_checked", "matched_posts"):
+    for field in ("pages_scanned", "posts_checked", "matched_posts", "saved_posts", "total_posts"):
         if field in activity and activity.get(field) is not None:
             payload[field] = _normalize_non_negative_int(activity.get(field))
     return payload
@@ -7790,6 +8427,15 @@ def _resolve_run_in_flight_cap() -> int:
         "SOCIAL_RUN_IN_FLIGHT_CAP",
         SOCIAL_RUN_IN_FLIGHT_CAP_DEFAULT,
         minimum=1,
+        maximum=32,
+    )
+
+
+def _resolve_catalog_run_in_flight_cap() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP",
+        SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP_DEFAULT,
+        minimum=2,
         maximum=32,
     )
 
@@ -14635,6 +15281,8 @@ def _ingest_instagram(
             activity["phase"] = str(payload.get("phase") or "scrape_posts")
             activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
             activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
+            if payload.get("total_posts") is not None:
+                activity["total_posts"] = _normalize_non_negative_int(payload.get("total_posts"))
             if payload.get("matched_posts") is not None:
                 activity["matched_posts"] = _normalize_non_negative_int(payload.get("matched_posts"))
             scraped_post_count = max(scraped_post_count, _normalize_non_negative_int(payload.get("posts_checked")))
@@ -21491,38 +22139,447 @@ def _catalog_recent_runs(platform: str, account_handle: str, *, limit: int = 10)
     normalized_platform = _normalize_platform_name(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_limit = max(1, min(int(limit), 25))
+    run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
     try:
         return pg.fetch_all(
-            """
+            f"""
+            with scoped_jobs as (
+              select
+                j.id::text as job_id,
+                j.run_id::text as run_id,
+                j.status,
+                j.created_at,
+                j.started_at,
+                j.completed_at,
+                j.error_message,
+                coalesce(j.metadata, '{{}}'::jsonb) as metadata,
+                coalesce(r.config, '{{}}'::jsonb) as run_config,
+                r.created_at as run_created_at,
+                lower(
+                  coalesce(
+                    nullif(j.config->>'stage', ''),
+                    nullif(j.metadata->>'stage', ''),
+                    nullif(j.job_type, ''),
+                    'unknown'
+                  )
+                ) as stage,
+                case
+                  when j.status in ('queued', 'pending', 'retrying', 'running', 'cancelling') then 0
+                  else 1
+                end as activity_rank,
+                case
+                  when lower(
+                    coalesce(
+                      nullif(j.config->>'stage', ''),
+                      nullif(j.metadata->>'stage', ''),
+                      nullif(j.job_type, ''),
+                      'unknown'
+                    )
+                  ) = 'shared_account_discovery' then 0
+                  when lower(
+                    coalesce(
+                      nullif(j.config->>'stage', ''),
+                      nullif(j.metadata->>'stage', ''),
+                      nullif(j.job_type, ''),
+                      'unknown'
+                    )
+                  ) = 'shared_account_posts' then 1
+                  when lower(
+                    coalesce(
+                      nullif(j.config->>'stage', ''),
+                      nullif(j.metadata->>'stage', ''),
+                      nullif(j.job_type, ''),
+                      'unknown'
+                    )
+                  ) = 'post_classify' then 2
+                  when lower(
+                    coalesce(
+                      nullif(j.config->>'stage', ''),
+                      nullif(j.metadata->>'stage', ''),
+                      nullif(j.job_type, ''),
+                      'unknown'
+                    )
+                  ) = 'season_materialize' then 3
+                  when lower(
+                    coalesce(
+                      nullif(j.config->>'stage', ''),
+                      nullif(j.metadata->>'stage', ''),
+                      nullif(j.job_type, ''),
+                      'unknown'
+                    )
+                  ) = 'analytics_refresh' then 4
+                  else 99
+                end as stage_rank
+              from social.scrape_jobs j
+              join social.scrape_runs r on r.id = j.run_id
+              where j.platform = %s
+                and lower(
+                  coalesce(
+                    nullif(j.config->>'account', ''),
+                    nullif(j.metadata->>'account', ''),
+                    ''
+                  )
+                ) = %s
+                and lower(
+                  coalesce(
+                    nullif(j.config->>'stage', ''),
+                    nullif(j.metadata->>'stage', ''),
+                    nullif(j.job_type, ''),
+                    'unknown'
+                  )
+                ) = any(%s::text[])
+                and coalesce(r.config->>'pipeline_ingest_mode', '') = %s
+                and {run_failure_not_dismissed_sql}
+            ),
+            representative_runs as (
+              select distinct on (run_id)
+                job_id,
+                run_id,
+                status,
+                created_at,
+                started_at,
+                completed_at,
+                error_message,
+                metadata,
+                run_config,
+                run_created_at
+              from scoped_jobs
+              order by run_id, activity_rank asc, created_at desc, stage_rank asc
+            )
             select
-              j.id::text as job_id,
-              j.run_id::text as run_id,
-              j.status,
-              j.created_at,
-              j.started_at,
-              j.completed_at,
-              j.error_message,
-              coalesce(j.metadata, '{}'::jsonb) as metadata,
-              coalesce(r.config, '{}'::jsonb) as run_config
-            from social.scrape_jobs j
-            join social.scrape_runs r on r.id = j.run_id
-            where j.platform = %s
-              and lower(coalesce(j.config->>'account', '')) = %s
-              and coalesce(j.config->>'stage', '') = %s
-              and coalesce(r.config->>'pipeline_ingest_mode', '') = %s
-            order by j.created_at desc
+              job_id,
+              run_id,
+              status,
+              created_at,
+              started_at,
+              completed_at,
+              error_message,
+              metadata,
+              run_config
+            from representative_runs
+            order by coalesce(run_created_at, created_at) desc, created_at desc
             limit %s
             """,
             [
                 normalized_platform,
                 normalized_account,
-                SHARED_ACCOUNT_POSTS_STAGE,
+                list(ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES),
                 SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
                 safe_limit,
             ],
         )
     except psycopg_errors.UndefinedTable:
         return []
+
+
+def _load_social_account_catalog_run_row(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    run_row = pg.fetch_one(
+        """
+        select
+          id::text as id,
+          status,
+          config
+        from social.scrape_runs
+        where id = %s::uuid
+          and coalesce(config->>'pipeline_ingest_mode', '') = %s
+        limit 1
+        """,
+        [run_id, SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE],
+    )
+    if not run_row:
+        raise LookupError("Catalog run not found.")
+    run_config = _metadata_dict(run_row.get("config"))
+    configured_platforms = {
+        _normalize_platform_name(value)
+        for value in _as_text_list(run_config.get("platforms") or [])
+        if _normalize_platform_name(value)
+    }
+    configured_accounts = {
+        _normalize_social_account_profile_handle(value)
+        for value in _as_text_list(run_config.get("accounts_override") or [])
+        if _normalize_social_account_profile_handle(value)
+    }
+    if configured_platforms and normalized_platform not in configured_platforms:
+        raise LookupError("Catalog run not found.")
+    if configured_accounts and normalized_account not in configured_accounts:
+        raise LookupError("Catalog run not found.")
+    return {
+        "id": str(run_row.get("id") or "").strip(),
+        "status": str(run_row.get("status") or "").strip().lower(),
+        "config": run_config,
+        "platform": normalized_platform,
+        "account_handle": normalized_account,
+    }
+
+
+def _shared_account_run_partitions_table_ready() -> bool:
+    return _relation_exists("social.shared_account_run_partitions")
+
+
+def _shared_account_partition_key(
+    *,
+    run_id: str,
+    platform: str,
+    account_handle: str,
+    shard_index: int,
+    cursor_start: str | None,
+    cursor_end: str | None,
+) -> str:
+    normalized_platform = _normalize_platform_name(platform) or "unknown"
+    normalized_account = _normalize_account_handle(account_handle) or "unknown"
+    digest = hashlib.sha1(
+        "|".join(
+            [
+                str(run_id or "").strip().lower(),
+                normalized_platform,
+                normalized_account,
+                str(int(shard_index)),
+                str(cursor_start or ""),
+                str(cursor_end or ""),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{normalized_platform}:{normalized_account}:{int(shard_index)}:{digest}"
+
+
+def _upsert_shared_account_run_partition(
+    *,
+    run_id: str,
+    platform: str,
+    account_handle: str,
+    partition_strategy: str,
+    partition_key: str,
+    shard_index: int,
+    shard_total: int,
+    cursor_start: str | None,
+    cursor_end: str | None,
+    boundary_start_at: datetime | None,
+    boundary_end_at: datetime | None,
+    status: str,
+    job_id: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "run_id": str(run_id),
+        "platform": _normalize_platform_name(platform),
+        "account_handle": _normalize_account_handle(account_handle),
+        "partition_strategy": str(partition_strategy or CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY),
+        "partition_key": str(partition_key),
+        "shard_index": max(0, int(shard_index)),
+        "shard_total": max(1, int(shard_total)),
+        "cursor_start": str(cursor_start or "").strip() or None,
+        "cursor_end": str(cursor_end or "").strip() or None,
+        "boundary_start_at": _coerce_dt(boundary_start_at),
+        "boundary_end_at": _coerce_dt(boundary_end_at),
+        "status": str(status or "discovered").strip().lower() or "discovered",
+        "job_id": str(job_id or "").strip() or None,
+        "metadata": json.dumps(_metadata_dict(metadata)),
+    }
+    return (
+        pg.fetch_one(
+            """
+            insert into social.shared_account_run_partitions (
+              run_id,
+              platform,
+              account_handle,
+              partition_strategy,
+              partition_key,
+              shard_index,
+              shard_total,
+              cursor_start,
+              cursor_end,
+              boundary_start_at,
+              boundary_end_at,
+              status,
+              job_id,
+              metadata
+            )
+            values (
+              %s::uuid,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s::timestamptz,
+              %s::timestamptz,
+              %s,
+              %s::uuid,
+              %s::jsonb
+            )
+            on conflict (run_id, partition_key)
+            do update set
+              partition_strategy = excluded.partition_strategy,
+              shard_index = excluded.shard_index,
+              shard_total = excluded.shard_total,
+              cursor_start = excluded.cursor_start,
+              cursor_end = excluded.cursor_end,
+              boundary_start_at = excluded.boundary_start_at,
+              boundary_end_at = excluded.boundary_end_at,
+              status = excluded.status,
+              job_id = coalesce(excluded.job_id, social.shared_account_run_partitions.job_id),
+              metadata = coalesce(social.shared_account_run_partitions.metadata, '{}'::jsonb) || excluded.metadata,
+              updated_at = now()
+            returning
+              id::text as id,
+              run_id::text as run_id,
+              platform,
+              account_handle,
+              partition_strategy,
+              partition_key,
+              shard_index,
+              shard_total,
+              cursor_start,
+              cursor_end,
+              boundary_start_at,
+              boundary_end_at,
+              status,
+              job_id::text as job_id,
+              metadata
+            """,
+            list(payload.values()),
+        )
+        or {}
+    )
+
+
+def _list_shared_account_run_partitions(
+    *,
+    run_id: str,
+    platform: str | None = None,
+    account_handle: str | None = None,
+) -> list[dict[str, Any]]:
+    if not _shared_account_run_partitions_table_ready():
+        return []
+    normalized_platform = _normalize_platform_name(platform) if platform is not None else None
+    normalized_account = _normalize_account_handle(account_handle) if account_handle is not None else None
+    return pg.fetch_all(
+        """
+        select
+          id::text as id,
+          run_id::text as run_id,
+          platform,
+          account_handle,
+          partition_strategy,
+          partition_key,
+          shard_index,
+          shard_total,
+          cursor_start,
+          cursor_end,
+          boundary_start_at,
+          boundary_end_at,
+          status,
+          job_id::text as job_id,
+          metadata,
+          created_at,
+          updated_at
+        from social.shared_account_run_partitions
+        where run_id = %s::uuid
+          and (%s::text is null or platform = %s::text)
+          and (%s::text is null or account_handle = %s::text)
+        order by shard_index asc, created_at asc
+        """,
+        [run_id, normalized_platform, normalized_platform, normalized_account, normalized_account],
+    )
+
+
+def _update_shared_account_partition_status_for_job(
+    *,
+    job_id: str,
+    status: str,
+    metadata_updates: Mapping[str, Any] | None = None,
+) -> None:
+    if not _shared_account_run_partitions_table_ready():
+        return
+    updates = _metadata_dict(metadata_updates)
+    pg.fetch_one(
+        """
+        update social.shared_account_run_partitions
+        set
+          status = %s,
+          metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb,
+          updated_at = now()
+        where job_id = %s::uuid
+        returning id::text
+        """,
+        [str(status or "").strip().lower(), json.dumps(updates), job_id],
+    )
+
+
+def _cancel_shared_account_run_partitions(run_id: str) -> None:
+    if not _shared_account_run_partitions_table_ready():
+        return
+    pg.fetch_all(
+        """
+        update social.shared_account_run_partitions
+        set
+          status = 'cancelled',
+          updated_at = now()
+        where run_id = %s::uuid
+          and status in ('discovered', 'queued', 'running')
+        returning id::text as id
+        """,
+        [run_id],
+    )
+
+
+def _shared_account_partition_progress(
+    *,
+    run_id: str,
+    platform: str,
+    account_handle: str,
+) -> dict[str, Any]:
+    partitions = _list_shared_account_run_partitions(
+        run_id=run_id,
+        platform=platform,
+        account_handle=account_handle,
+    )
+    if not partitions:
+        return {
+            "status": "not_started",
+            "partition_strategy": None,
+            "partition_count": 0,
+            "discovered_count": 0,
+            "queued_count": 0,
+            "running_count": 0,
+            "completed_count": 0,
+            "failed_count": 0,
+            "cancelled_count": 0,
+        }
+    counts = Counter(str(row.get("status") or "discovered").strip().lower() for row in partitions)
+    status = "running"
+    if counts.get("failed", 0) > 0:
+        status = "failed"
+    elif counts.get("running", 0) > 0:
+        status = "running"
+    elif counts.get("queued", 0) > 0 or counts.get("discovered", 0) > 0:
+        status = "queued"
+    elif counts.get("completed", 0) == len(partitions):
+        status = "completed"
+    elif counts.get("cancelled", 0) == len(partitions):
+        status = "cancelled"
+    return {
+        "status": status,
+        "partition_strategy": str(partitions[0].get("partition_strategy") or ""),
+        "partition_count": len(partitions),
+        "discovered_count": counts.get("discovered", 0),
+        "queued_count": counts.get("queued", 0),
+        "running_count": counts.get("running", 0),
+        "completed_count": counts.get("completed", 0),
+        "failed_count": counts.get("failed", 0),
+        "cancelled_count": counts.get("cancelled", 0),
+    }
 
 
 def _fetch_account_hashtag_review_rows(
@@ -21730,6 +22787,7 @@ def _classify_shared_catalog_rows(
     source_scope: str,
     account_handle: str,
     source_ids: list[str] | None,
+    progress_cb: Callable[[dict[str, int]], None] | None = None,
 ) -> dict[str, int]:
     rows = _fetch_shared_catalog_rows(platform, account_handle, source_ids=source_ids)
     assignment_rows = _fetch_social_account_profile_assignment_rows(platform, account_handle)
@@ -21809,6 +22867,8 @@ def _classify_shared_catalog_rows(
             candidate_matches=deduped_matches,
         )
         counts[assignment_status] += 1
+        if progress_cb:
+            progress_cb(dict(counts))
     return counts
 
 
@@ -21893,39 +22953,489 @@ def _shared_stage_post_limit(config: Mapping[str, Any] | None, *, default: int =
     return parsed
 
 
-def _scrape_shared_instagram_posts(
+def _shared_catalog_progress_interval_posts() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_SHARED_CATALOG_PROGRESS_INTERVAL_POSTS",
+        SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS_DEFAULT,
+        minimum=1,
+        maximum=SOCIAL_DB_UPSERT_BATCH_SIZE_MAX,
+    )
+
+
+def _build_shared_instagram_scraper():
+    from trr_backend.socials.instagram import InstagramScraper
+
+    # Shared-account catalog backfills target public profiles and currently work
+    # more reliably without authenticated session cookies, which can trigger
+    # bad-request and rate-limit responses on Modal.
+    return InstagramScraper(cookies={})
+
+
+def _discover_instagram_cursor_partitions(
+    *,
+    account_handle: str,
+    runner_count: int,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
+    scraper = _build_shared_instagram_scraper()
+    # Avoid the public web_profile_info endpoint here; on Modal it frequently
+    # 429s before we ever reach the warmed public GraphQL path.
+    total_posts = None
+    delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
+    target_posts_per_shard = _catalog_full_history_posts_per_shard("instagram")
+    partitions: list[SharedAccountCursorPartition] = []
+    lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
+    shard_index = 0
+    cursor: str | None = None
+    partition_start_cursor: str | None = None
+    partition_start_at: datetime | None = None
+    partition_posts = 0
+    partition_pages = 0
+    pages_scanned = 0
+    posts_checked = 0
+    seen_cursors: set[str] = set()
+
+    while True:
+        pages_scanned += 1
+        data = scraper.fetch_posts_graphql(account_handle, cursor, delay_seconds)
+        if not data:
+            break
+        page_info: dict[str, Any] = {}
+        timestamps: list[int] = []
+        page_posts = 0
+        for node, pi in scraper._iter_posts_from_graphql(data):
+            page_info = pi
+            timestamp = scraper._extract_timestamp(node)
+            if timestamp > 0:
+                timestamps.append(timestamp)
+            page_posts += 1
+        if page_posts <= 0:
+            break
+        if total_posts is None:
+            total_posts = scraper._extract_profile_total_posts(data, source="graphql")
+        posts_checked += page_posts
+        partition_posts += page_posts
+        partition_pages += 1
+        page_newest_at = datetime.fromtimestamp(max(timestamps), tz=UTC) if timestamps else None
+        page_oldest_at = datetime.fromtimestamp(min(timestamps), tz=UTC) if timestamps else None
+        if partition_start_at is None:
+            partition_start_at = page_newest_at
+        next_cursor = str(page_info.get("end_cursor") or "").strip() or None
+        has_next = bool(page_info.get("has_next_page"))
+        if progress_cb:
+            progress_cb(
+                {
+                    "phase": "discover_history",
+                    "pages_scanned": pages_scanned,
+                    "posts_checked": posts_checked,
+                    "matched_posts": 0,
+                    "saved_posts": 0,
+                    "total_posts": total_posts,
+                    "discovered_partitions": len(partitions),
+                }
+            )
+        should_finalize = partition_posts >= target_posts_per_shard or not has_next or not next_cursor
+        if next_cursor and next_cursor in seen_cursors:
+            should_finalize = True
+            has_next = False
+            next_cursor = None
+        if should_finalize:
+            partition_key = _shared_account_partition_key(
+                run_id="pending",
+                platform="instagram",
+                account_handle=account_handle,
+                shard_index=shard_index,
+                cursor_start=partition_start_cursor,
+                cursor_end=next_cursor,
+            )
+            partitions.append(
+                SharedAccountCursorPartition(
+                    partition_key=partition_key,
+                    shard_index=shard_index,
+                    shard_total=0,
+                    runner_lane=lanes[shard_index % len(lanes)],
+                    cursor_start=partition_start_cursor,
+                    cursor_end=next_cursor,
+                    boundary_start_at=partition_start_at,
+                    boundary_end_at=page_oldest_at,
+                    metadata={
+                        "pages_scanned": partition_pages,
+                        "posts_discovered": partition_posts,
+                    },
+                )
+            )
+            shard_index += 1
+            partition_start_cursor = next_cursor
+            partition_start_at = None
+            partition_posts = 0
+            partition_pages = 0
+        if not has_next or not next_cursor:
+            break
+        cursor = next_cursor
+        seen_cursors.add(cursor)
+    shard_total = max(1, len(partitions))
+    for partition in partitions:
+        partition.shard_total = shard_total
+    return partitions, {
+        "pages_scanned": pages_scanned,
+        "posts_checked": posts_checked,
+        "total_posts": total_posts,
+        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+    }
+
+
+def _discover_tiktok_cursor_partitions(
+    *,
+    account_handle: str,
+    runner_count: int,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
+    from trr_backend.socials.tiktok import TikTokScraper
+
+    scraper = TikTokScraper(cookies=_load_tiktok_cookies())
+    html_data = scraper._fetch_profile_html(account_handle, 0.35)
+    html_items, sec_uid = scraper._extract_posts_from_html_data(html_data or {}, account_handle)
+    if not sec_uid:
+        raise ValueError(f"Unable to discover TikTok pagination for @{account_handle}")
+    total_posts = len(html_items) if html_items else None
+    target_posts_per_shard = _catalog_full_history_posts_per_shard("tiktok")
+    partitions: list[SharedAccountCursorPartition] = []
+    lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
+    shard_index = 0
+    cursor = 0
+    partition_start_cursor = 0
+    partition_start_at: datetime | None = None
+    partition_posts = 0
+    partition_pages = 0
+    pages_scanned = 0
+    posts_checked = 0
+    seen_cursors: set[int] = set()
+
+    while True:
+        pages_scanned += 1
+        data = scraper.fetch_posts(account_handle, sec_uid, cursor, 0.35)
+        if not data:
+            break
+        items = list(data.get("itemList") or [])
+        if not items:
+            break
+        timestamps = [
+            scraper._coerce_timestamp(item.get("createTime") or item.get("createTimeISO"))
+            for item in items
+            if scraper._coerce_timestamp(item.get("createTime") or item.get("createTimeISO")) > 0
+        ]
+        page_posts = len(items)
+        posts_checked += page_posts
+        partition_posts += page_posts
+        partition_pages += 1
+        page_newest_at = datetime.fromtimestamp(max(timestamps), tz=UTC) if timestamps else None
+        page_oldest_at = datetime.fromtimestamp(min(timestamps), tz=UTC) if timestamps else None
+        if partition_start_at is None:
+            partition_start_at = page_newest_at
+        next_cursor = int(data.get("cursor") or 0)
+        has_more = bool(data.get("hasMore"))
+        if progress_cb:
+            progress_cb(
+                {
+                    "phase": "discover_history",
+                    "pages_scanned": pages_scanned,
+                    "posts_checked": posts_checked,
+                    "matched_posts": 0,
+                    "saved_posts": 0,
+                    "total_posts": total_posts,
+                    "discovered_partitions": len(partitions),
+                }
+            )
+        should_finalize = partition_posts >= target_posts_per_shard or not has_more or next_cursor <= 0
+        if next_cursor > 0 and next_cursor in seen_cursors:
+            should_finalize = True
+            has_more = False
+            next_cursor = 0
+        if should_finalize:
+            partition_key = _shared_account_partition_key(
+                run_id="pending",
+                platform="tiktok",
+                account_handle=account_handle,
+                shard_index=shard_index,
+                cursor_start=str(partition_start_cursor),
+                cursor_end=str(next_cursor) if next_cursor > 0 else None,
+            )
+            partitions.append(
+                SharedAccountCursorPartition(
+                    partition_key=partition_key,
+                    shard_index=shard_index,
+                    shard_total=0,
+                    runner_lane=lanes[shard_index % len(lanes)],
+                    cursor_start=str(partition_start_cursor),
+                    cursor_end=str(next_cursor) if next_cursor > 0 else None,
+                    boundary_start_at=partition_start_at,
+                    boundary_end_at=page_oldest_at,
+                    metadata={
+                        "pages_scanned": partition_pages,
+                        "posts_discovered": partition_posts,
+                        "sec_uid": sec_uid,
+                    },
+                )
+            )
+            shard_index += 1
+            partition_start_cursor = next_cursor
+            partition_start_at = None
+            partition_posts = 0
+            partition_pages = 0
+        if not has_more or next_cursor <= 0:
+            break
+        cursor = next_cursor
+        seen_cursors.add(cursor)
+    shard_total = max(1, len(partitions))
+    for partition in partitions:
+        partition.shard_total = shard_total
+    return partitions, {
+        "pages_scanned": pages_scanned,
+        "posts_checked": posts_checked,
+        "total_posts": total_posts,
+        "sec_uid": sec_uid,
+        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+    }
+
+
+def _discover_shared_account_cursor_partitions(
+    *,
+    platform: str,
+    account_handle: str,
+    runner_count: int,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
+    normalized_platform = _normalize_platform_name(platform)
+    if normalized_platform == "instagram":
+        return _discover_instagram_cursor_partitions(
+            account_handle=account_handle,
+            runner_count=runner_count,
+            progress_cb=progress_cb,
+        )
+    if normalized_platform == "tiktok":
+        return _discover_tiktok_cursor_partitions(
+            account_handle=account_handle,
+            runner_count=runner_count,
+            progress_cb=progress_cb,
+        )
+    raise ValueError(f"Full-history discovery is not supported for {platform}")
+
+
+def _scrape_shared_instagram_posts_partitioned(
     *,
     run_id: str | None,
     account_handle: str,
     config: Mapping[str, Any],
-    job_id: str,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    from trr_backend.socials.instagram import InstagramScraper, ScrapeConfig
+    from trr_backend.socials.instagram import ScrapeConfig
 
-    scraper = _get_cached_scraper(_load_instagram_cookies()) or InstagramScraper(cookies=_load_instagram_cookies())
-    scrape_config = ScrapeConfig(
-        username=account_handle,
-        hashtags=[],
-        date_start=_coerce_dt(config.get("date_start")),
-        date_end=_coerce_dt(config.get("date_end")),
-        delay_seconds=0.15,
-        max_pages=_shared_stage_post_limit(config),
-    )
-    posts = scraper.scrape(scrape_config)
+    scraper = _build_shared_instagram_scraper()
+    delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
+    scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
+    cursor = str(config.get("cursor_start") or "").strip() or None
+    end_cursor = str(config.get("cursor_end") or "").strip() or None
+    profile_total_posts = _normalize_non_negative_int(config.get("discovery_total_posts"))
+    pages_scanned = 0
+    posts_checked = 0
     rows: list[dict[str, Any]] = []
-    for post in posts:
-        if _shared_catalog_mode(config):
+    seen_cursors: set[str] = set()
+
+    while True:
+        pages_scanned += 1
+        data = scraper.fetch_posts_graphql(account_handle, cursor, scrape_config.delay_seconds)
+        if not data:
+            break
+        page_info: dict[str, Any] = {}
+        page_posts: list[Any] = []
+        for node, pi in scraper._iter_posts_from_graphql(data):
+            page_info = pi
+            page_posts.append(scraper._parse_post_node(node, scrape_config))
+        if not page_posts:
+            break
+        posts_checked += len(page_posts)
+        for post in page_posts:
             row = _upsert_shared_catalog_post(
                 platform="instagram",
                 run_id=run_id,
                 account_handle=account_handle,
                 post=post,
             )
-        else:
+            if row:
+                rows.append(row)
+        if progress_cb:
+            progress_cb(
+                {
+                    "phase": "scrape_partition_page",
+                    "pages_scanned": pages_scanned,
+                    "posts_checked": posts_checked,
+                    "matched_posts": len(rows),
+                    "saved_posts": len(rows),
+                    "total_posts": profile_total_posts or None,
+                }
+            )
+        next_cursor = str(page_info.get("end_cursor") or "").strip() or None
+        has_next = bool(page_info.get("has_next_page"))
+        if end_cursor and next_cursor == end_cursor:
+            break
+        if not has_next or not next_cursor or next_cursor in seen_cursors:
+            break
+        cursor = next_cursor
+        seen_cursors.add(cursor)
+    return rows, {
+        "retrieval_mode": "graphql_partition",
+        "pages_scanned": pages_scanned,
+        "posts_checked": posts_checked,
+        "total_posts": profile_total_posts or None,
+        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+        "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
+    }
+
+
+def _scrape_shared_tiktok_posts_partitioned(
+    *,
+    run_id: str | None,
+    account_handle: str,
+    config: Mapping[str, Any],
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
+
+    scraper = TikTokScraper(cookies=_load_tiktok_cookies())
+    scrape_config = TikTokScrapeConfig(username=account_handle, hashtags=[], delay_seconds=0.35, max_pages=None)
+    sec_uid = str(config.get("sec_uid") or "").strip()
+    if not sec_uid:
+        raise ValueError(f"Missing TikTok sec_uid partition metadata for @{account_handle}")
+    cursor = max(0, int(config.get("cursor_start") or 0))
+    end_cursor = max(0, int(config.get("cursor_end") or 0))
+    total_posts = _normalize_non_negative_int(config.get("discovery_total_posts"))
+    pages_scanned = 0
+    posts_checked = 0
+    rows: list[dict[str, Any]] = []
+    seen_cursors: set[int] = set()
+
+    while True:
+        pages_scanned += 1
+        data = scraper.fetch_posts(account_handle, sec_uid, cursor, scrape_config.delay_seconds)
+        if not data:
+            break
+        items = list(data.get("itemList") or [])
+        if not items:
+            break
+        posts_checked += len(items)
+        for item in items:
+            post = scraper._parse_post_item(item, scrape_config)
+            row = _upsert_shared_catalog_post(
+                platform="tiktok",
+                run_id=run_id,
+                account_handle=account_handle,
+                post=post,
+            )
+            if row:
+                rows.append(row)
+        if progress_cb:
+            progress_cb(
+                {
+                    "phase": "scrape_partition_page",
+                    "pages_scanned": pages_scanned,
+                    "posts_checked": posts_checked,
+                    "matched_posts": len(rows),
+                    "saved_posts": len(rows),
+                    "total_posts": total_posts or None,
+                }
+            )
+        next_cursor = int(data.get("cursor") or 0)
+        has_more = bool(data.get("hasMore"))
+        if end_cursor > 0 and next_cursor == end_cursor:
+            break
+        if not has_more or next_cursor <= 0 or next_cursor in seen_cursors:
+            break
+        cursor = next_cursor
+        seen_cursors.add(cursor)
+    return rows, {
+        "retrieval_mode": "api_partition",
+        "pages_scanned": pages_scanned,
+        "posts_checked": posts_checked,
+        "total_posts": total_posts or None,
+        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+        "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
+    }
+
+
+def _scrape_shared_instagram_posts(
+    *,
+    run_id: str | None,
+    account_handle: str,
+    config: Mapping[str, Any],
+    job_id: str,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if str(config.get("partition_strategy") or "").strip().lower() == CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY:
+        return _scrape_shared_instagram_posts_partitioned(
+            run_id=run_id,
+            account_handle=account_handle,
+            config=config,
+            progress_cb=progress_cb,
+        )
+
+    from trr_backend.socials.instagram import ScrapeConfig
+
+    scraper = _build_shared_instagram_scraper()
+    scrape_config = ScrapeConfig(
+        username=account_handle,
+        hashtags=[],
+        date_start=_coerce_dt(config.get("date_start")),
+        date_end=_coerce_dt(config.get("date_end")),
+        delay_seconds=float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15"),
+        max_pages=_shared_stage_post_limit(config),
+    )
+    posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
+    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    rows: list[dict[str, Any]] = []
+    if _shared_catalog_mode(config):
+        progress_interval = _shared_catalog_progress_interval_posts()
+        pages_scanned = _normalize_non_negative_int(retrieval_meta.get("pages_scanned"))
+        posts_checked = max(_normalize_non_negative_int(retrieval_meta.get("posts_checked")), len(posts))
+        matched_posts = len(posts)
+        total_posts = retrieval_meta.get("total_posts")
+
+        def _emit_persist_progress(saved_posts: int, *, force: bool = False) -> None:
+            if not progress_cb:
+                return
+            if not force and saved_posts > 0 and saved_posts % progress_interval != 0:
+                return
+            payload: dict[str, Any] = {
+                "phase": "persist_catalog_posts",
+                "pages_scanned": pages_scanned,
+                "posts_checked": posts_checked,
+                "matched_posts": matched_posts,
+                "saved_posts": max(0, int(saved_posts)),
+            }
+            if total_posts is not None:
+                payload["total_posts"] = _normalize_non_negative_int(total_posts)
+            progress_cb(payload)
+
+        _emit_persist_progress(0, force=True)
+        for index, post in enumerate(posts, start=1):
+            row = _upsert_shared_catalog_post(
+                platform="instagram",
+                run_id=run_id,
+                account_handle=account_handle,
+                post=post,
+            )
+            if row:
+                rows.append(row)
+            _emit_persist_progress(len(rows), force=index == len(posts))
+        retrieval_meta["persist_counters"] = {
+            "posts_upserted": len(rows),
+            "comments_upserted": 0,
+        }
+    else:
+        for post in posts:
             row = _upsert_instagram_post(None, job_id=job_id, account=account_handle, post=post)
-        if row:
-            rows.append(row)
-    return rows, dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+            if row:
+                rows.append(row)
+    return rows, retrieval_meta
 
 
 def _scrape_shared_tiktok_posts(
@@ -21935,6 +23445,13 @@ def _scrape_shared_tiktok_posts(
     config: Mapping[str, Any],
     job_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if str(config.get("partition_strategy") or "").strip().lower() == CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY:
+        return _scrape_shared_tiktok_posts_partitioned(
+            run_id=run_id,
+            account_handle=account_handle,
+            config=config,
+        )
+
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
     scraper = TikTokScraper(cookies=_load_tiktok_cookies())
@@ -22111,6 +23628,7 @@ def _scrape_shared_posts_for_account(
     account_handle: str,
     config: Mapping[str, Any],
     job_id: str,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     normalized_platform = _normalize_platform_name(platform)
     if normalized_platform == "instagram":
@@ -22119,6 +23637,7 @@ def _scrape_shared_posts_for_account(
             account_handle=account_handle,
             config=config,
             job_id=job_id,
+            progress_cb=progress_cb,
         )
     if normalized_platform == "tiktok":
         return _scrape_shared_tiktok_posts(
@@ -22255,6 +23774,278 @@ def _enqueue_shared_analytics_refresh_job(
     )
 
 
+def _enqueue_shared_discovery_job(
+    *,
+    run_id: str,
+    platform: str,
+    source_scope: str,
+    account_handle: str,
+    shared_account_source_id: Any,
+    pipeline_ingest_mode: str,
+    runner_count: int,
+    expected_total_posts: int | None = None,
+    required_worker_lane: str | None = None,
+    required_execution_backend: str | None = None,
+    initiated_by: str | None = None,
+    worker_id: str | None = None,
+    priority: int = 100,
+) -> str:
+    return _create_job(
+        None,
+        run_id=run_id,
+        platform=platform,
+        source_scope=source_scope,
+        job_type=SHARED_ACCOUNT_DISCOVERY_JOB_TYPE,
+        stage=SHARED_ACCOUNT_DISCOVERY_STAGE,
+        config={
+            "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+            "platform": platform,
+            "source_scope": source_scope,
+            "account": account_handle,
+            "shared_account_source_id": shared_account_source_id,
+            "runner_count": runner_count,
+            "runner_strategy": "full_history_cursor_breakpoints",
+            "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "pipeline_ingest_mode": pipeline_ingest_mode,
+            "expected_total_posts": _normalize_non_negative_int(expected_total_posts),
+            "required_worker_lane": str(required_worker_lane or "").strip().lower() or None,
+            "required_execution_backend": str(required_execution_backend or "").strip().lower() or None,
+        },
+        initiated_by=initiated_by,
+        status="queued" if is_queue_enabled() else "pending",
+        priority=priority,
+        worker_id=worker_id,
+        preclaim=bool(worker_id),
+    )
+
+
+def _run_shared_account_discovery_stage(
+    *,
+    run_id: str,
+    platform: str,
+    source_scope: str,
+    account_handle: str,
+    config: Mapping[str, Any],
+    job_id: str,
+    worker_id: str | None = None,
+) -> tuple[int, int, dict[str, Any]]:
+    progress_state = _new_job_progress_state()
+    runner_count = max(
+        1,
+        _normalize_non_negative_int(config.get("runner_count")) or CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+    )
+    activity: dict[str, Any] = {
+        "phase": f"{SHARED_ACCOUNT_DISCOVERY_STAGE}_start",
+        "pages_scanned": 0,
+        "posts_checked": 0,
+        "matched_posts": 0,
+        "saved_posts": 0,
+    }
+
+    def _flush_progress(*, force: bool = False) -> None:
+        _emit_job_progress(
+            job_id=job_id,
+            stage=SHARED_ACCOUNT_DISCOVERY_STAGE,
+            platform=platform,
+            account=account_handle,
+            scraped_posts=_normalize_non_negative_int(activity.get("posts_checked")),
+            scraped_comments=0,
+            posts_upserted=_normalize_non_negative_int(activity.get("saved_posts")),
+            comments_upserted=0,
+            activity=activity,
+            progress_state=progress_state,
+            force=force,
+        )
+
+    def _on_discovery_progress(payload: dict[str, Any]) -> None:
+        activity["phase"] = str(payload.get("phase") or "discover_history")
+        activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
+        activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
+        activity["matched_posts"] = _normalize_non_negative_int(payload.get("discovered_partitions"))
+        if payload.get("total_posts") is not None:
+            activity["total_posts"] = _normalize_non_negative_int(payload.get("total_posts"))
+        _flush_progress(force=False)
+
+    _flush_progress(force=True)
+    partitions, discovery_meta = _discover_shared_account_cursor_partitions(
+        platform=platform,
+        account_handle=account_handle,
+        runner_count=runner_count,
+        progress_cb=_on_discovery_progress,
+    )
+    activity["phase"] = "discovery_enqueue_shards"
+    activity["pages_scanned"] = _normalize_non_negative_int(discovery_meta.get("pages_scanned"))
+    activity["posts_checked"] = _normalize_non_negative_int(discovery_meta.get("posts_checked"))
+    activity["matched_posts"] = len(partitions)
+    expected_total_posts = _shared_account_expected_total_posts_from_config(
+        config,
+        platform=platform,
+        account_handle=account_handle,
+    )
+    if discovery_meta.get("total_posts") is not None:
+        activity["total_posts"] = _normalize_non_negative_int(discovery_meta.get("total_posts"))
+    elif expected_total_posts > 0:
+        activity["total_posts"] = expected_total_posts
+    if not partitions:
+        fallback_job_id = _create_job(
+            None,
+            run_id=run_id,
+            platform=platform,
+            source_scope=source_scope,
+            job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            stage=SHARED_ACCOUNT_POSTS_STAGE,
+            config={
+                "stage": SHARED_ACCOUNT_POSTS_STAGE,
+                "platform": platform,
+                "source_scope": source_scope,
+                "account": account_handle,
+                "shared_account_source_id": config.get("shared_account_source_id"),
+                "pipeline_ingest_mode": config.get("pipeline_ingest_mode"),
+                "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                "runner_strategy": "single_runner_fallback",
+                "runner_count": 1,
+                "max_posts_per_target": 0,
+                "discovery_total_posts": discovery_meta.get("total_posts"),
+                "expected_total_posts": expected_total_posts,
+                "discovery_fallback_reason": "no_partitions_discovered",
+                "required_worker_lane": config.get("required_worker_lane"),
+                "required_execution_backend": config.get("required_execution_backend"),
+            },
+            initiated_by=None,
+            status="queued" if is_queue_enabled() else "pending",
+            priority=100,
+            worker_id=worker_id,
+            preclaim=bool(worker_id),
+        )
+        activity["phase"] = "discovery_fallback_enqueued"
+        activity["queued_jobs"] = 1
+        _flush_progress(force=True)
+        return (
+            0,
+            0,
+            {
+                "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                "platform": platform,
+                "account": account_handle,
+                "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                "discovered_partition_count": 0,
+                "fallback_direct_job_enqueued": True,
+                "fallback_job_id": fallback_job_id,
+                "retrieval_meta": discovery_meta,
+                "expected_total_posts": expected_total_posts,
+                "activity": dict(activity),
+                "pipeline_ingest_mode": str(
+                    config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                ),
+            },
+        )
+    created_partition_rows: list[dict[str, Any]] = []
+    scheduler_lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
+    for partition in partitions:
+        partition_key = _shared_account_partition_key(
+            run_id=run_id,
+            platform=platform,
+            account_handle=account_handle,
+            shard_index=partition.shard_index,
+            cursor_start=partition.cursor_start,
+            cursor_end=partition.cursor_end,
+        )
+        created_partition_rows.append(
+            _upsert_shared_account_run_partition(
+                run_id=run_id,
+                platform=platform,
+                account_handle=account_handle,
+                partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                partition_key=partition_key,
+                shard_index=partition.shard_index,
+                shard_total=max(1, len(partitions)),
+                cursor_start=partition.cursor_start,
+                cursor_end=partition.cursor_end,
+                boundary_start_at=partition.boundary_start_at,
+                boundary_end_at=partition.boundary_end_at,
+                status="discovered",
+                metadata=partition.metadata,
+            )
+        )
+    for partition_row in created_partition_rows:
+        partition_metadata = _metadata_dict(partition_row.get("metadata"))
+        shard_job_id = _create_job(
+            None,
+            run_id=run_id,
+            platform=platform,
+            source_scope=source_scope,
+            job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            stage=SHARED_ACCOUNT_POSTS_STAGE,
+            config={
+                "stage": SHARED_ACCOUNT_POSTS_STAGE,
+                "platform": platform,
+                "source_scope": source_scope,
+                "account": account_handle,
+                "shared_account_source_id": config.get("shared_account_source_id"),
+                "pipeline_ingest_mode": config.get("pipeline_ingest_mode"),
+                "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                "partition_id": partition_row.get("id"),
+                "partition_key": partition_row.get("partition_key"),
+                "cursor_start": partition_row.get("cursor_start"),
+                "cursor_end": partition_row.get("cursor_end"),
+                "boundary_start_at": _iso(_coerce_dt(partition_row.get("boundary_start_at"))),
+                "boundary_end_at": _iso(_coerce_dt(partition_row.get("boundary_end_at"))),
+                "shard_index": partition_row.get("shard_index"),
+                "shard_total": partition_row.get("shard_total"),
+                "runner_lane": scheduler_lanes[int(partition_row.get("shard_index") or 0) % len(scheduler_lanes)],
+                "runner_count": runner_count,
+                "runner_strategy": "full_history_cursor_breakpoints",
+                "max_posts_per_target": 0,
+                "discovery_total_posts": discovery_meta.get("total_posts"),
+                "expected_total_posts": expected_total_posts,
+                "sec_uid": partition_metadata.get("sec_uid"),
+                "required_worker_lane": config.get("required_worker_lane"),
+                "required_execution_backend": config.get("required_execution_backend"),
+            },
+            initiated_by=None,
+            status="queued" if is_queue_enabled() else "pending",
+            priority=max(1, 100 + int(partition_row.get("shard_index") or 0)),
+            worker_id=None,
+            preclaim=False,
+        )
+        _upsert_shared_account_run_partition(
+            run_id=run_id,
+            platform=platform,
+            account_handle=account_handle,
+            partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            partition_key=str(partition_row.get("partition_key") or ""),
+            shard_index=int(partition_row.get("shard_index") or 0),
+            shard_total=max(1, int(partition_row.get("shard_total") or len(partitions) or 1)),
+            cursor_start=partition_row.get("cursor_start"),
+            cursor_end=partition_row.get("cursor_end"),
+            boundary_start_at=_coerce_dt(partition_row.get("boundary_start_at")),
+            boundary_end_at=_coerce_dt(partition_row.get("boundary_end_at")),
+            status="queued" if is_queue_enabled() else "running",
+            job_id=shard_job_id,
+            metadata=partition_metadata,
+        )
+    activity["phase"] = "shared_account_discovery_end"
+    activity["saved_posts"] = len(created_partition_rows)
+    _flush_progress(force=True)
+    return (
+        0,
+        0,
+        {
+            "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+            "platform": platform,
+            "account": account_handle,
+            "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "discovered_partition_count": len(created_partition_rows),
+            "retrieval_meta": discovery_meta,
+            "expected_total_posts": expected_total_posts,
+            "activity": dict(activity),
+            "pipeline_ingest_mode": str(
+                config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+            ),
+        },
+    )
+
+
 def _run_shared_account_posts_stage(
     *,
     run_id: str,
@@ -22266,13 +24057,133 @@ def _run_shared_account_posts_stage(
     worker_id: str | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     ingest_mode = str(config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE).strip().lower()
+    if str(config.get("partition_id") or "").strip():
+        _update_shared_account_partition_status_for_job(
+            job_id=job_id,
+            status="running",
+            metadata_updates={"source": "shared_account_posts_stage_start"},
+        )
+    progress_state = _new_job_progress_state()
+    activity: dict[str, Any] = {
+        "phase": f"{SHARED_ACCOUNT_POSTS_STAGE}_start",
+        "pages_scanned": 0,
+        "posts_checked": 0,
+        "matched_posts": 0,
+        "saved_posts": 0,
+    }
+    scraped_posts = 0
+    matched_posts = 0
+    saved_posts = 0
+
+    def _flush_progress(*, force: bool = False) -> None:
+        _emit_job_progress(
+            job_id=job_id,
+            stage=SHARED_ACCOUNT_POSTS_STAGE,
+            platform=platform,
+            account=account_handle,
+            scraped_posts=scraped_posts,
+            scraped_comments=0,
+            posts_upserted=saved_posts,
+            comments_upserted=0,
+            activity=activity,
+            progress_state=progress_state,
+            force=force,
+        )
+
+    def _on_scrape_progress(payload: dict[str, Any]) -> None:
+        nonlocal scraped_posts, matched_posts, saved_posts
+        activity["phase"] = str(payload.get("phase") or SHARED_ACCOUNT_POSTS_STAGE)
+        activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
+        activity["posts_checked"] = _normalize_non_negative_int(payload.get("posts_checked"))
+        if payload.get("matched_posts") is not None:
+            activity["matched_posts"] = _normalize_non_negative_int(payload.get("matched_posts"))
+        if payload.get("saved_posts") is not None:
+            activity["saved_posts"] = _normalize_non_negative_int(payload.get("saved_posts"))
+        if payload.get("total_posts") is not None:
+            activity["total_posts"] = _normalize_non_negative_int(payload.get("total_posts"))
+        scraped_posts = max(scraped_posts, _normalize_non_negative_int(payload.get("posts_checked")))
+        matched_posts = max(matched_posts, _normalize_non_negative_int(payload.get("matched_posts")))
+        saved_posts = max(saved_posts, _normalize_non_negative_int(payload.get("saved_posts")))
+        _flush_progress(force=payload.get("saved_posts") is not None)
+
+    _flush_progress(force=True)
     rows, retrieval_meta = _scrape_shared_posts_for_account(
         run_id=run_id,
         platform=platform,
         account_handle=account_handle,
         config=config,
         job_id=job_id,
+        progress_cb=_on_scrape_progress,
     )
+    scraped_posts = max(scraped_posts, _normalize_non_negative_int(retrieval_meta.get("posts_checked")), len(rows))
+    matched_posts = max(
+        matched_posts,
+        _normalize_non_negative_int((retrieval_meta.get("persist_counters") or {}).get("posts_upserted")),
+        len(rows),
+    )
+    saved_posts = max(
+        saved_posts,
+        _normalize_non_negative_int((retrieval_meta.get("persist_counters") or {}).get("posts_upserted")),
+        len(rows),
+    )
+    retrieval_error_code = (
+        str(retrieval_meta.get("error_code") or retrieval_meta.get("last_error_code") or "").strip().lower()
+    )
+    retrieval_error_class = str(
+        retrieval_meta.get("error_class") or retrieval_meta.get("last_error_class") or SharedStageRuntimeError.__name__
+    ).strip()
+    retrieval_retryable = bool(retrieval_meta.get("retryable"))
+    if retrieval_error_code:
+        raise SharedStageRuntimeError(
+            (
+                f"Shared-account posts stage failed for @{account_handle}: "
+                f"{retrieval_error_code} after checking {scraped_posts} posts"
+            ),
+            error_code=retrieval_error_code,
+            retryable=retrieval_retryable,
+            error_class=retrieval_error_class,
+            runtime_metadata={"retrieval_meta": dict(retrieval_meta or {})},
+        )
+    expected_total_posts = max(
+        _normalize_non_negative_int(config.get("discovery_total_posts")),
+        _shared_account_expected_total_posts_from_config(
+            config,
+            platform=platform,
+            account_handle=account_handle,
+        ),
+    )
+    if (
+        str(config.get("runner_strategy") or "").strip().lower() == "single_runner_fallback"
+        and expected_total_posts > 0
+        and max(scraped_posts, saved_posts) < expected_total_posts
+    ):
+        raise SharedStageRuntimeError(
+            (
+                f"Shared-account fallback ended early for @{account_handle}: "
+                f"checked {scraped_posts} of {expected_total_posts} discovered posts"
+            ),
+            error_code="catalog_incomplete",
+            retryable=True,
+            runtime_metadata={
+                "retrieval_meta": {
+                    **dict(retrieval_meta or {}),
+                    "expected_total_posts": expected_total_posts,
+                    "observed_posts_checked": scraped_posts,
+                    "observed_posts_saved": saved_posts,
+                }
+            },
+        )
+    activity["phase"] = "shared_account_posts_end"
+    activity["posts_checked"] = scraped_posts
+    activity["matched_posts"] = matched_posts
+    activity["saved_posts"] = saved_posts
+    if retrieval_meta.get("total_posts") is not None:
+        activity["total_posts"] = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
+    elif expected_total_posts > 0:
+        activity["total_posts"] = expected_total_posts
+    retrieval_meta["expected_total_posts"] = expected_total_posts or None
+    retrieval_meta["activity"] = dict(activity)
+    _flush_progress(force=True)
     source_ids = sorted(
         {
             _platform_source_id(platform, row)
@@ -22304,10 +24215,13 @@ def _run_shared_account_posts_stage(
         "account": account_handle,
         "source_ids": source_ids,
         "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
-        "activity": {"phase": "shared_account_posts_end", "last_progress_at": _iso(_now_utc())},
+        "activity": dict(activity),
         "retrieval_meta": retrieval_meta,
+        "expected_total_posts": expected_total_posts or None,
         "pipeline_ingest_mode": ingest_mode,
     }
+    if str(config.get("partition_id") or "").strip():
+        metadata["partition_id"] = str(config.get("partition_id") or "")
     return len(rows), 0, metadata
 
 
@@ -22318,36 +24232,92 @@ def _run_shared_post_classify_stage(
     source_scope: str,
     account_handle: str,
     config: Mapping[str, Any],
+    job_id: str,
     worker_id: str | None = None,
 ) -> tuple[int, int, dict[str, Any]]:
     source_ids = [str(item or "").strip() for item in (config.get("source_ids") or []) if str(item or "").strip()]
     ingest_mode = str(config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE).strip().lower()
+    progress_state = _new_job_progress_state()
+    activity: dict[str, Any] = {
+        "phase": "post_classify_start",
+        "posts_checked": 0,
+        "matched_posts": 0,
+    }
+    processed_rows = 0
+    matched_count = 0
+    ambiguous_count = 0
+    unmatched_count = 0
+    needs_review_count = 0
+
+    def _flush_progress(*, force: bool = False) -> None:
+        _emit_job_progress(
+            job_id=job_id,
+            stage=POST_CLASSIFY_STAGE,
+            platform=platform,
+            account=account_handle,
+            scraped_posts=processed_rows,
+            scraped_comments=0,
+            posts_upserted=matched_count,
+            comments_upserted=0,
+            activity=activity,
+            progress_state=progress_state,
+            force=force,
+        )
+
+    def _record_progress(*, force: bool = False) -> None:
+        activity["phase"] = "post_classify_running"
+        activity["posts_checked"] = processed_rows
+        activity["matched_posts"] = matched_count
+        _flush_progress(force=force)
+
+    _flush_progress(force=True)
+
     if ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+
+        def _on_catalog_progress(counts: dict[str, int]) -> None:
+            nonlocal processed_rows, matched_count, ambiguous_count, unmatched_count, needs_review_count
+            matched_count = _normalize_non_negative_int(counts.get("assigned"))
+            ambiguous_count = _normalize_non_negative_int(counts.get("ambiguous"))
+            needs_review_count = _normalize_non_negative_int(counts.get("needs_review"))
+            unmatched_count = _normalize_non_negative_int(counts.get("unassigned"))
+            processed_rows = matched_count + ambiguous_count + needs_review_count + unmatched_count
+            _record_progress()
+
         counts = _classify_shared_catalog_rows(
             run_id=run_id,
             platform=platform,
             source_scope=source_scope,
             account_handle=account_handle,
             source_ids=source_ids or None,
+            progress_cb=_on_catalog_progress,
         )
+        matched_count = _normalize_non_negative_int(counts.get("assigned"))
+        ambiguous_count = _normalize_non_negative_int(counts.get("ambiguous"))
+        needs_review_count = _normalize_non_negative_int(counts.get("needs_review"))
+        unmatched_count = _normalize_non_negative_int(counts.get("unassigned"))
+        processed_rows = matched_count + ambiguous_count + needs_review_count + unmatched_count
         _touch_shared_account_source(
             source_scope=source_scope,
             platform=platform,
             account_handle=account_handle,
             last_classified_at=_now_utc(),
         )
+        activity["phase"] = "post_classify_end"
+        activity["posts_checked"] = processed_rows
+        activity["matched_posts"] = matched_count
+        _flush_progress(force=True)
         metadata = {
             "stage": POST_CLASSIFY_STAGE,
             "platform": platform,
             "account": account_handle,
-            "matched_count": counts.get("assigned", 0),
-            "ambiguous_count": counts.get("ambiguous", 0),
-            "unmatched_count": counts.get("unassigned", 0),
-            "needs_review_count": counts.get("needs_review", 0),
-            "activity": {"phase": "post_classify_end", "last_progress_at": _iso(_now_utc())},
+            "matched_count": matched_count,
+            "ambiguous_count": ambiguous_count,
+            "unmatched_count": unmatched_count,
+            "needs_review_count": needs_review_count,
+            "activity": dict(activity),
             "pipeline_ingest_mode": ingest_mode,
         }
-        return sum(counts.values()), 0, metadata
+        return processed_rows, 0, metadata
     rows = _shared_post_rows_for_account(
         platform=platform,
         account_handle=account_handle,
@@ -22358,8 +24328,6 @@ def _run_shared_post_classify_stage(
     targets = _list_matchable_seasons(source_scope=source_scope, platform=platform)
     matched_source_ids: list[str] = []
     matched_season_ids: set[str] = set()
-    ambiguous_count = 0
-    unmatched_count = 0
     for row in rows:
         source_id = str(row.get("source_id") or "").strip()
         post_row_id = str(row.get("id") or "").strip()
@@ -22462,6 +24430,9 @@ def _run_shared_post_classify_stage(
                 run_id=run_id,
                 payload={"account_handle": account_handle, "candidate_matches": []},
             )
+        processed_rows += 1
+        matched_count = len(matched_source_ids)
+        _record_progress()
     _touch_shared_account_source(
         source_scope=source_scope,
         platform=platform,
@@ -22479,18 +24450,22 @@ def _run_shared_post_classify_stage(
             pipeline_ingest_mode=ingest_mode,
             worker_id=worker_id,
         )
+    activity["phase"] = "post_classify_end"
+    activity["posts_checked"] = processed_rows
+    activity["matched_posts"] = matched_count
+    _flush_progress(force=True)
     metadata = {
         "stage": POST_CLASSIFY_STAGE,
         "platform": platform,
         "account": account_handle,
         "matched_source_ids": matched_source_ids,
-        "matched_count": len(matched_source_ids),
+        "matched_count": matched_count,
         "ambiguous_count": ambiguous_count,
         "unmatched_count": unmatched_count,
-        "activity": {"phase": "post_classify_end", "last_progress_at": _iso(_now_utc())},
+        "activity": dict(activity),
         "pipeline_ingest_mode": ingest_mode,
     }
-    return len(rows), 0, metadata
+    return processed_rows, 0, metadata
 
 
 def _run_shared_season_materialize_stage(
@@ -22638,7 +24613,44 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
     source_scope = str(config.get("source_scope") or job.get("source_scope") or "bravo").strip().lower()
     account_handle = _normalize_account_handle(config.get("account")) or str(config.get("account") or "").strip()
     try:
-        if stage == SHARED_ACCOUNT_POSTS_STAGE:
+        dispatch_metadata = _job_dispatch_metadata(job)
+        dispatch_backend = str(dispatch_metadata.get("dispatch_backend") or "").strip().lower()
+        modal_claim = dispatch_backend == "modal" or str(worker_id or "").strip().lower().startswith("modal:")
+        if _job_requires_modal_executor(config, platform=platform) and not modal_claim:
+            raise SharedStageRuntimeError(
+                f"Shared-account instagram catalog backfill for @{account_handle} cannot run on the local executor.",
+                error_code=INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE,
+                retryable=True,
+                runtime_metadata={
+                    "required_execution_backend": "modal",
+                    "dispatch_backend": dispatch_backend or "local",
+                    "platform": platform,
+                    "account": account_handle,
+                },
+            )
+        if _job_requires_trusted_local_worker_lane(config, platform=platform) and dispatch_backend == "modal":
+            raise SharedStageRuntimeError(
+                f"Shared-account instagram catalog backfill for @{account_handle} cannot run on the remote executor.",
+                error_code=INSTAGRAM_REMOTE_EXECUTOR_BLOCKED_ERROR_CODE,
+                retryable=True,
+                runtime_metadata={
+                    "required_worker_lane": TRUSTED_LOCAL_WORKER_LANE,
+                    "dispatch_backend": "modal",
+                    "platform": platform,
+                    "account": account_handle,
+                },
+            )
+        if stage == SHARED_ACCOUNT_DISCOVERY_STAGE:
+            posts_count, comments_count, metadata = _run_shared_account_discovery_stage(
+                run_id=run_id,
+                platform=platform,
+                source_scope=source_scope,
+                account_handle=account_handle,
+                config=config,
+                job_id=job_id,
+                worker_id=worker_id,
+            )
+        elif stage == SHARED_ACCOUNT_POSTS_STAGE:
             posts_count, comments_count, metadata = _run_shared_account_posts_stage(
                 run_id=run_id,
                 platform=platform,
@@ -22655,6 +24667,7 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
                 source_scope=source_scope,
                 account_handle=account_handle,
                 config=config,
+                job_id=job_id,
                 worker_id=worker_id,
             )
         elif stage == SEASON_MATERIALIZE_STAGE:
@@ -22676,20 +24689,50 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
             metadata=metadata,
         )
     except Exception as exc:  # noqa: BLE001
-        _finish_job(
-            job_id,
-            status="failed",
-            items_found=0,
-            error_message=str(exc),
-            metadata={
+        runtime_error_code = str(getattr(exc, "error_code", "") or "").strip().lower()
+        runtime_error_class = str(getattr(exc, "error_class", "") or "").strip()
+        runtime_retryable = getattr(exc, "retryable", None)
+        runtime_metadata = _metadata_dict(getattr(exc, "runtime_metadata", None))
+        error_code = runtime_error_code or "shared_stage_failed"
+        error_class = runtime_error_class or exc.__class__.__name__
+        attempt_count = int(job.get("attempt_count") or 1)
+        max_attempts = int(job.get("max_attempts") or 1)
+        can_retry = bool(runtime_retryable) and attempt_count < max_attempts if runtime_retryable is not None else False
+        next_available_at = _now_utc() + timedelta(seconds=_retry_backoff_seconds(attempt_count)) if can_retry else None
+        existing_job = (
+            pg.fetch_one(
+                "select items_found, metadata from social.scrape_jobs where id = %s",
+                [job_id],
+            )
+            or {}
+        )
+        metadata = _metadata_dict(existing_job.get("metadata"))
+        metadata.update(
+            {
                 "stage": stage,
                 "platform": platform,
                 "account": account_handle,
                 "pipeline_ingest_mode": ingest_mode,
                 "error": str(exc),
-            },
-            last_error_code="shared_stage_failed",
-            last_error_class=exc.__class__.__name__,
+                "error_code": error_code,
+                "error_class": error_class,
+                "retryable": can_retry,
+            }
+        )
+        metadata.update(runtime_metadata)
+        activity = _metadata_dict(metadata.get("activity"))
+        activity["phase"] = "failed"
+        activity["last_progress_at"] = _iso(_now_utc())
+        metadata["activity"] = activity
+        _finish_job(
+            job_id,
+            status="retrying" if can_retry else "failed",
+            items_found=_normalize_non_negative_int(existing_job.get("items_found")),
+            error_message=str(exc),
+            metadata=metadata,
+            last_error_code=error_code,
+            last_error_class=error_class,
+            next_available_at=next_available_at,
         )
         logger.exception("Shared social ingest job failed: job_id=%s stage=%s platform=%s", job_id, stage, platform)
     finally:
@@ -22739,27 +24782,43 @@ def _list_candidate_jobs_for_modal_dispatch(*, run_id: str | None = None, limit:
     return pg.fetch_all(sql, [run_id, run_id, safe_limit])
 
 
-def _current_modal_dispatch_running_counts() -> tuple[dict[str, int], dict[tuple[str, str], int]]:
+def _current_modal_dispatch_running_counts() -> tuple[
+    dict[str, int],
+    dict[tuple[str, str], int],
+    dict[str, int],
+    dict[tuple[str, str, str], int],
+]:
     rows = pg.fetch_all(
         """
         select
+          coalesce(run_id::text, '') as run_id,
           lower(coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown')) as stage,
           lower(coalesce(platform, 'unknown')) as platform,
+          coalesce(config->>'pipeline_ingest_mode', '') as pipeline_ingest_mode,
           count(*)::int as total
         from social.scrape_jobs
         where status = 'running'
-        group by 1, 2
+        group by 1, 2, 3, 4
         """
     )
     by_stage: dict[str, int] = {}
     by_stage_platform: dict[tuple[str, str], int] = {}
+    by_run: dict[str, int] = {}
+    by_run_stage_platform: dict[tuple[str, str, str], int] = {}
     for row in rows:
         stage = _normalize_social_job_stage_for_stale(row.get("stage")) or "unknown"
         platform = _normalize_platform_name(row.get("platform")) or "unknown"
+        run_id = str(row.get("run_id") or "").strip()
+        ingest_mode = _resolve_pipeline_ingest_mode(row.get("pipeline_ingest_mode"))
         total = int(row.get("total") or 0)
         by_stage[stage] = by_stage.get(stage, 0) + total
-        by_stage_platform[(stage, platform)] = total
-    return by_stage, by_stage_platform
+        by_stage_platform[(stage, platform)] = by_stage_platform.get((stage, platform), 0) + total
+        if run_id:
+            by_run[run_id] = by_run.get(run_id, 0) + total
+            if ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+                key = (run_id, stage, platform)
+                by_run_stage_platform[key] = by_run_stage_platform.get(key, 0) + total
+    return by_stage, by_stage_platform, by_run, by_run_stage_platform
 
 
 def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
@@ -22780,7 +24839,9 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": reason}
 
     candidates = _list_candidate_jobs_for_modal_dispatch(run_id=run_id, limit=max(safe_limit * 4, 50))
-    running_by_stage, running_by_stage_platform = _current_modal_dispatch_running_counts()
+    running_by_stage, running_by_stage_platform, running_by_run, running_by_run_stage_platform = (
+        _current_modal_dispatch_running_counts()
+    )
     dispatched_job_ids: list[str] = []
     dispatch_attempts = 0
 
@@ -22789,6 +24850,11 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             break
         stage = _job_stage_from_row(job)
         platform = _normalize_platform_name(job.get("platform")) or "unknown"
+        job_run_id = str(job.get("run_id") or "").strip()
+        job_config = _metadata_dict(job.get("config"))
+        job_ingest_mode = _resolve_pipeline_ingest_mode(job_config.get("pipeline_ingest_mode"))
+        if _job_requires_trusted_local_worker_lane(job_config, platform=platform):
+            continue
         if _dispatch_request_is_fresh(job):
             continue
         if running_by_stage.get(stage, 0) >= _modal_dispatch_stage_global_cap(stage):
@@ -22796,6 +24862,16 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         platform_cap = _modal_dispatch_platform_cap(stage, platform)
         if platform_cap is not None and running_by_stage_platform.get((stage, platform), 0) >= platform_cap:
             continue
+        if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and job_run_id:
+            if running_by_run.get(job_run_id, 0) >= _resolve_catalog_run_in_flight_cap():
+                continue
+            if stage == SHARED_ACCOUNT_POSTS_STAGE:
+                platform_run_cap = _modal_dispatch_platform_cap(stage, platform)
+                if (
+                    platform_run_cap is not None
+                    and running_by_run_stage_platform.get((job_run_id, stage, platform), 0) >= platform_run_cap
+                ):
+                    continue
 
         job_id = str(job.get("id") or "").strip()
         if not job_id:
@@ -22826,6 +24902,11 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             dispatched_job_ids.append(job_id)
             running_by_stage[stage] = running_by_stage.get(stage, 0) + 1
             running_by_stage_platform[(stage, platform)] = running_by_stage_platform.get((stage, platform), 0) + 1
+            if job_run_id:
+                running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
+                if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+                    key = (job_run_id, stage, platform)
+                    running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
         else:
             _touch_job_dispatch_metadata(
                 job_id,
@@ -22903,7 +24984,14 @@ def _claim_next_jobs(
               array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
             ) as platforms,
             coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
-              as instagram_authenticated
+              as instagram_authenticated,
+            coalesce(
+              nullif(lower(coalesce(metadata->>'execution_backend_canonical', '')), ''),
+              case
+                when lower(coalesce(worker_id, '')) like 'modal:%%' then 'modal'
+                else 'local'
+              end
+            ) as execution_backend_canonical
           from social.scrape_workers
           where worker_id = %s
         ),
@@ -22962,6 +25050,14 @@ def _claim_next_jobs(
               select 1
               from worker_caps wc
               where j.platform = any(wc.platforms)
+            )
+            and (
+              lower(coalesce(j.config->>'required_execution_backend', '')) <> 'modal'
+              or exists (
+                select 1
+                from worker_caps wc
+                where wc.execution_backend_canonical = 'modal'
+              )
             )
             and (
               j.platform <> 'instagram'
@@ -23072,6 +25168,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         config["_last_error_code"] = str(job.get("last_error_code") or "").strip().lower() or None
         stage = str(config.get("stage") or ((job.get("metadata") or {}).get("stage")) or "posts")
         if stage in {
+            SHARED_ACCOUNT_DISCOVERY_STAGE,
             SHARED_ACCOUNT_POSTS_STAGE,
             POST_CLASSIFY_STAGE,
             SEASON_MATERIALIZE_STAGE,
@@ -24413,6 +26510,87 @@ def ingest_shared_accounts(
             "NO_SHARED_ACCOUNT_SOURCES", "No active shared account sources are configured"
         )
 
+    bounded_start = _coerce_dt(date_start)
+    bounded_end = _coerce_dt(date_end)
+    bounded_window = _catalog_backfill_has_bounded_window(date_start=bounded_start, date_end=bounded_end)
+    full_history_partition_enabled = (
+        normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and not bounded_window
+    )
+
+    expected_total_posts_by_account: dict[str, int] = {}
+    modal_executor_required = False
+    for row in sources:
+        platform = _normalize_platform_name(row.get("platform"))
+        account_handle = _normalize_account_handle(row.get("account_handle"))
+        if not platform or not account_handle:
+            continue
+        if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+            expected_total_posts = _best_known_social_account_total_posts(
+                platform,
+                account_handle,
+                materialized_total_posts=_social_account_profile_total_posts(platform, account_handle),
+                catalog_total_posts=_shared_catalog_total_posts(platform, account_handle),
+            )
+            if expected_total_posts > 0:
+                expected_total_posts_by_account[_shared_account_expected_total_posts_key(platform, account_handle)] = (
+                    expected_total_posts
+                )
+        modal_executor_required = modal_executor_required or _shared_account_catalog_requires_modal_executor(
+            platform=platform,
+            pipeline_ingest_mode=normalized_ingest_mode,
+        )
+
+    if modal_executor_required and is_queue_enabled():
+        assert_worker_available_when_queue_enabled(
+            required_execution_backend="modal",
+            platform="instagram",
+        )
+
+    catalog_runner_count = 1
+    catalog_runner_strategy = "single_runner"
+    catalog_partition_strategy: str | None = None
+    catalog_window_shard_days_by_platform: dict[str, int] = {}
+    catalog_total_shards_by_platform: dict[str, int] = {}
+    catalog_source_shards: dict[tuple[str, str], list[IngestTimeShard]] = {}
+    if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and bounded_window:
+        candidate_shards: dict[tuple[str, str], list[IngestTimeShard]] = {}
+        for row in sources:
+            platform = _normalize_platform_name(row.get("platform"))
+            account_handle = (
+                _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
+            )
+            if not platform or not account_handle:
+                continue
+            source_shards = _build_catalog_backfill_shards(
+                platform=platform,
+                date_start=bounded_start,
+                date_end=bounded_end,
+                runner_count=CATALOG_BACKFILL_MULTI_RUNNER_COUNT,
+            )
+            candidate_shards[(platform, account_handle)] = source_shards
+            catalog_total_shards_by_platform[platform] = catalog_total_shards_by_platform.get(platform, 0) + len(
+                source_shards
+            )
+            if source_shards:
+                first_shard = source_shards[0]
+                shard_days = max(
+                    1,
+                    int((first_shard.window_end - first_shard.window_start).total_seconds() // 86400) + 1,
+                )
+                existing_days = catalog_window_shard_days_by_platform.get(platform)
+                if existing_days is None or shard_days < existing_days:
+                    catalog_window_shard_days_by_platform[platform] = shard_days
+        catalog_source_shards = candidate_shards
+        if any(len(source_shards) > 1 for source_shards in candidate_shards.values()) or len(candidate_shards) > 1:
+            catalog_runner_count = CATALOG_BACKFILL_MULTI_RUNNER_COUNT
+            catalog_runner_strategy = "adaptive_dual_runner"
+            catalog_partition_strategy = CATALOG_FULL_HISTORY_DATE_WINDOW_PARTITION_STRATEGY
+    elif full_history_partition_enabled:
+        if any(_catalog_full_history_partition_supported(row.get("platform")) for row in sources):
+            catalog_runner_count = CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT
+            catalog_runner_strategy = "full_history_cursor_breakpoints"
+            catalog_partition_strategy = CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
+
     run_config = {
         "pipeline_ingest_mode": normalized_ingest_mode,
         "source_scope": source_scope,
@@ -24420,6 +26598,16 @@ def ingest_shared_accounts(
         "accounts_override": sorted(override_accounts),
         "date_start": _iso(date_start),
         "date_end": _iso(date_end),
+        "runner_strategy": catalog_runner_strategy,
+        "runner_count": catalog_runner_count,
+        "partition_strategy": catalog_partition_strategy,
+        "catalog_total_shards_by_platform": catalog_total_shards_by_platform,
+        "catalog_window_shard_days_by_platform": catalog_window_shard_days_by_platform,
+        "expected_total_posts_by_account": expected_total_posts_by_account,
+        "expected_total_posts": (
+            next(iter(expected_total_posts_by_account.values())) if len(expected_total_posts_by_account) == 1 else None
+        ),
+        "required_execution_backend": "modal" if modal_executor_required else None,
         **_configured_execution_metadata(),
     }
     run_id = _create_run(
@@ -24431,21 +26619,104 @@ def ingest_shared_accounts(
     )
     initial_job_status = "queued" if is_queue_enabled() else "pending"
     job_ids: list[str] = []
-    for row in sources:
-        platform = _normalize_platform_name(row.get("platform"))
-        account_handle = (
-            _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
-        )
-        if not platform or not account_handle:
-            continue
-        job_id = _create_job(
-            None,
-            run_id=run_id,
-            platform=platform,
-            source_scope=source_scope,
-            job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
-            stage=SHARED_ACCOUNT_POSTS_STAGE,
-            config={
+    sorted_sources = sorted(
+        sources,
+        key=lambda row: (
+            max(1, int(row.get("scrape_priority") or 100)),
+            _normalize_platform_name(row.get("platform")) or "",
+            _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip(),
+        ),
+    )
+
+    if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and catalog_source_shards:
+        sources_with_shards: list[dict[str, Any]] = []
+        max_shard_depth = 0
+        for row in sorted_sources:
+            platform = _normalize_platform_name(row.get("platform"))
+            account_handle = (
+                _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
+            )
+            if not platform or not account_handle:
+                continue
+            source_shards = list(catalog_source_shards.get((platform, account_handle)) or [])
+            if not source_shards:
+                continue
+            max_shard_depth = max(max_shard_depth, len(source_shards))
+            sources_with_shards.append(
+                {
+                    "row": row,
+                    "platform": platform,
+                    "account_handle": account_handle,
+                    "priority": max(1, int(row.get("scrape_priority") or 100)),
+                    "shards": source_shards,
+                }
+            )
+
+        for shard_depth in range(max_shard_depth):
+            for source in sources_with_shards:
+                source_shards = cast("list[IngestTimeShard]", source["shards"])
+                if shard_depth >= len(source_shards):
+                    continue
+                shard = source_shards[shard_depth]
+                platform = cast("str", source["platform"])
+                account_handle = cast("str", source["account_handle"])
+                row = cast("dict[str, Any]", source["row"])
+                base_priority = cast("int", source["priority"])
+                job_id = _create_job(
+                    None,
+                    run_id=run_id,
+                    platform=platform,
+                    source_scope=source_scope,
+                    job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+                    stage=SHARED_ACCOUNT_POSTS_STAGE,
+                    config={
+                        "stage": SHARED_ACCOUNT_POSTS_STAGE,
+                        "platform": platform,
+                        "source_scope": source_scope,
+                        "account": account_handle,
+                        "date_start": _iso(shard.window_start),
+                        "date_end": _iso(shard.window_end),
+                        "window_start": _iso(shard.window_start),
+                        "window_end": _iso(shard.window_end),
+                        "shard_index": shard.shard_index,
+                        "shard_total": len(source_shards),
+                        "runner_lane": shard.runner_lane,
+                        "runner_strategy": catalog_runner_strategy,
+                        "runner_count": catalog_runner_count,
+                        "shared_account_source_id": row.get("id"),
+                        "max_posts_per_target": 0,
+                        "pipeline_ingest_mode": normalized_ingest_mode,
+                        "required_execution_backend": (
+                            "modal"
+                            if _shared_account_catalog_requires_modal_executor(
+                                platform=platform,
+                                pipeline_ingest_mode=normalized_ingest_mode,
+                            )
+                            else None
+                        ),
+                        "expected_total_posts": _shared_account_expected_total_posts_from_config(
+                            {"expected_total_posts_by_account": expected_total_posts_by_account},
+                            platform=platform,
+                            account_handle=account_handle,
+                        ),
+                    },
+                    initiated_by=initiated_by,
+                    status=initial_job_status,
+                    priority=max(1, base_priority + shard_depth),
+                    worker_id=inline_worker_id,
+                    preclaim=bool(inline_worker_id),
+                    track_run_counters=False,
+                )
+                job_ids.append(job_id)
+    else:
+        for row in sorted_sources:
+            platform = _normalize_platform_name(row.get("platform"))
+            account_handle = (
+                _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
+            )
+            if not platform or not account_handle:
+                continue
+            job_config = {
                 "stage": SHARED_ACCOUNT_POSTS_STAGE,
                 "platform": platform,
                 "source_scope": source_scope,
@@ -24454,15 +26725,63 @@ def ingest_shared_accounts(
                 "date_end": _iso(date_end),
                 "shared_account_source_id": row.get("id"),
                 "pipeline_ingest_mode": normalized_ingest_mode,
-            },
-            initiated_by=initiated_by,
-            status=initial_job_status,
-            priority=max(1, int(row.get("scrape_priority") or 100)),
-            worker_id=inline_worker_id,
-            preclaim=bool(inline_worker_id),
-            track_run_counters=False,
-        )
-        job_ids.append(job_id)
+                "required_execution_backend": (
+                    "modal"
+                    if _shared_account_catalog_requires_modal_executor(
+                        platform=platform,
+                        pipeline_ingest_mode=normalized_ingest_mode,
+                    )
+                    else None
+                ),
+                "expected_total_posts": _shared_account_expected_total_posts_from_config(
+                    {"expected_total_posts_by_account": expected_total_posts_by_account},
+                    platform=platform,
+                    account_handle=account_handle,
+                ),
+            }
+            if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+                job_config["max_posts_per_target"] = 0
+            if (
+                normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                and full_history_partition_enabled
+                and _catalog_full_history_partition_supported(platform)
+            ):
+                job_id = _enqueue_shared_discovery_job(
+                    run_id=run_id,
+                    platform=platform,
+                    source_scope=source_scope,
+                    account_handle=account_handle,
+                    shared_account_source_id=row.get("id"),
+                    pipeline_ingest_mode=normalized_ingest_mode,
+                    runner_count=catalog_runner_count,
+                    expected_total_posts=_shared_account_expected_total_posts_from_config(
+                        {"expected_total_posts_by_account": expected_total_posts_by_account},
+                        platform=platform,
+                        account_handle=account_handle,
+                    ),
+                    required_worker_lane=job_config.get("required_worker_lane"),
+                    required_execution_backend=job_config.get("required_execution_backend"),
+                    initiated_by=initiated_by,
+                    worker_id=inline_worker_id,
+                    priority=max(1, int(row.get("scrape_priority") or 100)),
+                )
+            else:
+                job_id = _create_job(
+                    None,
+                    run_id=run_id,
+                    platform=platform,
+                    source_scope=source_scope,
+                    job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+                    stage=SHARED_ACCOUNT_POSTS_STAGE,
+                    config=job_config,
+                    initiated_by=initiated_by,
+                    status=initial_job_status,
+                    priority=max(1, int(row.get("scrape_priority") or 100)),
+                    worker_id=inline_worker_id,
+                    preclaim=bool(inline_worker_id),
+                    track_run_counters=False,
+                )
+            job_ids.append(job_id)
     if not job_ids:
         raise SocialIngestValidationError("NO_SHARED_ACCOUNT_SOURCES", "No shared account jobs were created")
     if _run_counter_columns_ready():
@@ -24476,12 +26795,19 @@ def ingest_shared_accounts(
                 active_jobs=len(job_ids) if _status_is_active(initial_job_status) else 0,
                 items_found_total=0,
                 stage_counts={
-                    SHARED_ACCOUNT_POSTS_STAGE: {
+                    (
+                        SHARED_ACCOUNT_DISCOVERY_STAGE
+                        if (
+                            normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                            and full_history_partition_enabled
+                        )
+                        else SHARED_ACCOUNT_POSTS_STAGE
+                    ): {
                         "total": len(job_ids),
                         "completed": 0,
                         "failed": 0,
                         "active": len(job_ids) if _status_is_active(initial_job_status) else 0,
-                    }
+                    },
                 },
             )
     else:
@@ -24561,9 +26887,9 @@ def cancel_shared_run(run_id: str, *, cancelled_by: str | None = None) -> dict[s
         select id::text as id
         from social.scrape_runs
         where id = %s::uuid
-          and coalesce(config->>'pipeline_ingest_mode', '') = %s
+          and coalesce(config->>'pipeline_ingest_mode', '') in (%s, %s)
         """,
-        [run_id, SHARED_ACCOUNT_ASYNC_INGEST_MODE],
+        [run_id, SHARED_ACCOUNT_ASYNC_INGEST_MODE, SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE],
     )
     if not run_row:
         raise ValueError("Shared run not found")
@@ -24601,6 +26927,7 @@ def cancel_shared_run(run_id: str, *, cancelled_by: str | None = None) -> dict[s
                 status="idle",
                 metadata={"source": "cancel_shared_run", "job_status": "cancelled"},
             )
+    _cancel_shared_account_run_partitions(run_id)
     summary = _update_run_summary(run_id, force_recompute=True)
     return {"run_id": run_id, "status": "cancelled", "summary": summary}
 
@@ -25612,6 +27939,7 @@ _RUN_PROGRESS_STAGE_BUCKETS = (
     "comments",
     "media_mirror",
     "comment_media_mirror",
+    SHARED_ACCOUNT_DISCOVERY_STAGE,
     SHARED_ACCOUNT_POSTS_STAGE,
     POST_CLASSIFY_STAGE,
     SEASON_MATERIALIZE_STAGE,
@@ -25634,6 +27962,7 @@ def _run_progress_stage_bucket(stage: str) -> str:
             "comments",
             "media_mirror",
             "comment_media_mirror",
+            SHARED_ACCOUNT_DISCOVERY_STAGE,
             SHARED_ACCOUNT_POSTS_STAGE,
             POST_CLASSIFY_STAGE,
             SEASON_MATERIALIZE_STAGE,
@@ -25686,6 +28015,8 @@ def _format_run_progress_stage_label(stage: str) -> str:
         return "media mirror"
     if normalized == "comment_media_mirror":
         return "comment media mirror"
+    if normalized == SHARED_ACCOUNT_DISCOVERY_STAGE:
+        return "history discovery"
     if normalized == SHARED_ACCOUNT_POSTS_STAGE:
         return "shared account scrape"
     if normalized == POST_CLASSIFY_STAGE:
@@ -25812,6 +28143,22 @@ def _run_progress_summary_needs_refresh(
     )
 
 
+def _derive_run_progress_status(stored_status: Any, job_rows: Sequence[Mapping[str, Any]]) -> str:
+    normalized_stored = str(stored_status or "").strip().lower()
+    job_statuses = {str(row.get("status") or "").strip().lower() for row in job_rows}
+    if "running" in job_statuses:
+        return "running"
+    if {"queued", "pending", "retrying", "cancelling"} & job_statuses:
+        if normalized_stored in _RUN_PROGRESS_ACTIVE_JOB_STATUSES:
+            return normalized_stored or "queued"
+        return "queued"
+    if "failed" in job_statuses:
+        return "failed"
+    if job_rows and job_statuses <= {"completed"}:
+        return "completed"
+    return normalized_stored
+
+
 def _build_run_progress_snapshot_payload(
     *,
     run_row: Mapping[str, Any],
@@ -25840,10 +28187,14 @@ def _build_run_progress_snapshot_payload(
     handle_stage_summary: dict[tuple[str, str], dict[str, dict[str, int]]] = {}
     active_worker_ids: set[str] = set()
     recent_entries: list[dict[str, Any]] = []
+    completed_posts = 0
+    matched_posts = 0
+    total_posts: int | None = None
 
     for row in job_rows:
         config = _metadata_dict(row.get("config"))
         metadata = _metadata_dict(row.get("metadata"))
+        activity = _metadata_dict(metadata.get("activity"))
         platform = _normalize_platform_name(row.get("platform")) or "unknown"
         status = str(row.get("status") or "").strip().lower() or "unknown"
         stage = _normalize_run_progress_stage(config.get("stage") or metadata.get("stage") or row.get("job_type"))
@@ -25864,6 +28215,35 @@ def _build_run_progress_snapshot_payload(
                 stage_payload["jobs_waiting"] += 1
         stage_payload["scraped_count"] += scraped_count
         stage_payload["saved_count"] += saved_count
+
+        if stage_bucket in {"posts", SHARED_ACCOUNT_POSTS_STAGE}:
+            retrieval_meta = _metadata_dict(metadata.get("retrieval_meta"))
+            retrieval_persist = _metadata_dict(retrieval_meta.get("persist_counters"))
+            activity_posts_checked = _normalize_non_negative_int(activity.get("posts_checked"))
+            if activity_posts_checked <= 0:
+                activity_posts_checked = max(
+                    _normalize_non_negative_int(retrieval_meta.get("posts_checked")),
+                    _normalize_non_negative_int((metadata.get("stage_counters") or {}).get("posts")),
+                    _normalize_non_negative_int(row.get("items_found")),
+                )
+            completed_posts += activity_posts_checked
+
+            activity_matched_posts = _normalize_non_negative_int(activity.get("matched_posts"))
+            if activity_matched_posts <= 0:
+                activity_matched_posts = max(
+                    _normalize_non_negative_int(retrieval_persist.get("posts_upserted")),
+                    _normalize_non_negative_int((metadata.get("persist_counters") or {}).get("posts_upserted")),
+                    _normalize_non_negative_int(row.get("items_found")),
+                )
+            matched_posts += activity_matched_posts
+
+            activity_total_posts = _normalize_non_negative_int(activity.get("total_posts"))
+            if activity_total_posts <= 0:
+                activity_total_posts = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
+            if activity_total_posts <= 0:
+                activity_total_posts = _normalize_non_negative_int(config.get("expected_total_posts"))
+            if activity_total_posts > 0:
+                total_posts = max(total_posts or 0, activity_total_posts)
 
         key = (platform, account_handle, stage)
         handle_bucket = per_handle_buckets.get(key)
@@ -25985,15 +28365,17 @@ def _build_run_progress_snapshot_payload(
 
     run_config = _metadata_dict(run_row.get("config"))
     runner_count = max(1, _normalize_non_negative_int(run_config.get("runner_count")) or 1)
-    scheduler_lanes = ["A", "B"] if runner_count >= 2 else ["A"]
+    scheduler_lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
     stage_sort_order = {
         "posts": 0,
         "comments": 1,
         "media_mirror": 2,
         "comment_media_mirror": 3,
-        "classify": 4,
-        "materialize": 5,
-        "analytics_refresh": 6,
+        SHARED_ACCOUNT_DISCOVERY_STAGE: 4,
+        SHARED_ACCOUNT_POSTS_STAGE: 5,
+        POST_CLASSIFY_STAGE: 6,
+        SEASON_MATERIALIZE_STAGE: 7,
+        ANALYTICS_REFRESH_STAGE: 8,
         "other": 99,
     }
     next_stage_by_handle: dict[tuple[str, str], str | None] = {}
@@ -26023,10 +28405,12 @@ def _build_run_progress_snapshot_payload(
         ),
     )
 
+    effective_run_status = _derive_run_progress_status(run_row.get("status"), job_rows)
+
     return {
         "season_id": str(run_row.get("season_id") or season_id or ""),
         "run_id": str(run_row.get("run_id") or run_id),
-        "run_status": str(run_row.get("status") or ""),
+        "run_status": effective_run_status,
         "source_scope": str(run_row.get("source_scope") or ""),
         "created_at": _iso(_coerce_dt(run_row.get("created_at"))),
         "started_at": _iso(_coerce_dt(run_row.get("started_at"))),
@@ -26036,9 +28420,16 @@ def _build_run_progress_snapshot_payload(
         "recent_log": trimmed_recent,
         "worker_runtime": {
             "runner_strategy": str(run_config.get("runner_strategy") or ""),
+            "runner_count": runner_count,
+            "partition_strategy": str(run_config.get("partition_strategy") or ""),
             "scheduler_lanes": scheduler_lanes,
             "active_workers_now": len(active_worker_ids),
             "worker_ids_sample": sorted(active_worker_ids)[:12],
+        },
+        "post_progress": {
+            "completed_posts": completed_posts,
+            "matched_posts": matched_posts,
+            "total_posts": total_posts,
         },
         "summary": _metadata_dict(summary_override if summary_override is not None else run_row.get("summary")),
         "updated_at": _iso(_now_utc()),
@@ -26145,6 +28536,85 @@ def get_run_progress_snapshot(
     )
 
 
+def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int | None:
+    normalized_platform = _normalize_platform_name(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform != "instagram" or not normalized_account:
+        return None
+
+    ttl_seconds = max(
+        30,
+        _normalize_non_negative_int(
+            os.getenv("SOCIAL_PROFILE_TOTAL_POSTS_CACHE_TTL_SEC")
+            or SOCIAL_PROFILE_TOTAL_POSTS_CACHE_TTL_SECONDS_DEFAULT
+        ),
+    )
+    cache_key = (normalized_platform, normalized_account)
+    now_monotonic = time_module.monotonic()
+    with _SOCIAL_PROFILE_TOTAL_POSTS_CACHE_LOCK:
+        cached = _SOCIAL_PROFILE_TOTAL_POSTS_CACHE.get(cache_key)
+        if cached and cached[0] > now_monotonic:
+            return cached[1]
+
+    total_posts: int | None = None
+    try:
+        from trr_backend.socials.instagram import InstagramScraper
+
+        auth_cookies = _load_instagram_cookies()
+        scraper_candidates: list[tuple[str, InstagramScraper]] = [("public_profile_info", InstagramScraper(cookies={}))]
+        if auth_cookies:
+            scraper_candidates.append(
+                (
+                    "authenticated_profile_info",
+                    _get_cached_scraper(auth_cookies) or InstagramScraper(cookies=auth_cookies),
+                )
+            )
+
+        for source_label, scraper in scraper_candidates:
+            profile_payload = scraper.fetch_profile_info(
+                normalized_account,
+                delay=0.0,
+                request_timeout=(5, 10),
+            )
+            if not isinstance(profile_payload, dict):
+                continue
+            total_posts = scraper._extract_profile_total_posts(profile_payload, source="profile_info")
+            if total_posts is not None:
+                break
+            logger.debug(
+                "Instagram live profile total unavailable for %s @%s via %s",
+                normalized_platform,
+                normalized_account,
+                source_label,
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "Failed resolving live profile total posts for %s @%s",
+            normalized_platform,
+            normalized_account,
+            exc_info=True,
+        )
+
+    with _SOCIAL_PROFILE_TOTAL_POSTS_CACHE_LOCK:
+        _SOCIAL_PROFILE_TOTAL_POSTS_CACHE[cache_key] = (now_monotonic + ttl_seconds, total_posts)
+    return total_posts
+
+
+def _best_known_social_account_total_posts(
+    platform: str,
+    account_handle: str,
+    *,
+    materialized_total_posts: int | None = None,
+    catalog_total_posts: int | None = None,
+) -> int:
+    candidates = [
+        _normalize_non_negative_int(materialized_total_posts),
+        _normalize_non_negative_int(catalog_total_posts),
+        _normalize_non_negative_int(_cached_live_profile_total_posts(platform, account_handle)),
+    ]
+    return max(candidates or [0])
+
+
 def get_social_account_catalog_run_progress(
     platform: str,
     account_handle: str,
@@ -26230,9 +28700,8 @@ def get_social_account_catalog_run_progress(
         raise ValueError("run_not_found")
 
     computed_summary = _summarize_run_progress_job_rows(job_rows)
-    single_target_run = (
-        (not configured_platforms or configured_platforms == {normalized_platform})
-        and (not configured_accounts or configured_accounts == {normalized_account})
+    single_target_run = (not configured_platforms or configured_platforms == {normalized_platform}) and (
+        not configured_accounts or configured_accounts == {normalized_account}
     )
     summary_override: Mapping[str, Any] | None = None
     if single_target_run:
@@ -26269,7 +28738,7 @@ def get_social_account_catalog_run_progress(
     else:
         summary_override = computed_summary
 
-    return _build_run_progress_snapshot_payload(
+    payload = _build_run_progress_snapshot_payload(
         run_row=run_row,
         job_rows=job_rows,
         run_id=run_id,
@@ -26277,6 +28746,52 @@ def get_social_account_catalog_run_progress(
         recent_log_limit=safe_recent_log_limit,
         summary_override=summary_override,
     )
+    partition_progress = _shared_account_partition_progress(
+        run_id=run_id,
+        platform=normalized_platform,
+        account_handle=normalized_account,
+    )
+    payload["partition_strategy"] = str(
+        run_config.get("partition_strategy") or partition_progress.get("partition_strategy") or ""
+    )
+    payload["discovery"] = partition_progress
+    post_progress = _metadata_dict(payload.get("post_progress"))
+    expected_total_posts = max(
+        _shared_account_expected_total_posts_from_config(
+            run_config,
+            platform=normalized_platform,
+            account_handle=normalized_account,
+        ),
+        _normalize_non_negative_int(partition_progress.get("expected_total_posts")),
+    )
+    best_known_total_posts = max(
+        expected_total_posts,
+        _best_known_social_account_total_posts(
+            normalized_platform,
+            normalized_account,
+            materialized_total_posts=_social_account_profile_total_posts(normalized_platform, normalized_account),
+            catalog_total_posts=_shared_catalog_total_posts(normalized_platform, normalized_account),
+        ),
+    )
+    if best_known_total_posts > _normalize_non_negative_int(post_progress.get("total_posts")):
+        post_progress["total_posts"] = best_known_total_posts
+        payload["post_progress"] = post_progress
+    payload["expected_total_posts"] = expected_total_posts or None
+    if (
+        str(payload.get("run_status") or "").strip().lower() == "completed"
+        and _normalize_non_negative_int(post_progress.get("completed_posts")) <= 0
+        and _normalize_non_negative_int(partition_progress.get("partition_count")) <= 0
+        and _normalize_non_negative_int(
+            (payload.get("stages") or {}).get(SHARED_ACCOUNT_DISCOVERY_STAGE, {}).get("jobs_completed")
+        )
+        > 0
+        and _normalize_non_negative_int(
+            (payload.get("stages") or {}).get(SHARED_ACCOUNT_POSTS_STAGE, {}).get("jobs_total")
+        )
+        <= 0
+    ):
+        payload["run_status"] = "failed"
+    return payload
 
 
 def _week_live_health_platform_specs() -> dict[str, dict[str, str]]:
@@ -37937,6 +40452,7 @@ def _fetch_social_account_profile_source_rows(platform: str, account_handle: str
           account_handle,
           is_active,
           scrape_priority,
+          metadata,
           last_scrape_run_id::text as last_scrape_run_id,
           last_scrape_job_id::text as last_scrape_job_id,
           last_scrape_status,
@@ -38064,7 +40580,8 @@ def _fetch_social_account_profile_assignment_rows(platform: str, account_handle:
         )
     except psycopg_errors.UndefinedTable:
         logger.warning(
-            "social.account_hashtag_assignments is not migrated yet; returning empty assignments for %s/%s",
+            "social.account_hashtag_assignments is not migrated yet; admin social profile hashtag lookups for %s/%s "
+            "will return empty assignments until migration 0180_social_account_hashtag_assignments.sql is applied",
             normalized_platform,
             normalized_account,
         )
@@ -38572,7 +41089,12 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
         "account_handle": normalized_account,
         "profile_url": _platform_profile_url_for_handle(normalized_platform, normalized_account),
         "avatar_url": _social_account_profile_avatar_url(normalized_platform, normalized_account, rows),
-        "total_posts": _normalize_non_negative_int(totals.get("total_posts")),
+        "total_posts": _best_known_social_account_total_posts(
+            normalized_platform,
+            normalized_account,
+            materialized_total_posts=totals.get("total_posts"),
+            catalog_total_posts=catalog_totals.get("catalog_total_posts"),
+        ),
         "total_engagement": _normalize_non_negative_int(totals.get("total_engagement")),
         "total_views": _normalize_non_negative_int(totals.get("total_views")),
         "first_post_at": totals.get("first_post_at"),
@@ -38760,6 +41282,126 @@ def get_social_account_catalog_review_queue(platform: str, account_handle: str) 
     return {"items": items}
 
 
+def get_social_account_catalog_verification(
+    platform: str,
+    account_handle: str,
+    *,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
+        raise ValueError("Catalog backfill is not supported for this platform.")
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+
+    expected_total_posts = 0
+    if run_id:
+        run_row = (
+            pg.fetch_one(
+                """
+                select config
+                from social.scrape_runs
+                where id = %s::uuid
+                  and coalesce(config->>'pipeline_ingest_mode', '') = %s
+                limit 1
+                """,
+                [run_id, SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE],
+            )
+            or {}
+        )
+        if run_row:
+            expected_total_posts = _shared_account_expected_total_posts_from_config(
+                _metadata_dict(run_row.get("config")),
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+    if expected_total_posts <= 0:
+        expected_total_posts = _best_known_social_account_total_posts(
+            normalized_platform,
+            normalized_account,
+            materialized_total_posts=_social_account_profile_total_posts(normalized_platform, normalized_account),
+            catalog_total_posts=_shared_catalog_total_posts(normalized_platform, normalized_account),
+        )
+
+    table, _, _ = _shared_catalog_base_query_parts(normalized_platform)
+    catalog_totals = (
+        pg.fetch_one(
+            f"""
+            select
+              count(*)::int as catalog_posts,
+              count(*) filter (
+                where nullif(trim(coalesce(caption, text, '')), '') is not null
+              )::int as caption_rows,
+              coalesce(sum(jsonb_array_length(coalesce(hashtags, '[]'::jsonb))), 0)::int as stored_hashtag_instances
+            from social.{table}
+            where lower(coalesce(source_account, '')) = %s
+            """,
+            [normalized_account],
+        )
+        or {}
+    )
+    hashtag_items = get_social_account_profile_hashtags(normalized_platform, normalized_account).get("items", [])
+    aggregated_hashtag_instances = sum(_normalize_non_negative_int(item.get("usage_count")) for item in hashtag_items)
+    catalog_posts = _normalize_non_negative_int(catalog_totals.get("catalog_posts"))
+    caption_rows = _normalize_non_negative_int(catalog_totals.get("caption_rows"))
+    stored_hashtag_instances = _normalize_non_negative_int(catalog_totals.get("stored_hashtag_instances"))
+    caption_complete = expected_total_posts <= 0 or caption_rows >= expected_total_posts
+    catalog_complete = expected_total_posts <= 0 or catalog_posts >= expected_total_posts
+    hashtag_counts_match = aggregated_hashtag_instances == stored_hashtag_instances
+    return {
+        "platform": normalized_platform,
+        "account_handle": normalized_account,
+        "run_id": str(run_id or "").strip() or None,
+        "expected_total_posts": expected_total_posts or None,
+        "catalog_posts": catalog_posts,
+        "caption_rows": caption_rows,
+        "stored_hashtag_instances": stored_hashtag_instances,
+        "aggregated_hashtag_instances": aggregated_hashtag_instances,
+        "catalog_complete": catalog_complete,
+        "caption_complete": caption_complete,
+        "hashtag_counts_match": hashtag_counts_match,
+        "verified": catalog_complete and caption_complete and hashtag_counts_match,
+    }
+
+
+def get_active_social_account_catalog_run(
+    platform: str,
+    account_handle: str,
+) -> dict[str, Any] | None:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    return pg.fetch_one(
+        """
+        select
+          r.id::text as run_id,
+          r.status,
+          r.created_at,
+          r.started_at
+        from social.scrape_runs r
+        where r.status = any(%s::text[])
+          and coalesce(r.config->>'pipeline_ingest_mode', '') = %s
+          and exists (
+            select 1
+            from jsonb_array_elements_text(coalesce(r.config->'platforms', '[]'::jsonb)) as platforms(value)
+            where lower(platforms.value) = %s
+          )
+          and exists (
+            select 1
+            from jsonb_array_elements_text(coalesce(r.config->'accounts_override', '[]'::jsonb)) as accounts(value)
+            where lower(accounts.value) = %s
+          )
+        order by r.created_at desc
+        limit 1
+        """,
+        [
+            list(_RUN_PROGRESS_ACTIVE_JOB_STATUSES),
+            SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            normalized_platform,
+            normalized_account,
+        ],
+    )
+
+
 def start_social_account_catalog_backfill(
     platform: str,
     account_handle: str,
@@ -38775,6 +41417,28 @@ def start_social_account_catalog_backfill(
     if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
         raise ValueError("Catalog backfill is not supported for this platform.")
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    active_run = get_active_social_account_catalog_run(normalized_platform, normalized_account)
+    if active_run:
+        active_run_id = str(active_run.get("run_id") or "").strip()
+        active_status = str(active_run.get("status") or "").strip().lower() or "running"
+        raise SocialIngestConflictError(
+            "SOCIAL_ACCOUNT_CATALOG_RUN_ALREADY_ACTIVE",
+            f"Catalog run {active_run_id or 'unknown'} is already {active_status} for @{normalized_account}.",
+            detail={
+                "run_id": active_run_id or None,
+                "status": active_status,
+                "platform": normalized_platform,
+                "account_handle": normalized_account,
+            },
+        )
+    if is_queue_enabled() and _shared_account_catalog_requires_modal_executor(
+        platform=normalized_platform,
+        pipeline_ingest_mode=SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+    ):
+        assert_worker_available_when_queue_enabled(
+            required_execution_backend="modal",
+            platform=normalized_platform,
+        )
     return ingest_shared_accounts(
         platforms=[normalized_platform],
         source_scope=source_scope,
@@ -38785,6 +41449,79 @@ def start_social_account_catalog_backfill(
         initiated_by=initiated_by,
         inline_worker_id=inline_worker_id,
     )
+
+
+def cancel_social_account_catalog_run(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    cancelled_by: str | None = None,
+) -> dict[str, Any]:
+    run_row = _load_social_account_catalog_run_row(
+        platform=platform,
+        account_handle=account_handle,
+        run_id=run_id,
+    )
+    run_id = str(run_row.get("id") or "").strip()
+    return cancel_shared_run(run_id, cancelled_by=cancelled_by)
+
+
+def dismiss_social_account_catalog_run(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    dismissed_by: str | None = None,
+) -> dict[str, Any]:
+    run_row = _load_social_account_catalog_run_row(
+        platform=platform,
+        account_handle=account_handle,
+        run_id=run_id,
+    )
+    run_id = str(run_row.get("id") or "").strip()
+    status = str(run_row.get("status") or "").strip().lower()
+    if status not in {"failed", "cancelled"}:
+        raise ValueError("Only failed or cancelled catalog runs can be dismissed.")
+    run_config = _metadata_dict(run_row.get("config"))
+    dismissed_at = str(run_config.get(_RUN_FAILURE_DISMISSED_AT_KEY) or "").strip()
+    if dismissed_at:
+        return {
+            "run_id": run_id,
+            "status": status,
+            "dismissed": True,
+            "dismissed_at": dismissed_at,
+        }
+
+    metadata_payload = {
+        _RUN_FAILURE_DISMISSED_AT_KEY: _iso(_now_utc()),
+        _RUN_FAILURE_DISMISSED_BY_KEY: dismissed_by,
+    }
+    run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
+    updated_row = pg.fetch_one(
+        f"""
+        update social.scrape_runs as r
+        set config = coalesce(r.config, '{{}}'::jsonb) || %s::jsonb
+        where r.id = %s::uuid
+          and r.status = any(%s::text[])
+          and {run_failure_not_dismissed_sql}
+        returning
+          r.id::text as id,
+          r.status,
+          coalesce(r.config->>'{_RUN_FAILURE_DISMISSED_AT_KEY}', '') as dismissed_at
+        """,
+        [json.dumps(metadata_payload), run_id, ["failed", "cancelled"]],
+    )
+    if not updated_row:
+        raise ValueError("Only failed or cancelled catalog runs can be dismissed.")
+    _invalidate_queue_status_cache()
+    return {
+        "run_id": str(updated_row.get("id") or "").strip(),
+        "status": str(updated_row.get("status") or "").strip().lower(),
+        "dismissed": True,
+        "dismissed_at": str(updated_row.get("dismissed_at") or "").strip()
+        or metadata_payload[_RUN_FAILURE_DISMISSED_AT_KEY],
+    }
 
 
 def sync_recent_social_account_catalog(

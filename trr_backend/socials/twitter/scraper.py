@@ -147,11 +147,7 @@ def mirror_tweet_media(tweets: list[Tweet]) -> dict[str, list[str]]:
                 mirrored_by_tweet_id[str(tweet.tweet_id)] = []
                 continue
 
-            _tweet_url = (
-                f"https://x.com/i/status/{tweet.tweet_id}"
-                if tweet.tweet_id
-                else None
-            )
+            _tweet_url = f"https://x.com/i/status/{tweet.tweet_id}" if tweet.tweet_id else None
             results = mirror_urls_to_s3(
                 source_urls,
                 s3_client=s3_client,

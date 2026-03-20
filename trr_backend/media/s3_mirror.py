@@ -1055,11 +1055,7 @@ def mirror_url_to_s3(
         reason = f"http_{int(status_code)}" if status_code is not None else "http_error"
 
         # -- yt-dlp fallback for expired Twitter video CDN URLs -----------
-        if (
-            status_code in (401, 403, 404)
-            and tweet_url
-            and is_twitter_video_url(source_url)
-        ):
+        if status_code in (401, 403, 404) and tweet_url and is_twitter_video_url(source_url):
             fresh_url = _resolve_twitter_video_via_ytdlp(tweet_url)
             if fresh_url and fresh_url != source_url:
                 _log.info(

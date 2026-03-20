@@ -281,6 +281,7 @@ def face_centroid(result: PeopleCountResult) -> tuple[float, float] | None:
     cy = ((best.y1 + best.y2) / 2) * 100
     return (round(cx, 1), round(cy, 1))
 
+
 def _runtime_markers() -> set[str]:
     raw_values = (
         os.getenv("APP_ENV"),

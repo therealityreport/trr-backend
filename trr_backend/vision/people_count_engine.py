@@ -500,9 +500,7 @@ def _adaptive_filter_faces(faces: list, *, image: Any) -> tuple[list, dict[int, 
         face_h = float(metrics["face_h"])
         face_area_ratio = float(metrics["face_area_ratio"])
         det_score = float(getattr(face, "det_score", 0.0))
-        is_hard_tiny = (
-            face_w < hard_min_side_px or face_h < hard_min_side_px or face_area_ratio < hard_min_area_ratio
-        )
+        is_hard_tiny = face_w < hard_min_side_px or face_h < hard_min_side_px or face_area_ratio < hard_min_area_ratio
         if is_hard_tiny:
             decisions_by_face[id(face)] = {"filter_decision": "filtered_tiny", "filter_metrics": metrics_payload}
             continue
@@ -1064,22 +1062,16 @@ def _compute_people_count_dict(payload: dict[str, object]) -> dict[str, object]:
     _ensure_detectors_available(mode)
 
     candidate_person_ids = _normalize_candidate_person_ids(
-        payload.get("candidate_person_ids")
-        if isinstance(payload.get("candidate_person_ids"), list)
-        else None
+        payload.get("candidate_person_ids") if isinstance(payload.get("candidate_person_ids"), list) else None
     )
     owner_person_id = _normalize_owner_person_id(
         payload.get("owner_person_id") if isinstance(payload.get("owner_person_id"), str) else None
     )
     owner_reference_images = _normalize_owner_reference_images(
-        payload.get("owner_reference_images")
-        if isinstance(payload.get("owner_reference_images"), list)
-        else None
+        payload.get("owner_reference_images") if isinstance(payload.get("owner_reference_images"), list) else None
     )
     person_reference_images = _normalize_person_reference_images(
-        payload.get("person_reference_images")
-        if isinstance(payload.get("person_reference_images"), list)
-        else None
+        payload.get("person_reference_images") if isinstance(payload.get("person_reference_images"), list) else None
     )
     owner_reference_centroid, reference_profile = _build_owner_reference_centroid_profile(
         owner_person_id=owner_person_id,

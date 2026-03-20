@@ -251,6 +251,14 @@ def fetch_one(query: str, params: Iterable[Any] | None = None) -> dict[str, Any]
     return _run_with_transient_retry(_run)
 
 
+def execute(query: str, params: Iterable[Any] | None = None) -> None:
+    def _run() -> None:
+        with db_cursor() as cur:
+            cur.execute(query, params or [])
+
+    _run_with_transient_retry(_run)
+
+
 def execute_returning(
     query: str,
     params: Iterable[Any] | None = None,

@@ -225,6 +225,7 @@ def parse_args() -> argparse.Namespace:
             "comments",
             "media_mirror",
             "comment_media_mirror",
+            "shared_account_discovery",
             "shared_account_posts",
             "post_classify",
             "season_materialize",

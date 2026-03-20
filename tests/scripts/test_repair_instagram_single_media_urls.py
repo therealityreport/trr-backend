@@ -7,10 +7,7 @@ import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
-
-SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "socials" / "repair_instagram_single_media_urls.py"
-)
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "socials" / "repair_instagram_single_media_urls.py"
 SPEC = importlib.util.spec_from_file_location("repair_instagram_single_media_urls", SCRIPT_PATH)
 assert SPEC and SPEC.loader
 repair_script = importlib.util.module_from_spec(SPEC)

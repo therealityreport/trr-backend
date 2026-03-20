@@ -33,7 +33,9 @@ class RepairStats:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="repair_instagram_single_media_urls",
-        description="Normalize historical Instagram non-carousel rows so single-media posts store one canonical source URL.",
+        description=(
+            "Normalize historical Instagram non-carousel rows so single-media posts store one canonical source URL."
+        ),
     )
     parser.add_argument(
         "--season-id",
@@ -176,7 +178,7 @@ def _fetch_candidate_rows(*, season_ids: list[str], show_ids: list[str], limit: 
           coalesce(nullif(to_jsonb(p) ->> 'post_format', ''), 'post') as post_format,
           coalesce(p.media_urls, '[]'::jsonb) as media_urls
         from social.instagram_posts p
-        where {' and '.join(filters)}
+        where {" and ".join(filters)}
         order by p.posted_at desc nulls last, p.id desc
         limit %s
         """,

@@ -279,9 +279,7 @@ def test_serialize_sync_session_normalizes_comment_display_counts_when_saved_exc
     assert payload["coverage_by_dimension"]["comments"]["total_reported_comments_raw"] == 4368
     assert payload["coverage_by_dimension"]["comments"]["comment_sync_status"]["expected_count"] == 4573
     assert payload["coverage_by_dimension"]["comments"]["comment_sync_status"]["expected_count_raw"] == 4368
-    assert (
-        payload["platform_diagnostics"]["tiktok"]["coverage_by_dimension"]["comments"]["reported_comments"] == 4573
-    )
+    assert payload["platform_diagnostics"]["tiktok"]["coverage_by_dimension"]["comments"]["reported_comments"] == 4573
     assert (
         payload["platform_diagnostics"]["tiktok"]["coverage_by_dimension"]["comments"]["reported_comments_raw"] == 4368
     )

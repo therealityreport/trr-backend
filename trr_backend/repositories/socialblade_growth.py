@@ -22,8 +22,7 @@ def socialblade_growth_table_exists() -> bool:
 def get_growth_data(person_id: str, handle: str) -> dict[str, Any] | None:
     """Fetch stored SocialBlade data for a person+handle pair."""
     row = pg.fetch_one(
-        "SELECT * FROM pipeline.socialblade_growth_data "
-        "WHERE person_id = %s AND instagram_handle = %s",
+        "SELECT * FROM pipeline.socialblade_growth_data WHERE person_id = %s AND instagram_handle = %s",
         [person_id, handle],
     )
     if not row:
@@ -142,9 +141,7 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
 def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
     """Convert a database row to the JSON response shape the frontend expects."""
     scraped_at_raw = row.get("scraped_at")
-    scraped_at_value = (
-        scraped_at_raw.isoformat() if hasattr(scraped_at_raw, "isoformat") else str(scraped_at_raw or "")
-    )
+    scraped_at_value = scraped_at_raw.isoformat() if hasattr(scraped_at_raw, "isoformat") else str(scraped_at_raw or "")
     freshness_status = "missing"
     is_stale = True
     age_hours: float | None = None
@@ -164,6 +161,9 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
         "platform": "instagram",
         "scraped_at": scraped_at_value,
         "stats_refreshed": bool(row.get("stats_refreshed", False)),
+        "history_source": ((row.get("raw_response") or {}) if isinstance(row.get("raw_response"), dict) else {}).get(
+            "history_source"
+        ),
         "profile_stats": row.get("profile_stats", {}),
         "rankings": row.get("rankings", {}),
         "daily_channel_metrics_60day": row.get("daily_channel_metrics_60day", {}),

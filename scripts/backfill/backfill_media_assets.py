@@ -15,8 +15,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="backfill_media_assets",
         description=(
-            "Backfill media_assets/media_links from legacy show/season/episode/person image tables "
-            "and cast photos."
+            "Backfill media_assets/media_links from legacy show/season/episode/person image tables and cast photos."
         ),
     )
     parser.add_argument(

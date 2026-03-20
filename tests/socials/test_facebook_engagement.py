@@ -312,14 +312,17 @@ class TestFacebookSearchAndShareHelpers:
         assert len(results) == 1
         assert results[0].post_id == post.post_id
 
-    def test_cross_platform_media_fallback_accepts_exact_caption_same_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_cross_platform_media_fallback_accepts_exact_caption_same_day(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         scraper = FacebookScraper()
         post = scraper._build_post_from_html(
             url="https://www.facebook.com/TestPage/posts/123",
             html_text=(
                 '<meta property="og:url" content="https://www.facebook.com/TestPage/posts/123" />'
                 '<meta property="og:description" '
-                'content="Opa! The moment you&apos;ve been waiting for is finally here. ❄️ A new season of #RHOSLC goes the distance starting September 16th!" />'
+                'content="Opa! The moment you&apos;ve been waiting for is finally here. '
+                '❄️ A new season of #RHOSLC goes the distance starting September 16th!" />'
                 '{"creation_time":1757980800}'
             ),
             username="TestPage",
@@ -366,7 +369,7 @@ class TestFacebookSearchAndShareHelpers:
 
         scraper._resolve_cross_platform_media_fallback(
             post=post,
-            html_text='https://www.instagram.com/reel/ABC123/',
+            html_text="https://www.instagram.com/reel/ABC123/",
             allow_fallback=True,
         )
 
@@ -421,7 +424,7 @@ class TestFacebookSearchAndShareHelpers:
 
         scraper._resolve_cross_platform_media_fallback(
             post=post,
-            html_text='https://www.instagram.com/p/ABC123/',
+            html_text="https://www.instagram.com/p/ABC123/",
             allow_fallback=True,
         )
 

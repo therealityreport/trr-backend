@@ -15,6 +15,7 @@ def override_admin():
 
 
 def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    import api.routers.admin_socialblade as router_module
     import trr_backend.socials.socialblade.service as service_module
 
     captured: dict[str, object] = {}
@@ -29,6 +30,11 @@ def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:
         }
 
     monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(
+        router_module,
+        "_scrape_socialblade_person_page",
+        lambda handle: {"username": handle, "scraped_at": "2026-03-16T12:00:00Z"},
+    )
 
     client = TestClient(app)
     response = client.post(
@@ -45,7 +51,7 @@ def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    import trr_backend.modal_dispatch as dispatch_module
+    import api.routers.admin_socialblade as router_module
     import trr_backend.socials.socialblade.service as service_module
 
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
@@ -64,9 +70,18 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(service_module, "queue_refresh_decision", fake_queue_refresh_decision)
     monkeypatch.setattr(
-        dispatch_module,
-        "dispatch_socialblade_scrape",
-        lambda **kwargs: {"dispatched": True, "call_id": f"call-{kwargs['handle']}"},
+        service_module,
+        "refresh_and_persist_socialblade",
+        lambda **kwargs: {
+            "username": kwargs["handle"],
+            "scraped_at": "2026-03-18T04:10:25Z",
+            "refresh_status": "refreshed",
+        },
+    )
+    monkeypatch.setattr(
+        router_module,
+        "_scrape_socialblade_person_page",
+        lambda handle: {"username": handle, "scraped_at": "2026-03-18T04:10:25Z"},
     )
 
     client = TestClient(app)
@@ -85,7 +100,12 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
     payload = response.json()
     assert response.status_code == 200
     assert payload["accepted"] == [
-        {"personId": "person-1", "handle": "lisabarlow14", "callId": "call-lisabarlow14"}
+        {
+            "personId": "person-1",
+            "handle": "lisabarlow14",
+            "refreshStatus": "refreshed",
+            "scrapedAt": "2026-03-18T04:10:25Z",
+        }
     ]
     assert payload["skipped"] == [
         {"personId": "person-1", "handle": "lisabarlow14", "reason": "duplicate_request"},
@@ -118,6 +138,4 @@ def test_batch_refresh_respects_season_run_kill_switch(monkeypatch: pytest.Monke
     assert response.status_code == 200
     assert payload["accepted"] == []
     assert payload["errors"] == []
-    assert payload["skipped"] == [
-        {"personId": "person-1", "handle": "lisabarlow14", "reason": "auto_refresh_disabled"}
-    ]
+    assert payload["skipped"] == [{"personId": "person-1", "handle": "lisabarlow14", "reason": "auto_refresh_disabled"}]

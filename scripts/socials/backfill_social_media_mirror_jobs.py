@@ -102,10 +102,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repair-reasons",
         default="",
-        help=(
-            "Optional comma-separated remediation reasons to include: "
-            + ",".join(REPAIR_REASON_CHOICES)
-        ),
+        help=("Optional comma-separated remediation reasons to include: " + ",".join(REPAIR_REASON_CHOICES)),
     )
     parser.add_argument(
         "--dry-run",

@@ -1091,6 +1091,7 @@ def list_cast_with_roles(
     seasons: str | None = Query(default=None),
     roles: str | None = Query(default=None),
     has_image: bool | None = Query(default=None),
+    exclude_zero_episode_members: bool = Query(default=False),
     archive_mode: str = Query(default="all"),
 ) -> list[dict[str, Any]]:
     request_started_at = time.perf_counter()
@@ -1273,6 +1274,9 @@ def list_cast_with_roles(
                 if not person_id:
                     continue
                 row["total_episodes"] = scoped_totals.get(person_id, 0)
+
+    if exclude_zero_episode_members:
+        filtered = [row for row in filtered if int(row.get("total_episodes") or 0) > 0]
 
     reverse = order.lower() != "asc"
     if sort_by == "name":

@@ -3508,8 +3508,7 @@ def execute_refresh_run(
                 total_rows=_safe_int(detail_result.get("detail_posts_total")),
                 matched_rows=max(
                     0,
-                    _safe_int(detail_result.get("detail_posts_done"))
-                    - _safe_int(detail_result.get("error_count")),
+                    _safe_int(detail_result.get("detail_posts_done")) - _safe_int(detail_result.get("error_count")),
                 ),
                 set_completed=True,
                 claim_token=claim_token,
@@ -3775,7 +3774,9 @@ def execute_refresh_run(
             "listing_complete": not incomplete_listing,
             "backfill_complete": not incomplete_backfill,
         }
-        detail_errors = (detail_result or {}).get("errors") if isinstance((detail_result or {}).get("errors"), list) else []
+        detail_errors = (
+            (detail_result or {}).get("errors") if isinstance((detail_result or {}).get("errors"), list) else []
+        )
         error_count = comment_errors + len(detail_errors)
 
         diagnostics = {

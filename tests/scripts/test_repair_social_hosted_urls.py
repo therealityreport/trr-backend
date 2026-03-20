@@ -104,7 +104,9 @@ def test_repair_platform_apply_updates_rows(monkeypatch: pytest.MonkeyPatch) -> 
                 ],
                 "hosted_user_avatar_url": "",
                 "hosted_owner_profile_pic_url": "",
-                "hosted_tagged_profile_pics": {"bravo": "https://legacy.example/social/instagram/profile-pics/bravo/a.jpg"},
+                "hosted_tagged_profile_pics": {
+                    "bravo": "https://legacy.example/social/instagram/profile-pics/bravo/a.jpg"
+                },
                 "raw_data": {},
             }
         ]
@@ -140,9 +142,7 @@ def test_repair_platform_apply_updates_rows(monkeypatch: pytest.MonkeyPatch) -> 
         "https://pub.example.r2.dev/social/instagram/a/media-02.jpg",
     ]
     tagged_profile_pics = json.loads(str(update_params[4]))
-    assert tagged_profile_pics == {
-        "bravo": "https://pub.example.r2.dev/social/instagram/profile-pics/bravo/a.jpg"
-    }
+    assert tagged_profile_pics == {"bravo": "https://pub.example.r2.dev/social/instagram/profile-pics/bravo/a.jpg"}
 
 
 def test_parse_platforms_rejects_invalid_platforms() -> None:

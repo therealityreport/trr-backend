@@ -278,22 +278,96 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
         with patch(
             "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
             return_value=None,
-        ):
+        ) as worker_guard:
             with patch(
                 "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
                 return_value=expected,
             ) as mocked:
                 response = client.post(
-                "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"backfill_scope": "full_history"},
-            )
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"backfill_scope": "full_history"},
+                )
 
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-1"
     assert response.json()["status"] == "queued"
+    worker_guard.assert_called_once_with(
+        required_execution_backend="modal",
+        platform="instagram",
+    )
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_post_social_account_catalog_backfill_requires_modal_executor(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "api.routers.socials.is_remote_job_plane_enabled",
+            return_value=False,
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "modal executor unavailable",
+                worker_health={"healthy": False, "reason": "modal_dispatch_unavailable"},
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history"},
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+    assert body["detail"]["required_execution_backend"] == "modal"
+
+
+def test_post_social_account_catalog_backfill_returns_conflict_for_active_profile_run(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialIngestConflictError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+            side_effect=SocialIngestConflictError(
+                "SOCIAL_ACCOUNT_CATALOG_RUN_ALREADY_ACTIVE",
+                "Catalog run run-active-1 is already running for @bravotv.",
+                detail={"run_id": "run-active-1", "status": "running"},
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "SOCIAL_ACCOUNT_CATALOG_RUN_ALREADY_ACTIVE"
+    assert response.json()["detail"]["run_id"] == "run-active-1"
 
 
 def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,10 +389,10 @@ def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch
                 return_value=expected,
             ) as mocked:
                 response = client.post(
-                "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-recent",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"lookback_days": 3},
-            )
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-recent",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"lookback_days": 3},
+                )
 
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-2"
@@ -326,6 +400,59 @@ def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
     assert mocked.call_args.kwargs["lookback_days"] == 3
+
+
+def test_post_social_account_catalog_run_cancel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+    expected = {
+        "run_id": run_id,
+        "status": "cancelled",
+        "summary": {"total_jobs": 5, "failed_jobs": 1},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.cancel_social_account_catalog_run",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["run_id"] == run_id
+
+
+def test_post_social_account_catalog_run_dismiss(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+    expected = {
+        "run_id": run_id,
+        "status": "failed",
+        "dismissed": True,
+        "dismissed_at": "2026-03-19T20:00:00.000Z",
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.dismiss_social_account_catalog_run",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/dismiss",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["dismissed"] is True
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["run_id"] == run_id
 
 
 def test_post_social_account_catalog_review_queue_resolve(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3116,9 +3243,7 @@ def test_get_run_progress_endpoint_returns_payload(
         "worker_runtime": {"active_workers_now": 1},
     }
 
-    with patch(
-        "trr_backend.repositories.social_season_analytics.get_run_progress_snapshot", return_value=expected
-    ):
+    with patch("trr_backend.repositories.social_season_analytics.get_run_progress_snapshot", return_value=expected):
         response = client.get(
             f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress?recent_log_limit=15",
             headers={"Authorization": f"Bearer {token}"},
@@ -3178,14 +3303,18 @@ def test_create_sync_session_endpoint_blocks_when_workers_unhealthy(
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True), patch(
-        "api.routers.socials.is_remote_job_plane_enabled",
-        return_value=False,
-    ), patch(
-        "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
-        side_effect=SocialWorkerUnavailableError(
-            "worker unavailable",
-            worker_health={"healthy": False, "healthy_workers": 0, "reason": "no_workers"},
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "api.routers.socials.is_remote_job_plane_enabled",
+            return_value=False,
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "worker unavailable",
+                worker_health={"healthy": False, "healthy_workers": 0, "reason": "no_workers"},
+            ),
         ),
     ):
         response = client.post(
@@ -3590,6 +3719,108 @@ def test_cancel_active_jobs_endpoint_returns_500_on_unhandled_error(
 
     assert response.status_code == 500
     assert response.json()["detail"] == "cancel active failed"
+
+
+def test_dismiss_recent_failures_endpoint_returns_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    job_id = str(uuid4())
+    expected = {
+        "requested_job_ids_count": 1,
+        "dismissed_jobs": 1,
+        "dismissed_job_ids": [job_id],
+        "recent_failures_remaining": 3,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.dismiss_recent_failures",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/ingest/recent-failures/dismiss",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"job_ids": [job_id]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["job_ids"] == [job_id]
+
+
+def test_dismiss_recent_failures_endpoint_returns_500_on_unhandled_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    job_id = str(uuid4())
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.dismiss_recent_failures",
+        side_effect=RuntimeError("dismiss failed"),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/ingest/recent-failures/dismiss",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"job_ids": [job_id]},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "dismiss failed"
+
+
+def test_reset_social_ingest_health_endpoint_returns_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "cancelled_jobs": 0,
+        "dismissed_failures": 12,
+        "dismissed_failed_runs": 4,
+        "active_jobs_remaining": 0,
+        "recent_failures_remaining": 0,
+        "failed_runs_remaining": 0,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.reset_social_ingest_health",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/ingest/reset-health",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_count == 1
+
+
+def test_reset_social_ingest_health_endpoint_returns_500_on_unhandled_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.reset_social_ingest_health",
+        side_effect=RuntimeError("reset failed"),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/ingest/reset-health",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "reset failed"
 
 
 def test_get_worker_detail_endpoint_returns_payload(

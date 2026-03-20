@@ -43,10 +43,11 @@
 | tmdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
 | imdb_fetched_at | timestamp with time zone | YES |  | NO | NEVER |
 | tmdb_meta | jsonb | YES |  | NO | NEVER |
-| imdb_meta | jsonb | YES |  | NO | NEVER |
 | tmdb_network_ids | ARRAY | YES |  | NO | NEVER |
 | tmdb_production_company_ids | ARRAY | YES |  | NO | NEVER |
+| imdb_meta | jsonb | YES |  | NO | NEVER |
 | alternative_names | ARRAY | NO | '{}'::text[] | NO | NEVER |
+| external_ids | jsonb | NO | '{}'::jsonb | NO | NEVER |
 | most_recent_episode | jsonb | NO | '{}'::jsonb | NO | NEVER |
 | slug | text | YES |  | NO | NEVER |
 
@@ -67,6 +68,9 @@ id
 ## Indexes
 
 - core_shows_alternative_names_gin (non-unique): alternative_names
+- core_shows_external_ids_gin (non-unique): external_ids
+- core_shows_external_ids_imdb_unique (unique): ((external_ids ->> 'imdb'::text))) WHERE (COALESCE((external_ids ->> 'imdb'::text), ''::text) <> ''::text
+- core_shows_external_ids_tmdb_unique (unique): ((external_ids ->> 'tmdb'::text))) WHERE (COALESCE((external_ids ->> 'tmdb'::text), ''::text) <> ''::text
 - core_shows_genres_gin (non-unique): genres
 - core_shows_imdb_id_unique (unique): imdb_id) WHERE ((imdb_id IS NOT NULL) AND (btrim(imdb_id) <> ''::text)
 - core_shows_keywords_gin (non-unique): keywords
@@ -127,10 +131,11 @@ true
   "tmdb_fetched_at": "1970-01-01T00:00:00Z",
   "imdb_fetched_at": "1970-01-01T00:00:00Z",
   "tmdb_meta": {},
-  "imdb_meta": {},
   "tmdb_network_ids": [],
   "tmdb_production_company_ids": [],
+  "imdb_meta": {},
   "alternative_names": [],
+  "external_ids": {},
   "most_recent_episode": {},
   "slug": "example"
 }

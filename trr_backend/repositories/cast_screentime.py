@@ -266,7 +266,7 @@ def list_target_youtube_accounts(*, show_id: str, season_id: str | None = None) 
           st.config
         FROM social.season_targets st
         CROSS JOIN LATERAL jsonb_array_elements_text(coalesce(st.accounts, '[]'::jsonb)) AS account(value)
-        WHERE {' AND '.join(filters)}
+        WHERE {" AND ".join(filters)}
         ORDER BY st.updated_at DESC, account.value ASC
         """,
         params,
@@ -577,7 +577,8 @@ def replace_cast_screentime_evidence(run_id: str, evidence_items: list[dict[str,
             return []
         sql = (
             "INSERT INTO screenalytics.cast_screentime_evidence "
-            "(run_id, segment_key, evidence_key, evidence_type, timestamp_ms, object_key, content_type, ttl_expires_at, metadata) "
+            "(run_id, segment_key, evidence_key, evidence_type, timestamp_ms, "
+            "object_key, content_type, ttl_expires_at, metadata) "
             "VALUES %s RETURNING *"
         )
         return pg.execute_values_returning(sql, rows, conn=conn)
@@ -602,7 +603,8 @@ def upsert_cast_screentime_evidence(run_id: str, evidence_items: list[dict[str, 
     ]
     sql = (
         "INSERT INTO screenalytics.cast_screentime_evidence "
-        "(run_id, segment_key, evidence_key, evidence_type, timestamp_ms, object_key, content_type, ttl_expires_at, metadata) "
+        "(run_id, segment_key, evidence_key, evidence_type, timestamp_ms, "
+        "object_key, content_type, ttl_expires_at, metadata) "
         "VALUES %s "
         "ON CONFLICT (run_id, evidence_key) DO UPDATE SET "
         "segment_key = EXCLUDED.segment_key, "
@@ -642,7 +644,8 @@ def replace_cast_screentime_excluded_sections(run_id: str, sections: list[dict[s
             return []
         sql = (
             "INSERT INTO screenalytics.cast_screentime_excluded_sections "
-            "(run_id, section_key, section_type, start_ms, end_ms, duration_ms, detection_source, confidence_score, metadata) "
+            "(run_id, section_key, section_type, start_ms, end_ms, duration_ms, "
+            "detection_source, confidence_score, metadata) "
             "VALUES %s RETURNING *"
         )
         return pg.execute_values_returning(sql, rows, conn=conn)
@@ -970,7 +973,9 @@ def upsert_suggestion_decision(payload: dict[str, Any]) -> dict[str, Any]:
     return rows[0] if rows else {}
 
 
-def list_suggestion_decisions_for_context(*, show_id: str, season_id: str | None, episode_id: str | None) -> list[dict[str, Any]]:
+def list_suggestion_decisions_for_context(
+    *, show_id: str, season_id: str | None, episode_id: str | None
+) -> list[dict[str, Any]]:
     clauses = ["(owner_scope = 'show' AND owner_entity_id = %s::uuid)"]
     params: list[Any] = [_normalize(show_id)]
     if season_id:
@@ -986,7 +991,7 @@ def list_suggestion_decisions_for_context(*, show_id: str, season_id: str | None
           p.full_name AS display_name
         FROM screenalytics.cast_screentime_suggestion_decisions d
         LEFT JOIN core.people p ON p.id = d.person_id
-        WHERE {' OR '.join(clauses)}
+        WHERE {" OR ".join(clauses)}
         ORDER BY d.decided_at DESC, d.updated_at DESC
         """,
         params,
@@ -1056,7 +1061,9 @@ def upsert_unknown_review_state(payload: dict[str, Any]) -> dict[str, Any]:
     return rows[0] if rows else {}
 
 
-def list_unknown_review_state_for_context(*, show_id: str, season_id: str | None, episode_id: str | None) -> list[dict[str, Any]]:
+def list_unknown_review_state_for_context(
+    *, show_id: str, season_id: str | None, episode_id: str | None
+) -> list[dict[str, Any]]:
     clauses = ["(owner_scope = 'show' AND owner_entity_id = %s::uuid)"]
     params: list[Any] = [_normalize(show_id)]
     if season_id:
@@ -1072,7 +1079,7 @@ def list_unknown_review_state_for_context(*, show_id: str, season_id: str | None
           p.full_name AS candidate_display_name
         FROM screenalytics.cast_screentime_unknown_review_state q
         LEFT JOIN core.people p ON p.id = q.candidate_person_id
-        WHERE {' OR '.join(clauses)}
+        WHERE {" OR ".join(clauses)}
         ORDER BY q.decided_at DESC, q.updated_at DESC
         """,
         params,

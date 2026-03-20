@@ -61,7 +61,11 @@ def _get_run_counts(run_id: str) -> dict[str, int]:
     SELECT
       (SELECT COUNT(*)::int FROM screenalytics.cast_screentime_segments WHERE run_id = %s::uuid) AS segment_count,
       (SELECT COUNT(*)::int FROM screenalytics.cast_screentime_evidence WHERE run_id = %s::uuid) AS evidence_count,
-      (SELECT COUNT(*)::int FROM screenalytics.cast_screentime_excluded_sections WHERE run_id = %s::uuid) AS excluded_section_count,
+      (
+        SELECT COUNT(*)::int
+        FROM screenalytics.cast_screentime_excluded_sections
+        WHERE run_id = %s::uuid
+      ) AS excluded_section_count,
       (SELECT COUNT(*)::int FROM screenalytics.run_artifacts WHERE run_id = %s::uuid) AS artifact_count,
       (SELECT COUNT(*)::int FROM screenalytics.run_person_metrics WHERE run_id = %s::uuid) AS metric_count
     """
@@ -114,10 +118,14 @@ def _force_stale_running_state(run_id: str, *, stale_after_seconds: int) -> dict
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-base-url", default=os.getenv("TRR_API_URL", ""), help="TRR API base URL. Defaults to TRR_API_URL.")
+    parser.add_argument(
+        "--api-base-url", default=os.getenv("TRR_API_URL", ""), help="TRR API base URL. Defaults to TRR_API_URL."
+    )
     parser.add_argument("--run-id", required=True, help="Existing cast-screentime run id to force stale.")
     parser.add_argument("--show-id", help="Optional show id filter for the reconcile endpoint.")
-    parser.add_argument("--stale-after-seconds", type=int, default=1800, help="Threshold passed to the reconcile endpoint.")
+    parser.add_argument(
+        "--stale-after-seconds", type=int, default=1800, help="Threshold passed to the reconcile endpoint."
+    )
     return parser.parse_args()
 
 

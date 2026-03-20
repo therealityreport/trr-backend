@@ -33,6 +33,11 @@ from pydantic import BaseModel, Field
 from api.auth import AdminUser, FacebankSeedAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.face_crops import generate_and_upload_face_crops
+from trr_backend.media.getty_replacement import (
+    ResolvedPublicReplacement,
+    is_bravo_network_name,
+    resolve_best_public_replacement,
+)
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.repositories.identity_assignment import (
     build_identity_candidate_person_ids as build_identity_candidate_person_ids_shared,
@@ -1218,11 +1223,45 @@ def _import_nbcumv_person_media(
         for entry in inventory_by_editorial_id.get(editorial_id, []):
             entry["resolution"] = resolution
 
+    bravo_show_cache: dict[str, bool] = {}
+
+    def _show_id_is_bravo_family(show_id_value: str | None) -> bool:
+        normalized_show_id = str(show_id_value or "").strip()
+        if not normalized_show_id:
+            return False
+        cached = bravo_show_cache.get(normalized_show_id)
+        if cached is not None:
+            return cached
+        try:
+            response = (
+                db.schema("core").table("shows").select("networks").eq("id", normalized_show_id).limit(1).execute()
+            )
+            row = (response.data or [{}])[0] if response.data else {}
+        except Exception:  # noqa: BLE001
+            row = {}
+        networks = row.get("networks") if isinstance(row, dict) else None
+        is_bravo = any(is_bravo_network_name(network) for network in (networks or []))
+        bravo_show_cache[normalized_show_id] = is_bravo
+        return is_bravo
+
+    def _is_bravo_auto_replace_eligible(bucket_metadata: Mapping[str, Any]) -> bool:
+        bucket_type = str(bucket_metadata.get("bucket_type") or "").strip().lower()
+        if bucket_type in {"wwhl", "bravocon"}:
+            return True
+        request_show_id = str(show_id or "").strip() if show_id is not None else ""
+        if request_show_id and _show_id_is_bravo_family(request_show_id):
+            return True
+        resolved_show_id = str(bucket_metadata.get("resolved_show_id") or "").strip()
+        if bucket_type == "show" and resolved_show_id:
+            return _show_id_is_bravo_family(resolved_show_id)
+        return False
+
     def _build_getty_cast_photo_row(
         asset: dict[str, Any],
         *,
         asset_show_name: str | None,
         crosswalk_reason: str,
+        public_replacement: ResolvedPublicReplacement | None = None,
     ) -> dict[str, Any] | None:
         editorial_id = str(asset.get("editorial_id") or "").strip()
         preview_url = _getty_preview_url(asset)
@@ -1230,6 +1269,10 @@ def _import_nbcumv_person_media(
         if not editorial_id or not preview_url:
             return None
         width, height = _getty_dimensions(asset)
+        resolved_image_url = str(public_replacement.image_url).strip() if public_replacement else preview_url
+        resolved_page_url = str(public_replacement.page_url).strip() if public_replacement else detail_url
+        resolved_width = public_replacement.width if public_replacement and public_replacement.width else width
+        resolved_height = public_replacement.height if public_replacement and public_replacement.height else height
         people = [
             str(entry.get("text") or "").strip()
             for entry in (asset.get("people") or [])
@@ -1239,14 +1282,15 @@ def _import_nbcumv_person_media(
         people_count = _getty_people_count(asset)
         metadata: dict[str, Any] = {
             "getty": asset,
-            "getty_only_fallback": True,
-            "source_domain": "gettyimages.com",
-            "source_url": preview_url,
-            "source_page_url": detail_url,
+            "getty_only_fallback": public_replacement is None,
+            "source_domain": public_replacement.source_domain if public_replacement else "gettyimages.com",
+            "source_url": resolved_image_url,
+            "source_page_url": resolved_page_url,
+            "original_source_url": preview_url,
             "original_source_page_url": detail_url,
             "original_source_label": "Getty",
             "crosswalk_reason": crosswalk_reason,
-            "source_resolution": "getty_watermark_fallback",
+            "source_resolution": (public_replacement.mode if public_replacement else "getty_watermark_fallback"),
             "getty_details": dict(asset.get("details") or {}) if isinstance(asset.get("details"), dict) else {},
             "getty_tags": (
                 list(asset.get("keyword_texts") or []) if isinstance(asset.get("keyword_texts"), list) else []
@@ -1291,20 +1335,35 @@ def _import_nbcumv_person_media(
         date_created = str(asset.get("date_created") or "").strip()
         if date_created:
             metadata["created_at"] = date_created
+        if public_replacement:
+            metadata["original_source"] = "getty"
+            metadata["replaced_from"] = {
+                "url": public_replacement.page_url,
+                "domain": public_replacement.source_domain,
+                "image_url": public_replacement.image_url,
+                "width": public_replacement.width,
+                "height": public_replacement.height,
+                "replaced_at": datetime.now(UTC).isoformat(),
+                "mode": public_replacement.mode,
+            }
 
         return {
             "person_id": person_id,
             "source": _GETTY_SOURCE_ID,
             "source_image_id": editorial_id,
-            "url": preview_url,
-            "url_path": urlparse(preview_url).path or None,
-            "image_url": preview_url,
-            "thumb_url": str(asset.get("thumb_url") or asset.get("thumbUrl") or preview_url).strip() or preview_url,
-            "image_url_canonical": preview_url,
-            "source_page_url": detail_url,
+            "url": resolved_image_url,
+            "url_path": urlparse(resolved_image_url).path or None,
+            "image_url": resolved_image_url,
+            "thumb_url": (
+                resolved_image_url
+                if public_replacement
+                else str(asset.get("thumb_url") or asset.get("thumbUrl") or preview_url).strip() or preview_url
+            ),
+            "image_url_canonical": resolved_image_url,
+            "source_page_url": resolved_page_url,
             "caption": str(asset.get("caption") or "").strip() or None,
-            "width": width,
-            "height": height,
+            "width": resolved_width,
+            "height": resolved_height,
             "season": season_number,
             "people_names": people or None,
             "title_names": [asset_show_name] if asset_show_name else None,
@@ -1782,11 +1841,17 @@ def _import_nbcumv_person_media(
                     if not m_editorial_id or m_editorial_id in seen_editorial_ids:
                         continue
                     enriched = dict(matched_asset)
-                    enriched["event_name"] = str(event.get("event_name") or enriched.get("event_name") or "").strip() or None
+                    enriched["event_name"] = (
+                        str(event.get("event_name") or enriched.get("event_name") or "").strip() or None
+                    )
                     enriched["event_id"] = str(event.get("event_id") or enriched.get("event_id") or "").strip() or None
-                    enriched["event_url_slug"] = str(event.get("event_url_slug") or enriched.get("event_url_slug") or "").strip() or None
+                    enriched["event_url_slug"] = (
+                        str(event.get("event_url_slug") or enriched.get("event_url_slug") or "").strip() or None
+                    )
                     enriched["event_url"] = str(event.get("event_url") or "").strip() or None
-                    enriched["event_date"] = str(event.get("event_date") or enriched.get("event_date") or "").strip() or None
+                    enriched["event_date"] = (
+                        str(event.get("event_date") or enriched.get("event_date") or "").strip() or None
+                    )
                     enriched["grouped_image_count"] = event.get("grouped_image_count")
                     enriched["person_image_count"] = event.get("person_image_count")
                     enriched["source_query_scope"] = str(event.get("source_query_scope") or "").strip() or None
@@ -1859,6 +1924,24 @@ def _import_nbcumv_person_media(
             )
         if not isinstance(image, dict):
             unmatched_assets.append(_summarize_getty_asset(asset, reason="no_nbcumv_match"))
+            public_replacement = None
+            preview_url = _getty_preview_url(asset)
+            replacement_width, replacement_height = _getty_dimensions(asset)
+            if preview_url and _is_bravo_auto_replace_eligible(bucket_metadata):
+                try:
+                    public_replacement = resolve_best_public_replacement(
+                        preview_url,
+                        expected_width=replacement_width,
+                        expected_height=replacement_height,
+                        bravo_only=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Auto Getty replacement lookup failed for person_id=%s editorial_id=%s: %s",
+                        person_id,
+                        asset.get("editorial_id"),
+                        exc,
+                    )
             getty_row = _build_getty_cast_photo_row(
                 asset,
                 asset_show_name=(
@@ -1868,25 +1951,29 @@ def _import_nbcumv_person_media(
                     or None
                 ),
                 crosswalk_reason="nbcumv_unavailable" if nbcumv_access_error else "no_nbcumv_match",
+                public_replacement=public_replacement,
             )
             if getty_row is not None:
                 metadata = getty_row.get("metadata")
                 if isinstance(metadata, dict):
                     metadata["gallery_bucket"] = dict(bucket_metadata)
                     metadata.update(dict(bucket_metadata))
-                    metadata["source_resolution"] = "getty_watermark_fallback"
+                resolution = str((metadata or {}).get("source_resolution") or "").strip() or "getty_watermark_fallback"
                 if bucket_metadata.get("bucket_type") == "show" and bucket_metadata.get("resolved_show_name"):
                     getty_row["title_names"] = [str(bucket_metadata["resolved_show_name"])]
                 getty_only_rows.append(getty_row)
                 _mark_event_inventory_resolution(
                     event_inventory_by_editorial_id,
                     asset,
-                    resolution="getty_watermark_fallback",
+                    resolution=resolution,
                 )
             _emit_progress(
                 match_index,
                 match_total,
-                f"No NBCUMV match for Getty asset {match_index}/{match_total}; keeping Getty preview.",
+                (
+                    f"No NBCUMV match for Getty asset {match_index}/{match_total}; "
+                    f"{'using public Bravo replacement' if public_replacement else 'keeping Getty preview'}."
+                ),
             )
             continue
         image_show_title = str(image.get("lbx_showTitle") or "").strip()
@@ -2084,8 +2171,7 @@ def _import_nbcumv_person_media(
             "Getty complete with NBCUMV unavailable: " if nbcumv_access_error else "Getty/NBCUMV complete: "
         )
         result["summary_message"] = (
-            summary_prefix
-            + f"{int(result.get('shared_nbcumv_imported') or 0)} shared via NBCUMV, "
+            summary_prefix + f"{int(result.get('shared_nbcumv_imported') or 0)} shared via NBCUMV, "
             f"{int(result.get('nbcumv_only_imported') or 0)} NBCUMV-only, "
             f"{int(result.get('getty_only_imported') or 0)} Getty-only, "
             f"{int(result.get('skipped') or 0)} skipped, {int(result.get('failed') or 0)} failed"
@@ -2792,11 +2878,14 @@ def _resolve_runtime_person_reference_pools(
                 if isinstance(used_raw, list):
                     references = [entry for entry in used_raw if isinstance(entry, dict)]
                 if references:
-                    references = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
-                        db,
-                        person_id,
-                        used_references=references,
-                    ))
+                    references = cast(
+                        list[dict[str, Any]],
+                        sync_owner_tagging_reference_usage(
+                            db,
+                            person_id,
+                            used_references=references,
+                        ),
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Failed to resolve runtime tagging references person_id=%s error=%s",
@@ -4219,10 +4308,7 @@ def _mirror_person_media_assets(
 
     def _is_duplicate_media_asset_hash_error(exc: Exception) -> bool:
         message = str(exc)
-        return (
-            "media_assets_source_hosted_sha_uq" in message
-            or "media_assets_sha256_unique" in message
-        )
+        return "media_assets_source_hosted_sha_uq" in message or "media_assets_sha256_unique" in message
 
     rows = _fetch_person_media_link_rows(db, person_id)
     assets_by_id: dict[str, dict[str, Any]] = {}
@@ -4308,9 +4394,7 @@ def _mirror_person_media_assets(
                                     hosted_content_type=(
                                         str(_ct) if (_ct := patch.get("hosted_content_type")) is not None else None
                                     ),
-                                    hosted_etag=(
-                                        str(_et) if (_et := patch.get("hosted_etag")) is not None else None
-                                    ),
+                                    hosted_etag=(str(_et) if (_et := patch.get("hosted_etag")) is not None else None),
                                     width=int(_w) if (_w := patch.get("width")) is not None else None,
                                     height=int(_h) if (_h := patch.get("height")) is not None else None,
                                     completed_at=completed_at,
@@ -4332,15 +4416,9 @@ def _mirror_person_media_assets(
                                     hosted_url=str(patch.get("hosted_url") or ""),
                                     hosted_bytes=int(patch.get("hosted_bytes") or 0),
                                     hosted_content_type=(
-                                        str(_ct2)
-                                        if (_ct2 := patch.get("hosted_content_type")) is not None
-                                        else None
+                                        str(_ct2) if (_ct2 := patch.get("hosted_content_type")) is not None else None
                                     ),
-                                    hosted_etag=(
-                                        str(_et2)
-                                        if (_et2 := patch.get("hosted_etag")) is not None
-                                        else None
-                                    ),
+                                    hosted_etag=(str(_et2) if (_et2 := patch.get("hosted_etag")) is not None else None),
                                     width=int(_w2) if (_w2 := patch.get("width")) is not None else None,
                                     height=int(_h2) if (_h2 := patch.get("height")) is not None else None,
                                     completed_at=completed_at,
@@ -5431,10 +5509,6 @@ def _resize_person_gallery_images(
         resize_crop_succeeded,
         resize_crop_failed,
     )
-
-
-
-
 
 
 _REAL_HOUSEWIVES_SHORT_CODE_BY_LOCATION: dict[str, str] = {
@@ -8255,6 +8329,8 @@ async def refresh_person_images_stream(
             from trr_backend.integrations import nbcumv as nbcumv_integration
             from trr_backend.repositories.cast_photos import (
                 update_cast_photo_hosted_fields,
+            )
+            from trr_backend.repositories.cast_photos import (
                 upsert_cast_photos as _upsert_cast_photos,
             )
 
@@ -8292,7 +8368,9 @@ async def refresh_person_images_stream(
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "expand_event scan failed person_id=%s url=%s: %s",
-                    person_id_str, expand_event_url, exc,
+                    person_id_str,
+                    expand_event_url,
+                    exc,
                 )
                 yield error_event(
                     stage="expand_event",
@@ -8354,8 +8432,7 @@ async def refresh_person_images_stream(
                     {
                         "stage": "expand_event_crosswalk",
                         "message": (
-                            f"Crosswalking asset {idx}/{total_assets}: "
-                            f"{object_name or editorial_id or 'unknown'}"
+                            f"Crosswalking asset {idx}/{total_assets}: {object_name or editorial_id or 'unknown'}"
                         ),
                         "current": idx - 1,
                         "total": total_assets,
@@ -8373,7 +8450,8 @@ async def refresh_person_images_stream(
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "expand_event NBCUMV lookup failed for %s: %s",
-                            object_name, exc,
+                            object_name,
+                            exc,
                         )
 
                 if isinstance(nbcumv_image, dict):
@@ -8382,9 +8460,7 @@ async def refresh_person_images_stream(
                     lbx_filename = str(nbcumv_image.get("lbx_filename") or "").strip()
                     if not lbx_id or not lbx_filename:
                         expand_failed += 1
-                        expand_errors.append(
-                            f"{object_name or editorial_id}: NBCUMV match missing lbx_id or filename."
-                        )
+                        expand_errors.append(f"{object_name or editorial_id}: NBCUMV match missing lbx_id or filename.")
                         continue
                     try:
                         import_result = await asyncio.to_thread(
@@ -8395,16 +8471,9 @@ async def refresh_person_images_stream(
                                 lbx_filename=lbx_filename,
                                 location=nbcumv_image.get("location"),
                                 nbcumv_image=nbcumv_image,
-                                show_ids=[
-                                    v for v in nbcumv_image.get("showIds") or []
-                                    if isinstance(v, str)
-                                ],
-                                link_show_ids=(
-                                    [request.show_id] if request.show_id else []
-                                ),
-                                getty_detail_url=(
-                                    str(asset.get("detail_url") or "").strip() or None
-                                ),
+                                show_ids=[v for v in nbcumv_image.get("showIds") or [] if isinstance(v, str)],
+                                link_show_ids=([request.show_id] if request.show_id else []),
+                                getty_detail_url=(str(asset.get("detail_url") or "").strip() or None),
                                 gallery_bucket={
                                     "source_resolution": "nbcumv_preferred_shared",
                                     "expand_event_url": expand_event_url,
@@ -8417,7 +8486,9 @@ async def refresh_person_images_stream(
                     except Exception as exc:  # noqa: BLE001
                         logger.exception(
                             "expand_event NBCUMV import failed person_id=%s lbx_id=%s: %s",
-                            person_id_str, lbx_id, exc,
+                            person_id_str,
+                            lbx_id,
+                            exc,
                         )
                         expand_failed += 1
                         expand_errors.append(f"{lbx_filename or lbx_id}: {exc}")
@@ -8486,9 +8557,7 @@ async def refresh_person_images_stream(
                             "url": preview_url,
                             "url_path": urlparse(preview_url).path or None,
                             "image_url": preview_url,
-                            "thumb_url": str(
-                                asset.get("thumb_url") or asset.get("thumbUrl") or preview_url
-                            ).strip(),
+                            "thumb_url": str(asset.get("thumb_url") or asset.get("thumbUrl") or preview_url).strip(),
                             "image_url_canonical": preview_url,
                             "source_page_url": detail_url,
                             "caption": caption_text,
@@ -8504,8 +8573,7 @@ async def refresh_person_images_stream(
                     {
                         "stage": "expand_event_crosswalk",
                         "message": (
-                            f"Processed asset {idx}/{total_assets}: "
-                            f"{object_name or editorial_id or 'unknown'}"
+                            f"Processed asset {idx}/{total_assets}: {object_name or editorial_id or 'unknown'}"
                         ),
                         "current": idx,
                         "total": total_assets,
@@ -8516,14 +8584,15 @@ async def refresh_person_images_stream(
             if getty_only_rows:
                 try:
                     upserted = await asyncio.to_thread(
-                        _upsert_cast_photos, db, getty_only_rows, dedupe_on="source_image_id",
+                        _upsert_cast_photos,
+                        db,
+                        getty_only_rows,
+                        dedupe_on="source_image_id",
                     )
                     for upserted_row in upserted:
                         row_id = str(upserted_row.get("id") or "").strip()
                         source_image_id = str(upserted_row.get("source_image_id") or "").strip()
-                        source_row_map = {
-                            str(r.get("source_image_id") or "").strip(): r for r in getty_only_rows
-                        }
+                        source_row_map = {str(r.get("source_image_id") or "").strip(): r for r in getty_only_rows}
                         source_row = source_row_map.get(source_image_id)
                         row_preview_url = str((source_row or {}).get("url") or "").strip()
                         if row_id and row_preview_url:
@@ -8537,13 +8606,15 @@ async def refresh_person_images_stream(
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning(
                                     "expand_event: failed to set hosted fields for %s: %s",
-                                    row_id, exc,
+                                    row_id,
+                                    exc,
                                 )
                     expand_getty_only = len(upserted)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "expand_event: upsert_cast_photos failed for person_id=%s: %s",
-                        person_id_str, exc,
+                        person_id_str,
+                        exc,
                     )
                     expand_failed += len(getty_only_rows)
                     expand_errors.append(f"Getty-only upsert failed: {exc}")

@@ -38,8 +38,7 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
         == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_RUNTIME_SECRET_NAME"]
     )
     assert (
-        result["TRR_MODAL_SOCIAL_SECRET_NAME"]
-        == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_SOCIAL_SECRET_NAME"]
+        result["TRR_MODAL_SOCIAL_SECRET_NAME"] == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_SOCIAL_SECRET_NAME"]
     )
 
 

@@ -7,7 +7,6 @@ import argparse
 import json
 import mimetypes
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -37,7 +36,14 @@ def _service_headers() -> dict[str, str]:
     return headers
 
 
-def _admin_request(session: requests.Session, *, api_base: str, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+def _admin_request(
+    session: requests.Session,
+    *,
+    api_base: str,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
     response = session.request(
         method=method,
         url=f"{api_base}{path}",
@@ -69,7 +75,14 @@ def _upload_via_presigned_put(put_url: str, *, video_path: Path, content_type: s
     return {"status_code": response.status_code, "content_length": video_path.stat().st_size}
 
 
-def _wait_for_run(session: requests.Session, *, api_base: str, run_id: str, poll_seconds: float, timeout_seconds: float) -> dict[str, Any]:
+def _wait_for_run(
+    session: requests.Session,
+    *,
+    api_base: str,
+    run_id: str,
+    poll_seconds: float,
+    timeout_seconds: float,
+) -> dict[str, Any]:
     deadline = time.time() + timeout_seconds
     last_payload: dict[str, Any] | None = None
     while time.time() < deadline:
@@ -90,7 +103,13 @@ def _wait_for_run(session: requests.Session, *, api_base: str, run_id: str, poll
     raise TimeoutError(f"Timed out waiting for run {run_id}: last_status={last_payload.get('status')}")
 
 
-def _transition_review_status(session: requests.Session, *, api_base: str, run_id: str, review_status: str) -> dict[str, Any]:
+def _transition_review_status(
+    session: requests.Session,
+    *,
+    api_base: str,
+    run_id: str,
+    review_status: str,
+) -> dict[str, Any]:
     return _admin_request(
         session,
         api_base=api_base,
@@ -219,7 +238,11 @@ def _advance_to_approved(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-base-url", default=os.getenv("TRR_API_URL", ""), help="TRR API base URL. Defaults to TRR_API_URL.")
+    parser.add_argument(
+        "--api-base-url",
+        default=os.getenv("TRR_API_URL", ""),
+        help="TRR API base URL. Defaults to TRR_API_URL.",
+    )
     parser.add_argument("--owner-scope", choices=("show", "season", "episode"), required=True)
     parser.add_argument("--owner-id", required=True)
     parser.add_argument("--show-id")
@@ -240,7 +263,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     upload_parser.add_argument("--filename")
     upload_parser.add_argument("--content-type")
 
-    import_parser = subparsers.add_parser("import-run", help="Mirror a remote source into a video asset, then create a run.")
+    import_parser = subparsers.add_parser(
+        "import-run",
+        help="Mirror a remote source into a video asset, then create a run.",
+    )
     import_parser.add_argument(
         "--source-mode",
         choices=("youtube_url", "external_url", "social_youtube_row"),

@@ -70,10 +70,7 @@ def main() -> int:
     )
     print("\nSuggested Modal deploy commands:")
     print("  " + deploy_command)
-    print(
-        "  "
-        + f"python3.11 scripts/modal/verify_modal_readiness.py{verify_args} --json | jq -r '.api_web_url'"
-    )
+    print("  " + f"python3.11 scripts/modal/verify_modal_readiness.py{verify_args} --json | jq -r '.api_web_url'")
 
     print("\nCutover steps:")
     print("  1. Ensure Modal named secrets `trr-backend-runtime` and `trr-social-auth` exist.")

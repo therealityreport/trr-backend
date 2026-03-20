@@ -382,15 +382,15 @@ class YouTubeScraper:
     SHORTS_LIKE_COUNT_PATTERNS = (
         re.compile(
             r'<[^>]+\bid=(["\'])button-bar\1[^>]*>.*?<reel-action-bar-view-model\b[^>]*>.*?'
-            r'<like-button-view-model\b[^>]*>.*?<toggle-button-view-model\b[^>]*>.*?'
-            r'<button-view-model\b[^>]*>.*?<label\b[^>]*>.*?<div\b[^>]*>.*?'
-            r'<span\b[^>]*>(?P<count>[^<]+)</span>',
+            r"<like-button-view-model\b[^>]*>.*?<toggle-button-view-model\b[^>]*>.*?"
+            r"<button-view-model\b[^>]*>.*?<label\b[^>]*>.*?<div\b[^>]*>.*?"
+            r"<span\b[^>]*>(?P<count>[^<]+)</span>",
             re.IGNORECASE | re.DOTALL,
         ),
         re.compile(
-            r'<like-button-view-model\b[^>]*>.*?<toggle-button-view-model\b[^>]*>.*?'
-            r'<button-view-model\b[^>]*>.*?<label\b[^>]*>.*?<div\b[^>]*>.*?'
-            r'<span\b[^>]*>(?P<count>[^<]+)</span>',
+            r"<like-button-view-model\b[^>]*>.*?<toggle-button-view-model\b[^>]*>.*?"
+            r"<button-view-model\b[^>]*>.*?<label\b[^>]*>.*?<div\b[^>]*>.*?"
+            r"<span\b[^>]*>(?P<count>[^<]+)</span>",
             re.IGNORECASE | re.DOTALL,
         ),
     )
