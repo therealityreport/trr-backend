@@ -29,6 +29,7 @@ credit_id, episode_id
 
 ## Indexes
 
+- credit_occurrences_episode_credit_idx (non-unique): episode_id, credit_id
 - credit_occurrences_episode_id_idx (non-unique): episode_id
 - credit_occurrences_pkey (unique): credit_id, episode_id
 

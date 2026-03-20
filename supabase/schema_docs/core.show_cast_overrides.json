@@ -1,6 +1,6 @@
 {
   "schema": "core",
-  "table": "credits",
+  "table": "show_cast_overrides",
   "columns": [
     {
       "name": "id",
@@ -30,12 +30,20 @@
       "name": "credit_category",
       "data_type": "text",
       "is_nullable": "NO",
+      "default": "'Self'::text",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "friend_of",
+      "data_type": "boolean",
+      "is_nullable": "YES",
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
     },
     {
-      "name": "role",
+      "name": "role_override",
       "data_type": "text",
       "is_nullable": "YES",
       "default": null,
@@ -43,7 +51,7 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "billing_order",
+      "name": "billing_order_override",
       "data_type": "integer",
       "is_nullable": "YES",
       "default": null,
@@ -51,18 +59,18 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "source_type",
+      "name": "notes_override",
       "data_type": "text",
-      "is_nullable": "NO",
+      "is_nullable": "YES",
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
     },
     {
-      "name": "metadata",
-      "data_type": "jsonb",
-      "is_nullable": "NO",
-      "default": "'{}'::jsonb",
+      "name": "tags_override",
+      "data_type": "ARRAY",
+      "is_nullable": "YES",
+      "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
     },
@@ -88,102 +96,70 @@
   ],
   "foreign_keys": [
     {
-      "constraint": "credits_person_id_fkey",
+      "constraint": "show_cast_overrides_person_id_fkey",
       "column": "person_id",
       "references": "core.people.id"
     },
     {
-      "constraint": "credits_show_id_fkey",
+      "constraint": "show_cast_overrides_show_id_fkey",
       "column": "show_id",
       "references": "core.shows.id"
     }
   ],
-  "unique_constraints": [],
+  "unique_constraints": [
+    [
+      "show_id",
+      "person_id",
+      "credit_category"
+    ]
+  ],
   "indexes": [
     {
-      "name": "credits_person_id_idx",
+      "name": "idx_show_cast_overrides_person_id",
       "columns": [
         "person_id"
       ],
       "unique": false,
-      "definition": "CREATE INDEX credits_person_id_idx ON core.credits USING btree (person_id)"
+      "definition": "CREATE INDEX idx_show_cast_overrides_person_id ON core.show_cast_overrides USING btree (person_id)"
     },
     {
-      "name": "credits_pkey",
-      "columns": [
-        "id"
-      ],
-      "unique": true,
-      "definition": "CREATE UNIQUE INDEX credits_pkey ON core.credits USING btree (id)"
-    },
-    {
-      "name": "credits_show_id_category_idx",
-      "columns": [
-        "show_id",
-        "credit_category"
-      ],
-      "unique": false,
-      "definition": "CREATE INDEX credits_show_id_category_idx ON core.credits USING btree (show_id, credit_category)"
-    },
-    {
-      "name": "credits_show_id_idx",
+      "name": "idx_show_cast_overrides_show_id",
       "columns": [
         "show_id"
       ],
       "unique": false,
-      "definition": "CREATE INDEX credits_show_id_idx ON core.credits USING btree (show_id)"
+      "definition": "CREATE INDEX idx_show_cast_overrides_show_id ON core.show_cast_overrides USING btree (show_id)"
     },
     {
-      "name": "credits_show_person_category_idx",
+      "name": "show_cast_overrides_pkey",
+      "columns": [
+        "id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_cast_overrides_pkey ON core.show_cast_overrides USING btree (id)"
+    },
+    {
+      "name": "show_cast_overrides_show_id_person_id_credit_category_key",
       "columns": [
         "show_id",
         "person_id",
         "credit_category"
       ],
-      "unique": false,
-      "definition": "CREATE INDEX credits_show_person_category_idx ON core.credits USING btree (show_id, person_id, credit_category)"
-    },
-    {
-      "name": "credits_show_person_idx",
-      "columns": [
-        "show_id",
-        "person_id"
-      ],
-      "unique": false,
-      "definition": "CREATE INDEX credits_show_person_idx ON core.credits USING btree (show_id, person_id)"
-    },
-    {
-      "name": "credits_source_type_idx",
-      "columns": [
-        "source_type"
-      ],
-      "unique": false,
-      "definition": "CREATE INDEX credits_source_type_idx ON core.credits USING btree (source_type)"
-    },
-    {
-      "name": "credits_unique_idx",
-      "columns": [
-        "show_id",
-        "person_id",
-        "credit_category",
-        "COALESCE(role",
-        "''::text)",
-        "source_type"
-      ],
       "unique": true,
-      "definition": "CREATE UNIQUE INDEX credits_unique_idx ON core.credits USING btree (show_id, person_id, credit_category, COALESCE(role, ''::text), source_type)"
+      "definition": "CREATE UNIQUE INDEX show_cast_overrides_show_id_person_id_credit_category_key ON core.show_cast_overrides USING btree (show_id, person_id, credit_category)"
     }
   ],
-  "rls_enabled": true,
+  "rls_enabled": false,
   "example_row": {
     "id": "00000000-0000-0000-0000-000000000000",
     "show_id": "00000000-0000-0000-0000-000000000000",
     "person_id": "00000000-0000-0000-0000-000000000000",
     "credit_category": "example",
-    "role": "example",
-    "billing_order": 0,
-    "source_type": "example",
-    "metadata": {},
+    "friend_of": false,
+    "role_override": "example",
+    "billing_order_override": 0,
+    "notes_override": "example",
+    "tags_override": [],
     "created_at": "1970-01-01T00:00:00Z",
     "updated_at": "1970-01-01T00:00:00Z"
   }

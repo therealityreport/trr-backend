@@ -37,6 +37,9 @@
 | hosted_bytes | bigint | YES |  | NO | NEVER |
 | hosted_etag | text | YES |  | NO | NEVER |
 | hosted_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_at | timestamp with time zone | YES |  | NO | NEVER |
+| archived_by_firebase_uid | text | YES |  | NO | NEVER |
+| archived_reason | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -67,6 +70,7 @@ id
 - episode_images_source_image_id_idx (non-unique): source, source_image_id) WHERE (source_image_id IS NOT NULL
 - episode_images_tmdb_episode_source_file_unique (unique): tmdb_series_id, season_number, episode_number, source, file_path
 - episode_images_tmdb_series_season_episode_idx (non-unique): tmdb_series_id, season_number, episode_number
+- idx_episode_images_archived (non-unique): archived_at) WHERE (archived_at IS NOT NULL
 
 ## RLS Enabled
 
@@ -108,6 +112,9 @@ true
   "hosted_content_type": "example",
   "hosted_bytes": 0,
   "hosted_etag": "example",
-  "hosted_at": "1970-01-01T00:00:00Z"
+  "hosted_at": "1970-01-01T00:00:00Z",
+  "archived_at": "1970-01-01T00:00:00Z",
+  "archived_by_firebase_uid": "example",
+  "archived_reason": "example"
 }
 ```
