@@ -16,15 +16,15 @@
 | fetched_at | timestamp with time zone | NO | now() | NO | NEVER |
 | tmdb_id | integer | YES |  | NO | NEVER |
 | url_original | text | YES |  | NO | ALWAYS |
+| caption | text | YES |  | NO | NEVER |
 | source_image_id | text | NO |  | NO | NEVER |
+| image_type | text | YES |  | NO | NEVER |
+| position | integer | YES |  | NO | NEVER |
 | url | text | NO |  | NO | NEVER |
 | url_path | text | YES |  | NO | NEVER |
-| caption | text | YES |  | NO | NEVER |
-| position | integer | YES |  | NO | NEVER |
 | metadata | jsonb | NO | '{}'::jsonb | NO | NEVER |
-| image_type | text | YES |  | NO | NEVER |
-| created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | updated_at | timestamp with time zone | NO | now() | NO | NEVER |
+| created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | fetch_method | text | YES |  | NO | NEVER |
 | fetched_from_url | text | YES |  | NO | NEVER |
 | hosted_bucket | text | YES |  | NO | NEVER |
@@ -67,6 +67,8 @@ id
 - show_images_fetch_method_idx (non-unique): fetch_method
 - show_images_pkey (unique): id
 - show_images_show_source_source_image_id_key (unique): show_id, source, source_image_id
+- show_images_source_image_id_idx (non-unique): source, source_image_id) WHERE (source_image_id IS NOT NULL
+- show_images_source_unique (unique): show_id, source, source_image_id
 - show_images_tmdb_source_kind_file_path_key (unique): tmdb_id, source, kind, file_path
 
 ## RLS Enabled
@@ -89,15 +91,15 @@ true
   "fetched_at": "1970-01-01T00:00:00Z",
   "tmdb_id": 0,
   "url_original": "example",
+  "caption": "example",
   "source_image_id": "example",
+  "image_type": "example",
+  "position": 0,
   "url": "example",
   "url_path": "example",
-  "caption": "example",
-  "position": 0,
   "metadata": {},
-  "image_type": "example",
-  "created_at": "1970-01-01T00:00:00Z",
   "updated_at": "1970-01-01T00:00:00Z",
+  "created_at": "1970-01-01T00:00:00Z",
   "fetch_method": "example",
   "fetched_from_url": "example",
   "hosted_bucket": "example",

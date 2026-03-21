@@ -104,6 +104,7 @@ _API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1"))
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "64")))
 _SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "4")))
 _ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "1")))
+_ADMIN_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_ADMIN_OPERATION_CONCURRENCY_LIMIT", "8")))
 _DEFAULT_RUNTIME_SECRET_NAME = "trr-backend-runtime"
 _DEFAULT_SOCIAL_SECRET_NAME = "trr-social-auth"
 _LOCAL_RUNTIME_MARKERS: Final[frozenset[str]] = frozenset({"local", "dev", "development", "test"})
@@ -336,6 +337,7 @@ def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str
     retries=0,
     timeout=60 * 60,
     min_containers=_ADMIN_KEEP_WARM,
+    max_containers=_ADMIN_CONCURRENCY_LIMIT,
 )
 def run_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
     return _execute_admin_operation(operation_id, operation_type)
@@ -347,6 +349,7 @@ def run_admin_operation(operation_id: str, operation_type: str) -> dict[str, obj
     retries=0,
     timeout=60 * 60,
     min_containers=_ADMIN_KEEP_WARM,
+    max_containers=_ADMIN_CONCURRENCY_LIMIT,
 )
 def run_admin_operation_v2(operation_id: str, operation_type: str) -> dict[str, object]:
     return _execute_admin_operation(operation_id, operation_type)

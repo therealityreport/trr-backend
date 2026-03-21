@@ -195,6 +195,34 @@ def fake_repo(monkeypatch):
             next(iter(store["video_assets"])) if store["video_assets"] else lookup_id
         )
 
+    def build_candidate_cast_snapshot(
+        *, video_asset_id=None, show_id=None, season_id=None, episode_id=None, media_type=None, owner_scope=None
+    ):
+        snapshot = list_candidate_cast_snapshot(
+            video_asset_id=video_asset_id,
+            show_id=show_id,
+            season_id=season_id,
+            episode_id=episode_id,
+        )
+        return {
+            "snapshot": snapshot,
+            "candidate_scope_policy": {
+                "media_type": media_type or "episode",
+                "owner_scope": owner_scope,
+                "primary_scope": owner_scope or "show",
+                "scope_order": [owner_scope] if owner_scope else ["show"],
+                "fallback_scopes_used": [],
+                "preferred_facebank_coverage": True,
+            },
+            "cast_coverage_summary": {
+                "candidate_count": len(snapshot),
+                "approved_facebank_coverage_count": len(snapshot),
+                "fallback_scopes_used": [],
+                "warning": None,
+                "warnings": [],
+            },
+        }
+
     def create_run(payload):
         run_id = str(uuid4())
         record = {
@@ -208,6 +236,11 @@ def fake_repo(monkeypatch):
             "run_config_json": payload.get("run_config_json", {}),
             "config_hash": payload.get("config_hash"),
             "candidate_cast_snapshot_json": payload.get("candidate_cast_snapshot_json", []),
+            "candidate_scope_policy_json": payload.get("candidate_scope_policy_json", {}),
+            "cast_coverage_summary_json": payload.get("cast_coverage_summary_json", {}),
+            "dispatch_status": payload.get("dispatch_status"),
+            "dispatch_job_id": payload.get("dispatch_job_id"),
+            "dispatch_accepted_at": payload.get("dispatch_accepted_at"),
             "manifest_key": None,
             "error_message": None,
             "started_at": None,
@@ -325,6 +358,8 @@ def fake_repo(monkeypatch):
         return [
             {
                 **row,
+                "media_type": asset.get("media_type"),
+                "media_kind": asset.get("media_kind"),
                 "video_class": asset.get("video_class"),
                 "promo_subtype": asset.get("promo_subtype"),
                 "show_id": asset.get("show_id"),
@@ -359,7 +394,7 @@ def fake_repo(monkeypatch):
             if not row.get("is_current"):
                 continue
             asset = store["video_assets"].get(row["video_asset_id"], {})
-            if asset.get("show_id") != show_id or asset.get("video_class") != "episode":
+            if asset.get("show_id") != show_id or asset.get("media_type") != "episode":
                 continue
             rows.append({**row, **asset})
         return rows
@@ -370,7 +405,7 @@ def fake_repo(monkeypatch):
             if not row.get("is_current"):
                 continue
             asset = store["video_assets"].get(row["video_asset_id"], {})
-            if asset.get("season_id") != season_id or asset.get("video_class") != "episode":
+            if asset.get("season_id") != season_id or asset.get("media_type") != "episode":
                 continue
             rows.append({**row, **asset})
         return rows
@@ -432,6 +467,7 @@ def fake_repo(monkeypatch):
     monkeypatch.setattr(repo, "list_target_youtube_accounts", list_target_youtube_accounts)
     monkeypatch.setattr(repo, "get_social_youtube_video", get_social_youtube_video)
     monkeypatch.setattr(repo, "list_candidate_cast_snapshot", list_candidate_cast_snapshot)
+    monkeypatch.setattr(repo, "build_candidate_cast_snapshot", build_candidate_cast_snapshot)
     monkeypatch.setattr(repo, "create_run", create_run)
     monkeypatch.setattr(repo, "get_run", get_run)
     monkeypatch.setattr(repo, "get_run_with_video_asset", get_run_with_video_asset)
@@ -462,13 +498,14 @@ def fake_repo(monkeypatch):
     monkeypatch.setattr(
         repo,
         "list_runs_for_show",
-        lambda show_id, limit=20, video_class=None: [
+        lambda show_id, limit=20, video_class=None, media_type=None: [
             run
             for run in (
                 {**store["video_assets"].get(record["video_asset_id"], {}), **record}
                 for record in store["runs"].values()
             )
-            if not video_class or run.get("video_class") == video_class
+            if (not video_class or run.get("video_class") == video_class)
+            and (not media_type or run.get("media_type") == media_type)
         ][:limit],
     )
     monkeypatch.setattr(repo, "get_publish_version_for_run", get_publish_version_for_run)
@@ -585,12 +622,13 @@ def _service_headers():
 
 def test_upload_complete_and_run_flow():
     client = TestClient(app)
-    show_id = uuid4()
+    episode_id = uuid4()
 
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
         json={
-            "show_id": str(show_id),
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
             "filename": "episode.mp4",
             "content_type": "video/mp4",
             "expected_size_bytes": 1024,
@@ -617,6 +655,10 @@ def test_upload_complete_and_run_flow():
     payload = run_response.json()
     assert payload["dispatch_state"] == "queued"
     assert payload["run"]["run_type"] == "cast_screentime"
+    assert payload["run"]["status"] == "queued"
+    assert payload["run"]["dispatch_status"] == "queued"
+    assert payload["run"]["cast_coverage_summary_json"]["candidate_count"] == 1
+    assert payload["run"]["candidate_scope_policy_json"]["preferred_facebank_coverage"] is True
 
 
 def test_create_run_marks_dispatch_failures_failed(monkeypatch):
@@ -628,12 +670,13 @@ def test_create_run_marks_dispatch_failures_failed(monkeypatch):
     monkeypatch.setattr(screenalytics_cast_screentime, "start_run", _raise_dispatch_error)
 
     client = TestClient(app)
-    show_id = uuid4()
+    episode_id = uuid4()
 
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
         json={
-            "show_id": str(show_id),
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
             "filename": "episode.mp4",
             "content_type": "video/mp4",
             "expected_size_bytes": 1024,
@@ -680,8 +723,30 @@ def test_promo_upload_session_preserves_classification():
     assert response.status_code == 200
     body = response.json()
     assert body["owner_scope"] == "season"
+    assert body["media_type"] == "trailer"
+    assert body["media_kind"] is None
     assert body["video_class"] == "promo"
     assert body["promo_subtype"] == "trailer"
+
+
+def test_episode_media_type_requires_episode_owner_scope():
+    client = TestClient(app)
+    season_id = uuid4()
+
+    response = client.post(
+        "/api/v1/admin/cast-screentime/upload-sessions",
+        json={
+            "owner_scope": "season",
+            "owner_id": str(season_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+            "media_type": "episode",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "owner_scope=episode" in response.json()["detail"].lower()
 
 
 def test_import_youtube_trailer_asset():
@@ -701,6 +766,8 @@ def test_import_youtube_trailer_asset():
     )
     assert response.status_code == 200
     video_asset = response.json()["video_asset"]
+    assert video_asset["media_type"] == "trailer"
+    assert video_asset["media_kind"] is None
     assert video_asset["video_class"] == "promo"
     assert video_asset["promo_subtype"] == "trailer"
     assert video_asset["source_import_type"] == "youtube_url_import"
@@ -750,6 +817,8 @@ def test_import_social_youtube_row_uses_social_import_type():
     )
     assert response.status_code == 200
     video_asset = response.json()["video_asset"]
+    assert video_asset["media_type"] == "extras"
+    assert video_asset["media_kind"] == "episode_teaser"
     assert video_asset["source_import_type"] == "social_youtube_import"
     assert video_asset["promo_subtype"] == "episode_teaser"
 
@@ -787,12 +856,13 @@ def test_upload_complete_fails_when_ffprobe_rejects_upload(monkeypatch):
     )
 
     client = TestClient(app)
-    show_id = uuid4()
+    episode_id = uuid4()
 
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
         json={
-            "show_id": str(show_id),
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
             "filename": "episode.mp4",
             "content_type": "video/mp4",
             "expected_size_bytes": 1024,
@@ -810,11 +880,12 @@ def test_upload_complete_fails_when_ffprobe_rejects_upload(monkeypatch):
 
 def test_internal_finalize_and_reads():
     client = TestClient(app)
-    show_id = uuid4()
+    episode_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
         json={
-            "show_id": str(show_id),
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
             "filename": "episode.mp4",
             "content_type": "video/mp4",
             "expected_size_bytes": 1024,
@@ -875,11 +946,12 @@ def test_internal_finalize_and_reads():
 
 def test_review_status_rejects_non_success_run():
     client = TestClient(app)
-    show_id = uuid4()
+    episode_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
         json={
-            "show_id": str(show_id),
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
             "filename": "episode.mp4",
             "content_type": "video/mp4",
             "expected_size_bytes": 1024,
@@ -908,11 +980,12 @@ def test_review_status_rejects_non_success_run():
 
 def test_generate_segment_clip_persists_clip_evidence():
     client = TestClient(app)
-    show_id = uuid4()
+    episode_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
         json={
-            "show_id": str(show_id),
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
             "filename": "episode.mp4",
             "content_type": "video/mp4",
             "expected_size_bytes": 1024,
@@ -943,11 +1016,12 @@ def test_generate_segment_clip_persists_clip_evidence():
 
 def test_reconcile_stale_runs_marks_running_runs_failed():
     client = TestClient(app)
-    show_id = uuid4()
+    episode_id = uuid4()
     create_response = client.post(
         "/api/v1/admin/cast-screentime/upload-sessions",
         json={
-            "show_id": str(show_id),
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
             "filename": "episode.mp4",
             "content_type": "video/mp4",
             "expected_size_bytes": 1024,
@@ -958,7 +1032,9 @@ def test_reconcile_stale_runs_marks_running_runs_failed():
         f"/api/v1/admin/cast-screentime/upload-sessions/{upload_session_id}/complete",
         json={"upload_session_id": upload_session_id},
     )
-    video_asset_id = complete_response.json()["video_asset"]["id"]
+    video_asset = complete_response.json()["video_asset"]
+    video_asset_id = video_asset["id"]
+    show_id = video_asset["show_id"]
     run_response = client.post(
         f"/api/v1/admin/cast-screentime/video-assets/{video_asset_id}/runs",
         json={},
@@ -1170,6 +1246,8 @@ def test_suggestion_and_unknown_review_decisions_persist_for_run_context(monkeyp
     payload = state_response.json()
     assert payload["suggestion_decisions"][0]["suggestion_key"] == "suggest-person-1"
     assert payload["unknown_review_state"][0]["queue_key"] == "unknown-queue-demo"
+    assert payload["rerun_required_for_metrics"] is True
+    assert "rerun" in payload["decision_effect_summary"].lower()
 
 
 def test_publish_rejects_promo_assets():
@@ -1218,7 +1296,7 @@ def test_publish_rejects_promo_assets():
         json={"notes": {"source": "pytest"}},
     )
     assert response.status_code == 409
-    assert "independent reports" in response.json()["detail"].lower()
+    assert "only episode assets" in response.json()["detail"].lower()
 
 
 def test_list_show_runs_rejects_service_role_without_internal_secret_header(monkeypatch, no_admin_override):
@@ -1258,7 +1336,7 @@ def test_list_show_runs_allows_service_role_with_valid_internal_secret_header(mo
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
-    monkeypatch.setattr(repo, "list_runs_for_show", lambda show_id, limit=20, video_class=None: [])
+    monkeypatch.setattr(repo, "list_runs_for_show", lambda show_id, limit=20, video_class=None, media_type=None: [])
 
     client = TestClient(app)
     response = client.get(

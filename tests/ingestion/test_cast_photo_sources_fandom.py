@@ -71,6 +71,14 @@ def test_fetch_fandom_gallery_cast_photos_keeps_only_real_housewives_confessiona
                 file_page_url=None,
                 section_label="Promotional Portraits",
             ),
+            FandomGalleryImage(
+                url="https://static.wikia.nocookie.net/real-housewives/images/4/44/Lisa_Barlow_S6_Title_Card_1.jpeg",
+                thumb_url=None,
+                caption="Season 6 ( RHOSLC )",
+                source_page_url="https://real-housewives.fandom.com/wiki/Lisa_Barlow/Gallery",
+                file_page_url=None,
+                section_label="Title Cards",
+            ),
         ],
     )
 
@@ -83,6 +91,7 @@ def test_fetch_fandom_gallery_cast_photos_keeps_only_real_housewives_confessiona
         resolve_file_pages=False,
     )
 
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert {row["metadata"]["content_type"] for row in rows} == {"CONFESSIONAL", "INTRO"}
     assert {row["context_type"] for row in rows} == {"confessional", "intro"}
+    assert any((row.get("metadata") or {}).get("fandom_section_label") == "Title Cards" for row in rows)

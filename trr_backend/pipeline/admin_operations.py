@@ -470,6 +470,10 @@ def _resolve_remote_operation_producer(
         from api.routers.admin_person_images import build_person_reprocess_images_operation_producer
 
         return build_person_reprocess_images_operation_producer(request_payload=request_payload)
+    if normalized_type == "admin_bravotv_image_run":
+        from api.routers.admin_bravotv_images import build_bravotv_image_operation_producer
+
+        return build_bravotv_image_operation_producer(request_payload=request_payload)
     return None
 
 

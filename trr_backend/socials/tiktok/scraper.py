@@ -964,6 +964,167 @@ class TikTokScraper:
             user.get("avatar"),
         )
 
+    def _extract_user_detail_profile_snapshot(self, user_data: dict | None, username: str) -> dict[str, Any]:
+        if not isinstance(user_data, dict):
+            return {}
+        user_info = user_data.get("userInfo") if isinstance(user_data.get("userInfo"), dict) else {}
+        user = user_info.get("user") if isinstance(user_info.get("user"), dict) else {}
+        stats = user_info.get("stats") if isinstance(user_info.get("stats"), dict) else {}
+        resolved_username = str(
+            user.get("uniqueId")
+            or user.get("unique_id")
+            or user.get("uniqueIdModifyTime")
+            or username
+            or ""
+        ).strip()
+        if "@" in resolved_username:
+            resolved_username = resolved_username.split("@")[-1].strip()
+        profile_url = f"https://www.tiktok.com/@{resolved_username}" if resolved_username else None
+        return {
+            "username": resolved_username or username,
+            "sec_uid": str(user.get("secUid") or user.get("sec_uid") or "").strip() or None,
+            "display_name": str(user.get("nickname") or user.get("nickName") or "").strip() or None,
+            "bio": str(user.get("signature") or user.get("bio") or "").strip() or None,
+            "avatar_url": self._extract_user_detail_avatar_url(user_data),
+            "is_verified": bool(user.get("verified") or user.get("isVerified") or False),
+            "follower_count": self._safe_int_metric(
+                stats.get("followerCount") or stats.get("follower_count") or user.get("followerCount") or 0
+            ),
+            "following_count": self._safe_int_metric(
+                stats.get("followingCount") or stats.get("following_count") or user.get("followingCount") or 0
+            ),
+            "total_posts": self._safe_int_metric(
+                stats.get("videoCount")
+                or stats.get("video_count")
+                or stats.get("itemCount")
+                or stats.get("item_count")
+                or user.get("videoCount")
+                or user.get("video_count")
+                or user.get("itemCount")
+                or user.get("item_count")
+                or 0
+            ),
+            "profile_url": profile_url,
+        }
+
+    def _extract_html_profile_snapshot(self, data: dict | None, username: str) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+        default_scope = data.get("__DEFAULT_SCOPE__", {}) if isinstance(data.get("__DEFAULT_SCOPE__"), dict) else {}
+        webapp_detail = (
+            default_scope.get("webapp.user-detail", {}) if isinstance(default_scope.get("webapp.user-detail"), dict) else {}
+        )
+        user_info = webapp_detail.get("userInfo", {}) if isinstance(webapp_detail.get("userInfo"), dict) else {}
+        user = user_info.get("user", {}) if isinstance(user_info.get("user"), dict) else {}
+        stats = user_info.get("stats", {}) if isinstance(user_info.get("stats"), dict) else {}
+        item_list = user_info.get("itemList", []) if isinstance(user_info.get("itemList"), list) else []
+        user_module = data.get("UserModule", {}) if isinstance(data.get("UserModule"), dict) else {}
+        users = user_module.get("users", {}) if isinstance(user_module.get("users"), dict) else {}
+        user_fallback = users.get(username, {}) if isinstance(users.get(username), dict) else {}
+        stats_module = user_module.get("stats", {}) if isinstance(user_module.get("stats"), dict) else {}
+        stats_fallback = stats_module.get(username, {}) if isinstance(stats_module.get(username), dict) else {}
+        resolved_username = str(
+            user.get("uniqueId") or user.get("unique_id") or user_fallback.get("uniqueId") or username or ""
+        ).strip()
+        profile_url = f"https://www.tiktok.com/@{resolved_username}" if resolved_username else None
+        return {
+            "username": resolved_username or username,
+            "sec_uid": str(user.get("secUid") or user_fallback.get("secUid") or "").strip() or None,
+            "display_name": str(
+                user.get("nickname")
+                or user.get("nickName")
+                or user_fallback.get("nickname")
+                or user_fallback.get("nickName")
+                or ""
+            ).strip()
+            or None,
+            "bio": str(user.get("signature") or user.get("bio") or user_fallback.get("signature") or "").strip() or None,
+            "avatar_url": self._pick_best_avatar_url(
+                user.get("avatarLarger"),
+                user.get("avatar_larger"),
+                user.get("originalAvatarUrl"),
+                user.get("avatarMedium"),
+                user.get("avatar_medium"),
+                user.get("avatarThumb"),
+                user.get("avatar_thumb"),
+                user.get("avatar_thumb_url"),
+                user.get("avatarUrl"),
+                user.get("avatar"),
+                user_fallback.get("avatarLarger"),
+                user_fallback.get("avatar_larger"),
+                user_fallback.get("originalAvatarUrl"),
+                user_fallback.get("avatarMedium"),
+                user_fallback.get("avatar_medium"),
+                user_fallback.get("avatarThumb"),
+                user_fallback.get("avatar_thumb"),
+                user_fallback.get("avatar_thumb_url"),
+                user_fallback.get("avatarUrl"),
+                user_fallback.get("avatar"),
+            ),
+            "is_verified": bool(
+                user.get("verified") or user.get("isVerified") or user_fallback.get("verified") or False
+            ),
+            "follower_count": self._safe_int_metric(
+                stats.get("followerCount")
+                or stats.get("follower_count")
+                or stats_fallback.get("followerCount")
+                or stats_fallback.get("follower_count")
+                or 0
+            ),
+            "following_count": self._safe_int_metric(
+                stats.get("followingCount")
+                or stats.get("following_count")
+                or stats_fallback.get("followingCount")
+                or stats_fallback.get("following_count")
+                or 0
+            ),
+            "total_posts": max(
+                self._safe_int_metric(
+                    stats.get("videoCount")
+                    or stats.get("video_count")
+                    or stats.get("itemCount")
+                    or stats.get("item_count")
+                    or stats_fallback.get("videoCount")
+                    or stats_fallback.get("video_count")
+                    or stats_fallback.get("itemCount")
+                    or stats_fallback.get("item_count")
+                    or 0
+                ),
+                len(item_list),
+            ),
+            "profile_url": profile_url,
+        }
+
+    @staticmethod
+    def _merge_profile_snapshots(*snapshots: dict[str, Any]) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict):
+                continue
+            for key in ("username", "sec_uid", "display_name", "bio", "avatar_url", "profile_url"):
+                value = str(snapshot.get(key) or "").strip()
+                if value and not str(merged.get(key) or "").strip():
+                    merged[key] = value
+            for key in ("follower_count", "following_count", "total_posts"):
+                if snapshot.get(key) is None:
+                    continue
+                merged[key] = max(int(merged.get(key) or 0), max(0, int(snapshot.get(key) or 0)))
+            if snapshot.get("is_verified"):
+                merged["is_verified"] = True
+        return merged
+
+    def build_profile_snapshot(
+        self,
+        username: str,
+        *,
+        user_data: dict | None = None,
+        html_data: dict | None = None,
+    ) -> dict[str, Any]:
+        return self._merge_profile_snapshots(
+            self._extract_user_detail_profile_snapshot(user_data, username),
+            self._extract_html_profile_snapshot(html_data, username),
+        )
+
     def fetch_user_detail(self, username: str, delay: float = 2.0) -> dict | None:
         """Fetch user detail to get secUid needed for post list."""
         self._rate_limit(delay)
@@ -1066,6 +1227,8 @@ class TikTokScraper:
                 "Set SOCIAL_TIKTOK_COOKIES_JSON or TIKTOK_COOKIES_FILE env var."
             )
 
+        html_data: dict | None = None
+
         # Get user detail first to get secUid
         user_data = self.fetch_user_detail(config.username, config.delay_seconds)
         api_preflight_fail_reason = self._last_api_fail_reason
@@ -1106,7 +1269,8 @@ class TikTokScraper:
                         use_api = True  # Can try API for pagination now
 
         # Process HTML-extracted posts first
-        profile_avatar_url = self._extract_user_detail_avatar_url(user_data)
+        profile_snapshot = self.build_profile_snapshot(config.username, user_data=user_data, html_data=html_data)
+        profile_avatar_url = str(profile_snapshot.get("avatar_url") or "").strip() or None
 
         posts = []
         existing_ids: set[str] = set()
@@ -1130,6 +1294,8 @@ class TikTokScraper:
             description = str(item.get("desc") or item.get("text") or "")
             if config.matches_hashtags(description):
                 post = self._parse_post_item(item, config)
+                if not getattr(post, "author_nickname", None) and profile_snapshot.get("display_name"):
+                    post.author_nickname = str(profile_snapshot.get("display_name") or "")
                 if not getattr(post, "user_avatar_url", None) and profile_avatar_url:
                     post.user_avatar_url = profile_avatar_url
                 if post.video_id and post.video_id not in existing_ids:
@@ -1183,6 +1349,8 @@ class TikTokScraper:
                     description = str(item.get("desc") or item.get("text") or "")
                     if config.matches_hashtags(description):
                         post = self._parse_post_item(item, config)
+                        if not getattr(post, "author_nickname", None) and profile_snapshot.get("display_name"):
+                            post.author_nickname = str(profile_snapshot.get("display_name") or "")
                         if not getattr(post, "user_avatar_url", None) and profile_avatar_url:
                             post.user_avatar_url = profile_avatar_url
                         # Avoid duplicates from HTML extraction / prior pages.
@@ -1257,6 +1425,8 @@ class TikTokScraper:
             "pages_scanned": pages_scanned,
             "videos_scanned": posts_checked,
             "first_page_count": len(posts[:30]),
+            "total_posts": max(self._safe_int_metric(profile_snapshot.get("total_posts")), len(posts)),
+            "profile_snapshot": profile_snapshot,
         }
         return posts
 

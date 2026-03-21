@@ -10,8 +10,50 @@ from fastapi import APIRouter, Depends, Query
 
 from api.screenalytics_auth import require_screenalytics_service_token
 from trr_backend.db import pg
+from trr_backend.db.admin import create_supabase_admin_client
+from trr_backend.repositories.tagging_references import build_owner_facebank_initial_reference_profile
 
 router = APIRouter(prefix="/screenalytics", tags=["screenalytics"])
+
+
+def _select_initial_facebank_photos(
+    *,
+    person_id: UUID,
+    limit: int,
+    seed_only: bool,
+    show_id: UUID | None,
+    show_name: str | None,
+) -> list[dict]:
+    db = create_supabase_admin_client()
+    profile = build_owner_facebank_initial_reference_profile(
+        db,
+        str(person_id),
+        show_id=str(show_id) if show_id else None,
+        show_name=show_name,
+        max_refs=limit,
+        seed_only=seed_only,
+    )
+    rows: list[dict] = []
+    for item in profile.get("used") or []:
+        rows.append(
+            {
+                "served_url": item.get("served_url"),
+                "source_url": item.get("source_url"),
+                "hosted_url": item.get("hosted_url"),
+                "hosted_key": item.get("hosted_key"),
+                "media_asset_id": item.get("media_asset_id"),
+                "is_primary": bool(item.get("is_primary")),
+                "width": item.get("width"),
+                "height": item.get("height"),
+                "kind": item.get("kind") or "gallery",
+                "source": item.get("source"),
+                "selection_bucket": item.get("selection_bucket"),
+                "selection_reasons": item.get("selection_reasons") or [],
+                "facebank_seed": bool(item.get("facebank_seed")),
+                "rank": item.get("rank"),
+            }
+        )
+    return rows
 
 
 @router.get("/episodes/{episode_id}/cast")
@@ -53,8 +95,22 @@ def get_person_photos(
     limit: int = Query(default=200, le=500),
     offset: int = Query(default=0, ge=0),
     seed_only: bool = Query(default=False),
+    selection_profile: str | None = Query(default=None),
+    show_id: UUID | None = Query(default=None),
+    show_name: str | None = Query(default=None),
     _: None = Depends(require_screenalytics_service_token),
 ) -> list[dict]:
+    if selection_profile == "facebank_initial":
+        if offset != 0:
+            return []
+        return _select_initial_facebank_photos(
+            person_id=person_id,
+            limit=limit,
+            seed_only=seed_only,
+            show_id=show_id,
+            show_name=show_name,
+        )
+
     sql = (
         "SELECT served_url, hosted_key, is_primary, width, height, kind "
         "FROM core.v_person_images "

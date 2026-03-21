@@ -36,7 +36,6 @@
 - [core.season_source_latest](core.season_source_latest.md) ([diagram](diagrams/core.season_source_latest.mermaid.md))
 - [core.seasons](core.seasons.md) ([diagram](diagrams/core.seasons.mermaid.md))
 - [core.show_alternative_names](core.show_alternative_names.md) ([diagram](diagrams/core.show_alternative_names.mermaid.md))
-- [core.show_cast_overrides](core.show_cast_overrides.md) ([diagram](diagrams/core.show_cast_overrides.mermaid.md))
 - [core.show_cast_role_assignments](core.show_cast_role_assignments.md) ([diagram](diagrams/core.show_cast_role_assignments.mermaid.md))
 - [core.show_external_ids](core.show_external_ids.md) ([diagram](diagrams/core.show_external_ids.mermaid.md))
 - [core.show_images](core.show_images.md) ([diagram](diagrams/core.show_images.mermaid.md))

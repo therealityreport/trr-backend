@@ -37,9 +37,6 @@
 | created_at | timestamp with time zone | NO | now() | NO | NEVER |
 | fetch_method | text | YES |  | NO | NEVER |
 | fetched_from_url | text | YES |  | NO | NEVER |
-| archived_at | timestamp with time zone | YES |  | NO | NEVER |
-| archived_by_firebase_uid | text | YES |  | NO | NEVER |
-| archived_reason | text | YES |  | NO | NEVER |
 
 ## Primary Key
 
@@ -59,7 +56,6 @@ id
 - core_season_images_season_id_idx (non-unique): season_id
 - core_season_images_tmdb_series_season_idx (non-unique): tmdb_series_id, season_number
 - core_season_images_unique (unique): tmdb_series_id, season_number, source, file_path
-- idx_season_images_archived (non-unique): archived_at) WHERE (archived_at IS NOT NULL
 - season_images_fetch_method_idx (non-unique): fetch_method
 - season_images_metadata_idx (non-unique): metadata
 - season_images_pkey (unique): id
@@ -106,9 +102,6 @@ true
   "updated_at": "1970-01-01T00:00:00Z",
   "created_at": "1970-01-01T00:00:00Z",
   "fetch_method": "example",
-  "fetched_from_url": "example",
-  "archived_at": "1970-01-01T00:00:00Z",
-  "archived_by_firebase_uid": "example",
-  "archived_reason": "example"
+  "fetched_from_url": "example"
 }
 ```

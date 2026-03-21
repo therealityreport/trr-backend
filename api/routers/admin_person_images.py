@@ -20,10 +20,10 @@ import unicodedata
 from collections import Counter
 from collections.abc import AsyncGenerator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Any, Literal, TypeVar, cast
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 from uuid import UUID
 
 from fastapi import APIRouter, Body, HTTPException, Request
@@ -57,9 +57,94 @@ router = APIRouter(prefix="/admin/person", tags=["admin-person"])
 TChunk = TypeVar("TChunk")
 _GETTY_SOURCE_ID = "getty"
 _GETTY_PERSON_GALLERY_VARIANT = "person_gallery_nbcumv_crosswalk"
+_EVENT_SUBCATEGORY_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("celebrity_sightings", "Celebrity Sightings", ("celebrity sightings", "celebrities at")),
+    (
+        "premieres_red_carpet_screenings",
+        "Premieres / Red Carpet / Screenings",
+        ("premiere of", "premiere", "red carpet", "special screening", "opening night"),
+    ),
+    (
+        "press_upfront_tca_panel",
+        "Press / Upfront / TCA / Panel",
+        ("tca", "tour", "press day", "press tour", "upfront", "panel", "portraits", "press line"),
+    ),
+    (
+        "tv_radio_podcast_studio",
+        "TV / Radio / Podcast / Studio Appearances",
+        ('on "extra"', "podcast", "hollywood today live", "siriusxm", "build series", "visit", "discussing"),
+    ),
+    (
+        "awards_after_party_ceremony",
+        "Awards / After Party / Ceremony",
+        ("academy awards", "golden globe", "golden globes", "grammy", "espys", "after party"),
+    ),
+    (
+        "charity_benefit_fundraiser",
+        "Charity / Benefit / Fundraiser",
+        (
+            "benefitting",
+            "benefiting",
+            "benefit",
+            "foundation",
+            "fundraiser",
+            "auction",
+            "awareness",
+            "luncheon",
+            "guild",
+            "hospital",
+            "susan g. komen",
+            "cedars-sinai",
+            "scholarship",
+            "gala dinner",
+        ),
+    ),
+    (
+        "brand_launch_opening_social",
+        "Brand / Launch / Opening / Social Event",
+        (
+            "launch party",
+            "grand opening",
+            "pre-opening",
+            "launch",
+            "boutique",
+            "magazine",
+            "party",
+            "presents",
+            "celebrates",
+            "event hosted by",
+            "young hollywood",
+            "hot hollywood",
+            "so sexy",
+            "hollywood in bright pink",
+            "villa azur",
+            "tao",
+        ),
+    ),
+    (
+        "reality_tv_bravo_franchise",
+        "Reality TV / Bravo / Franchise Event",
+        (
+            "bravo",
+            "real housewives",
+            "ultimate girls trip",
+            "my kitchen rules",
+            "marriage boot camp",
+            "love after lockup",
+            "andy cohen",
+            "reality tv",
+            "dragcon",
+            "celebrity apprentice",
+        ),
+    ),
+    ("other_shows", "Other Shows", ("big brother",)),
+)
+_EVENT_SUBCATEGORY_LABEL_BY_KEY = {key: label for key, label, _keywords in _EVENT_SUBCATEGORY_DEFINITIONS}
+_EVENT_UNSORTED_KEY = "unsorted"
+_EVENT_UNSORTED_LABEL = "UNSORTED"
 
 # Valid sources for person images
-SourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
+SourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv", "getty"]
 ALL_SOURCES: list[SourceType] = ["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"]
 ReprocessSourceType = Literal["imdb", "tmdb", "fandom", "fandom-gallery", "getty", "nbcumv"]
 ALL_REPROCESS_SOURCES: list[ReprocessSourceType] = [
@@ -134,7 +219,10 @@ def _is_internal_raw_stream_request(request: Request | Any | None) -> bool:
 
 
 class RefreshImagesRequest(BaseModel):
-    """Request to refresh person images from sources."""
+    """Request to refresh person images from sources.
+
+    `getty` is accepted as an alias for the fused Getty/NBCUMV/Bravo refresh path.
+    """
 
     sources: list[SourceType] | None = Field(
         default=None,
@@ -531,6 +619,13 @@ def _normalize_scope_ids(values: list[str] | None) -> list[str] | None:
     return normalized
 
 
+def _build_google_reverse_image_search_url(image_url: str | None) -> str | None:
+    cleaned = str(image_url or "").strip()
+    if not cleaned:
+        return None
+    return f"https://www.google.com/searchbyimage?image_url={quote(cleaned, safe='')}"
+
+
 def _read_positive_int_env(name: str, default: int) -> int:
     raw = str(os.getenv(name) or "").strip()
     if not raw:
@@ -546,9 +641,59 @@ def _normalize_source_progress_key(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower().replace("-", "_")
     if not normalized:
         return None
-    if normalized == "nbcumv":
+    if normalized in {"nbcumv", "getty"}:
         return "getty_nbcumv"
     return normalized
+
+
+def _canonicalize_refresh_source(value: str | None) -> SourceType | None:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    if cleaned.lower() == "getty":
+        return "nbcumv"
+    return cast(SourceType, cleaned)
+
+
+def _canonicalize_refresh_sources(values: list[str] | None) -> list[SourceType]:
+    if values is None:
+        return []
+    seen: set[str] = set()
+    normalized: list[SourceType] = []
+    for value in values:
+        canonical = _canonicalize_refresh_source(value)
+        if canonical is None:
+            continue
+        dedupe_key = canonical.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized.append(canonical)
+    return normalized
+
+
+def _resolve_requested_source_labels(
+    request: RefreshImagesRequest,
+    *,
+    operational_sources: list[SourceType],
+) -> list[str]:
+    if not request.sources:
+        return list(operational_sources)
+
+    enabled_progress_keys = {
+        progress_key
+        for source in operational_sources
+        if (progress_key := _normalize_source_progress_key(source)) is not None
+    }
+    labels: list[str] = []
+    for source in request.sources:
+        label = str(source or "").strip().lower()
+        progress_key = _normalize_source_progress_key(label)
+        if not label or progress_key is None or progress_key not in enabled_progress_keys:
+            continue
+        if label not in labels:
+            labels.append(label)
+    return labels or list(operational_sources)
 
 
 def _empty_source_progress_entry() -> dict[str, Any]:
@@ -736,7 +881,7 @@ def _resolve_refresh_sources(
     db: SupabaseAdminClient,
     request: RefreshImagesRequest,
 ) -> tuple[list[SourceType], bool]:
-    requested_sources = list(request.sources or ALL_SOURCES)
+    requested_sources = _canonicalize_refresh_sources(list(request.sources or ALL_SOURCES))
     if not request.enforce_show_source_policy:
         return requested_sources, False
     return _apply_show_source_policy(db, request.show_id, requested_sources)
@@ -747,6 +892,40 @@ def _slugify_gallery_bucket_key(value: str | None) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", text)
     text = re.sub(r"-{2,}", "-", text).strip("-")
     return text
+
+
+def _normalize_event_category_text(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _resolve_event_subcategories(
+    *,
+    event_group_title: str | None,
+    title: str | None,
+    caption: str | None,
+) -> dict[str, Any]:
+    haystack = " | ".join(value for value in (event_group_title, title, caption) if value).strip()
+    normalized_haystack = _normalize_event_category_text(haystack)
+    matched_keys: list[str] = []
+    for key, _label, keywords in _EVENT_SUBCATEGORY_DEFINITIONS:
+        if any(keyword in normalized_haystack for keyword in keywords):
+            matched_keys.append(key)
+    if not matched_keys:
+        matched_keys = [_EVENT_UNSORTED_KEY]
+    matched_labels = [
+        _EVENT_SUBCATEGORY_LABEL_BY_KEY.get(key, _EVENT_UNSORTED_LABEL if key == _EVENT_UNSORTED_KEY else key)
+        for key in matched_keys
+    ]
+    primary_key = matched_keys[0]
+    primary_label = matched_labels[0]
+    return {
+        "event_subcategory_keys": matched_keys,
+        "event_subcategory_labels": matched_labels,
+        "event_primary_subcategory_key": primary_key,
+        "event_primary_subcategory_label": primary_label,
+    }
 
 
 def _extract_getty_caption_show_title(value: str | None) -> str | None:
@@ -788,6 +967,11 @@ def _resolve_gallery_bucket_metadata(
     event_group_title = str(asset.get("getty_event_group_title") or asset.get("event_name") or "").strip() or None
     title = str(asset.get("search_title") or asset.get("title") or "").strip() or None
     caption = str(asset.get("caption") or asset.get("search_caption") or "").strip() or None
+    event_subcategories = _resolve_event_subcategories(
+        event_group_title=event_group_title,
+        title=title,
+        caption=caption,
+    )
 
     resolved_show_row = resolved_asset_show if isinstance(resolved_asset_show, dict) else None
     if resolved_show_row is None:
@@ -812,6 +996,7 @@ def _resolve_gallery_bucket_metadata(
             "getty_event_group_title": event_group_title,
             "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
             "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            **event_subcategories,
         }
     if "watch what happens live" in normalized_event_text or re.search(r"\bwwhl\b", normalized_event_text):
         return {
@@ -823,6 +1008,7 @@ def _resolve_gallery_bucket_metadata(
             "getty_event_group_title": event_group_title,
             "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
             "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            **event_subcategories,
         }
     if isinstance(resolved_show_row, dict):
         resolved_show_id = str(resolved_show_row.get("id") or "").strip() or None
@@ -836,6 +1022,7 @@ def _resolve_gallery_bucket_metadata(
             "getty_event_group_title": event_group_title,
             "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
             "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            **event_subcategories,
         }
 
     event_label = event_group_title or title
@@ -849,6 +1036,7 @@ def _resolve_gallery_bucket_metadata(
             "getty_event_group_title": event_group_title,
             "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
             "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            **event_subcategories,
         }
 
     return {
@@ -860,6 +1048,10 @@ def _resolve_gallery_bucket_metadata(
         "getty_event_group_title": None,
         "getty_event_group_id": None,
         "getty_event_group_slug": None,
+        "event_subcategory_keys": [_EVENT_UNSORTED_KEY],
+        "event_subcategory_labels": [_EVENT_UNSORTED_LABEL],
+        "event_primary_subcategory_key": _EVENT_UNSORTED_KEY,
+        "event_primary_subcategory_label": _EVENT_UNSORTED_LABEL,
     }
 
 
@@ -880,10 +1072,7 @@ def _import_nbcumv_person_media(
     )
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
-    from trr_backend.repositories.cast_photos import (
-        update_cast_photo_hosted_fields,
-        upsert_cast_photos,
-    )
+    from trr_backend.repositories.cast_photos import upsert_cast_photos
 
     def _summarize_getty_asset(
         asset: dict[str, Any],
@@ -891,6 +1080,7 @@ def _import_nbcumv_person_media(
         reason: str,
         image: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        person_match = asset.get("person_match") if isinstance(asset.get("person_match"), dict) else None
         summary = {
             "detail_url": str(asset.get("detail_url") or "").strip() or None,
             "editorial_id": str(asset.get("editorial_id") or "").strip() or None,
@@ -898,11 +1088,26 @@ def _import_nbcumv_person_media(
             "title": str(asset.get("title") or "").strip() or None,
             "caption": str(asset.get("caption") or "").strip() or None,
             "reason": reason,
+            "person_match_reason": (
+                str(person_match.get("reason") or "").strip() or None if isinstance(person_match, dict) else None
+            ),
+            "person_match_name": (
+                str(person_match.get("matched_name") or "").strip() or None if isinstance(person_match, dict) else None
+            ),
+            "person_match_name_source": (
+                str(person_match.get("name_source") or "").strip() or None if isinstance(person_match, dict) else None
+            ),
+            "person_match_deny_reason": (
+                str(person_match.get("deny_reason") or "").strip() or None if isinstance(person_match, dict) else None
+            ),
         }
         if isinstance(image, dict):
             summary["nbcumv_lbx_id"] = str(image.get("lbx_id") or "").strip() or None
             summary["nbcumv_filename"] = str(image.get("lbx_filename") or "").strip() or None
             summary["nbcumv_show_title"] = str(image.get("lbx_showTitle") or "").strip() or None
+        preview_url = _getty_preview_url(asset)
+        if preview_url:
+            summary["google_image_search_url"] = _build_google_reverse_image_search_url(preview_url)
         return {key: value for key, value in summary.items() if value not in (None, "", [])}
 
     result: dict[str, Any] = {
@@ -926,6 +1131,7 @@ def _import_nbcumv_person_media(
         "getty_snapshot_saved": False,
         "getty_bravo_events": [],
         "getty_broad_events": [],
+        "getty_wwhl_events": [],
         "summary_message": None,
     }
     normalized_person_name = str(person_name or "").strip()
@@ -1201,6 +1407,10 @@ def _import_nbcumv_person_media(
             "bucket_type": bucket_metadata.get("bucket_type"),
             "bucket_key": bucket_metadata.get("bucket_key"),
             "bucket_label": bucket_metadata.get("bucket_label"),
+            "event_subcategory_keys": list(bucket_metadata.get("event_subcategory_keys") or []),
+            "event_subcategory_labels": list(bucket_metadata.get("event_subcategory_labels") or []),
+            "event_primary_subcategory_key": bucket_metadata.get("event_primary_subcategory_key"),
+            "event_primary_subcategory_label": bucket_metadata.get("event_primary_subcategory_label"),
             "representative_detail_url": detail_url,
             "representative_editorial_id": editorial_id,
             "representative_object_name": object_name,
@@ -1222,6 +1432,53 @@ def _import_nbcumv_person_media(
             return
         for entry in inventory_by_editorial_id.get(editorial_id, []):
             entry["resolution"] = resolution
+
+    def _describe_person_match(asset: dict[str, Any]) -> dict[str, Any]:
+        if not normalized_person_name:
+            return {"matched": False, "reason": None, "matched_name": None}
+        existing = asset.get("person_match")
+        if isinstance(existing, dict):
+            return existing
+        return getty_integration.describe_asset_person_match(asset, normalized_person_name)
+
+    def _load_wwhl_fallback_grouped_events() -> list[dict[str, Any]]:
+        if not _is_wwhl_show_name(resolved_show_name):
+            return []
+        air_dates = _load_person_wwhl_episode_air_dates_from_credits(db, person_id)
+        if not air_dates:
+            return []
+        fallback_events: list[dict[str, Any]] = []
+        seen_event_urls: set[str] = set()
+        safe_limit = max(1, int(limit))
+        for air_date in air_dates:
+            try:
+                target_date = datetime.strptime(air_date, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            begin_date = (target_date - timedelta(days=2)).isoformat()
+            end_date = (target_date + timedelta(days=2)).isoformat()
+            events = getty_integration.search_grouped_events(
+                "Watch What Happens Live",
+                limit=safe_limit,
+                person_name=normalized_person_name,
+                person_match_required=True,
+                full_scan_person_assets=True,
+                source_query_scope="wwhl_date_range",
+                query_params={
+                    "sort": "newest",
+                    "numberofpeople": "one,two",
+                    "begindate": begin_date,
+                    "enddate": end_date,
+                    "recency": "daterange",
+                },
+            )
+            for event in events:
+                event_url = str(event.get("event_url") or event.get("detail_url") or "").strip()
+                if not event_url or event_url in seen_event_urls:
+                    continue
+                seen_event_urls.add(event_url)
+                fallback_events.append(event)
+        return fallback_events
 
     bravo_show_cache: dict[str, bool] = {}
 
@@ -1273,11 +1530,21 @@ def _import_nbcumv_person_media(
         resolved_page_url = str(public_replacement.page_url).strip() if public_replacement else detail_url
         resolved_width = public_replacement.width if public_replacement and public_replacement.width else width
         resolved_height = public_replacement.height if public_replacement and public_replacement.height else height
-        people = [
-            str(entry.get("text") or "").strip()
-            for entry in (asset.get("people") or [])
-            if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+        match_details = _describe_person_match(asset)
+        overlay_people = [
+            str(entry).strip()
+            for entry in (asset.get("people_overlay_names") or asset.get("search_people_overlay_names") or [])
+            if isinstance(entry, str) and str(entry).strip()
         ]
+        people = (
+            overlay_people
+            if overlay_people
+            else [
+                str(entry.get("text") or "").strip()
+                for entry in (asset.get("people") or [])
+                if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+            ]
+        )
         object_name = str(asset.get("object_name") or "").strip() or None
         people_count = _getty_people_count(asset)
         metadata: dict[str, Any] = {
@@ -1289,6 +1556,7 @@ def _import_nbcumv_person_media(
             "original_source_url": preview_url,
             "original_source_page_url": detail_url,
             "original_source_label": "Getty",
+            "google_reverse_image_search_url": _build_google_reverse_image_search_url(preview_url),
             "crosswalk_reason": crosswalk_reason,
             "source_resolution": (public_replacement.mode if public_replacement else "getty_watermark_fallback"),
             "getty_details": dict(asset.get("details") or {}) if isinstance(asset.get("details"), dict) else {},
@@ -1305,6 +1573,14 @@ def _import_nbcumv_person_media(
             "person_image_count": asset.get("person_image_count"),
             "source_query_scope": str(asset.get("source_query_scope") or "").strip() or None,
         }
+        if str(match_details.get("reason") or "").strip():
+            metadata["getty_person_match_reason"] = str(match_details["reason"]).strip()
+        if str(match_details.get("deny_reason") or "").strip():
+            metadata["getty_person_match_deny_reason"] = str(match_details["deny_reason"]).strip()
+        if str(match_details.get("matched_name") or "").strip():
+            metadata["getty_person_match_name"] = str(match_details["matched_name"]).strip()
+        if str(match_details.get("name_source") or "").strip():
+            metadata["getty_person_match_name_source"] = str(match_details["name_source"]).strip()
         if object_name:
             metadata["object_name"] = object_name
         if asset_show_name:
@@ -1335,6 +1611,10 @@ def _import_nbcumv_person_media(
         date_created = str(asset.get("date_created") or "").strip()
         if date_created:
             metadata["created_at"] = date_created
+        if public_replacement is None:
+            google_image_search_url = _build_google_reverse_image_search_url(preview_url)
+            if google_image_search_url:
+                metadata["google_image_search_url"] = google_image_search_url
         if public_replacement:
             metadata["original_source"] = "getty"
             metadata["replaced_from"] = {
@@ -1476,6 +1756,10 @@ def _import_nbcumv_person_media(
         query_params={"sort": "best", "numberofpeople": "one,two"},
         source_query_scope="broad",
     )
+    wwhl_grouped_events: list[dict[str, Any]] = []
+    if _is_wwhl_show_name(resolved_show_name) and not bravo_grouped_events and not broad_grouped_events:
+        _emit_progress(0, 0, "Retrying Getty grouped events with WWHL date-range fallback...")
+        wwhl_grouped_events = _load_wwhl_fallback_grouped_events()
 
     _ensure_sources(db)
     matched_assets: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]] = []
@@ -1774,6 +2058,17 @@ def _import_nbcumv_person_media(
     if normalized_show:
         _emit_progress(0, len(getty_assets), f"Filtering {len(getty_assets)} Getty assets to '{resolved_show_name}'...")
     for asset in getty_assets:
+        person_match = _describe_person_match(asset)
+        if str(person_match.get("reason") or "").strip() == "known_exception":
+            filtered_out_assets.append(
+                _summarize_getty_asset(
+                    asset,
+                    reason=str(person_match.get("deny_reason") or "known_exception"),
+                )
+            )
+            continue
+        if person_match.get("matched"):
+            asset = {**asset, "person_match": person_match}
         resolved_asset_show = _resolve_asset_show(asset)
         resolved_asset_show_title = (
             str(resolved_asset_show.get("title") or "").strip() if isinstance(resolved_asset_show, dict) else ""
@@ -1873,6 +2168,7 @@ def _import_nbcumv_person_media(
 
     result["getty_bravo_events"] = _capture_grouped_event_inventory(bravo_grouped_events)
     result["getty_broad_events"] = _capture_grouped_event_inventory(broad_grouped_events)
+    result["getty_wwhl_events"] = _capture_grouped_event_inventory(wwhl_grouped_events)
 
     combined_assets = scoped_assets + broad_event_assets
     result["getty_candidates_total"] = len(combined_assets)
@@ -2004,10 +2300,16 @@ def _import_nbcumv_person_media(
         seen_lbx_ids.add(lbx_id)
         _mark_event_inventory_resolution(event_inventory_by_editorial_id, asset, resolution="nbcumv_matched")
         matched_bucket_metadata = dict(bucket_metadata)
+        person_match = _describe_person_match(asset)
         matched_bucket_metadata["source_resolution"] = "nbcumv_preferred_shared"
         matched_bucket_metadata["source_query_scope"] = str(asset.get("source_query_scope") or "").strip() or None
         matched_bucket_metadata["person_image_count"] = asset.get("person_image_count")
         matched_bucket_metadata["getty_date_created"] = str(asset.get("date_created") or "").strip() or None
+        matched_bucket_metadata["getty_person_match_reason"] = str(person_match.get("reason") or "").strip() or None
+        matched_bucket_metadata["getty_person_match_name"] = str(person_match.get("matched_name") or "").strip() or None
+        matched_bucket_metadata["getty_person_match_name_source"] = (
+            str(person_match.get("name_source") or "").strip() or None
+        )
         matched_assets.append((asset, image, matched_bucket_metadata, "nbcumv_preferred_shared"))
         matched_summaries.append(_summarize_getty_asset(asset, reason="matched", image=image))
         _emit_progress(match_index, match_total, f"Matched NBCUMV asset {len(matched_assets)}: {filename}")
@@ -2045,11 +2347,12 @@ def _import_nbcumv_person_media(
         "filtered_out_count": len(filtered_out_assets),
         "bravo_events": result["getty_bravo_events"],
         "broad_events": result["getty_broad_events"],
+        "wwhl_date_range_events": result["getty_wwhl_events"],
         "matched": matched_summaries,
         "unmatched": unmatched_assets,
         "filtered_out": filtered_out_assets,
     }
-    if getty_assets or bravo_grouped_events or broad_grouped_events:
+    if getty_assets or bravo_grouped_events or broad_grouped_events or wwhl_grouped_events:
         try:
             _persist_person_getty_snapshot(
                 db,
@@ -2063,6 +2366,8 @@ def _import_nbcumv_person_media(
             result["errors"].append(f"Getty snapshot persistence failed: {exc}")
 
     if getty_only_rows:
+        from trr_backend.repositories import cast_photos as cast_photos_repo
+
         editorial_ids = [
             str(row.get("source_image_id") or "").strip()
             for row in getty_only_rows
@@ -2084,7 +2389,7 @@ def _import_nbcumv_person_media(
             if not row_id or not preview_url:
                 continue
             try:
-                update_cast_photo_hosted_fields(
+                cast_photos_repo.update_cast_photo_hosted_fields(
                     db,
                     row_id,
                     {"hosted_url": preview_url, "hosted_content_type": "image/jpeg"},
@@ -5680,6 +5985,45 @@ def _load_person_wwhl_episode_imdb_ids_from_credits(
     return out
 
 
+def _load_person_wwhl_episode_air_dates_from_credits(
+    db: SupabaseAdminClient,
+    person_id: str,
+) -> list[str]:
+    imdb_ids = list(_load_person_wwhl_episode_imdb_ids_from_credits(db, person_id))
+    if not imdb_ids:
+        return []
+
+    seen_dates: set[str] = set()
+    air_dates: list[str] = []
+    for chunk in _chunked(imdb_ids, 100):
+        try:
+            response = (
+                db.schema("core")
+                .table("episodes")
+                .select("imdb_episode_id,air_date")
+                .in_("imdb_episode_id", chunk)
+                .limit(1000)
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("WWHL air-date lookup failed person_id=%s error=%s", person_id, exc)
+            continue
+        if hasattr(response, "error") and response.error:
+            logger.debug("WWHL air-date lookup error person_id=%s error=%s", person_id, response.error)
+            continue
+        for row in response.data or []:
+            if not isinstance(row, dict):
+                continue
+            air_date = str(row.get("air_date") or "").strip()
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", air_date):
+                continue
+            if air_date in seen_dates:
+                continue
+            seen_dates.add(air_date)
+            air_dates.append(air_date)
+    return sorted(air_dates)
+
+
 def _normalize_show_lookup_key(value: str | None) -> str:
     text = str(value or "").strip().lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
@@ -7553,7 +7897,8 @@ def refresh_person_images(
     """
     Refresh images for a person from external sources.
 
-    Fetches from IMDb, TMDb, Fandom; upserts to DB; mirrors to S3.
+    Fetches from IMDb, TMDb, Fandom, and the fused Getty/NBCUMV path;
+    upserts to DB; mirrors to R2-compatible object storage.
     """
     from trr_backend.ingestion.cast_photo_sources import fetch_all_cast_photos
     from trr_backend.repositories.cast_photos import upsert_cast_photos
@@ -7583,14 +7928,19 @@ def refresh_person_images(
         errors.append("Fandom sources skipped for non-Real Housewives show context.")
 
     # 1.5 Refresh person profiles (best-effort)
-    tmdb_profile_status, tmdb_profile_error_code, tmdb_profile_error_detail = _run_tmdb_profile_refresh(
-        db,
-        person_id_str,
-        tmdb_person_id=tmdb_person_id,
-    )
-    if tmdb_profile_status == "failed":
-        logger.warning("TMDb profile refresh failed for %s: %s", person_id, tmdb_profile_error_detail)
-        errors.append(f"TMDb profile [{tmdb_profile_error_code}]: {tmdb_profile_error_detail}")
+    if "tmdb" in sources:
+        tmdb_profile_status, tmdb_profile_error_code, tmdb_profile_error_detail = _run_tmdb_profile_refresh(
+            db,
+            person_id_str,
+            tmdb_person_id=tmdb_person_id,
+        )
+        if tmdb_profile_status == "failed":
+            logger.warning("TMDb profile refresh failed for %s: %s", person_id, tmdb_profile_error_detail)
+            errors.append(f"TMDb profile [{tmdb_profile_error_code}]: {tmdb_profile_error_detail}")
+    else:
+        tmdb_profile_status = "skipped"
+        tmdb_profile_error_code = "TMDB_SOURCE_NOT_REQUESTED"
+        tmdb_profile_error_detail = "TMDb profile sync skipped because TMDb was not selected."
     if "fandom" in sources or "fandom-gallery" in sources:
         try:
             _refresh_fandom_profile(db, person_id_str, person_name=person_name)
@@ -8010,7 +8360,7 @@ def refresh_person_images(
         tmdb_profile_status=tmdb_profile_status,
         tmdb_profile_error_code=tmdb_profile_error_code,
         tmdb_profile_error_detail=tmdb_profile_error_detail,
-        sources_used=list(sources),
+        sources_used=_resolve_requested_source_labels(request, operational_sources=sources),
         photos_fetched=photos_fetched_total,
         photos_upserted=photos_upserted_total,
         photos_mirrored=photos_mirrored,
@@ -8645,9 +8995,15 @@ async def refresh_person_images_stream(
         for requested_source in requested_sources:
             update_source_progress(requested_source, status="pending", message="Pending")
 
-        for filtered_source in set(requested_sources) - set(sources):
+        enabled_progress_keys = {
+            progress_key for source in sources if (progress_key := _normalize_source_progress_key(source)) is not None
+        }
+        for requested_source in requested_sources:
+            progress_key = _normalize_source_progress_key(requested_source)
+            if progress_key is None or progress_key in enabled_progress_keys:
+                continue
             update_source_progress(
-                filtered_source,
+                requested_source,
                 status="skipped",
                 remaining=0,
                 message="Skipped by source policy.",
@@ -8662,46 +9018,62 @@ async def refresh_person_images_stream(
             update_source_progress("fandom-gallery", status="skipped", remaining=0, message="No person name.")
 
         # 1.5 Refresh person profiles (best-effort)
-        if await _client_disconnected("tmdb_profile"):
-            return
-        yield progress({"stage": "tmdb_profile", "message": "Syncing TMDb profile..."})
-        tmdb_profile_status, tmdb_profile_error_code, tmdb_profile_error_detail = await asyncio.to_thread(
-            _run_tmdb_profile_refresh,
-            db,
-            person_id_str,
-            tmdb_person_id=tmdb_person_id,
-        )
-        if tmdb_profile_status == "failed":
-            errors.append(f"TMDb profile [{tmdb_profile_error_code}]: {tmdb_profile_error_detail}")
-            yield progress(
-                {
-                    "stage": "tmdb_profile",
-                    "message": f"TMDb profile sync failed ({tmdb_profile_error_code}).",
-                    "tmdb_profile_status": tmdb_profile_status,
-                    "tmdb_profile_error_code": tmdb_profile_error_code,
-                    "tmdb_profile_error_detail": tmdb_profile_error_detail,
-                    "current": 1,
-                    "total": 1,
-                }
+        if "tmdb" in sources:
+            if await _client_disconnected("tmdb_profile"):
+                return
+            yield progress({"stage": "tmdb_profile", "message": "Syncing TMDb profile..."})
+            tmdb_profile_status, tmdb_profile_error_code, tmdb_profile_error_detail = await asyncio.to_thread(
+                _run_tmdb_profile_refresh,
+                db,
+                person_id_str,
+                tmdb_person_id=tmdb_person_id,
             )
-        elif tmdb_profile_status == "skipped":
-            yield progress(
-                {
-                    "stage": "tmdb_profile",
-                    "message": "TMDb profile sync skipped.",
-                    "tmdb_profile_status": tmdb_profile_status,
-                    "tmdb_profile_error_code": tmdb_profile_error_code,
-                    "tmdb_profile_error_detail": tmdb_profile_error_detail,
-                    "current": 1,
-                    "total": 1,
-                }
-            )
+            if tmdb_profile_status == "failed":
+                errors.append(f"TMDb profile [{tmdb_profile_error_code}]: {tmdb_profile_error_detail}")
+                yield progress(
+                    {
+                        "stage": "tmdb_profile",
+                        "message": f"TMDb profile sync failed ({tmdb_profile_error_code}).",
+                        "tmdb_profile_status": tmdb_profile_status,
+                        "tmdb_profile_error_code": tmdb_profile_error_code,
+                        "tmdb_profile_error_detail": tmdb_profile_error_detail,
+                        "current": 1,
+                        "total": 1,
+                    }
+                )
+            elif tmdb_profile_status == "skipped":
+                yield progress(
+                    {
+                        "stage": "tmdb_profile",
+                        "message": "TMDb profile sync skipped.",
+                        "tmdb_profile_status": tmdb_profile_status,
+                        "tmdb_profile_error_code": tmdb_profile_error_code,
+                        "tmdb_profile_error_detail": tmdb_profile_error_detail,
+                        "current": 1,
+                        "total": 1,
+                    }
+                )
+            else:
+                yield progress(
+                    {
+                        "stage": "tmdb_profile",
+                        "message": "TMDb profile synced.",
+                        "tmdb_profile_status": tmdb_profile_status,
+                        "current": 1,
+                        "total": 1,
+                    }
+                )
         else:
+            tmdb_profile_status = "skipped"
+            tmdb_profile_error_code = "TMDB_SOURCE_NOT_REQUESTED"
+            tmdb_profile_error_detail = "TMDb profile sync skipped because TMDb was not selected."
             yield progress(
                 {
                     "stage": "tmdb_profile",
-                    "message": "TMDb profile synced.",
+                    "message": "Skipping TMDb profile (TMDb source not selected).",
                     "tmdb_profile_status": tmdb_profile_status,
+                    "tmdb_profile_error_code": tmdb_profile_error_code,
+                    "tmdb_profile_error_detail": tmdb_profile_error_detail,
                     "current": 1,
                     "total": 1,
                 }

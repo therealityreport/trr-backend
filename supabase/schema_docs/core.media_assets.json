@@ -282,16 +282,6 @@
       "definition": "CREATE INDEX idx_media_assets_archived ON core.media_assets USING btree (archived_at) WHERE (archived_at IS NOT NULL)"
     },
     {
-      "name": "idx_media_assets_id_source_hosted",
-      "columns": [
-        "id",
-        "source",
-        "hosted_url"
-      ],
-      "unique": false,
-      "definition": "CREATE INDEX idx_media_assets_id_source_hosted ON core.media_assets USING btree (id, source, hosted_url)"
-    },
-    {
       "name": "media_assets_hosted_url_idx",
       "columns": [
         "hosted_url) WHERE (hosted_url IS NOT NULL"

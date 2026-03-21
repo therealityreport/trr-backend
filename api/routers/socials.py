@@ -75,6 +75,8 @@ _ACCOUNT_PROFILE_POSTS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_POSTS_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_HASHTAGS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_COLLABORATORS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK = Lock()
 _WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST = 0
@@ -632,6 +634,7 @@ def _clear_account_profile_caches() -> None:
     _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
+    _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE, _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_COLLABORATORS_CACHE, _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK)
 
 
@@ -3383,6 +3386,43 @@ def get_social_account_profile_hashtags_route(
         raise _lookup_error_to_not_found(exc) from exc
 
 
+@router.get("/profiles/{platform}/{account_handle}/hashtags/timeline")
+def get_social_account_profile_hashtag_timeline_route(
+    platform: str,
+    account_handle: str,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_hashtag_timeline
+
+    cache_key = _account_profile_cache_key(
+        surface="hashtags_timeline",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
+        _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_hashtag_timeline(platform=platform, account_handle=account_handle)
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
+            _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
 @router.get("/profiles/{platform}/{account_handle}/catalog/review-queue")
 def get_social_account_catalog_review_queue_route(
     platform: str,
@@ -3716,6 +3756,35 @@ def get_social_account_catalog_run_progress_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to fetch social account catalog run progress: platform=%s account=%s run_id=%s",
+            platform,
+            account_handle,
+            run_id,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/catalog/verification")
+def get_social_account_catalog_verification_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID | None = None,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_verification
+
+    try:
+        return get_social_account_catalog_verification(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id) if run_id else None,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog verification: platform=%s account=%s run_id=%s",
             platform,
             account_handle,
             run_id,

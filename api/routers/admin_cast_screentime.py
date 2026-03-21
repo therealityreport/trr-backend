@@ -43,7 +43,9 @@ class UploadSessionCreateRequest(BaseModel):
     content_type: str = "video/mp4"
     expected_size_bytes: int | None = None
     expected_checksum_sha256: str | None = None
-    video_class: Literal["episode", "promo"] = "episode"
+    media_type: Literal["episode", "trailer", "extras"] | None = None
+    media_kind: str | None = None
+    video_class: Literal["episode", "promo"] | None = "episode"
     promo_subtype: Literal["trailer", "episode_teaser"] | None = None
 
 
@@ -53,7 +55,9 @@ class ImportVideoAssetRequest(BaseModel):
     social_youtube_video_id: UUID | None = None
     owner_scope: Literal["show", "season", "episode"] = "season"
     owner_id: UUID
-    video_class: Literal["episode", "promo"] = "promo"
+    media_type: Literal["episode", "trailer", "extras"] | None = None
+    media_kind: str | None = None
+    video_class: Literal["episode", "promo"] | None = "promo"
     promo_subtype: Literal["trailer", "episode_teaser"] | None = "trailer"
 
 
@@ -190,11 +194,65 @@ def _validate_upload_scope(payload: UploadSessionCreateRequest) -> None:
         )
 
 
-def _validate_video_classification(video_class: str, promo_subtype: str | None) -> None:
-    if video_class == "promo" and promo_subtype not in {"trailer", "episode_teaser"}:
-        raise HTTPException(status_code=400, detail="promo_subtype is required for promo assets")
-    if video_class != "promo" and promo_subtype:
-        raise HTTPException(status_code=400, detail="promo_subtype is only valid for promo assets")
+def _normalize_media_kind(value: Any) -> str | None:
+    candidate = str(value or "").strip()
+    return candidate or None
+
+
+def _compat_media_type_from_legacy(video_class: str | None, promo_subtype: str | None) -> tuple[str, str | None]:
+    normalized_video_class = str(video_class or "").strip().lower() or "episode"
+    normalized_promo_subtype = str(promo_subtype or "").strip().lower() or None
+    if normalized_video_class == "episode":
+        return "episode", None
+    if normalized_promo_subtype == "trailer":
+        return "trailer", None
+    if normalized_promo_subtype == "episode_teaser":
+        return "extras", "episode_teaser"
+    return "extras", None
+
+
+def _legacy_fields_for_media_type(media_type: str, media_kind: str | None) -> tuple[str, str | None]:
+    if media_type == "episode":
+        return "episode", None
+    if media_type == "trailer":
+        return "promo", "trailer"
+    if media_kind == "episode_teaser":
+        return "promo", "episode_teaser"
+    return "promo", None
+
+
+def _normalize_media_classification(
+    *,
+    media_type: str | None,
+    media_kind: str | None,
+    video_class: str | None,
+    promo_subtype: str | None,
+) -> dict[str, str | None]:
+    normalized_media_type = str(media_type or "").strip().lower() or None
+    normalized_media_kind = _normalize_media_kind(media_kind)
+    if normalized_media_type not in {"episode", "trailer", "extras"}:
+        normalized_media_type, normalized_media_kind = _compat_media_type_from_legacy(video_class, promo_subtype)
+    legacy_video_class, legacy_promo_subtype = _legacy_fields_for_media_type(
+        normalized_media_type, normalized_media_kind
+    )
+    return {
+        "media_type": normalized_media_type,
+        "media_kind": normalized_media_kind,
+        "video_class": legacy_video_class,
+        "promo_subtype": legacy_promo_subtype,
+    }
+
+
+def _validate_media_classification(
+    *,
+    media_type: str,
+    media_kind: str | None,
+    owner_scope: str,
+) -> None:
+    if media_type == "episode" and owner_scope != "episode":
+        raise HTTPException(status_code=400, detail="episode media_type requires owner_scope=episode")
+    if media_type == "episode" and media_kind:
+        raise HTTPException(status_code=400, detail="media_kind is only valid for trailer or extras assets")
 
 
 def _derive_owner_scope(show_id: str | None, season_id: str | None, episode_id: str | None) -> str | None:
@@ -224,12 +282,18 @@ def _annotate_video_asset_row(row: dict[str, Any] | None) -> dict[str, Any]:
     show_id = str(payload.get("show_id") or "").strip() or None
     season_id = str(payload.get("season_id") or "").strip() or None
     episode_id = str(payload.get("episode_id") or "").strip() or None
-    video_class = str(payload.get("video_class") or "episode")
+    media = _normalize_media_classification(
+        media_type=str(payload.get("media_type") or "").strip() or None,
+        media_kind=str(payload.get("media_kind") or "").strip() or None,
+        video_class=str(payload.get("video_class") or "").strip() or None,
+        promo_subtype=str(payload.get("promo_subtype") or "").strip() or None,
+    )
     payload["owner_scope"] = _derive_owner_scope(show_id, season_id, episode_id)
     payload["owner_id"] = episode_id or season_id or show_id
-    payload["is_publishable"] = video_class != "promo"
-    if video_class == "promo":
-        payload["publish_block_reason"] = "promo_assets_are_not_publishable"
+    payload.update(media)
+    payload["is_publishable"] = media["media_type"] == "episode"
+    if media["media_type"] != "episode":
+        payload["publish_block_reason"] = "non_episode_assets_are_not_publishable"
     else:
         payload["publish_block_reason"] = None
     return payload
@@ -903,8 +967,12 @@ def _promote_session_to_video_asset(
         )
         or "season"
     )
-    video_class = str(session.get("video_class") or "episode")
-    promo_subtype = str(session.get("promo_subtype") or "").strip() or None
+    media = _normalize_media_classification(
+        media_type=str(session.get("media_type") or "").strip() or None,
+        media_kind=str(session.get("media_kind") or "").strip() or None,
+        video_class=str(session.get("video_class") or "").strip() or None,
+        promo_subtype=str(session.get("promo_subtype") or "").strip() or None,
+    )
     source_import_type = str(session.get("source_import_type") or "upload")
 
     source_json = {
@@ -924,10 +992,13 @@ def _promote_session_to_video_asset(
         "ingest_type": ingest_type,
         "video_probe": probe,
         "owner_scope": owner_scope,
-        "is_publishable": video_class != "promo",
+        "is_publishable": media["media_type"] == "episode",
+        "media_type": media["media_type"],
     }
-    if promo_subtype:
-        metadata["promo_subtype"] = promo_subtype
+    if media["media_kind"]:
+        metadata["media_kind"] = media["media_kind"]
+    if media["promo_subtype"]:
+        metadata["promo_subtype"] = media["promo_subtype"]
 
     video_asset = cast_screentime.create_video_asset(
         {
@@ -939,8 +1010,10 @@ def _promote_session_to_video_asset(
             "source_json": source_json,
             "duration_seconds": probe.get("duration_seconds"),
             "metadata": metadata,
-            "video_class": video_class,
-            "promo_subtype": promo_subtype,
+            "video_class": media["video_class"],
+            "promo_subtype": media["promo_subtype"],
+            "media_type": media["media_type"],
+            "media_kind": media["media_kind"],
             "source_import_type": source_import_type,
         }
     )
@@ -962,9 +1035,15 @@ def _default_run_config(video_asset: dict[str, Any]) -> dict[str, Any]:
     source_json = video_asset.get("source_json")
     if not isinstance(source_json, dict):
         source_json = {}
+    media_type = str(video_asset.get("media_type") or "").strip().lower() or "episode"
+    media_kind = _normalize_media_kind(video_asset.get("media_kind"))
+    title_card_auto_exclude = media_type in {"episode", "trailer"}
+    flashback_auto_exclude = media_type == "episode"
     return {
         "run_type": "cast_screentime",
         "pipeline_version": "cast_screentime_v1",
+        "media_type": media_type,
+        "media_kind": media_kind,
         "recognition_backend": "arcface_r100",
         "distance_metric": "cosine",
         "sampling_strategy": {
@@ -973,13 +1052,26 @@ def _default_run_config(video_asset: dict[str, Any]) -> dict[str, Any]:
             "frame_stride": 3,
         },
         "excluded_section_types": [
-            "intro_song",
-            "previously_on",
-            "coming_up",
-            "next_time_on",
-            "title_card",
-            "black_screen",
+            section
+            for section in [
+                "black_screen",
+                "title_card" if title_card_auto_exclude else None,
+                "flashback" if flashback_auto_exclude else None,
+            ]
+            if section
         ],
+        "exclusion_policy": {
+            "black_screen": {"auto_exclude": True},
+            "title_card": {
+                "detect": True,
+                "auto_exclude": title_card_auto_exclude,
+                "reference_match_min_confidence": 0.97 if media_type == "trailer" else 0.0,
+            },
+            "flashback": {
+                "detect": True,
+                "auto_exclude": flashback_auto_exclude,
+            },
+        },
         "confidence_thresholds": {
             "frontal_auto_assign": 0.90,
             "side_profile_auto_assign": 0.95,
@@ -991,6 +1083,9 @@ def _default_run_config(video_asset: dict[str, Any]) -> dict[str, Any]:
         "effective_runtime_policy": "exclude_marked_sections",
         "localization_mode": "download_full_local",
         "source_object_key": source_json.get("object_key"),
+        "suggestion_review_policy": {
+            "accepted_decisions_require_rerun_for_official_metrics": True,
+        },
     }
 
 
@@ -1058,13 +1153,23 @@ def create_upload_session(
     admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     _validate_upload_scope(request)
-    _validate_video_classification(request.video_class, request.promo_subtype)
     owner_context = _resolve_owner_context_from_request(
         owner_scope=request.owner_scope,
         owner_id=request.owner_id,
         show_id=request.show_id,
         season_id=request.season_id,
         episode_id=request.episode_id,
+    )
+    media = _normalize_media_classification(
+        media_type=request.media_type,
+        media_kind=request.media_kind,
+        video_class=request.video_class,
+        promo_subtype=request.promo_subtype,
+    )
+    _validate_media_classification(
+        media_type=str(media["media_type"] or "episode"),
+        media_kind=media["media_kind"],
+        owner_scope=str(owner_context.get("owner_scope") or request.owner_scope or "season"),
     )
     upload_session_id = str(uuid4())
     temp_object_key = _temp_upload_key(upload_session_id, request.filename)
@@ -1086,8 +1191,10 @@ def create_upload_session(
                 "owner_id": owner_context.get("owner_id"),
             },
             "expires_at": expires_at.isoformat(),
-            "video_class": request.video_class,
-            "promo_subtype": request.promo_subtype,
+            "video_class": media["video_class"],
+            "promo_subtype": media["promo_subtype"],
+            "media_type": media["media_type"],
+            "media_kind": media["media_kind"],
             "source_import_type": "upload",
             "owner_scope": owner_context.get("owner_scope"),
         }
@@ -1106,8 +1213,10 @@ def create_upload_session(
         "expires_at": expires_at.isoformat(),
         "owner_scope": owner_context.get("owner_scope"),
         "owner_id": owner_context.get("owner_id"),
-        "video_class": request.video_class,
-        "promo_subtype": request.promo_subtype,
+        "media_type": media["media_type"],
+        "media_kind": media["media_kind"],
+        "video_class": media["video_class"],
+        "promo_subtype": media["promo_subtype"],
     }
 
 
@@ -1148,13 +1257,23 @@ def import_video_asset(
     request: ImportVideoAssetRequest,
     admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
-    _validate_video_classification(request.video_class, request.promo_subtype)
     owner_context = _resolve_owner_context_from_request(
         owner_scope=request.owner_scope,
         owner_id=request.owner_id,
         show_id=None,
         season_id=None,
         episode_id=None,
+    )
+    media = _normalize_media_classification(
+        media_type=request.media_type,
+        media_kind=request.media_kind,
+        video_class=request.video_class,
+        promo_subtype=request.promo_subtype,
+    )
+    _validate_media_classification(
+        media_type=str(media["media_type"] or "episode"),
+        media_kind=media["media_kind"],
+        owner_scope=str(owner_context.get("owner_scope") or request.owner_scope or "season"),
     )
     upload_session_id = UUID(str(uuid4()))
     temp_object_key = _temp_upload_key(str(upload_session_id), "import.mp4")
@@ -1175,8 +1294,10 @@ def import_video_asset(
                 "source_mode": request.source_mode,
             },
             "expires_at": expires_at.isoformat(),
-            "video_class": request.video_class,
-            "promo_subtype": request.promo_subtype,
+            "video_class": media["video_class"],
+            "promo_subtype": media["promo_subtype"],
+            "media_type": media["media_type"],
+            "media_kind": media["media_kind"],
             "source_import_type": {
                 "youtube_url": "youtube_url_import",
                 "social_youtube_row": "social_youtube_import",
@@ -1382,12 +1503,17 @@ def create_run(
     if not isinstance(source_json, dict) or not source_json.get("object_key"):
         raise HTTPException(status_code=409, detail="Video asset does not have a verified source object key")
 
-    snapshot = cast_screentime.list_candidate_cast_snapshot(
+    annotated_asset = _annotate_video_asset_row(video_asset)
+    snapshot_bundle = cast_screentime.build_candidate_cast_snapshot(
         video_asset_id=str(video_asset_id),
         show_id=str(video_asset.get("show_id") or "") or None,
         season_id=str(video_asset.get("season_id") or "") or None,
         episode_id=str(video_asset.get("episode_id") or "") or None,
+        media_type=str(annotated_asset.get("media_type") or "") or None,
+        owner_scope=str(annotated_asset.get("owner_scope") or "") or None,
     )
+    run_config["candidate_scope_policy"] = snapshot_bundle.get("candidate_scope_policy") or {}
+    run_config["cast_coverage_summary"] = snapshot_bundle.get("cast_coverage_summary") or {}
     run = cast_screentime.create_run(
         {
             "video_asset_id": str(video_asset_id),
@@ -1398,7 +1524,9 @@ def create_run(
             "review_status": "draft",
             "run_config_json": run_config,
             "config_hash": _compute_config_hash(run_config),
-            "candidate_cast_snapshot_json": snapshot,
+            "candidate_cast_snapshot_json": snapshot_bundle.get("snapshot") or [],
+            "candidate_scope_policy_json": snapshot_bundle.get("candidate_scope_policy") or {},
+            "cast_coverage_summary_json": snapshot_bundle.get("cast_coverage_summary") or {},
         }
     )
 
@@ -1406,12 +1534,22 @@ def create_run(
     dispatch_result: dict[str, Any] | None = None
     try:
         dispatch_result = screenalytics_cast_screentime.start_run(str(run["id"]))
+        cast_screentime.update_run(
+            str(run["id"]),
+            {
+                "status": "queued",
+                "dispatch_status": str(dispatch_result.get("state") or "queued"),
+                "dispatch_job_id": str(dispatch_result.get("job_id") or "").strip() or None,
+                "dispatch_accepted_at": datetime.now(UTC).isoformat(),
+            },
+        )
     except screenalytics_cast_screentime.ScreenalyticsCastScreentimeClientError as exc:
         dispatch_state = "dispatch_failed"
         cast_screentime.update_run(
             str(run["id"]),
             {
                 "status": "failed",
+                "dispatch_status": "dispatch_failed",
                 "error_message": str(exc),
                 "completed_at": datetime.now(UTC).isoformat(),
             },
@@ -1536,9 +1674,9 @@ def publish_run(
     admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
-    video_class = str(run.get("video_class") or "episode")
-    if video_class != "episode":
-        raise HTTPException(status_code=409, detail="Promo/test assets are independent reports and cannot be published")
+    media_type = str(_annotate_run_row(run).get("media_type") or "episode")
+    if media_type != "episode":
+        raise HTTPException(status_code=409, detail="Only episode assets can be published into canonical rollups")
     if str(run.get("status") or "") != "success":
         raise HTTPException(status_code=409, detail="Only successful runs can be published")
     if str(run.get("review_status") or "draft") != "approved":
@@ -1597,9 +1735,13 @@ def get_publish_history(video_asset_id: UUID, _: CastScreentimeAdminUser) -> dic
     video_asset = cast_screentime.get_video_asset(str(video_asset_id))
     if not video_asset:
         raise HTTPException(status_code=404, detail="Video asset not found")
+    annotated = _annotate_video_asset_row(video_asset)
     return {
         "video_asset_id": str(video_asset_id),
-        "video_class": str(video_asset.get("video_class") or "episode"),
+        "media_type": annotated.get("media_type"),
+        "media_kind": annotated.get("media_kind"),
+        "video_class": annotated.get("video_class"),
+        "promo_subtype": annotated.get("promo_subtype"),
         "publish_history": cast_screentime.list_publish_versions(str(video_asset_id)),
     }
 
@@ -1609,9 +1751,15 @@ def list_show_runs(
     show_id: UUID,
     _: CastScreentimeAdminUser,
     limit: int = Query(default=20, ge=1, le=100),
+    media_type: Literal["episode", "trailer", "extras"] | None = Query(default=None),
     video_class: Literal["episode", "promo"] | None = Query(default=None),
 ) -> dict[str, Any]:
-    rows = cast_screentime.list_runs_for_show(str(show_id), limit=limit, video_class=video_class)
+    rows = cast_screentime.list_runs_for_show(
+        str(show_id),
+        limit=limit,
+        video_class=video_class,
+        media_type=media_type,
+    )
     return {"show_id": str(show_id), "runs": [_annotate_run_row(row) for row in rows]}
 
 
@@ -1647,8 +1795,14 @@ def get_decision_state(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, An
     show_id = str(run.get("show_id") or "").strip()
     if not show_id:
         raise HTTPException(status_code=409, detail="Run does not have a show scope")
+    decision_effect_summary = (
+        "Accepted suggestions and unknown-review decisions only affect future reruns; "
+        "they do not retroactively rewrite this run's official named metrics."
+    )
     return {
         "run_id": str(run_id),
+        "rerun_required_for_metrics": True,
+        "decision_effect_summary": decision_effect_summary,
         "suggestion_decisions": cast_screentime.list_suggestion_decisions_for_context(
             show_id=show_id,
             season_id=str(run.get("season_id") or "") or None,
@@ -1704,7 +1858,16 @@ def set_suggestion_decision(
             "decided_by": str(admin_user.get("id") or ""),
         }
     )
-    return {"run_id": str(run_id), "decision": row}
+    decision_effect_summary = (
+        "Decision stored for future eligibility only; rerun required for official metrics "
+        "to change."
+    )
+    return {
+        "run_id": str(run_id),
+        "decision": row,
+        "rerun_required_for_metrics": True,
+        "decision_effect_summary": decision_effect_summary,
+    }
 
 
 @router.post("/admin/cast-screentime/runs/{run_id}/unknown-review/{queue_key}/decision")
@@ -1745,7 +1908,16 @@ def set_unknown_review_decision(
             "decided_by": str(admin_user.get("id") or ""),
         }
     )
-    return {"run_id": str(run_id), "decision": row}
+    decision_effect_summary = (
+        "Decision stored for future eligibility only; rerun required for official metrics "
+        "to change."
+    )
+    return {
+        "run_id": str(run_id),
+        "decision": row,
+        "rerun_required_for_metrics": True,
+        "decision_effect_summary": decision_effect_summary,
+    }
 
 
 @router.post("/admin/cast-screentime/runs/reconcile-stale")
@@ -1793,6 +1965,7 @@ def update_status(
         "error_message": request.error_message,
         "manifest_key": request.manifest_key,
         "worker_heartbeat_at": datetime.now(UTC).isoformat(),
+        "dispatch_status": request.status,
     }
     now = datetime.now(UTC).isoformat()
     if request.status == "running" and not run.get("started_at"):
@@ -1883,6 +2056,7 @@ def finalize_run(
         "effective_runtime_seconds": request.effective_runtime_seconds,
         "worker_heartbeat_at": datetime.now(UTC).isoformat(),
         "completed_at": datetime.now(UTC).isoformat(),
+        "dispatch_status": request.status,
     }
     if request.status == "success":
         payload["review_status"] = request.review_status or "ready_for_review"

@@ -44,8 +44,11 @@ def create_media_upload_session(payload: dict[str, Any]) -> dict[str, Any]:
         "INSERT INTO screenalytics.media_upload_sessions "
         "(id, show_id, season_id, episode_id, created_by, status, temp_object_key, content_type, "
         " expected_size_bytes, expected_checksum_sha256, verification_json, expires_at, "
-        " video_class, promo_subtype, source_import_type, owner_scope) "
-        "VALUES (COALESCE(%s::uuid, gen_random_uuid()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        " video_class, promo_subtype, media_type, media_kind, source_import_type, owner_scope) "
+        "VALUES ("
+        "COALESCE(%s::uuid, gen_random_uuid()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+        "%s, %s, %s, %s, %s, %s"
+        ") "
         "RETURNING *"
     )
     rows = pg.execute_returning(
@@ -65,6 +68,8 @@ def create_media_upload_session(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("expires_at"),
             payload.get("video_class", "episode"),
             payload.get("promo_subtype"),
+            payload.get("media_type", "episode"),
+            payload.get("media_kind"),
             payload.get("source_import_type", "upload"),
             payload.get("owner_scope", "season"),
         ],
@@ -98,8 +103,8 @@ def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
         "INSERT INTO screenalytics.video_assets "
         "(id, episode_id, season_id, show_id, media_asset_id, source_url, source_json, duration_seconds, metadata, "
-        " video_class, promo_subtype, source_import_type) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        " video_class, promo_subtype, media_type, media_kind, source_import_type) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "RETURNING *"
     )
     rows = pg.execute_returning(
@@ -116,6 +121,8 @@ def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
             _json(payload.get("metadata", {})),
             payload.get("video_class", "episode"),
             payload.get("promo_subtype"),
+            payload.get("media_type", "episode"),
+            payload.get("media_kind"),
             payload.get("source_import_type", "upload"),
         ],
     )
@@ -378,6 +385,233 @@ def list_candidate_cast_snapshot(
             """,
             [show_id],
         )
+    return []
+
+
+def _fetch_episode_cast_rows(episode_id: str) -> list[dict[str, Any]]:
+    try:
+        return pg.fetch_all(
+            """
+            SELECT
+              v.person_id::text AS person_id,
+              p.full_name AS display_name,
+              'trr_episode_credits'::text AS source,
+              1.0::float AS confidence,
+              v.credit_category,
+              v.billing_order,
+              v.role
+            FROM core.v_episode_cast v
+            JOIN core.people p ON p.id = v.person_id
+            WHERE v.episode_id = %s::uuid
+            ORDER BY v.billing_order NULLS LAST, p.full_name ASC
+            """,
+            [episode_id],
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def _fetch_season_cast_rows(season_id: str) -> list[dict[str, Any]]:
+    try:
+        return pg.fetch_all(
+            """
+            WITH season_totals AS (
+              SELECT COUNT(*)::float AS total_episodes
+              FROM core.episodes
+              WHERE season_id = %s::uuid
+            )
+            SELECT
+              v.person_id::text AS person_id,
+              p.full_name AS display_name,
+              'trr_season_credits'::text AS source,
+              CASE
+                WHEN st.total_episodes > 0
+                  THEN LEAST(1.0, GREATEST(0.0, v.episodes_in_season::float / st.total_episodes))
+                ELSE 1.0
+              END AS confidence,
+              NULL::text AS credit_category,
+              NULL::int AS billing_order,
+              NULL::text AS role
+            FROM core.v_season_cast v
+            CROSS JOIN season_totals st
+            JOIN core.people p ON p.id = v.person_id
+            WHERE v.season_id = %s::uuid
+            ORDER BY v.episodes_in_season DESC, p.full_name ASC
+            """,
+            [season_id, season_id],
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def _fetch_show_cast_rows(show_id: str) -> list[dict[str, Any]]:
+    return pg.fetch_all(
+        """
+        SELECT
+          sc.person_id::text AS person_id,
+          p.full_name AS display_name,
+          'trr_show_credits'::text AS source,
+          1.0::float AS confidence,
+          sc.credit_category,
+          sc.billing_order,
+          sc.role
+        FROM core.v_show_cast sc
+        JOIN core.people p ON p.id = sc.person_id
+        WHERE sc.show_id = %s::uuid
+        ORDER BY sc.billing_order NULLS LAST, p.full_name ASC
+        """,
+        [show_id],
+    )
+
+
+def _approved_facebank_person_ids(person_ids: list[str]) -> set[str]:
+    normalized = [person_id for person_id in person_ids if person_id]
+    if not normalized:
+        return set()
+    rows = pg.fetch_all(
+        """
+        SELECT DISTINCT person_id::text AS person_id
+        FROM screenalytics.face_bank_images
+        WHERE approved = true
+          AND person_id::text = ANY(%s)
+        """,
+        [normalized],
+    )
+    return {
+        str(row.get("person_id") or "").strip()
+        for row in rows
+        if isinstance(row, dict) and str(row.get("person_id") or "").strip()
+    }
+
+
+def _scope_order(*, media_type: str | None, owner_scope: str | None) -> list[str]:
+    normalized_media_type = str(media_type or "").strip().lower() or "episode"
+    normalized_owner_scope = str(owner_scope or "").strip().lower()
+    if normalized_media_type == "episode":
+        return ["episode", "season", "show"]
+    if normalized_owner_scope == "episode":
+        return ["episode", "season", "show"]
+    if normalized_owner_scope == "season":
+        return ["season", "show"]
+    return ["show"]
+
+
+def _sort_scope_rows_with_coverage(rows: list[dict[str, Any]], approved_person_ids: set[str]) -> list[dict[str, Any]]:
+    def _sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        person_id = str(row.get("person_id") or "").strip()
+        billing_order = row.get("billing_order")
+        confidence = row.get("confidence")
+        display_name = str(row.get("display_name") or "").strip().lower()
+        try:
+            billing_value = int(billing_order) if billing_order is not None else 999999
+        except (TypeError, ValueError):
+            billing_value = 999999
+        try:
+            confidence_value = float(confidence) if confidence is not None else 0.0
+        except (TypeError, ValueError):
+            confidence_value = 0.0
+        return (
+            0 if person_id in approved_person_ids else 1,
+            billing_value,
+            -confidence_value,
+            display_name,
+        )
+
+    return sorted(rows, key=_sort_key)
+
+
+def build_candidate_cast_snapshot(
+    *,
+    video_asset_id: str | None = None,
+    show_id: str | None = None,
+    season_id: str | None = None,
+    episode_id: str | None = None,
+    media_type: str | None = None,
+    owner_scope: str | None = None,
+) -> dict[str, Any]:
+    direct_rows = list_video_asset_cast_candidates(video_asset_id) if video_asset_id else []
+    scope_order = _scope_order(media_type=media_type, owner_scope=owner_scope)
+    scope_rows: dict[str, list[dict[str, Any]]] = {
+        "episode": _fetch_episode_cast_rows(episode_id) if episode_id and "episode" in scope_order else [],
+        "season": _fetch_season_cast_rows(season_id) if season_id and "season" in scope_order else [],
+        "show": _fetch_show_cast_rows(show_id) if show_id and "show" in scope_order else [],
+    }
+
+    snapshot: list[dict[str, Any]] = []
+    seen_person_ids: set[str] = set()
+    fallback_scopes_used: list[str] = []
+
+    def _append_rows(rows: list[dict[str, Any]], *, mark_scope: str | None = None) -> None:
+        for row in rows:
+            person_id = str(row.get("person_id") or "").strip()
+            if not person_id or person_id in seen_person_ids:
+                continue
+            snapshot.append(row)
+            seen_person_ids.add(person_id)
+            if mark_scope and mark_scope not in fallback_scopes_used:
+                fallback_scopes_used.append(mark_scope)
+
+    if direct_rows:
+        _append_rows(direct_rows)
+
+    approved_person_ids = _approved_facebank_person_ids(
+        [
+            str(row.get("person_id") or "").strip()
+            for row in [*direct_rows, *scope_rows["episode"], *scope_rows["season"], *scope_rows["show"]]
+        ]
+    )
+
+    primary_scope = next(
+        (scope for scope in scope_order if scope_rows.get(scope)), scope_order[0] if scope_order else "show"
+    )
+    primary_rows = _sort_scope_rows_with_coverage(scope_rows.get(primary_scope, []), approved_person_ids)
+    _append_rows(primary_rows)
+
+    approved_count = len({person_id for person_id in seen_person_ids if person_id in approved_person_ids})
+    needs_fallback = not seen_person_ids or approved_count == 0
+    if primary_scope == "episode" and len(seen_person_ids) < 2:
+        needs_fallback = True
+
+    if needs_fallback:
+        for scope in scope_order:
+            if scope == primary_scope:
+                continue
+            rows = _sort_scope_rows_with_coverage(scope_rows.get(scope, []), approved_person_ids)
+            before_count = len(seen_person_ids)
+            _append_rows(rows, mark_scope=scope)
+            if len(seen_person_ids) > before_count:
+                approved_count = len({person_id for person_id in seen_person_ids if person_id in approved_person_ids})
+            if len(seen_person_ids) >= 4 and approved_count >= 1:
+                break
+
+    warnings: list[str] = []
+    if not seen_person_ids:
+        warnings.append("no_candidate_cast_rows_found")
+    if approved_count == 0:
+        warnings.append("no_approved_facebank_coverage")
+    if primary_scope == "episode" and fallback_scopes_used:
+        warnings.append("episode_scope_required_fallback")
+    if len(seen_person_ids) < 2:
+        warnings.append("sparse_candidate_cast")
+
+    return {
+        "snapshot": snapshot,
+        "candidate_scope_policy": {
+            "media_type": str(media_type or "").strip().lower() or "episode",
+            "owner_scope": str(owner_scope or "").strip().lower() or None,
+            "primary_scope": primary_scope,
+            "scope_order": scope_order,
+            "fallback_scopes_used": fallback_scopes_used,
+            "preferred_facebank_coverage": True,
+        },
+        "cast_coverage_summary": {
+            "candidate_count": len(snapshot),
+            "approved_facebank_coverage_count": approved_count,
+            "fallback_scopes_used": fallback_scopes_used,
+            "warning": warnings[0] if warnings else None,
+            "warnings": warnings,
+        },
+    }
 
     return []
 
@@ -386,8 +620,10 @@ def create_run(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
         "INSERT INTO screenalytics.runs_v2 "
         "(video_asset_id, status, run_type, pipeline_version, execution_backend, review_status, "
-        " run_config_json, config_hash, candidate_cast_snapshot_json) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        " run_config_json, config_hash, candidate_cast_snapshot_json, candidate_scope_policy_json, "
+        " cast_coverage_summary_json, "
+        " dispatch_status, dispatch_job_id, dispatch_accepted_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "RETURNING *"
     )
     rows = pg.execute_returning(
@@ -402,6 +638,11 @@ def create_run(payload: dict[str, Any]) -> dict[str, Any]:
             _json(payload.get("run_config_json", {})),
             payload.get("config_hash"),
             _json(payload.get("candidate_cast_snapshot_json", [])),
+            _json(payload.get("candidate_scope_policy_json", {})),
+            _json(payload.get("cast_coverage_summary_json", {})),
+            payload.get("dispatch_status"),
+            payload.get("dispatch_job_id"),
+            payload.get("dispatch_accepted_at"),
         ],
     )
     return rows[0] if rows else {}
@@ -425,6 +666,8 @@ def get_run_with_video_asset(run_id: str) -> dict[str, Any] | None:
           va.duration_seconds,
           va.video_class,
           va.promo_subtype,
+          va.media_type,
+          va.media_kind,
           va.source_import_type,
           va.metadata AS video_asset_metadata
         FROM screenalytics.runs_v2 r
@@ -710,12 +953,21 @@ def list_excluded_sections(run_id: str) -> list[dict[str, Any]]:
     )
 
 
-def list_runs_for_show(show_id: str, *, limit: int = 20, video_class: str | None = None) -> list[dict[str, Any]]:
+def list_runs_for_show(
+    show_id: str,
+    *,
+    limit: int = 20,
+    video_class: str | None = None,
+    media_type: str | None = None,
+) -> list[dict[str, Any]]:
     params: list[Any] = [show_id]
-    video_class_clause = ""
-    if video_class:
+    classification_clause = ""
+    if media_type:
+        params.append(media_type)
+        classification_clause = " AND va.media_type = %s"
+    elif video_class:
         params.append(video_class)
-        video_class_clause = " AND va.video_class = %s"
+        classification_clause = " AND va.video_class = %s"
     params.append(limit)
     return pg.fetch_all(
         f"""
@@ -726,11 +978,13 @@ def list_runs_for_show(show_id: str, *, limit: int = 20, video_class: str | None
           va.episode_id,
           va.video_class,
           va.promo_subtype,
+          va.media_type,
+          va.media_kind,
           va.source_import_type
         FROM screenalytics.runs_v2 r
         JOIN screenalytics.video_assets va ON va.id = r.video_asset_id
         WHERE r.run_type = 'cast_screentime' AND va.show_id = %s
-          {video_class_clause}
+          {classification_clause}
         ORDER BY r.created_at DESC
         LIMIT %s
         """,
@@ -761,6 +1015,8 @@ def list_publish_versions(video_asset_id: str) -> list[dict[str, Any]]:
           r.effective_runtime_seconds,
           va.video_class,
           va.promo_subtype,
+          va.media_type,
+          va.media_kind,
           va.show_id,
           va.season_id,
           va.episode_id
@@ -1095,12 +1351,14 @@ def list_current_published_versions_for_show(show_id: str) -> list[dict[str, Any
           va.season_id,
           va.episode_id,
           va.video_class,
-          va.promo_subtype
+          va.promo_subtype,
+          va.media_type,
+          va.media_kind
         FROM screenalytics.cast_screentime_publish_versions pv
         JOIN screenalytics.video_assets va ON va.id = pv.video_asset_id
         WHERE pv.is_current = true
           AND va.show_id = %s
-          AND va.video_class = 'episode'
+          AND va.media_type = 'episode'
         ORDER BY pv.published_at DESC
         """,
         [_normalize(show_id)],
@@ -1116,12 +1374,14 @@ def list_current_published_versions_for_season(season_id: str) -> list[dict[str,
           va.season_id,
           va.episode_id,
           va.video_class,
-          va.promo_subtype
+          va.promo_subtype,
+          va.media_type,
+          va.media_kind
         FROM screenalytics.cast_screentime_publish_versions pv
         JOIN screenalytics.video_assets va ON va.id = pv.video_asset_id
         WHERE pv.is_current = true
           AND va.season_id = %s
-          AND va.video_class = 'episode'
+          AND va.media_type = 'episode'
         ORDER BY pv.published_at DESC
         """,
         [_normalize(season_id)],
@@ -1130,26 +1390,30 @@ def list_current_published_versions_for_season(season_id: str) -> list[dict[str,
 
 def reconcile_stale_runs(*, stale_after_seconds: int, show_id: str | None = None) -> list[dict[str, Any]]:
     where_show = "AND va.show_id = %s::uuid" if show_id else ""
-    params: list[Any] = [
-        "failed",
-        "worker_heartbeat_expired",
-        int(stale_after_seconds),
-    ]
-    if show_id:
-        params.append(show_id)
     return pg.execute_returning(
         f"""
         UPDATE screenalytics.runs_v2 AS r
         SET status = %s,
-            error_message = %s,
+            error_message = CASE
+              WHEN r.status = 'queued' THEN 'worker_dispatch_expired'
+              ELSE 'worker_heartbeat_expired'
+            END,
             completed_at = COALESCE(r.completed_at, NOW()),
             worker_heartbeat_at = NOW(),
             updated_at = NOW()
         FROM screenalytics.video_assets AS va
         WHERE r.video_asset_id = va.id
           AND r.run_type = 'cast_screentime'
-          AND r.status = 'running'
-          AND COALESCE(r.worker_heartbeat_at, r.started_at, r.created_at) < NOW() - (%s::int * INTERVAL '1 second')
+          AND (
+            (
+              r.status = 'running'
+              AND COALESCE(r.worker_heartbeat_at, r.started_at, r.created_at) < NOW() - (%s::int * INTERVAL '1 second')
+            )
+            OR (
+              r.status = 'queued'
+              AND COALESCE(r.dispatch_accepted_at, r.created_at) < NOW() - (%s::int * INTERVAL '1 second')
+            )
+          )
           {where_show}
         RETURNING
           r.id::text AS id,
@@ -1158,7 +1422,9 @@ def reconcile_stale_runs(*, stale_after_seconds: int, show_id: str | None = None
           r.status,
           r.error_message,
           r.completed_at,
-          r.worker_heartbeat_at
+          r.worker_heartbeat_at,
+          r.dispatch_status,
+          r.dispatch_job_id
         """,
-        params,
+        ["failed", int(stale_after_seconds), int(stale_after_seconds), *([show_id] if show_id else [])],
     )

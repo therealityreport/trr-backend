@@ -30,7 +30,6 @@ id
 
 ## Indexes
 
-- idx_media_links_person_gallery_entity_kind_id (non-unique): entity_type, entity_id, kind, id) WHERE ((entity_type = 'person'::text) AND (kind = 'gallery'::text)
 - media_links_entity_idx (non-unique): entity_type, entity_id
 - media_links_entity_kind_asset_uq (unique): entity_type, entity_id, kind, media_asset_id
 - media_links_facebank_seed_idx (non-unique): entity_type, entity_id, kind, facebank_seed

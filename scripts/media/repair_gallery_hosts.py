@@ -26,7 +26,7 @@ from trr_backend.media.s3_mirror import mirror_cast_photo_row, mirror_media_asse
 CandidateKind = Literal["media_link_asset", "cast_photo"]
 CandidateStatus = Literal["ok", "repaired", "broken_unreachable", "error"]
 
-DEFAULT_ALLOWED_SOURCES = ("imdb", "tmdb", "fandom", "bravo")
+DEFAULT_ALLOWED_SOURCES: tuple[str, ...] = ("imdb", "tmdb", "fandom", "bravo")
 
 
 @dataclass(frozen=True)
@@ -121,6 +121,23 @@ def _get_str(value: Any) -> str | None:
         return None
     trimmed = value.strip()
     return trimmed if trimmed else None
+
+
+def _get_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(key, str):
+            out[key] = item
+    return out
+
+
+def _get_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _source_matches(source: str | None, allowed_sources: set[str]) -> bool:
@@ -340,15 +357,15 @@ def _resolve_cast_source_url(row: dict[str, Any]) -> str | None:
 
 
 def _extract_crop_payload(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
+    payload = _get_dict(value)
+    if not payload:
         return None
-    try:
-        x = float(value.get("x"))
-        y = float(value.get("y"))
-        zoom = float(value.get("zoom"))
-    except (TypeError, ValueError):
+    x = _get_float(payload.get("x"))
+    y = _get_float(payload.get("y"))
+    zoom = _get_float(payload.get("zoom"))
+    if x is None or y is None or zoom is None:
         return None
-    mode_raw = str(value.get("mode") or "auto").strip().lower()
+    mode_raw = str(payload.get("mode") or "auto").strip().lower()
     return {
         "x": max(0.0, min(100.0, x)),
         "y": max(0.0, min(100.0, y)),
@@ -401,11 +418,11 @@ def _collect_candidates(
         source = _get_str(asset.get("source")) or "unknown"
         if not _source_matches(source, allowed_sources):
             continue
-        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        metadata = _get_dict(asset.get("metadata"))
         source_url = _get_str(asset.get("source_url"))
         hosted_url = _get_str(asset.get("hosted_url"))
         source_page_url = _get_str(metadata.get("source_page_url")) or _get_str(metadata.get("page_url")) or None
-        link_context = link.get("context") if isinstance(link.get("context"), dict) else {}
+        link_context = _get_dict(link.get("context"))
         candidates.append(
             RepairCandidate(
                 kind="media_link_asset",
@@ -440,7 +457,7 @@ def _collect_candidates(
                 source = _get_str(row.get("source")) or "unknown"
                 if not row_id or not person_id or not _source_matches(source, allowed_sources):
                     continue
-                metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                metadata = _get_dict(row.get("metadata"))
                 source_url = _resolve_cast_source_url(row)
                 hosted_url = _get_str(row.get("hosted_url"))
                 source_page_url = _get_str(row.get("source_page_url"))
@@ -696,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     db = load_env_and_db()
 
-    allowed_sources = _split_csv(args.sources)
+    allowed_sources: set[str] = _split_csv(args.sources)
     if not allowed_sources:
         allowed_sources = set(DEFAULT_ALLOWED_SOURCES)
 
