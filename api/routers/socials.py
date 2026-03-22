@@ -37,9 +37,9 @@ from trr_backend.job_plane import (
     execution_owner_label,
     is_remote_job_plane_enabled,
 )
-from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
 from trr_backend.modal_dispatch import dispatch_reddit_refresh, modal_execution_metadata
 from trr_backend.observability import get_trace_id
+from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
@@ -1406,7 +1406,14 @@ async def search_twitter(
 
         if request.persist and tweets:
             label = request.scrape_query or request.query
-            upsert_standalone_tweets(tweets, scrape_query=label)
+            try:
+                upsert_standalone_tweets(tweets, scrape_query=label)
+            except Exception as upsert_err:  # noqa: BLE001
+                logger.warning(
+                    "upsert_standalone_tweets failed for query %r: %s",
+                    label,
+                    upsert_err,
+                )
 
         return TwitterSearchResponse(
             success=True,
