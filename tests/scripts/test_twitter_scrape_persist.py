@@ -101,3 +101,21 @@ def test_persist_with_empty_results_does_not_call_upsert(monkeypatch: pytest.Mon
 
     # Guard at the call site: `if args.persist and tweets` skips upsert when empty
     assert upsert_calls == []
+
+
+def test_persist_with_replies_mode_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--persist is not supported in --replies or --quotes mode; expect SystemExit(2)."""
+    import sys
+
+    # --replies + --persist
+    with pytest.raises(SystemExit) as excinfo:
+        monkeypatch.setattr(sys, "argv", ["scrape", "--replies", "--tweet", "123", "--persist"])
+        import scripts.socials.twitter.scrape as scrape_mod
+        scrape_mod.main()
+    assert excinfo.value.code == 2
+
+    # --quotes + --persist
+    with pytest.raises(SystemExit) as excinfo:
+        monkeypatch.setattr(sys, "argv", ["scrape", "--quotes", "--tweet", "123", "--persist"])
+        scrape_mod.main()
+    assert excinfo.value.code == 2
