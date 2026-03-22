@@ -234,6 +234,9 @@ Examples:
 
     args = parser.parse_args()
 
+    if args.persist and (args.replies or args.quotes):
+        parser.error("--persist is only supported in search mode (not --replies / --quotes)")
+
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
