@@ -1,5 +1,4 @@
 """Tests for TwitterScraper fast_mode, rate limiting, and backfill diagnostics."""
-
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -12,8 +11,6 @@ from trr_backend.socials.twitter.scraper import Tweet, TwitterScrapeConfig, Twit
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
 def _make_scraper() -> TwitterScraper:
     """Return a minimal TwitterScraper with no real HTTP session."""
     with patch.object(TwitterScraper, "_create_session", return_value=MagicMock()):
