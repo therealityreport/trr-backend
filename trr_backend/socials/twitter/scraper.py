@@ -308,7 +308,7 @@ class TwitterScraper:
         self.bearer_token = bearer_token or self.PUBLIC_BEARER_TOKEN
         self.session = self._create_session()
         self._request_count = 0
-        self._last_429_at: float = 0.0
+        self._last_429_at: float | None = None
         self._consecutive_success: int = 0
         self._guest_token: str | None = None
         self._search_hash: str | None = None
@@ -525,7 +525,7 @@ class TwitterScraper:
         """
         if self._request_count > 0:
             now = time.monotonic()
-            if self._last_429_at and (now - self._last_429_at) < 60.0:
+            if self._last_429_at is not None and (now - self._last_429_at) < 60.0:
                 effective_delay = delay * 2.0
             elif fast_mode:
                 # Aggressive tiers: ramp down as we prove the session is healthy
@@ -535,8 +535,6 @@ class TwitterScraper:
                     effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
                 else:
                     effective_delay = delay * 0.5   # e.g. 0.5 * 0.5 = 0.25s
-            elif self._consecutive_success >= 20:
-                effective_delay = delay * 0.5
             else:
                 effective_delay = delay * 0.5
             logger.debug(f"Rate limiting: waiting {effective_delay:.3f}s (base={delay}s, fast={fast_mode}, streak={self._consecutive_success})")
