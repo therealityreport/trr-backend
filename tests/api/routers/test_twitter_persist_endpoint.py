@@ -77,6 +77,7 @@ def test_persist_true_calls_upsert(client: TestClient, monkeypatch: pytest.Monke
     assert resp.json()["success"] is True
     assert len(upsert_calls) == 1
     assert upsert_calls[0]["scrape_query"] == "#RHOSLC"
+    assert len(upsert_calls[0]["tweets"]) == 1
 
 
 def test_persist_true_uses_explicit_scrape_query(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,7 +97,7 @@ def test_persist_true_uses_explicit_scrape_query(client: TestClient, monkeypatch
         lambda tweets, *, scrape_query: upsert_calls.append({"scrape_query": scrape_query}) or [],
     )
 
-    client.post(
+    resp = client.post(
         "/api/v1/admin/socials/twitter/search",
         headers={"Authorization": f"Bearer {_make_admin_token()}"},
         json={
@@ -107,6 +108,7 @@ def test_persist_true_uses_explicit_scrape_query(client: TestClient, monkeypatch
             "scrape_query": "RHOSLC-S4-premiere",
         },
     )
+    assert resp.status_code == 200
     assert upsert_calls[0]["scrape_query"] == "RHOSLC-S4-premiere"
 
 
@@ -127,7 +129,7 @@ def test_persist_defaults_scrape_query_to_query_value(client: TestClient, monkey
         lambda tweets, *, scrape_query: upsert_calls.append({"scrape_query": scrape_query}) or [],
     )
 
-    client.post(
+    resp = client.post(
         "/api/v1/admin/socials/twitter/search",
         headers={"Authorization": f"Bearer {_make_admin_token()}"},
         json={
@@ -138,6 +140,7 @@ def test_persist_defaults_scrape_query_to_query_value(client: TestClient, monkey
             # scrape_query intentionally omitted
         },
     )
+    assert resp.status_code == 200
     assert upsert_calls[0]["scrape_query"] == "@BravoTV"
 
 
