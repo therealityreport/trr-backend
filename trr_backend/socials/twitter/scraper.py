@@ -43,10 +43,28 @@ class TwitterScrapeConfig:
     delay_seconds: float = 2.0
     max_pages: int | None = None  # None = no limit
 
+    # Performance tuning
+    fast_mode: bool = False
+    """When True, uses aggressive rate-limiting tiers for faster scraping."""
+
+    fetch_comment_replies: bool = True
+    """When False, skip reply fetching for bulk scrapes."""
+
     # Metadata for tracking
     show_id: int | None = None
     season_number: int | None = None
     person_id: int | None = None
+
+    def __post_init__(self):
+        """Apply fast_mode overrides when enabled."""
+        if self.fast_mode:
+            # Use a lower base delay unless explicitly overridden
+            if self.delay_seconds == 2.0:  # Only override if at default
+                self.delay_seconds = 0.5
+            logger.info(
+                "TwitterScrapeConfig fast_mode enabled: delay=%.2fs",
+                self.delay_seconds,
+            )
 
     def build_search_query(self) -> str:
         """Build Twitter advanced search query string."""
@@ -57,7 +75,7 @@ class TwitterScrapeConfig:
         # Add the main query (supports raw advanced query passthrough).
         if ADVANCED_QUERY_HINT_RE.search(normalized_query):
             parts.append(normalized_query)
-        elif normalized_query.startswith("#"):
+        elif normalized_query.startswith("#") or normalized_query.startswith("@"):
             parts.append(normalized_query)
         else:
             # Search for exact phrase or hashtag
@@ -290,6 +308,8 @@ class TwitterScraper:
         self.bearer_token = bearer_token or self.PUBLIC_BEARER_TOKEN
         self.session = self._create_session()
         self._request_count = 0
+        self._last_429_at: float = 0.0
+        self._consecutive_success: int = 0
         self._guest_token: str | None = None
         self._search_hash: str | None = None
         # twikit credentials: {"username": ..., "email": ..., "password": ...}
@@ -496,12 +516,40 @@ class TwitterScraper:
         self._discover_graphql_hashes()
         return f"{self.GRAPHQL_BASE_URL}/{self._detail_hash}/TweetDetail"
 
-    def _rate_limit(self, delay: float):
-        """Apply rate limiting between requests."""
+    def _rate_limit(self, delay: float, *, fast_mode: bool = False):
+        """Apply adaptive rate limiting between requests.
+
+        Standard mode: starts at 50% of the base delay.
+        Fast mode: uses aggressive tiers that ramp down with consecutive successes.
+        Both modes: double delay for 60s after any 429 response.
+        """
         if self._request_count > 0:
-            logger.debug(f"Rate limiting: waiting {delay}s")
-            time.sleep(delay)
+            now = time.monotonic()
+            if self._last_429_at and (now - self._last_429_at) < 60.0:
+                effective_delay = delay * 2.0
+            elif fast_mode:
+                # Aggressive tiers: ramp down as we prove the session is healthy
+                if self._consecutive_success >= 20:
+                    effective_delay = delay * 0.15  # e.g. 0.5 * 0.15 = 0.075s
+                elif self._consecutive_success >= 5:
+                    effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
+                else:
+                    effective_delay = delay * 0.5   # e.g. 0.5 * 0.5 = 0.25s
+            elif self._consecutive_success >= 20:
+                effective_delay = delay * 0.5
+            else:
+                effective_delay = delay * 0.5
+            logger.debug(f"Rate limiting: waiting {effective_delay:.3f}s (base={delay}s, fast={fast_mode}, streak={self._consecutive_success})")
+            time.sleep(effective_delay)
         self._request_count += 1
+
+    def _track_response_status(self, status_code: int) -> None:
+        """Track response status for adaptive rate limiting."""
+        if status_code == 429:
+            self._last_429_at = time.monotonic()
+            self._consecutive_success = 0
+        elif 200 <= status_code < 400:
+            self._consecutive_success += 1
 
     # Syndication endpoints (public, no auth required)
     SYNDICATION_TIMELINE_URL = "https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
@@ -779,6 +827,7 @@ class TwitterScraper:
         }
         try:
             response = self.session.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SECONDS)
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             payload = response.json()
         except Exception:
@@ -878,9 +927,13 @@ class TwitterScraper:
                     for flag in missing_flags:
                         features.setdefault(flag, False)
                     response = _request(features)
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is not None:
+                self._track_response_status(status)
             logger.debug("Tweet detail summary request failed for %s: %s", normalized_id, exc)
             return None
         except Exception:
@@ -1390,7 +1443,7 @@ class TwitterScraper:
         import json
 
         logger.info(f"Using syndication API for @{username}")
-        self._rate_limit(config.delay_seconds)
+        self._rate_limit(config.delay_seconds, fast_mode=config.fast_mode)
 
         url = self.SYNDICATION_TIMELINE_URL.format(username=username)
         headers = {
@@ -1405,8 +1458,12 @@ class TwitterScraper:
 
         try:
             response = self.session.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SECONDS)
+            self._track_response_status(response.status_code)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None:
+                self._track_response_status(status)
             logger.error(f"Syndication request failed for @{username}: {e}")
             return []
 
@@ -1777,12 +1834,13 @@ class TwitterScraper:
         feature_overrides: dict[str, bool] | None = None,
         referer: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        fast_mode: bool = False,
     ) -> dict | None:
         """Fetch search results."""
         import json
         import urllib.parse
 
-        self._rate_limit(delay)
+        self._rate_limit(delay, fast_mode=fast_mode)
 
         variables = {
             "rawQuery": query,
@@ -1826,11 +1884,15 @@ class TwitterScraper:
                 cookies=self.cookies,
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             self._last_graphql_status_code = response.status_code
             return response.json()
         except requests.exceptions.RequestException as e:
-            self._last_graphql_status_code = getattr(getattr(e, "response", None), "status_code", None)
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None:
+                self._track_response_status(status)
+            self._last_graphql_status_code = status
             logger.error(f"Search request failed: {e}")
             return None
 
@@ -1916,11 +1978,13 @@ class TwitterScraper:
                     for flag in missing_flags:
                         features.setdefault(flag, False)
                     response = _request(features)
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
             status_code = getattr(getattr(e, "response", None), "status_code", None)
             if status_code is not None:
+                self._track_response_status(status_code)
                 self._set_reply_failure_reason(f"http_{status_code}")
             else:
                 self._set_reply_failure_reason("request_error")
@@ -2134,11 +2198,13 @@ class TwitterScraper:
                     for flag in missing_flags:
                         features.setdefault(flag, False)
                     response = _request(features)
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code is not None:
+                self._track_response_status(status_code)
                 self._set_quote_failure_reason(f"http_{status_code}")
             else:
                 self._set_quote_failure_reason("request_error")
@@ -2650,7 +2716,7 @@ class TwitterScraper:
                 break
 
             logger.info(f"Fetching page {page_num}...")
-            data = self._fetch_search(search_query, cursor, config.delay_seconds)
+            data = self._fetch_search(search_query, cursor, config.delay_seconds, fast_mode=config.fast_mode)
             if not data:
                 if self._last_graphql_status_code == 404 and graphql_404_count < 1:
                     graphql_404_count += 1
@@ -2848,6 +2914,7 @@ class TwitterScraper:
             "window_start": config.date_start.isoformat(),
             "window_end": config.date_end.isoformat(),
             "from_query": bool(from_match),
+            "fast_mode": config.fast_mode,
             "graphql_404_count": graphql_404_count,
             "graphql_failed": graphql_failed,
             "fallback_triggered": fallback_triggered,
