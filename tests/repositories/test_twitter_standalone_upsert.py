@@ -84,3 +84,29 @@ def test_upsert_returns_upserted_rows():
         mock_upsert.return_value = expected
         result = upsert_standalone_tweets([_make_tweet("555")], scrape_query="#RHOSLC")
     assert result == expected
+
+
+def test_tweet_to_payload_includes_raw_data():
+    from trr_backend.repositories.twitter_standalone import _tweet_to_payload
+    tweet = _make_tweet("600")
+    payload = _tweet_to_payload(tweet, scrape_query="#TEST", scraped_at="2026-01-01T00:00:00+00:00")
+    assert "raw_data" in payload
+    # raw_data should be a dict (tweet.to_dict() output)
+    assert isinstance(payload["raw_data"], dict)
+    assert payload["raw_data"].get("tweet_id") == "600"
+
+
+def test_tweet_to_payload_preserves_none_display_name():
+    from trr_backend.repositories.twitter_standalone import _tweet_to_payload
+    tweet = _make_tweet("700")
+    tweet.display_name = None
+    payload = _tweet_to_payload(tweet, scrape_query="#TEST", scraped_at="2026-01-01T00:00:00+00:00")
+    assert payload["display_name"] is None
+
+
+def test_tweet_to_payload_created_at_none_guard():
+    from trr_backend.repositories.twitter_standalone import _tweet_to_payload
+    tweet = _make_tweet("800")
+    tweet.created_at = None  # type: ignore[assignment]
+    payload = _tweet_to_payload(tweet, scrape_query="#TEST", scraped_at="2026-01-01T00:00:00+00:00")
+    assert payload["created_at"] is None

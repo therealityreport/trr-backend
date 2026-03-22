@@ -41,7 +41,7 @@ def upsert_standalone_tweets(
 def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> dict[str, Any]:
     """Convert a Tweet dataclass to a social.twitter_tweets insert payload."""
     created_at_ts: str | None = None
-    if tweet.created_at:
+    if tweet.created_at is not None:
         try:
             created_at_ts = datetime.fromtimestamp(tweet.created_at, tz=UTC).isoformat()
         except (OSError, OverflowError, ValueError):
@@ -50,7 +50,7 @@ def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> di
     return {
         "tweet_id": tweet.tweet_id,
         "username": tweet.username,
-        "display_name": tweet.display_name or "",
+        "display_name": tweet.display_name,
         "user_verified": tweet.user_verified,
         "text": tweet.text,
         "hashtags": tweet.hashtags or [],
@@ -69,5 +69,6 @@ def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> di
         "created_at": created_at_ts,
         "scraped_at": scraped_at,
         "scrape_query": scrape_query,
+        "raw_data": tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         # season_id, job_id, show_id, person_id intentionally omitted (NULL)
     }
