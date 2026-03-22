@@ -37,6 +37,7 @@ from trr_backend.job_plane import (
     execution_owner_label,
     is_remote_job_plane_enabled,
 )
+from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
 from trr_backend.modal_dispatch import dispatch_reddit_refresh, modal_execution_metadata
 from trr_backend.observability import get_trace_id
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
@@ -1251,6 +1252,13 @@ class TwitterSearchRequest(BaseModel):
     season_number: int | None = Field(default=None, ge=0, le=100, description="Associated season")
     person_id: UUID | None = Field(default=None, description="Associated person ID")
 
+    # Persistence options
+    persist: bool = Field(default=False, description="Upsert results to social.twitter_tweets")
+    scrape_query: str | None = Field(
+        default=None,
+        description="Label stored on persisted rows; defaults to query value when omitted",
+    )
+
 
 class TweetResponse(BaseModel):
     """Single tweet in response."""
@@ -1395,6 +1403,10 @@ async def search_twitter(
         tweets = scraper.scrape(config)
         if request.mirror_to_s3:
             mirror_tweet_media(tweets)
+
+        if request.persist and tweets:
+            label = request.scrape_query or request.query
+            upsert_standalone_tweets(tweets, scrape_query=label)
 
         return TwitterSearchResponse(
             success=True,
@@ -3547,12 +3559,14 @@ async def post_social_account_catalog_backfill_route(
         used_inline_fallback = bool(payload.allow_inline_dev_fallback)
 
     try:
+        date_start = payload.date_start if payload.backfill_scope == "bounded_window" else None
+        date_end = payload.date_end if payload.backfill_scope == "bounded_window" else None
         result = start_social_account_catalog_backfill(
             platform=platform,
             account_handle=account_handle,
             source_scope=payload.source_scope,
-            date_start=payload.date_start if payload.backfill_scope == "bounded_window" else payload.date_start,
-            date_end=payload.date_end if payload.backfill_scope == "bounded_window" else payload.date_end,
+            date_start=date_start,
+            date_end=date_end,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
         )
