@@ -47,9 +47,6 @@ class TwitterScrapeConfig:
     fast_mode: bool = False
     """When True, uses aggressive rate-limiting tiers for faster scraping."""
 
-    fetch_comment_replies: bool = True
-    """When False, skip reply fetching for bulk scrapes."""
-
     # Metadata for tracking
     show_id: int | None = None
     season_number: int | None = None
