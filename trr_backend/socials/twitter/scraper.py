@@ -46,7 +46,6 @@ class TwitterScrapeConfig:
     # Performance tuning
     fast_mode: bool = False
     """When True, uses aggressive rate-limiting tiers for faster scraping."""
-
     # Metadata for tracking
     show_id: int | None = None
     season_number: int | None = None
