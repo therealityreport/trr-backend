@@ -22,6 +22,7 @@ from pathlib import Path
 # Add project root to path (scripts/socials/twitter -> project root)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
+from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
 from trr_backend.utils.env import load_env
 
@@ -220,6 +221,15 @@ Examples:
     parser.add_argument("--season", type=int, help="Associated season number for metadata")
     parser.add_argument("--person-id", type=int, help="Associated person ID for metadata")
     parser.add_argument("--mirror", action="store_true", help="Mirror tweet media URLs to S3 and print hosted URLs")
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="Upsert results to social.twitter_tweets (standalone, no season required)",
+    )
+    parser.add_argument(
+        "--scrape-query",
+        help="Label stored on each persisted row (defaults to --query value)",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
@@ -395,6 +405,11 @@ Examples:
         save_results(tweets, str(output_path))
         if args.mirror:
             _print_mirror_summary(tweets)
+
+    if args.persist and tweets:
+        label = args.scrape_query or args.query
+        upserted = upsert_standalone_tweets(tweets, scrape_query=label)
+        logger.info("Persisted %d tweets to DB with scrape_query=%r", len(upserted), label)
 
 
 if __name__ == "__main__":
