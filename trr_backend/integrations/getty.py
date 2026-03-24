@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -67,6 +68,20 @@ _PEOPLE_COUNT_WORDS = {
     "nine": 9,
     "ten": 10,
 }
+_PEOPLE_OVERLAY_RE = re.compile(r"\bPeople:\s*([^\n|]+)", flags=re.IGNORECASE)
+_PICTURED_RE = re.compile(r"\bPictured:\s*([^.;]+)", flags=re.IGNORECASE)
+_ONE_LETTER_EDIT_ALLOWED_CONTEXT_RE = re.compile(
+    r"\b(watch what happens live|wwhl|episode\s+\d+|season\s+\d+)\b",
+    flags=re.IGNORECASE,
+)
+_GETTY_PERSON_MATCH_DENYLIST = (
+    {
+        "person_name": "Brandi Glanville",
+        "event_fragment": "Hilary Roberts Birthday Celebration And Red Songbird Foundation Launch Party",
+        "title_fragment": "Brandi Glanville Photos and High-Res Pictures",
+        "deny_reason": "hilary_roberts_event_false_positive",
+    },
+)
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -418,8 +433,10 @@ def fetch_grouped_event_page(
         scanned_assets.append(_summarize_grouped_event_asset(merged_asset))
         if representative_asset is None:
             representative_asset = merged_asset
-        if person_name and matched_asset is None and _asset_matches_person(merged_asset, person_name):
-            matched_asset = merged_asset
+        if person_name and matched_asset is None:
+            match_details = describe_asset_person_match(merged_asset, person_name)
+            if match_details.get("matched"):
+                matched_asset = {**merged_asset, "person_match": match_details}
 
     return {
         "event_url": cleaned_url,
@@ -508,8 +525,9 @@ def scan_event_page_for_person(
             continue
         merged = _merge_search_candidate_with_detail(candidate, detail)
         all_scanned.append(merged)
-        if _asset_matches_person(merged, person_name):
-            matched_assets.append(merged)
+        match_details = describe_asset_person_match(merged, person_name)
+        if match_details.get("matched"):
+            matched_assets.append({**merged, "person_match": match_details})
         if progress_cb:
             progress_cb(index, total, f"Scanned {index}/{total}, {len(matched_assets)} matches so far")
 
@@ -713,6 +731,9 @@ def _extract_search_asset_candidates_from_payload(payload: dict[str, Any]) -> li
         object_name = str(asset.get("objectName") or "").strip()
         if object_name:
             candidate["object_name"] = object_name
+        overlay_people = _extract_people_overlay_names(asset)
+        if overlay_people:
+            candidate["search_people_overlay_names"] = overlay_people
         candidates.append(candidate)
     return candidates
 
@@ -734,6 +755,7 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
     detail_fields = _extract_detail_section_fields(soup)
     keyword_texts = _extract_keyword_texts(asset_json)
     people_count = _infer_people_count(keyword_texts)
+    overlay_people = _extract_people_overlay_names(asset_json)
 
     result: dict[str, Any] = {
         "detail_url": detail_url,
@@ -783,6 +805,7 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
     )
     result["keywords"] = asset_json.get("keywords") if isinstance(asset_json.get("keywords"), list) else []
     result["keyword_texts"] = keyword_texts
+    result["people_overlay_names"] = overlay_people
     result["restrictions"] = detail_fields.get("restrictions")
     result["release_info"] = detail_fields.get("release_info")
     result["source"] = detail_fields.get("source_display") or _first_present(asset_json, "source")
@@ -888,6 +911,31 @@ def _extract_specific_people(asset_json: dict[str, Any]) -> list[dict[str, Any]]
     return people
 
 
+def _extract_people_overlay_names(payload: Any) -> list[str]:
+    matches: list[str] = []
+
+    def _visit(value: Any, *, depth: int = 0) -> None:
+        if depth > 3:
+            return
+        if isinstance(value, str):
+            for match in _PEOPLE_OVERLAY_RE.finditer(value):
+                raw_names = match.group(1).strip()
+                if not raw_names:
+                    continue
+                matches.extend(_split_people_name_list(raw_names))
+            return
+        if isinstance(value, dict):
+            for nested in value.values():
+                _visit(nested, depth=depth + 1)
+            return
+        if isinstance(value, list):
+            for nested in value:
+                _visit(nested, depth=depth + 1)
+
+    _visit(payload)
+    return _dedupe_names(matches)
+
+
 def _extract_detail_section_fields(soup: BeautifulSoup) -> dict[str, str]:
     strings = [value.strip() for value in soup.stripped_strings if value and value.strip()]
     results: dict[str, str] = {}
@@ -946,31 +994,220 @@ def _normalize_name(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().casefold())
 
 
-def _asset_matches_person(asset: dict[str, Any], person_name: str) -> bool:
+def _normalize_alpha_only(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().casefold())
+
+
+def _dedupe_names(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = " ".join(str(value or "").split()).strip()
+        if not cleaned:
+            continue
+        normalized = _normalize_name(cleaned)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(cleaned)
+    return deduped
+
+
+def _split_people_name_list(value: str | None) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    cleaned = re.sub(r"\((?:l|r|c|far left|far right|left|right|center)[^)]*\)", " ", raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:l-r|r-l|left to right)\b", " ", cleaned, flags=re.IGNORECASE)
+    parts = re.split(r"\s*(?:,|/|;|&|\band\b)\s*", cleaned)
+    return _dedupe_names(parts)
+
+
+def _extract_pictured_names(*values: str | None) -> list[str]:
+    matches: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        for match in _PICTURED_RE.finditer(text):
+            matches.extend(_split_people_name_list(match.group(1)))
+    return _dedupe_names(matches)
+
+
+@lru_cache(maxsize=2048)
+def _has_single_character_edit(first: str, second: str) -> bool:
+    if first == second:
+        return False
+    if abs(len(first) - len(second)) > 1:
+        return False
+    if len(first) > len(second):
+        first, second = second, first
+    index_first = 0
+    index_second = 0
+    edits = 0
+    while index_first < len(first) and index_second < len(second):
+        if first[index_first] == second[index_second]:
+            index_first += 1
+            index_second += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        if len(first) == len(second):
+            index_first += 1
+            index_second += 1
+        else:
+            index_second += 1
+    if index_second < len(second) or index_first < len(first):
+        edits += 1
+    return edits == 1
+
+
+def _names_match_with_one_letter_tolerance(expected: str, candidate: str) -> bool:
+    expected_tokens = _normalize_name(expected).split()
+    candidate_tokens = _normalize_name(candidate).split()
+    if len(expected_tokens) < 2 or len(expected_tokens) != len(candidate_tokens):
+        return False
+    mismatch_count = 0
+    for left, right in zip(expected_tokens, candidate_tokens, strict=False):
+        if left == right:
+            continue
+        if mismatch_count > 0:
+            return False
+        if not _has_single_character_edit(_normalize_alpha_only(left), _normalize_alpha_only(right)):
+            return False
+        mismatch_count += 1
+    return mismatch_count == 1
+
+
+def _asset_matches_denylist(asset: dict[str, Any], person_name: str) -> str | None:
+    normalized_person = _normalize_name(person_name)
+    title = str(asset.get("title") or asset.get("search_title") or "").strip()
+    event_name = str(asset.get("event_name") or "").strip()
+    for entry in _GETTY_PERSON_MATCH_DENYLIST:
+        if _normalize_name(entry["person_name"]) != normalized_person:
+            continue
+        if entry["event_fragment"].casefold() not in event_name.casefold():
+            continue
+        title_fragment = str(entry.get("title_fragment") or "").strip()
+        if title_fragment and title_fragment.casefold() not in title.casefold():
+            continue
+        return str(entry["deny_reason"]).strip() or "known_exception"
+    return None
+
+
+def describe_asset_person_match(asset: dict[str, Any], person_name: str) -> dict[str, Any]:
     normalized_person = _normalize_name(person_name)
     if not normalized_person:
-        return False
-    searchable_values = [
-        asset.get("caption"),
-        asset.get("title"),
-        asset.get("search_caption"),
-        asset.get("search_title"),
-        asset.get("event_name"),
-    ]
-    for value in searchable_values:
-        if normalized_person and normalized_person in _normalize_name(str(value or "")):
-            return True
+        return {"matched": False, "reason": None, "matched_name": None}
 
-    for person in asset.get("people") or []:
-        if not isinstance(person, dict):
-            continue
-        if normalized_person == _normalize_name(str(person.get("text") or "")):
-            return True
+    deny_reason = _asset_matches_denylist(asset, person_name)
+    if deny_reason:
+        return {
+            "matched": False,
+            "reason": "known_exception",
+            "matched_name": None,
+            "deny_reason": deny_reason,
+        }
+
+    overlay_people = _dedupe_names(
+        [
+            *[
+                str(value).strip()
+                for value in (asset.get("people_overlay_names") or asset.get("search_people_overlay_names") or [])
+                if isinstance(value, str) and str(value).strip()
+            ],
+            *[
+                str(entry).strip()
+                for entry in _extract_people_overlay_names(
+                    asset.get("asset") if isinstance(asset.get("asset"), dict) else {}
+                )
+            ],
+        ]
+    )
+    for name in overlay_people:
+        if _normalize_name(name) == normalized_person:
+            return {
+                "matched": True,
+                "reason": "solo_overlay",
+                "matched_name": name,
+                "name_source": "people_overlay",
+            }
+
+    specific_people = [
+        str(person.get("text") or "").strip()
+        for person in asset.get("people") or []
+        if isinstance(person, dict) and str(person.get("text") or "").strip()
+    ]
+    for name in _dedupe_names(specific_people):
+        if _normalize_name(name) == normalized_person:
+            return {
+                "matched": True,
+                "reason": "specific_people",
+                "matched_name": name,
+                "name_source": "specific_people",
+            }
+
+    caption_values = [
+        str(asset.get("caption") or "").strip() or None,
+        str(asset.get("search_caption") or "").strip() or None,
+    ]
+    pictured_names = _extract_pictured_names(*caption_values)
+    for name in pictured_names:
+        if _normalize_name(name) == normalized_person:
+            return {
+                "matched": True,
+                "reason": "caption",
+                "matched_name": name,
+                "name_source": "pictured_list",
+            }
+
+    strong_context_values = [
+        str(asset.get("caption") or "").strip(),
+        str(asset.get("search_caption") or "").strip(),
+        str(asset.get("title") or "").strip(),
+        str(asset.get("search_title") or "").strip(),
+        str(asset.get("event_name") or "").strip(),
+    ]
+    for value in strong_context_values:
+        normalized_value = _normalize_name(value)
+        if normalized_person and normalized_person in normalized_value:
+            reason = "caption" if value in caption_values else "keyword_title"
+            return {
+                "matched": True,
+                "reason": reason,
+                "matched_name": person_name,
+                "name_source": "text_match",
+            }
+
+    strong_typo_context = any(
+        _ONE_LETTER_EDIT_ALLOWED_CONTEXT_RE.search(value) for value in strong_context_values if value
+    )
+    if strong_typo_context:
+        for name in pictured_names:
+            if _names_match_with_one_letter_tolerance(person_name, name):
+                return {
+                    "matched": True,
+                    "reason": "caption_typo",
+                    "matched_name": name,
+                    "name_source": "pictured_list_typo",
+                }
 
     for keyword in _extract_keyword_texts(asset.get("asset") if isinstance(asset.get("asset"), dict) else {}):
-        if normalized_person == _normalize_name(keyword) or normalized_person in _normalize_name(keyword):
-            return True
-    return False
+        normalized_keyword = _normalize_name(keyword)
+        if normalized_keyword == normalized_person or normalized_person in normalized_keyword:
+            return {
+                "matched": True,
+                "reason": "keyword_title",
+                "matched_name": keyword,
+                "name_source": "keyword",
+            }
+
+    return {"matched": False, "reason": None, "matched_name": None}
+
+
+def _asset_matches_person(asset: dict[str, Any], person_name: str) -> bool:
+    return bool(describe_asset_person_match(asset, person_name).get("matched"))
 
 
 def _summarize_grouped_event_asset(asset: dict[str, Any]) -> dict[str, Any]:

@@ -311,7 +311,7 @@
       "definition": "CREATE INDEX idx_cast_tmdb_twitter_id ON core.cast_tmdb USING btree (twitter_id) WHERE (twitter_id IS NOT NULL)"
     }
   ],
-  "rls_enabled": false,
+  "rls_enabled": true,
   "example_row": {
     "id": "00000000-0000-0000-0000-000000000000",
     "person_id": "00000000-0000-0000-0000-000000000000",

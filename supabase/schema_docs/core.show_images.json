@@ -99,9 +99,33 @@
       "is_generated": "ALWAYS"
     },
     {
+      "name": "caption",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
       "name": "source_image_id",
       "data_type": "text",
       "is_nullable": "NO",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "image_type",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "position",
+      "data_type": "integer",
+      "is_nullable": "YES",
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
@@ -123,22 +147,6 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "caption",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "position",
-      "data_type": "integer",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
       "name": "metadata",
       "data_type": "jsonb",
       "is_nullable": "NO",
@@ -147,15 +155,7 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "image_type",
-      "data_type": "text",
-      "is_nullable": "YES",
-      "default": null,
-      "is_identity": "NO",
-      "is_generated": "NEVER"
-    },
-    {
-      "name": "created_at",
+      "name": "updated_at",
       "data_type": "timestamp with time zone",
       "is_nullable": "NO",
       "default": "now()",
@@ -163,7 +163,7 @@
       "is_generated": "NEVER"
     },
     {
-      "name": "updated_at",
+      "name": "created_at",
       "data_type": "timestamp with time zone",
       "is_nullable": "NO",
       "default": "now()",
@@ -413,6 +413,25 @@
       "definition": "CREATE UNIQUE INDEX show_images_show_source_source_image_id_key ON core.show_images USING btree (show_id, source, source_image_id)"
     },
     {
+      "name": "show_images_source_image_id_idx",
+      "columns": [
+        "source",
+        "source_image_id) WHERE (source_image_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX show_images_source_image_id_idx ON core.show_images USING btree (source, source_image_id) WHERE (source_image_id IS NOT NULL)"
+    },
+    {
+      "name": "show_images_source_unique",
+      "columns": [
+        "show_id",
+        "source",
+        "source_image_id"
+      ],
+      "unique": true,
+      "definition": "CREATE UNIQUE INDEX show_images_source_unique ON core.show_images USING btree (show_id, source, source_image_id)"
+    },
+    {
       "name": "show_images_tmdb_source_kind_file_path_key",
       "columns": [
         "tmdb_id",
@@ -438,15 +457,15 @@
     "fetched_at": "1970-01-01T00:00:00Z",
     "tmdb_id": 0,
     "url_original": "example",
+    "caption": "example",
     "source_image_id": "example",
+    "image_type": "example",
+    "position": 0,
     "url": "example",
     "url_path": "example",
-    "caption": "example",
-    "position": 0,
     "metadata": {},
-    "image_type": "example",
-    "created_at": "1970-01-01T00:00:00Z",
     "updated_at": "1970-01-01T00:00:00Z",
+    "created_at": "1970-01-01T00:00:00Z",
     "fetch_method": "example",
     "fetched_from_url": "example",
     "hosted_bucket": "example",

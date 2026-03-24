@@ -265,6 +265,41 @@ def test_get_social_account_catalog_review_queue(client: TestClient, monkeypatch
     assert response.json()["items"][0]["hashtag"] == "rhop"
 
 
+def test_get_social_account_catalog_verification(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+    expected = {
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "run_id": run_id,
+        "expected_total_posts": 16_454,
+        "catalog_posts": 16_454,
+        "caption_rows": 16_454,
+        "stored_hashtag_instances": 18_876,
+        "aggregated_hashtag_instances": 18_876,
+        "catalog_complete": True,
+        "caption_complete": True,
+        "hashtag_counts_match": True,
+        "verified": True,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_verification",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/verification?run_id={run_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["verified"] is True
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["run_id"] == run_id
+
+
 def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -298,6 +333,81 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
     )
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "run_id": "catalog-run-tt-1",
+        "status": "queued",
+        "ingest_mode": "shared_account_catalog_backfill",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ) as worker_guard:
+            with patch(
+                "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+                return_value=expected,
+            ) as mocked:
+                response = client.post(
+                    "/api/v1/admin/socials/profiles/tiktok/bravotv/catalog/backfill",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"backfill_scope": "full_history"},
+                )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "catalog-run-tt-1"
+    worker_guard.assert_called_once_with(required_execution_backend=None, platform=None)
+    assert mocked.call_args.kwargs["platform"] == "tiktok"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+@pytest.mark.parametrize(
+    ("platform", "handle", "run_id"),
+    [
+        ("twitter", "bravotv", "catalog-run-tw-1"),
+        ("threads", "bravotv", "catalog-run-th-1"),
+        ("youtube", "bravo", "catalog-run-yt-1"),
+    ],
+)
+def test_post_social_account_catalog_backfill_additional_supported_platforms(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    handle: str,
+    run_id: str,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ) as worker_guard:
+            with patch(
+                "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+                return_value={
+                    "run_id": run_id,
+                    "status": "queued",
+                    "ingest_mode": "shared_account_catalog_backfill",
+                },
+            ) as mocked:
+                response = client.post(
+                    f"/api/v1/admin/socials/profiles/{platform}/{handle}/catalog/backfill",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"backfill_scope": "full_history"},
+                )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == run_id
+    worker_guard.assert_called_once_with(required_execution_backend=None, platform=None)
+    assert mocked.call_args.kwargs["platform"] == platform
+    assert mocked.call_args.kwargs["account_handle"] == handle
 
 
 def test_post_social_account_catalog_backfill_requires_modal_executor(

@@ -42,6 +42,34 @@ class TaggingReferenceProfile(TypedDict):
     generated_at: str
 
 
+class FacebankInitialReferenceImage(TypedDict, total=False):
+    served_url: str
+    source_url: str
+    hosted_url: str
+    hosted_key: str
+    media_asset_id: str
+    link_id: str
+    source: str
+    kind: str
+    width: int | None
+    height: int | None
+    is_primary: bool
+    position: int | None
+    facebank_seed: bool
+    rank: int
+    selection_bucket: int
+    selection_reasons: list[str]
+
+
+class FacebankInitialReferenceProfile(TypedDict):
+    owner_person_id: str
+    requested: int
+    accepted: int
+    used: list[FacebankInitialReferenceImage]
+    skipped: list[TaggingReferenceSkipped]
+    generated_at: str
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -146,6 +174,13 @@ def _build_reference_url_candidates(row: dict[str, Any], *, preferred_url: str |
         seen.add(canonical)
         out.append(str(value).strip() if isinstance(value, str) else canonical)
     return out
+
+
+def _preferred_facebank_served_url(row: dict[str, Any]) -> str | None:
+    for value in (row.get("hosted_url"), row.get("source_url")):
+        if _is_http_url(value):
+            return str(value).strip()
+    return None
 
 
 def _extract_reference_url_fields(
@@ -268,6 +303,92 @@ def _is_starred(row: dict[str, Any]) -> bool:
         if isinstance(value, bool):
             return value
     return False
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _resolution_sort_tuple(row: dict[str, Any]) -> tuple[int, int, int]:
+    width = max(_coerce_int(row.get("width")) or 0, 0)
+    height = max(_coerce_int(row.get("height")) or 0, 0)
+    longest = max(width, height)
+    area = width * height
+    if longest >= 1400 and area >= 900_000:
+        tier = 4
+    elif longest >= 1000 and area >= 450_000:
+        tier = 3
+    elif longest >= 800 and area >= 250_000:
+        tier = 2
+    elif longest >= 600 and area >= 150_000:
+        tier = 1
+    elif longest >= 400 and area >= 60_000:
+        tier = 0
+    else:
+        tier = -1
+    return tier, longest, area
+
+
+def _is_event_or_glamour_source(row: dict[str, Any]) -> bool:
+    source = str(row.get("source") or "").strip().lower()
+    if source in {"getty", "nbcumv"}:
+        return True
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    context = row.get("context") if isinstance(row.get("context"), dict) else {}
+    for value in (
+        metadata.get("gallery_bucket_type"),
+        metadata.get("media_type_label"),
+        context.get("gallery_bucket_type"),
+        context.get("media_type_label"),
+    ):
+        normalized = _normalize_name_key(value)
+        if normalized == "event":
+            return True
+    return False
+
+
+def _is_publicity_like(row: dict[str, Any]) -> bool:
+    source = str(row.get("source") or "").strip().lower()
+    if source in {"imdb", "tmdb"}:
+        return True
+    return bool(row.get("is_primary"))
+
+
+def _is_very_low_resolution(row: dict[str, Any]) -> bool:
+    width = _coerce_int(row.get("width")) or 0
+    height = _coerce_int(row.get("height")) or 0
+    longest = max(width, height)
+    area = max(width, 0) * max(height, 0)
+    if longest == 0:
+        return False
+    return longest < 250 or area < 40_000
+
+
+def _facebank_selection_bucket(*, manual: bool, seeded: bool, starred: bool, show_priority: bool, solo: bool) -> int:
+    if manual and solo:
+        return 1
+    if manual:
+        return 2
+    if (seeded or starred) and solo:
+        return 3
+    if show_priority and solo:
+        return 4
+    if seeded or starred:
+        return 5
+    if solo:
+        return 6
+    return 7
 
 
 def _load_person_show_context(db: Any, person_id: str) -> tuple[set[str], set[str]]:
@@ -393,7 +514,7 @@ def _list_gallery_rows(db: Any, person_id: str) -> list[dict[str, Any]]:
         assets_resp = (
             db.schema("core")
             .table("media_assets")
-            .select("id,source,source_url,hosted_url,caption,metadata,created_at,updated_at")
+            .select("id,source,source_url,hosted_url,hosted_key,width,height,caption,metadata,created_at,updated_at")
             .in_("id", asset_ids)
             .execute()
         )
@@ -432,11 +553,15 @@ def _list_gallery_rows(db: Any, person_id: str) -> list[dict[str, Any]]:
                 "facebank_seed": bool(link.get("facebank_seed")),
                 "context": link.get("context") if isinstance(link.get("context"), dict) else {},
                 "position": link.get("position"),
+                "is_primary": bool(link.get("is_primary")),
                 "link_created_at": link.get("created_at"),
                 "link_updated_at": link.get("updated_at"),
                 "source": asset.get("source"),
                 "source_url": asset.get("source_url"),
                 "hosted_url": asset.get("hosted_url"),
+                "hosted_key": asset.get("hosted_key"),
+                "width": asset.get("width"),
+                "height": asset.get("height"),
                 "caption": asset.get("caption"),
                 "metadata": asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {},
                 "asset_created_at": asset.get("created_at"),
@@ -716,6 +841,266 @@ def _rank_candidates(
             break
 
     return selected, skipped
+
+
+def _rank_facebank_initial_candidates(
+    rows: list[dict[str, Any]],
+    *,
+    show_ids: set[str],
+    show_name_keys: set[str],
+    request_show_id: str | None,
+    request_show_name: str | None,
+    max_refs: int,
+) -> tuple[list[FacebankInitialReferenceImage], list[TaggingReferenceSkipped]]:
+    skipped: list[TaggingReferenceSkipped] = []
+    scored: list[dict[str, Any]] = []
+
+    for row in rows:
+        served_url = _preferred_facebank_served_url(row)
+        if not served_url:
+            skipped.append({"url": "", "reason": "missing_served_url"})
+            continue
+        if _is_very_low_resolution(row):
+            skipped.append({"url": served_url, "reason": "very_low_resolution"})
+            continue
+
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        manual = _is_manual_upload(row)
+        seeded = bool(row.get("facebank_seed"))
+        starred = _is_starred(row)
+        solo = _is_solo_candidate(context, metadata)
+        show_priority = _row_matches_show_priority(
+            row,
+            show_ids=show_ids,
+            show_name_keys=show_name_keys,
+            request_show_id=request_show_id,
+            request_show_name=request_show_name,
+        )
+        publicity_like = _is_publicity_like(row)
+        glamour_like = _is_event_or_glamour_source(row)
+        resolution_tier, longest_edge, area = _resolution_sort_tuple(row)
+        bucket = _facebank_selection_bucket(
+            manual=manual,
+            seeded=seeded,
+            starred=starred,
+            show_priority=show_priority,
+            solo=solo,
+        )
+        reasons: list[str] = []
+        if manual:
+            reasons.append("manual_upload")
+        if seeded:
+            reasons.append("seeded")
+        if starred:
+            reasons.append("starred")
+        if show_priority:
+            reasons.append("show_priority")
+        if solo:
+            reasons.append("solo")
+        if bool(row.get("is_primary")):
+            reasons.append("primary")
+        if publicity_like:
+            reasons.append("publicity_like")
+        if glamour_like:
+            reasons.append("event_or_glamour")
+        if resolution_tier >= 1:
+            reasons.append("resolution_preferred")
+        elif resolution_tier >= 0:
+            reasons.append("resolution_acceptable")
+        else:
+            reasons.append("resolution_fallback")
+
+        scored.append(
+            {
+                "row": row,
+                "served_url": served_url,
+                "manual": manual,
+                "seeded": seeded,
+                "starred": starred,
+                "solo": solo,
+                "show_priority": show_priority,
+                "publicity_like": publicity_like,
+                "glamour_like": glamour_like,
+                "bucket": bucket,
+                "resolution_tier": resolution_tier,
+                "longest_edge": longest_edge,
+                "area": area,
+                "timestamp": _row_timestamp(row) or datetime.fromtimestamp(0, tz=UTC),
+                "position": int(row.get("position")) if isinstance(row.get("position"), int) else 2**31,
+                "reasons": reasons,
+            }
+        )
+
+    scored.sort(
+        key=lambda entry: (
+            int(entry["bucket"]),
+            -int(entry["resolution_tier"]),
+            -int(entry["show_priority"]),
+            -int(bool(entry["row"].get("is_primary"))),
+            -int(entry["publicity_like"]),
+            -int(entry["longest_edge"]),
+            -int(entry["area"]),
+            int(entry["position"]),
+            -entry["timestamp"].timestamp(),
+        )
+    )
+
+    selected: list[FacebankInitialReferenceImage] = []
+    seen_asset_ids: set[str] = set()
+    seen_urls: set[str] = set()
+    glamour_count = 0
+
+    def try_add(
+        candidate: dict[str, Any],
+        *,
+        require_solo: bool,
+        allow_glamour: bool,
+    ) -> bool:
+        nonlocal glamour_count
+        media_asset_id = str(candidate["row"].get("media_asset_id") or "").strip()
+        canonical_url = _canonicalize_url(candidate.get("served_url"))
+        if media_asset_id and media_asset_id in seen_asset_ids:
+            return False
+        if canonical_url and canonical_url in seen_urls:
+            return False
+        if require_solo and not bool(candidate.get("solo")):
+            return False
+        if not allow_glamour and bool(candidate.get("glamour_like")):
+            return False
+        if bool(candidate.get("glamour_like")) and glamour_count >= 1 and len(selected) >= min(3, max_refs):
+            return False
+
+        row = candidate["row"]
+        selected.append(
+            {
+                "served_url": str(candidate["served_url"]),
+                **({"source_url": row.get("source_url")} if _is_http_url(row.get("source_url")) else {}),
+                **({"hosted_url": row.get("hosted_url")} if _is_http_url(row.get("hosted_url")) else {}),
+                **(
+                    {"hosted_key": str(row.get("hosted_key") or "").strip()}
+                    if str(row.get("hosted_key") or "").strip()
+                    else {}
+                ),
+                "media_asset_id": media_asset_id or None,
+                "link_id": str(row.get("link_id") or "").strip() or None,
+                "source": str(row.get("source") or "").strip() or None,
+                "kind": str(row.get("kind") or "").strip() or None,
+                "width": _coerce_int(row.get("width")),
+                "height": _coerce_int(row.get("height")),
+                "is_primary": bool(row.get("is_primary")),
+                "position": _coerce_int(row.get("position")),
+                "facebank_seed": bool(row.get("facebank_seed")),
+                "rank": len(selected) + 1,
+                "selection_bucket": int(candidate["bucket"]),
+                "selection_reasons": list(candidate.get("reasons") or []),
+            }
+        )
+        if media_asset_id:
+            seen_asset_ids.add(media_asset_id)
+        if canonical_url:
+            seen_urls.add(canonical_url)
+        if bool(candidate.get("glamour_like")):
+            glamour_count += 1
+        return True
+
+    def targeted_pick(predicate) -> None:  # noqa: ANN001
+        if len(selected) >= max_refs:
+            return
+        for candidate in scored:
+            if not predicate(candidate):
+                continue
+            if try_add(candidate, require_solo=True, allow_glamour=False):
+                return
+        for candidate in scored:
+            if not predicate(candidate):
+                continue
+            if try_add(candidate, require_solo=True, allow_glamour=True):
+                return
+
+    targeted_pick(lambda item: bool(item.get("show_priority")))
+    targeted_pick(lambda item: bool(item.get("publicity_like")) or bool(item["row"].get("is_primary")))
+
+    for require_solo, allow_glamour in (
+        (True, False),
+        (True, True),
+        (False, False),
+        (False, True),
+    ):
+        if len(selected) >= max_refs:
+            break
+        for candidate in scored:
+            if len(selected) >= max_refs:
+                break
+            if not allow_glamour and glamour_count >= 1 and bool(candidate.get("glamour_like")):
+                continue
+            try_add(candidate, require_solo=require_solo, allow_glamour=allow_glamour)
+
+    for index, entry in enumerate(selected, start=1):
+        entry["rank"] = index
+
+    if len(selected) < max_refs:
+        used_link_ids = {str(item.get("link_id") or "").strip() for item in selected if item.get("link_id")}
+        for candidate in scored:
+            if len(selected) >= max_refs:
+                break
+            link_id = str(candidate["row"].get("link_id") or "").strip()
+            if link_id and link_id in used_link_ids:
+                continue
+            skipped.append(
+                {
+                    "url": str(candidate.get("served_url") or ""),
+                    "reason": "not_selected_initial_facebank_window",
+                }
+            )
+
+    return selected[:max_refs], skipped
+
+
+def build_owner_facebank_initial_reference_profile(
+    db: Any,
+    person_id: str,
+    *,
+    show_id: Any | None = None,
+    show_name: str | None = None,
+    max_refs: int = 5,
+    seed_only: bool = False,
+) -> FacebankInitialReferenceProfile:
+    owner_person_id = _normalize_uuid_text(person_id) or str(person_id).strip()
+    requested = max(0, int(max_refs or 5))
+    rows = _list_gallery_rows(db, owner_person_id)
+    if seed_only:
+        rows = [row for row in rows if bool(row.get("facebank_seed"))]
+
+    if not rows or requested == 0:
+        return {
+            "owner_person_id": owner_person_id,
+            "requested": requested,
+            "accepted": 0,
+            "used": [],
+            "skipped": [],
+            "generated_at": _now_iso(),
+        }
+
+    request_show_id = _normalize_uuid_text(show_id)
+    request_show_name = show_name.strip() if isinstance(show_name, str) and show_name.strip() else None
+    show_ids, show_names = _load_person_show_context(db, owner_person_id)
+    selected, skipped = _rank_facebank_initial_candidates(
+        rows,
+        show_ids=show_ids,
+        show_name_keys=show_names,
+        request_show_id=request_show_id,
+        request_show_name=request_show_name,
+        max_refs=requested,
+    )
+    return {
+        "owner_person_id": owner_person_id,
+        "requested": requested,
+        "accepted": len(selected),
+        "used": selected,
+        "skipped": skipped,
+        "generated_at": _now_iso(),
+    }
 
 
 def build_owner_tagging_reference_profile(

@@ -87,7 +87,7 @@ def _infer_fandom_content_type(*values: str | None) -> str | None:
         return None
     if "confessional" in text or "confession" in text:
         return "CONFESSIONAL"
-    if "intro" in text or "tagline" in text or "opening" in text or "chapter card" in text:
+    if "intro" in text or "tagline" in text or "opening" in text or "chapter card" in text or "title card" in text:
         return "INTRO"
     if "reunion" in text:
         return "REUNION"
@@ -1049,6 +1049,10 @@ def fetch_fandom_gallery_cast_photos(
             source_variant="fandom_gallery",
             source_page_url=file_page_url or image.source_page_url,
         )
+        if section_label:
+            metadata["fandom_section_label"] = section_label
+        if content_type:
+            metadata["fandom_section_tag"] = content_type
         if image.source_page_url:
             metadata.setdefault("source_gallery_url", image.source_page_url)
         if file_page_url:

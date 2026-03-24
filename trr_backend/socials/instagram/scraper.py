@@ -196,6 +196,11 @@ class InstagramScraper:
     PROFILE_POSTS_PAGE_SIZE = 33
     _PROFILE_PAGE_LSD_RE = re.compile(r'"LSD",\[\],\{"token":"(?P<token>[^"]+)"\}')
     _PROFILE_PAGE_BLOKS_VERSION_RE = re.compile(r"bloks_version[^0-9a-fA-F]+(?P<token>[0-9a-fA-F]{32,})")
+    _PROFILE_PAGE_SPIN_R_RE = re.compile(r'"__spin_r":(?P<token>\d+)')
+    _PROFILE_PAGE_SPIN_B_RE = re.compile(r'"__spin_b":"(?P<token>[^"]+)"')
+    _PROFILE_PAGE_SPIN_T_RE = re.compile(r'"__spin_t":(?P<token>\d+)')
+    _PROFILE_PAGE_HSI_RE = re.compile(r'"hsi":"?(?P<token>\d+)"?')
+    _PROFILE_PAGE_HS_RE = re.compile(r'"(?:haste_session|__hs)":"(?P<token>[^"]+)"')
 
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
@@ -261,7 +266,7 @@ class InstagramScraper:
         return ids
 
     def _resolve_graphql_cursor_retry_attempts(self, cursor: str | None) -> int:
-        default_attempts = 3 if cursor else 1
+        default_attempts = 3 if cursor else 2
         raw = (os.getenv("SOCIAL_INSTAGRAM_CURSOR_RETRY_ATTEMPTS") or "").strip()
         if not raw:
             return default_attempts
@@ -269,6 +274,341 @@ class InstagramScraper:
             return max(1, min(int(raw), 5))
         except ValueError:
             return default_attempts
+
+    def _resolve_graphql_retry_backoff_seconds(self, cursor: str | None, attempt_index: int) -> float:
+        raw = (os.getenv("SOCIAL_INSTAGRAM_CURSOR_RETRY_BACKOFF_SECONDS") or "").strip()
+        if raw:
+            try:
+                base = max(0.0, min(float(raw), 30.0))
+            except ValueError:
+                base = 1.5 if cursor else 0.75
+        else:
+            base = 1.5 if cursor else 0.75
+        if base <= 0:
+            return 0.0
+        return min(base * max(1, attempt_index + 1), 30.0)
+
+    @staticmethod
+    def _playwright_graphql_fallback_enabled() -> bool:
+        raw = (os.getenv("SOCIAL_INSTAGRAM_BROWSER_GRAPHQL_FALLBACK") or "").strip().lower()
+        if raw:
+            return raw not in {"0", "false", "off", "no"}
+        return True
+
+    def _browser_cookie_payload(self) -> list[dict[str, Any]]:
+        cookies: list[dict[str, Any]] = []
+        for name, value in self._request_cookies().items():
+            if not str(name or "").strip() or not str(value or "").strip():
+                continue
+            cookies.append(
+                {
+                    "name": str(name),
+                    "value": str(value),
+                    "domain": ".instagram.com",
+                    "path": "/",
+                    "secure": True,
+                }
+            )
+        return cookies
+
+    def _fetch_posts_graphql_with_browser(
+        self,
+        username: str,
+        cursor: str | None = None,
+        *,
+        request_timeout: tuple[int, int] | float | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # noqa: BLE001
+            self.last_retrieval_meta.update(
+                {
+                    "error_code": "instagram_graphql_browser_unavailable",
+                    "error_class": type(exc).__name__,
+                    "retryable": True,
+                    "graphql_cursor": str(cursor or "").strip() or None,
+                }
+            )
+            return None
+
+        from trr_backend.socials.browser_cookie_refresh import launch_browser
+
+        timeout = request_timeout or self.request_timeout
+        if isinstance(timeout, tuple):
+            timeout_ms = int(max(timeout) * 1000)
+        else:
+            timeout_ms = int(float(timeout) * 1000)
+        timeout_ms = max(15_000, min(timeout_ms, 90_000))
+        doc_ids = self._profile_posts_doc_ids()
+        user_agent = self._get_headers().get("user-agent", "Mozilla/5.0")
+
+        with sync_playwright() as playwright:
+            browser = launch_browser(playwright, headless=True)
+            try:
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 1400},
+                    user_agent=user_agent,
+                )
+                browser_cookies = self._browser_cookie_payload()
+                if browser_cookies:
+                    context.add_cookies(browser_cookies)
+                page = context.new_page()
+                page.goto(
+                    f"https://www.instagram.com/{username}/",
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                page.wait_for_timeout(1_500)
+                if cursor:
+                    captured_payload: dict[str, Any] | None = None
+                    captured_failure: dict[str, Any] | None = None
+
+                    def _handle_response(response: Any) -> None:
+                        nonlocal captured_payload, captured_failure
+                        if captured_payload is not None:
+                            return
+                        try:
+                            if "/graphql/query" not in str(response.url or ""):
+                                return
+                            request = response.request
+                            post_data = str(request.post_data or "")
+                            if cursor and cursor not in post_data:
+                                return
+                            payload = response.json()
+                            connection = (
+                                payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+                            )
+                            edges = connection.get("edges") or []
+                            count_value = self._coerce_int(connection.get("count"), default=0)
+                            if response.ok and connection and (edges or count_value == 0):
+                                captured_payload = payload
+                                return
+                            captured_failure = {
+                                "status": int(getattr(response, "status", 0) or 0) or None,
+                                "payload": payload if isinstance(payload, dict) else None,
+                            }
+                        except Exception:  # noqa: BLE001
+                            return
+
+                    page.on("response", _handle_response)
+                    max_scroll_attempts = 6
+                    scroll_attempt = 0
+                    while scroll_attempt < max_scroll_attempts and captured_payload is None:
+                        scroll_attempt += 1
+                        page.mouse.wheel(0, 6000)
+                        page.wait_for_timeout(2_000)
+                    result = {"ok": bool(captured_payload), "payload": captured_payload, "failure": captured_failure}
+                else:
+                    result = page.evaluate(
+                        """
+                    async ({ username, cursor, docIds, count, fallbackAsbdId }) => {
+                      const html = document.documentElement.outerHTML || "";
+                      const capture = (pattern) => {
+                        const match = html.match(pattern);
+                        if (!match) return null;
+                        return match.groups?.token ?? match[1] ?? null;
+                      };
+                      const lsd = capture(/"LSD",\\[\\],\\{"token":"(?<token>[^"]+)"/);
+                      const spinR = capture(/"__spin_r":(?<token>\\d+)/);
+                      const spinB = capture(/"__spin_b":"(?<token>[^"]+)"/);
+                      const spinT = capture(/"__spin_t":(?<token>\\d+)/);
+                      const hsi = capture(/"hsi":"?(?<token>\\d+)"?/);
+                      const hs = capture(/"(?:haste_session|__hs)":"(?<token>[^"]+)"/);
+                      const cookies = Object.fromEntries(
+                        document.cookie.split("; ").filter(Boolean).map((part) => {
+                          const idx = part.indexOf("=");
+                          if (idx <= 0) return [part, ""];
+                          return [part.slice(0, idx), part.slice(idx + 1)];
+                        })
+                      );
+                      const viewerId = cookies.ds_user_id || "0";
+                      const asbdId = fallbackAsbdId || "359341";
+                      const dpr = String(window.devicePixelRatio || cookies.dpr || "1");
+                      const runtime = {};
+                      if (lsd) {
+                        runtime.lsd = lsd;
+                        runtime.jazoest = `2${Array.from(lsd).reduce((sum, ch) => sum + ch.charCodeAt(0), 0)}`;
+                      }
+                      if (spinR) runtime.__spin_r = spinR;
+                      if (spinB) runtime.__spin_b = spinB;
+                      if (spinT) runtime.__spin_t = spinT;
+                      if (hsi) runtime.__hsi = hsi;
+                      if (hs) runtime.__hs = hs;
+                      if (dpr) runtime.dpr = dpr;
+                      let lastFailure = null;
+                      for (const docId of docIds) {
+                        const form = new URLSearchParams({
+                          av: viewerId,
+                          __d: "www",
+                          __user: viewerId,
+                          __a: "1",
+                          __req: "1",
+                          __comet_req: "7",
+                          fb_api_caller_class: "RelayModern",
+                          fb_api_req_friendly_name: "PolarisProfilePostsTabContentQuery_connection",
+                          variables: JSON.stringify({
+                            after: cursor,
+                            before: null,
+                            data: {
+                              count,
+                              include_reel_media_seen_timestamp: true,
+                              include_relationship_info: true,
+                              latest_besties_reel_media: true,
+                              latest_reel_media: true
+                            },
+                            first: count,
+                            last: null,
+                            username
+                          }),
+                          server_timestamps: "true",
+                          doc_id: docId,
+                          ...runtime
+                        });
+                        const response = await fetch("/graphql/query", {
+                          method: "POST",
+                          credentials: "include",
+                          headers: {
+                            "content-type": "application/x-www-form-urlencoded",
+                            "x-fb-friendly-name": "PolarisProfilePostsTabContentQuery_connection",
+                            "x-asbd-id": asbdId,
+                            ...(lsd ? { "x-fb-lsd": lsd } : {})
+                          },
+                          body: form.toString()
+                        });
+                        const text = await response.text();
+                        let payload = null;
+                        try {
+                          payload = JSON.parse(text);
+                        } catch (error) {
+                          payload = null;
+                        }
+                        const connection = payload?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+                        const edges = Array.isArray(connection?.edges) ? connection.edges : [];
+                        const countValue = Number(connection?.count || 0);
+                        if (response.ok && connection && (edges.length > 0 || countValue === 0)) {
+                          return { ok: true, payload, runtime };
+                        }
+                        lastFailure = {
+                          status: response.status,
+                          payload,
+                          text
+                        };
+                      }
+                      return { ok: false, failure: lastFailure, runtime };
+                    }
+                    """,
+                        {
+                            "username": username,
+                            "cursor": str(cursor or "").strip() or None,
+                            "docIds": doc_ids,
+                            "count": self.PROFILE_POSTS_PAGE_SIZE,
+                            "fallbackAsbdId": str(os.getenv("INSTAGRAM_WEB_X_ASBD_ID") or self.WEB_X_ASBD_ID),
+                        },
+                    )
+                runtime = dict((result or {}).get("runtime") or {})
+                if runtime:
+                    self._profile_page_context_cache[username] = {
+                        "lsd": str(runtime.get("lsd") or "").strip(),
+                        "spin_r": str(runtime.get("__spin_r") or "").strip(),
+                        "spin_b": str(runtime.get("__spin_b") or "").strip(),
+                        "spin_t": str(runtime.get("__spin_t") or "").strip(),
+                        "hsi": str(runtime.get("__hsi") or "").strip(),
+                        "hs": str(runtime.get("__hs") or "").strip(),
+                    }
+                for cookie in context.cookies():
+                    name = str(cookie.get("name") or "").strip()
+                    value = str(cookie.get("value") or "")
+                    if name and value:
+                        self.session.cookies.set(name, value)
+                if result and result.get("ok") and result.get("payload"):
+                    self.last_retrieval_meta["graphql_cursor"] = str(cursor or "").strip() or None
+                    self.last_retrieval_meta["retrieval_mode"] = "graphql_playwright"
+                    self.last_retrieval_meta["transport"] = "playwright"
+                    self.last_retrieval_meta["retrieval_transport"] = "playwright"
+                    return dict(result["payload"])
+                failure = dict((result or {}).get("failure") or {})
+                failure_payload = failure.get("payload") if isinstance(failure.get("payload"), dict) else {}
+                failure_message = str(failure_payload.get("message") or "").strip().lower() or None
+                status_code = failure.get("status")
+                try:
+                    status_code = int(status_code) if status_code is not None else None
+                except (TypeError, ValueError):
+                    status_code = None
+                if cursor:
+                    error_code = "instagram_graphql_cursor_request_failed"
+                    if status_code == 401:
+                        error_code = "instagram_graphql_cursor_unauthorized"
+                    elif status_code == 403:
+                        error_code = "instagram_graphql_cursor_forbidden"
+                    elif status_code == 429:
+                        error_code = "instagram_graphql_cursor_rate_limited"
+                    elif status_code == 400 and failure_message == "checkpoint_required":
+                        error_code = "instagram_graphql_checkpoint_required"
+                else:
+                    error_code = "instagram_graphql_initial_request_failed"
+                    if status_code == 400 and failure_message == "checkpoint_required":
+                        error_code = "instagram_graphql_checkpoint_required"
+                self.last_retrieval_meta.update(
+                    {
+                        "error_code": error_code,
+                        "error_class": "PlaywrightGraphQLFailure",
+                        "error_status_code": status_code,
+                        "error_message": failure_message,
+                        "retryable": True,
+                        "graphql_cursor": str(cursor or "").strip() or None,
+                        "transport": "playwright",
+                        "retrieval_transport": "playwright",
+                    }
+                )
+                return None
+            finally:
+                browser.close()
+
+    def _reset_request_session(self) -> None:
+        preserved_cookies = self._request_cookies()
+        self.session = self._create_session()
+        for key, value in preserved_cookies.items():
+            if value is None:
+                continue
+            self.session.cookies.set(str(key), str(value))
+
+    def _graphql_request_error_details(
+        self,
+        *,
+        cursor: str | None,
+        error: requests.exceptions.RequestException | None,
+    ) -> dict[str, Any]:
+        response = getattr(error, "response", None)
+        status_code = None
+        try:
+            status_code = int(getattr(response, "status_code", 0) or 0) or None
+        except (TypeError, ValueError):
+            status_code = None
+        error_message = self._graphql_error_response_message(response)
+        if cursor:
+            if status_code == 401:
+                error_code = "instagram_graphql_cursor_unauthorized"
+            elif status_code == 403:
+                error_code = "instagram_graphql_cursor_forbidden"
+            elif status_code == 429:
+                error_code = "instagram_graphql_cursor_rate_limited"
+            elif status_code == 400 and error_message == "checkpoint_required":
+                error_code = "instagram_graphql_checkpoint_required"
+            else:
+                error_code = "instagram_graphql_cursor_request_failed"
+        else:
+            if status_code == 400 and error_message == "checkpoint_required":
+                error_code = "instagram_graphql_checkpoint_required"
+            else:
+                error_code = "instagram_graphql_initial_request_failed"
+        return {
+            "error_code": error_code,
+            "error_class": error.__class__.__name__ if error is not None else "RequestException",
+            "error_status_code": status_code,
+            "error_message": error_message,
+            "retryable": True,
+            "graphql_cursor": str(cursor or "").strip() or None,
+        }
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -385,6 +725,31 @@ class InstagramScraper:
             headers["x-csrftoken"] = request_cookies["csrftoken"]
         return headers
 
+    @staticmethod
+    def _graphql_error_response_message(response: requests.Response | None) -> str | None:
+        if response is None:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            message = str(payload.get("message") or "").strip().lower()
+            if message:
+                return message
+        text = str(getattr(response, "text", "") or "").strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            message = str(payload.get("message") or "").strip().lower()
+            if message:
+                return message
+        return None
+
     def _extract_profile_page_context(self, html: str) -> dict[str, str]:
         context: dict[str, str] = {}
         if not html:
@@ -395,7 +760,57 @@ class InstagramScraper:
         bloks_match = self._PROFILE_PAGE_BLOKS_VERSION_RE.search(html)
         if bloks_match:
             context["bloks_version"] = str(bloks_match.group("token") or "").strip()
+        spin_r_match = self._PROFILE_PAGE_SPIN_R_RE.search(html)
+        if spin_r_match:
+            context["spin_r"] = str(spin_r_match.group("token") or "").strip()
+        spin_b_match = self._PROFILE_PAGE_SPIN_B_RE.search(html)
+        if spin_b_match:
+            context["spin_b"] = str(spin_b_match.group("token") or "").strip()
+        spin_t_match = self._PROFILE_PAGE_SPIN_T_RE.search(html)
+        if spin_t_match:
+            context["spin_t"] = str(spin_t_match.group("token") or "").strip()
+        hsi_match = self._PROFILE_PAGE_HSI_RE.search(html)
+        if hsi_match:
+            context["hsi"] = str(hsi_match.group("token") or "").strip()
+        hs_match = self._PROFILE_PAGE_HS_RE.search(html)
+        if hs_match:
+            context["hs"] = str(hs_match.group("token") or "").strip()
         return {key: value for key, value in context.items() if value}
+
+    @staticmethod
+    def _jazoest_for_token(token: str | None) -> str | None:
+        raw = str(token or "").strip()
+        if not raw:
+            return None
+        return f"2{sum(ord(char) for char in raw)}"
+
+    def _graphql_form_runtime_fields(
+        self,
+        *,
+        page_context: dict[str, str],
+        request_cookies: dict[str, str],
+    ) -> dict[str, str]:
+        runtime_fields: dict[str, str] = {}
+        lsd_token = str(page_context.get("lsd") or request_cookies.get("lsd") or "").strip()
+        if lsd_token:
+            runtime_fields["lsd"] = lsd_token
+            jazoest = self._jazoest_for_token(lsd_token)
+            if jazoest:
+                runtime_fields["jazoest"] = jazoest
+        for context_key, field_key in (
+            ("spin_r", "__spin_r"),
+            ("spin_b", "__spin_b"),
+            ("spin_t", "__spin_t"),
+            ("hsi", "__hsi"),
+            ("hs", "__hs"),
+        ):
+            value = str(page_context.get(context_key) or "").strip()
+            if value:
+                runtime_fields[field_key] = value
+        dpr = str(request_cookies.get("dpr") or "").strip()
+        if dpr:
+            runtime_fields["dpr"] = dpr
+        return runtime_fields
 
     def _warm_profile_request_context(
         self,
@@ -1352,6 +1767,17 @@ class InstagramScraper:
     ) -> dict | None:
         """Fetch posts using GraphQL (requires auth for full access)."""
         self._rate_limit(delay)
+        for key in (
+            "error_code",
+            "error_class",
+            "error_status_code",
+            "error_message",
+            "retryable",
+            "graphql_cursor",
+            "transport",
+            "retrieval_transport",
+        ):
+            self.last_retrieval_meta.pop(key, None)
         timeout = request_timeout or self.request_timeout
         attempt_limit = self._resolve_graphql_cursor_retry_attempts(cursor)
         last_error: requests.exceptions.RequestException | None = None
@@ -1394,6 +1820,7 @@ class InstagramScraper:
                 "variables": json.dumps(variables),
                 "server_timestamps": "true",
             }
+            data.update(self._graphql_form_runtime_fields(page_context=page_context, request_cookies=request_cookies))
 
             headers = self._get_headers(f"https://www.instagram.com/{username}/")
             headers["content-type"] = "application/x-www-form-urlencoded"
@@ -1423,6 +1850,10 @@ class InstagramScraper:
                     payload = response.json()
                     connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
                     if connection:
+                        self.last_retrieval_meta["graphql_cursor"] = str(cursor or "").strip() or None
+                        self.last_retrieval_meta["retrieval_mode"] = "graphql_requests_enriched"
+                        self.last_retrieval_meta["transport"] = "requests_enriched"
+                        self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
                         return payload
                     logger.warning("Instagram GraphQL doc_id %s returned no connection data; trying fallback", doc_id)
                 except requests.exceptions.RequestException as e:
@@ -1432,6 +1863,10 @@ class InstagramScraper:
                     continue
 
             if cursor and attempt_index + 1 < attempt_limit and saw_request_error:
+                self._reset_request_session()
+                backoff_seconds = self._resolve_graphql_retry_backoff_seconds(cursor, attempt_index)
+                if backoff_seconds > 0:
+                    time.sleep(backoff_seconds)
                 logger.warning(
                     "Instagram GraphQL cursor page failed for @%s; refreshing profile context and retrying (%d/%d)",
                     username,
@@ -1439,9 +1874,43 @@ class InstagramScraper:
                     attempt_limit,
                 )
                 continue
+            if not cursor and attempt_index + 1 < attempt_limit and saw_request_error:
+                self._reset_request_session()
+                backoff_seconds = self._resolve_graphql_retry_backoff_seconds(cursor, attempt_index)
+                if backoff_seconds > 0:
+                    time.sleep(backoff_seconds)
+                logger.warning(
+                    "Instagram GraphQL initial page failed for @%s; refreshing profile context and retrying (%d/%d)",
+                    username,
+                    attempt_index + 1,
+                    attempt_limit,
+                )
+                continue
             break
         if last_error is not None and cursor:
+            self.last_retrieval_meta.update(self._graphql_request_error_details(cursor=cursor, error=last_error))
+            self.last_retrieval_meta["transport"] = "requests_enriched"
+            self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
+            if self.last_retrieval_meta.get("error_code") in {
+                "instagram_graphql_cursor_unauthorized",
+                "instagram_graphql_cursor_forbidden",
+                "instagram_graphql_cursor_rate_limited",
+            }:
+                self._reset_request_session()
+                self._profile_page_context_cache.pop(username, None)
             logger.warning("Instagram GraphQL exhausted cursor retries for @%s after cursor=%s", username, cursor)
+        elif last_error is not None:
+            self.last_retrieval_meta.update(self._graphql_request_error_details(cursor=cursor, error=last_error))
+            self.last_retrieval_meta["transport"] = "requests_enriched"
+            self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
+        if self._playwright_graphql_fallback_enabled():
+            fallback_payload = self._fetch_posts_graphql_with_browser(
+                username,
+                cursor,
+                request_timeout=timeout,
+            )
+            if fallback_payload is not None:
+                return fallback_payload
         return None
 
     def _iter_posts_from_profile_info(self, data: dict) -> Iterator[tuple[dict, dict]]:

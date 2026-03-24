@@ -37,8 +37,5 @@ erDiagram
         TIMESTAMP_WITH_TIME_ZONE created_at
         TEXT fetch_method
         TEXT fetched_from_url
-        TIMESTAMP_WITH_TIME_ZONE archived_at
-        TEXT archived_by_firebase_uid
-        TEXT archived_reason
     }
 ```

@@ -112,3 +112,58 @@ def test_person_photos_seed_only_false_omits_facebank_filter(monkeypatch):
     assert response.status_code == 200
     assert "AND facebank_seed = true" not in str(captured["sql"])
     assert captured["params"] == [str(person_id), 9, 1]
+
+
+def test_person_photos_facebank_initial_profile_uses_ranked_selection(monkeypatch):
+    person_id = uuid4()
+    captured: dict[str, object] = {}
+
+    def fake_select_initial_facebank_photos(**kwargs):
+        captured.update(kwargs)
+        return [
+            {
+                "served_url": "https://cdn.example.com/seed.jpg",
+                "media_asset_id": str(uuid4()),
+                "selection_reasons": ["seeded", "solo"],
+                "selection_bucket": 3,
+                "is_primary": True,
+                "width": 800,
+                "height": 1000,
+                "kind": "gallery",
+            }
+        ]
+
+    monkeypatch.setattr(screenalytics_router, "_select_initial_facebank_photos", fake_select_initial_facebank_photos)
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/screenalytics/people/{person_id}/photos"
+        "?selection_profile=facebank_initial&seed_only=true&limit=5&show_id="
+        f"{uuid4()}&show_name=Demo%20Show",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["selection_reasons"] == ["seeded", "solo"]
+    assert captured["person_id"] == person_id
+    assert captured["limit"] == 5
+    assert captured["seed_only"] is True
+
+
+def test_person_photos_facebank_initial_profile_ignores_nonzero_offset(monkeypatch):
+    monkeypatch.setattr(
+        screenalytics_router,
+        "_select_initial_facebank_photos",
+        lambda **_kwargs: [{"served_url": "https://cdn.example.com/should-not-run.jpg"}],
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/screenalytics/people/{uuid4()}/photos?selection_profile=facebank_initial&offset=1",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []

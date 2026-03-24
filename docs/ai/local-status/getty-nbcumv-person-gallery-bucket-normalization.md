@@ -8,8 +8,8 @@ handoff:
   include: true
   state: active
   last_updated: 2026-03-20
-  current_phase: "Getty/NBCUMV person refresh classification is in place, with remaining work limited to occasional targeted validation of shared-versus-NBCUMV-only counts"
-  next_action: "Only rerun Lisa Barlow or another affected person refresh if a live gallery/regression shows the shared, NBCUMV-only, and Getty-only counters drifting again; otherwise archive this item in the next cleanup pass"
+  current_phase: "Getty/NBCUMV person refresh classification remains in place, and the latest follow-up now stamps Google reverse-image-search URLs onto Getty fallback rows for manual operator use"
+  next_action: "Run one live person-gallery Get Images pass only if needed to confirm the new Google reverse-search link appears on Getty fallback rows in the lightbox; otherwise archive this item in the next cleanup pass"
   detail: self
 ```
 
@@ -73,3 +73,10 @@ handoff:
   - replay advanced through at least `after_seq=48`
   - the run reached late mirror work and no longer stops with `No Getty candidates found` or `NBCUMV direct search requires show context`
 - The most recent reported failure signature was `Supabase error updating mirror result: duplicate key value violates unique constraint "media_assets_source_hosted_sha_uq"` during S3 mirroring; that path now falls back instead of counting as a failed mirrored asset.
+- 2026-03-20 follow-up:
+  - Getty fallback rows now persist `google_reverse_image_search_url` metadata built from the Getty preview URL so operators can open a manual Google Image Search when no automatic public replacement is available.
+  - This follow-up intentionally kept the existing object-storage mirror path unchanged; hosted media still flows through the shared object-storage/R2-compatible mirror helpers rather than any local-file save path.
+  - Focused validation passed:
+    - `./.venv/bin/ruff check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py`
+    - `./.venv/bin/ruff format --check api/routers/admin_person_images.py tests/api/routers/test_admin_person_images.py`
+    - `./.venv/bin/pytest -q tests/api/routers/test_admin_person_images.py -k 'import_nbcumv_person_media_auto_replaces_bravocon_getty_asset or import_nbcumv_person_media_falls_back_to_getty_when_nbcumv_unavailable'`

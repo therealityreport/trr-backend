@@ -39,6 +39,7 @@ from trr_backend.job_plane import (
 )
 from trr_backend.modal_dispatch import dispatch_reddit_refresh, modal_execution_metadata
 from trr_backend.observability import get_trace_id
+from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ _ACCOUNT_PROFILE_POSTS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_POSTS_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_HASHTAGS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_COLLABORATORS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK = Lock()
 _WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST = 0
@@ -632,6 +635,7 @@ def _clear_account_profile_caches() -> None:
     _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
+    _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE, _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_COLLABORATORS_CACHE, _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK)
 
 
@@ -1248,6 +1252,13 @@ class TwitterSearchRequest(BaseModel):
     season_number: int | None = Field(default=None, ge=0, le=100, description="Associated season")
     person_id: UUID | None = Field(default=None, description="Associated person ID")
 
+    # Persistence options
+    persist: bool = Field(default=False, description="Upsert results to social.twitter_tweets")
+    scrape_query: str | None = Field(
+        default=None,
+        description="Label stored on persisted rows; defaults to query value when omitted",
+    )
+
 
 class TweetResponse(BaseModel):
     """Single tweet in response."""
@@ -1392,6 +1403,17 @@ async def search_twitter(
         tweets = scraper.scrape(config)
         if request.mirror_to_s3:
             mirror_tweet_media(tweets)
+
+        if request.persist and tweets:
+            label = request.scrape_query or request.query
+            try:
+                upsert_standalone_tweets(tweets, scrape_query=label)
+            except Exception as upsert_err:  # noqa: BLE001
+                logger.warning(
+                    "upsert_standalone_tweets failed for query %r: %s",
+                    label,
+                    upsert_err,
+                )
 
         return TwitterSearchResponse(
             success=True,
@@ -3383,6 +3405,43 @@ def get_social_account_profile_hashtags_route(
         raise _lookup_error_to_not_found(exc) from exc
 
 
+@router.get("/profiles/{platform}/{account_handle}/hashtags/timeline")
+def get_social_account_profile_hashtag_timeline_route(
+    platform: str,
+    account_handle: str,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_hashtag_timeline
+
+    cache_key = _account_profile_cache_key(
+        surface="hashtags_timeline",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
+        _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_hashtag_timeline(platform=platform, account_handle=account_handle)
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
+            _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
 @router.get("/profiles/{platform}/{account_handle}/catalog/review-queue")
 def get_social_account_catalog_review_queue_route(
     platform: str,
@@ -3507,12 +3566,14 @@ async def post_social_account_catalog_backfill_route(
         used_inline_fallback = bool(payload.allow_inline_dev_fallback)
 
     try:
+        date_start = payload.date_start if payload.backfill_scope == "bounded_window" else None
+        date_end = payload.date_end if payload.backfill_scope == "bounded_window" else None
         result = start_social_account_catalog_backfill(
             platform=platform,
             account_handle=account_handle,
             source_scope=payload.source_scope,
-            date_start=payload.date_start if payload.backfill_scope == "bounded_window" else payload.date_start,
-            date_end=payload.date_end if payload.backfill_scope == "bounded_window" else payload.date_end,
+            date_start=date_start,
+            date_end=date_end,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
         )
@@ -3716,6 +3777,35 @@ def get_social_account_catalog_run_progress_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to fetch social account catalog run progress: platform=%s account=%s run_id=%s",
+            platform,
+            account_handle,
+            run_id,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/catalog/verification")
+def get_social_account_catalog_verification_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID | None = None,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_verification
+
+    try:
+        return get_social_account_catalog_verification(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id) if run_id else None,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog verification: platform=%s account=%s run_id=%s",
             platform,
             account_handle,
             run_id,

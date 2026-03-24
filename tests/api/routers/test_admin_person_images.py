@@ -164,11 +164,16 @@ def test_resolve_imdb_focus_filters_returns_empty_for_non_target_show(monkeypatc
     assert prioritize_solo is False
 
 
-def test_resolve_refresh_sources_keeps_nbcumv_without_show_context() -> None:
-    request = admin_person_images.RefreshImagesRequest(sources=["imdb", "nbcumv"])
+def test_resolve_refresh_sources_canonicalizes_getty_alias_to_nbcumv() -> None:
+    request = admin_person_images.RefreshImagesRequest(sources=["imdb", "getty"])
     sources, fandom_skipped = admin_person_images._resolve_refresh_sources(MagicMock(), request)
     assert fandom_skipped is False
     assert sources == ["imdb", "nbcumv"]
+
+
+def test_normalize_source_progress_key_maps_getty_alias_to_shared_bucket() -> None:
+    assert admin_person_images._normalize_source_progress_key("getty") == "getty_nbcumv"
+    assert admin_person_images._normalize_source_progress_key("nbcumv") == "getty_nbcumv"
 
 
 def test_refresh_request_accepts_expanded_limit_per_source() -> None:
@@ -176,9 +181,94 @@ def test_refresh_request_accepts_expanded_limit_per_source() -> None:
     assert request.limit_per_source == 1000
 
 
+def test_refresh_request_accepts_getty_source_alias() -> None:
+    request = admin_person_images.RefreshImagesRequest(sources=["getty"])
+    assert request.sources == ["getty"]
+
+
 def test_reprocess_request_accepts_getty_source() -> None:
     request = admin_person_images.ReprocessImagesRequest(sources=["getty"])
     assert request.sources == ["getty"]
+
+
+def test_resolve_gallery_bucket_metadata_includes_event_subcategories() -> None:
+    metadata = admin_person_images._resolve_gallery_bucket_metadata(
+        asset={
+            "event_name": "Bravo Launch Party Premiere Night",
+            "title": "Bravo Launch Party Premiere Night",
+            "caption": "Bravo cast attends the launch party premiere night.",
+        },
+        resolved_asset_show=None,
+        show_lookup_by_alias={},
+    )
+
+    assert metadata["bucket_type"] == "event"
+    assert metadata["event_subcategory_keys"] == [
+        "premieres_red_carpet_screenings",
+        "brand_launch_opening_social",
+        "reality_tv_bravo_franchise",
+    ]
+    assert metadata["event_primary_subcategory_key"] == "premieres_red_carpet_screenings"
+
+
+def test_import_nbcumv_person_media_uses_wwhl_date_range_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    captured_grouped_searches: list[dict[str, object]] = []
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(getty_integration, "search_editorial_assets", lambda *args, **kwargs: [])
+
+    def _fake_grouped_search(phrase: str, **kwargs):
+        captured_grouped_searches.append(
+            {
+                "phrase": phrase,
+                "query_params": kwargs.get("query_params"),
+                "source_query_scope": kwargs.get("source_query_scope"),
+            }
+        )
+        return []
+
+    monkeypatch.setattr(getty_integration, "search_grouped_events", _fake_grouped_search)
+    monkeypatch.setattr(
+        admin_person_images,
+        "_load_person_wwhl_episode_air_dates_from_credits",
+        lambda db, person_id: ["2022-06-27"],
+    )
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "resolve_show_by_title",
+        lambda title: {"id": "show-wwhl", "title": "Watch What Happens Live with Andy Cohen"},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda *args, **kwargs: {"ok": True},
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        MagicMock(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name="Watch What Happens Live with Andy Cohen",
+        limit=10,
+    )
+
+    assert result["getty_wwhl_events"] == []
+    assert captured_grouped_searches[2] == {
+        "phrase": "Watch What Happens Live",
+        "query_params": {
+            "sort": "newest",
+            "numberofpeople": "one,two",
+            "begindate": "2022-06-25",
+            "enddate": "2022-06-29",
+            "recency": "daterange",
+        },
+        "source_query_scope": "wwhl_date_range",
+    }
 
 
 def test_import_nbcumv_person_media_persists_getty_unmatched_urls_and_imports_only_overlaps(
@@ -825,6 +915,10 @@ def test_import_nbcumv_person_media_imports_getty_fallback_when_nbcumv_is_unauth
     assert imported_getty_rows[0]["source"] == "getty"
     assert imported_getty_rows[0]["metadata"]["crosswalk_reason"] == "nbcumv_unavailable"
     assert imported_getty_rows[0]["metadata"]["source_resolution"] == "getty_watermark_fallback"
+    assert (
+        imported_getty_rows[0]["metadata"]["google_reverse_image_search_url"]
+        == "https://www.google.com/searchbyimage?image_url=https%3A%2F%2Fmedia.gettyimages.com%2Fid%2F2246511440%2Fphoto%2Fsample.jpg"
+    )
 
 
 def test_import_nbcumv_person_media_auto_replaces_bravocon_getty_asset(
@@ -921,6 +1015,10 @@ def test_import_nbcumv_person_media_auto_replaces_bravocon_getty_asset(
     assert metadata["original_source_url"] == "https://media.gettyimages.com/bravocon-comp.jpg"
     assert metadata["original_source"] == "getty"
     assert metadata["getty_only_fallback"] is False
+    assert (
+        metadata["google_reverse_image_search_url"]
+        == "https://www.google.com/searchbyimage?image_url=https%3A%2F%2Fmedia.gettyimages.com%2Fbravocon-comp.jpg"
+    )
 
 
 def test_import_nbcumv_person_media_uses_date_scoped_nup_fallback_before_getty_only(

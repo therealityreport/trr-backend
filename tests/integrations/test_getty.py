@@ -263,6 +263,57 @@ def test_fetch_asset_detail_extracts_detail_fields_and_people_count(monkeypatch)
     assert detail["people_count"] == 2
 
 
+def test_infer_people_count_supports_one_person_keyword() -> None:
+    assert getty._infer_people_count(["One Person"]) == 1
+
+
+def test_describe_asset_person_match_prefers_people_overlay_over_noisy_tags() -> None:
+    details = getty.describe_asset_person_match(
+        {
+            "search_people_overlay_names": ["Brandi Glanville"],
+            "people": [{"text": "Andy Cohen"}],
+            "caption": "Watch What Happens Live With Andy Cohen -- Episode 1501",
+        },
+        "Brandi Glanville",
+    )
+
+    assert details["matched"] is True
+    assert details["reason"] == "solo_overlay"
+    assert details["matched_name"] == "Brandi Glanville"
+
+
+def test_describe_asset_person_match_allows_single_letter_wwhl_caption_typo() -> None:
+    details = getty.describe_asset_person_match(
+        {
+            "caption": (
+                "Watch What Happens Live With Andy Cohen - Season 19 "
+                "WATCH WHAT HAPPENS LIVE WITH ANDY COHEN -- Episode 19109 -- "
+                "Pictured: Jill Zarin, Brandy Glanville"
+            ),
+        },
+        "Brandi Glanville",
+    )
+
+    assert details["matched"] is True
+    assert details["reason"] == "caption_typo"
+    assert details["matched_name"] == "Brandy Glanville"
+
+
+def test_describe_asset_person_match_rejects_known_false_positive_event() -> None:
+    details = getty.describe_asset_person_match(
+        {
+            "event_name": "CA: Hilary Roberts Birthday Celebration And Red Songbird Foundation Launch Party",
+            "title": "6 Brandi Glanville Photos and High-Res Pictures",
+            "people": [{"text": "Brandi Glanville"}],
+        },
+        "Brandi Glanville",
+    )
+
+    assert details["matched"] is False
+    assert details["reason"] == "known_exception"
+    assert details["deny_reason"] == "hilary_roberts_event_false_positive"
+
+
 def test_search_grouped_events_requires_person_match_when_requested(monkeypatch) -> None:
     monkeypatch.setattr(
         getty,
