@@ -1,5 +1,18 @@
 # Twitter Search Persistence Query-Run Provenance
 
+Last updated: 2026-03-23
+
+## Handoff Snapshot
+```yaml
+handoff:
+  include: true
+  state: recent
+  last_updated: 2026-03-23
+  current_phase: "backend consolidation complete on main"
+  next_action: "Use backend main as the source of truth and monitor downstream screenalytics/TRR-APP smoke coverage only if regressions appear"
+  detail: self
+```
+
 ## Summary
 - Created a clean backend worktree branch at `feat/twitter-search-persistence-clean` to isolate the Twitter hashtag search feature from the contaminated PR branch.
 - Replaced single-label standalone persistence with scrape-run provenance via `social.twitter_scrape_queries` and `social.twitter_scrape_query_tweets`.
@@ -18,9 +31,8 @@
   - `ruff check` on all touched Twitter feature files
   - `ruff format --check` on all touched Twitter feature files
   - `./scripts/reload_postgrest_schema.sh` with env sourced from the main backend worktree `.env`
-- Blocked:
-  - `make schema-docs-check` fails because the local database configured in `.env` is already ahead of `main` on unrelated core tables, so generated schema docs show non-Twitter drift.
+  - `make schema-docs-check`
 
 ## Notes
 - The clean worktree intentionally leaves the original contaminated branch untouched.
-- No remote push or replacement PR was created yet.
+- The missing query-run provenance delta from the clean worktree is now preserved on backend `main`.
