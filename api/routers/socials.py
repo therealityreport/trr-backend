@@ -47,7 +47,7 @@ from trr_backend.modal_dispatch import (
     modal_reddit_refresh_function_name,
 )
 from trr_backend.observability import get_trace_id
-from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
+from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
@@ -1328,6 +1328,10 @@ class TwitterSearchResponse(BaseModel):
     tweets: list[TweetResponse]
     search_query_used: str
     filters_applied: dict
+    retrieval_meta: dict | None = None
+    complete: bool = False
+    persist_summary: dict | None = None
+    scrape_run_id: str | None = None
     error: str | None = None
 
 
@@ -1436,19 +1440,43 @@ async def search_twitter(
         twikit_creds = _load_twikit_credentials(twitter_cookies)
         scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
         tweets = scraper.scrape(config)
+        retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+        complete = bool(retrieval_meta.get("complete"))
         if request.mirror_to_s3:
             mirror_tweet_media(tweets)
 
-        if request.persist and tweets:
-            label = request.scrape_query or request.query
+        persist_summary: dict[str, Any] | None = None
+        if request.persist:
+            label = str(request.scrape_query or request.query).strip() or request.query
             try:
-                upsert_standalone_tweets(tweets, scrape_query=label)
+                persist_summary = persist_standalone_twitter_search(
+                    tweets,
+                    raw_query=request.query,
+                    normalized_search_query=config.build_search_query(),
+                    scrape_query_label=label,
+                    window_start_day=config.window_start_day(),
+                    window_end_day_exclusive=config.window_end_day_exclusive(),
+                    requested_via="api",
+                    retrieval_meta=retrieval_meta,
+                    complete=complete,
+                )
             except Exception as upsert_err:  # noqa: BLE001
                 logger.warning(
-                    "upsert_standalone_tweets failed for query %r: %s",
+                    "persist_standalone_twitter_search failed for query %r: %s",
                     label,
                     upsert_err,
                 )
+                persist_summary = {
+                    "requested": True,
+                    "succeeded": False,
+                    "scrape_query_label": label,
+                    "scrape_run_id": None,
+                    "tweets_upserted": 0,
+                    "tweet_memberships_created": 0,
+                    "tweet_memberships_total": len(tweets),
+                    "requested_via": "api",
+                    "error": str(upsert_err),
+                }
 
         return TwitterSearchResponse(
             success=True,
@@ -1460,9 +1488,21 @@ async def search_twitter(
                 "query": request.query,
                 "date_start": request.date_start.isoformat(),
                 "date_end": request.date_end.isoformat(),
+                "window_contract": "whole_day",
+                "window_start_day": config.window_start_day(),
+                "window_end_day_inclusive": config.window_end_day_inclusive(),
+                "window_end_day_exclusive": config.window_end_day_exclusive(),
                 "include_replies": request.include_replies,
                 "include_links": request.include_links,
             },
+            retrieval_meta=retrieval_meta,
+            complete=complete,
+            persist_summary=persist_summary,
+            scrape_run_id=(
+                str(persist_summary.get("scrape_run_id"))
+                if isinstance(persist_summary, dict) and persist_summary.get("scrape_run_id")
+                else None
+            ),
         )
     except HTTPException:
         raise
@@ -1475,6 +1515,10 @@ async def search_twitter(
             tweets=[],
             search_query_used=config.build_search_query(),
             filters_applied={},
+            retrieval_meta=None,
+            complete=False,
+            persist_summary=None,
+            scrape_run_id=None,
             error=str(e),
         )
 

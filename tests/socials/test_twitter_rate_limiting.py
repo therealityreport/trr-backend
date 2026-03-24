@@ -1,4 +1,5 @@
 """Tests for TwitterScraper fast_mode, rate limiting, and backfill diagnostics."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -6,7 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trr_backend.socials.twitter.scraper import Tweet, TwitterScrapeConfig, TwitterScraper
+from trr_backend.socials.twitter.scraper import (
+    Tweet,
+    TwitterScrapeConfig,
+    TwitterScraper,
+    classify_twitter_search_complete,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,6 +64,9 @@ class TestTwitterScrapeConfigFastMode:
             date_end=datetime(2024, 1, 2),
         )
         assert config.delay_seconds == 2.0
+        assert config.window_start_day() == "2024-01-01"
+        assert config.window_end_day_inclusive() == "2024-01-02"
+        assert config.window_end_day_exclusive() == "2024-01-03"
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +138,27 @@ class TestTrackResponseStatus:
 
         scraper._track_response_status(200)
         assert scraper._consecutive_success == 1
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "retryable", "error_code", "expected"),
+    [
+        ("no_cursor", False, None, True),
+        ("older_than_window_repeated", False, None, True),
+        ("max_pages_reached", False, None, False),
+        ("graphql_fetch_failed", False, None, False),
+        ("no_cursor", True, "twitter_search_fallback_exhausted", False),
+    ],
+)
+def test_classify_twitter_search_complete(stop_reason, retryable, error_code, expected):
+    assert (
+        classify_twitter_search_complete(
+            stop_reason=stop_reason,
+            retryable=retryable,
+            error_code=error_code,
+        )
+        is expected
+    )
 
 
 def _make_tweet(tweet_id: str = "tweet-1") -> Tweet:
@@ -212,5 +243,5 @@ def test_scrape_emits_progress_for_successful_twikit_fallback(monkeypatch: pytes
     )
 
     assert len(tweets) == 1
-    assert "error_code" not in scraper.last_retrieval_meta
+    assert scraper.last_retrieval_meta["error_code"] is None
     assert any(event.get("phase") == "scrape_twikit_fallback" for event in progress_events)

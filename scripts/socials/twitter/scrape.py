@@ -22,7 +22,7 @@ from pathlib import Path
 # Add project root to path (scripts/socials/twitter -> project root)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
+from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
 from trr_backend.utils.env import load_env
 
@@ -154,6 +154,33 @@ def _print_fetch_diagnostics(scraper: TwitterScraper, fetch_mode: str) -> None:
         return
     failure_reason = getattr(scraper, "last_reply_fetch_reason", None)
     print(f"  - final_failure_reason: {failure_reason or 'none'}")
+
+
+def _print_search_diagnostics(scraper: TwitterScraper) -> None:
+    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    if not retrieval_meta:
+        return
+    print("\nSearch diagnostics:")
+    print(f"  - complete: {bool(retrieval_meta.get('complete'))}")
+    print(f"  - retrieval_mode: {retrieval_meta.get('retrieval_mode') or 'unknown'}")
+    print(f"  - posts_checked: {int(retrieval_meta.get('posts_checked') or 0)}")
+    print(f"  - pages_scanned: {int(retrieval_meta.get('pages_scanned') or 0)}")
+    print(f"  - stop_reason: {retrieval_meta.get('stop_reason') or 'unknown'}")
+    print(f"  - retryable: {bool(retrieval_meta.get('retryable'))}")
+    if retrieval_meta.get("error_code"):
+        print(f"  - error_code: {retrieval_meta['error_code']}")
+
+
+def _print_persist_summary(summary: dict[str, object] | None) -> None:
+    if not isinstance(summary, dict):
+        return
+    print("\nPersistence summary:")
+    print(f"  - succeeded: {bool(summary.get('succeeded'))}")
+    print(f"  - scrape_run_id: {summary.get('scrape_run_id') or 'none'}")
+    print(f"  - tweets_upserted: {int(summary.get('tweets_upserted') or 0)}")
+    print(f"  - tweet_memberships_created: {int(summary.get('tweet_memberships_created') or 0)}")
+    if summary.get("error"):
+        print(f"  - error: {summary['error']}")
 
 
 def main():
@@ -387,6 +414,7 @@ Examples:
     print(f"SUMMARY: Found {len(tweets)} tweets")
     print(f"Search query: {config.build_search_query()}")
     print("=" * 60)
+    _print_search_diagnostics(scraper)
 
     if tweets:
         print("\nPreview (first 5 tweets):")
@@ -409,10 +437,25 @@ Examples:
         if args.mirror:
             _print_mirror_summary(tweets)
 
-    if args.persist and tweets:
-        label = args.scrape_query or args.query
-        upserted = upsert_standalone_tweets(tweets, scrape_query=label)
-        logger.info("Persisted %d tweets to DB with scrape_query=%r", len(upserted), label)
+    if args.persist:
+        label = str(args.scrape_query or args.query).strip() or args.query
+        persist_summary = persist_standalone_twitter_search(
+            tweets,
+            raw_query=args.query,
+            normalized_search_query=config.build_search_query(),
+            scrape_query_label=label,
+            window_start_day=config.window_start_day(),
+            window_end_day_exclusive=config.window_end_day_exclusive(),
+            requested_via="cli",
+            retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
+            complete=bool(getattr(scraper, "last_retrieval_meta", {}).get("complete")),
+        )
+        _print_persist_summary(persist_summary)
+        logger.info(
+            "Persisted Twitter search run with scrape_query=%r and run_id=%r",
+            label,
+            persist_summary.get("scrape_run_id"),
+        )
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -29,6 +29,26 @@ ADVANCED_QUERY_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 MEDIA_URL_EXTENSION_RE = re.compile(r"\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|m4v|mov|webm)(?:$|[?#])", re.IGNORECASE)
+WHOLE_DAY_WINDOW_CONTRACT = "whole_day"
+TWITTER_COMPLETE_STOP_REASONS = {"complete", "no_cursor", "no_tweet_entries", "older_than_window_repeated"}
+
+
+def normalize_twitter_search_window(date_start: datetime, date_end: datetime) -> tuple[datetime, datetime]:
+    """Normalize the public Twitter search contract to whole-day bounds."""
+    start_day = date_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_day_exclusive = date_end.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return start_day, end_day_exclusive
+
+
+def classify_twitter_search_complete(
+    *,
+    stop_reason: str | None,
+    retryable: bool = False,
+    error_code: str | None = None,
+) -> bool:
+    if retryable or error_code:
+        return False
+    return str(stop_reason or "").strip() in TWITTER_COMPLETE_STOP_REASONS
 
 
 @dataclass
@@ -52,7 +72,8 @@ class TwitterScrapeConfig:
     person_id: int | None = None
 
     def __post_init__(self):
-        """Apply fast_mode overrides when enabled."""
+        """Normalize whole-day window bounds and apply fast_mode overrides."""
+        self.date_start, self.date_end = normalize_twitter_search_window(self.date_start, self.date_end)
         if self.fast_mode:
             # Use a lower base delay unless explicitly overridden
             if self.delay_seconds == 2.0:  # Only override if at default
@@ -61,6 +82,15 @@ class TwitterScrapeConfig:
                 "TwitterScrapeConfig fast_mode enabled: delay=%.2fs",
                 self.delay_seconds,
             )
+
+    def window_start_day(self) -> str:
+        return self.date_start.date().isoformat()
+
+    def window_end_day_exclusive(self) -> str:
+        return self.date_end.date().isoformat()
+
+    def window_end_day_inclusive(self) -> str:
+        return (self.date_end - timedelta(days=1)).date().isoformat()
 
     def build_search_query(self) -> str:
         """Build Twitter advanced search query string."""
@@ -1495,11 +1525,11 @@ class TwitterScraper:
             if not tweet:
                 continue
 
-            # Check date range
+            # Check date range (end bound is exclusive).
             if tweet.created_at > 0:
                 if tweet.created_at < config.date_start.timestamp():
                     continue
-                if tweet.created_at > config.date_end.timestamp():
+                if tweet.created_at >= config.date_end.timestamp():
                     continue
 
             tweets.append(tweet)
@@ -2658,14 +2688,24 @@ class TwitterScraper:
             return int(value.replace(tzinfo=UTC).timestamp())
         return int(value.timestamp())
 
-    def _tweet_within_window(self, *, tweet: Tweet, start_ts: int, end_ts: int) -> bool:
+    def _tweet_within_window(self, *, tweet: Tweet, start_ts: int, end_ts_exclusive: int) -> bool:
         created_at = int(getattr(tweet, "created_at", 0) or 0)
         if created_at <= 0:
             return False
-        return start_ts <= created_at <= end_ts
+        return start_ts <= created_at < end_ts_exclusive
 
-    def _clamp_tweets_to_window(self, *, tweets: list[Tweet], start_ts: int, end_ts: int) -> list[Tweet]:
-        return [tweet for tweet in tweets if self._tweet_within_window(tweet=tweet, start_ts=start_ts, end_ts=end_ts)]
+    def _clamp_tweets_to_window(
+        self,
+        *,
+        tweets: list[Tweet],
+        start_ts: int,
+        end_ts_exclusive: int,
+    ) -> list[Tweet]:
+        return [
+            tweet
+            for tweet in tweets
+            if self._tweet_within_window(tweet=tweet, start_ts=start_ts, end_ts_exclusive=end_ts_exclusive)
+        ]
 
     def scrape(
         self,
@@ -2690,7 +2730,7 @@ class TwitterScraper:
         search_query = config.build_search_query()
         logger.info(f"Starting Twitter search: {search_query}")
         window_start_ts = self._window_bound_timestamp(config.date_start)
-        window_end_ts = self._window_bound_timestamp(config.date_end)
+        window_end_ts_exclusive = self._window_bound_timestamp(config.date_end)
 
         tweets: list[Tweet] = []
         graphql_404_count = 0
@@ -2770,7 +2810,7 @@ class TwitterScraper:
                                     if not self._tweet_within_window(
                                         tweet=tweet,
                                         start_ts=window_start_ts,
-                                        end_ts=window_end_ts,
+                                        end_ts_exclusive=window_end_ts_exclusive,
                                     ):
                                         filtered_out_of_window += 1
                                         if int(getattr(tweet, "created_at", 0) or 0) < window_start_ts:
@@ -2834,7 +2874,7 @@ class TwitterScraper:
                 tweets = self._clamp_tweets_to_window(
                     tweets=twikit_tweets,
                     start_ts=window_start_ts,
-                    end_ts=window_end_ts,
+                    end_ts_exclusive=window_end_ts_exclusive,
                 )
                 if tweets:
                     retrieval_mode = "twikit"
@@ -2855,7 +2895,7 @@ class TwitterScraper:
                 tweets = self._clamp_tweets_to_window(
                     tweets=syndication_tweets,
                     start_ts=window_start_ts,
-                    end_ts=window_end_ts,
+                    end_ts_exclusive=window_end_ts_exclusive,
                 )
                 if tweets:
                     retrieval_mode = "syndication"
@@ -2880,7 +2920,7 @@ class TwitterScraper:
                 tweets = self._clamp_tweets_to_window(
                     tweets=playwright_tweets,
                     start_ts=window_start_ts,
-                    end_ts=window_end_ts,
+                    end_ts_exclusive=window_end_ts_exclusive,
                 )
                 if tweets:
                     retrieval_mode = "playwright"
@@ -2905,7 +2945,7 @@ class TwitterScraper:
                 tweets = self._clamp_tweets_to_window(
                     tweets=twikit_tweets,
                     start_ts=window_start_ts,
-                    end_ts=window_end_ts,
+                    end_ts_exclusive=window_end_ts_exclusive,
                 )
                 if tweets:
                     retrieval_mode = "twikit"
@@ -2930,7 +2970,7 @@ class TwitterScraper:
                 tweets = self._clamp_tweets_to_window(
                     tweets=playwright_tweets,
                     start_ts=window_start_ts,
-                    end_ts=window_end_ts,
+                    end_ts_exclusive=window_end_ts_exclusive,
                 )
                 if tweets:
                     retrieval_mode = "playwright"
@@ -2951,6 +2991,13 @@ class TwitterScraper:
         twikit_failure_reason = str(self._last_twikit_search_error or "").strip() or None
         playwright_failure_reason = str(self._last_playwright_search_error or "").strip() or None
         fallback_exhausted = not tweets and bool(graphql_failed or twikit_failure_reason or playwright_failure_reason)
+        retryable = graphql_failed and not tweets
+        error_code = "twitter_search_fallback_exhausted" if retryable else None
+        complete = classify_twitter_search_complete(
+            stop_reason=stop_reason,
+            retryable=retryable,
+            error_code=error_code,
+        )
 
         logger.info("Search complete: found %d tweets (%d checked)", len(tweets), posts_checked_total)
         self._emit_progress(
@@ -2965,12 +3012,18 @@ class TwitterScraper:
             "search_query": search_query,
             "window_start": config.date_start.isoformat(),
             "window_end": config.date_end.isoformat(),
+            "window_start_day": config.window_start_day(),
+            "window_end_day_inclusive": config.window_end_day_inclusive(),
+            "window_end_day_exclusive": config.window_end_day_exclusive(),
+            "window_contract": WHOLE_DAY_WINDOW_CONTRACT,
             "from_query": bool(from_match),
             "fast_mode": config.fast_mode,
             "graphql_404_count": graphql_404_count,
             "graphql_failed": graphql_failed,
             "fallback_triggered": fallback_triggered,
             "fallback_attempts": fallback_attempts,
+            "retryable": retryable,
+            "error_code": error_code,
             "twikit_failure_reason": twikit_failure_reason,
             "playwright_failure_reason": playwright_failure_reason,
             "pages_scanned": page_num,
@@ -2981,9 +3034,8 @@ class TwitterScraper:
             "twikit_checked": twikit_checked_total,
             "syndication_checked": syndication_checked_total,
             "playwright_checked": playwright_checked_total,
+            "complete": complete,
         }
-        if fallback_exhausted:
-            self.last_retrieval_meta["error_code"] = "twitter_search_fallback_exhausted"
-            self.last_retrieval_meta["retryable"] = True
+        if fallback_exhausted and error_code:
             self.last_retrieval_meta["error_class"] = "TwitterSearchFallbackError"
         return tweets

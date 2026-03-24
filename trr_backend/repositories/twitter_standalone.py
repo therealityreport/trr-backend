@@ -1,16 +1,18 @@
 """
-Standalone (non-season) tweet persistence.
+Standalone (non-season) Twitter search persistence.
 
-Provides upsert_standalone_tweets() for persisting tweets scraped by
-arbitrary hashtag or @mention queries, without requiring a season_id.
+Provides tweet upsert helpers plus per-query scrape provenance so repeated
+hashtag and mention searches can preserve membership history.
 """
+
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.repositories.social_season_analytics import _pg_upsert_many
+from trr_backend.db import pg
+from trr_backend.repositories.social_season_analytics import _adapt_payload_json_values, _pg_upsert_many
 from trr_backend.socials.twitter.scraper import Tweet
 
 logger = logging.getLogger(__name__)
@@ -20,22 +22,123 @@ def upsert_standalone_tweets(
     tweets: list[Tweet],
     *,
     scrape_query: str,
+    conn: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Upsert a list of Tweet objects into social.twitter_tweets.
-
-    Uses tweet_id as the conflict key. Sets scrape_query on every row
-    so callers can later filter by search term.
-
-    Returns the list of upserted rows as returned by _pg_upsert_many.
-    """
+    """Upsert Tweet objects into social.twitter_tweets."""
     if not tweets:
         return []
 
     now = datetime.now(UTC).isoformat()
-    payloads = [_tweet_to_payload(t, scrape_query=scrape_query, scraped_at=now) for t in tweets]
-    rows = _pg_upsert_many("twitter_tweets", payloads, conflict_col="tweet_id")
+    payloads = [_tweet_to_payload(tweet, scrape_query=scrape_query, scraped_at=now) for tweet in tweets]
+    rows = _pg_upsert_many("twitter_tweets", payloads, conflict_col="tweet_id", conn=conn)
     logger.info("upsert_standalone_tweets: %d upserted for query %r", len(rows), scrape_query)
     return rows
+
+
+def persist_standalone_twitter_search(
+    tweets: list[Tweet],
+    *,
+    raw_query: str,
+    normalized_search_query: str,
+    scrape_query_label: str,
+    window_start_day: str,
+    window_end_day_exclusive: str,
+    requested_via: str,
+    retrieval_meta: dict[str, Any] | None,
+    complete: bool,
+) -> dict[str, Any]:
+    """Persist tweet rows plus scrape-run provenance for one standalone search."""
+    retrieval_payload = dict(retrieval_meta or {})
+    deduped_tweets = _dedupe_tweets_by_id(tweets)
+    posts_checked = int(retrieval_payload.get("posts_checked") or 0)
+
+    with pg.db_connection() as conn:
+        upserted_rows = upsert_standalone_tweets(
+            deduped_tweets,
+            scrape_query=scrape_query_label,
+            conn=conn,
+        )
+        run_row = _insert_scrape_query_run(
+            {
+                "scrape_query_label": scrape_query_label,
+                "raw_query": raw_query,
+                "normalized_search_query": normalized_search_query,
+                "window_start_day": window_start_day,
+                "window_end_day_exclusive": window_end_day_exclusive,
+                "requested_via": requested_via,
+                "complete": bool(complete),
+                "posts_checked": posts_checked,
+                "tweets_found": len(deduped_tweets),
+                "retrieval_meta": retrieval_payload,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+            conn=conn,
+        )
+        membership_rows = _insert_scrape_query_memberships(
+            str(run_row["id"]),
+            [tweet.tweet_id for tweet in deduped_tweets],
+            conn=conn,
+        )
+
+    return {
+        "requested": True,
+        "succeeded": True,
+        "scrape_query_label": scrape_query_label,
+        "scrape_run_id": str(run_row["id"]),
+        "tweets_upserted": len(upserted_rows),
+        "tweet_memberships_created": len(membership_rows),
+        "tweet_memberships_total": len(deduped_tweets),
+        "requested_via": requested_via,
+        "error": None,
+    }
+
+
+def _dedupe_tweets_by_id(tweets: list[Tweet]) -> list[Tweet]:
+    deduped: list[Tweet] = []
+    seen_tweet_ids: set[str] = set()
+    for tweet in tweets:
+        tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
+        if not tweet_id or tweet_id in seen_tweet_ids:
+            continue
+        seen_tweet_ids.add(tweet_id)
+        deduped.append(tweet)
+    return deduped
+
+
+def _insert_scrape_query_run(payload: dict[str, Any], *, conn: Any | None = None) -> dict[str, Any]:
+    columns = list(payload.keys())
+    placeholders = ", ".join(["%s"] * len(columns))
+    col_list = ", ".join(columns)
+    adapted = _adapt_payload_json_values(payload)
+    sql = f"""
+        INSERT INTO social.twitter_scrape_queries ({col_list})
+        VALUES ({placeholders})
+        RETURNING *
+    """
+    with pg.db_cursor(conn=conn) as cur:
+        return pg.fetch_one_with_cursor(cur, sql, [adapted[column] for column in columns])
+
+
+def _insert_scrape_query_memberships(
+    scrape_query_id: str,
+    tweet_ids: list[str],
+    *,
+    conn: Any | None = None,
+) -> list[dict[str, Any]]:
+    if not tweet_ids:
+        return []
+
+    rows = [(scrape_query_id, tweet_id) for tweet_id in tweet_ids if str(tweet_id or "").strip()]
+    if not rows:
+        return []
+
+    sql = (
+        "INSERT INTO social.twitter_scrape_query_tweets (scrape_query_id, tweet_id) "
+        "VALUES %s "
+        "ON CONFLICT (scrape_query_id, tweet_id) DO NOTHING "
+        "RETURNING *"
+    )
+    return pg.execute_values_returning(sql, rows, conn=conn)
 
 
 def _tweet_to_payload(tweet: Tweet, *, scrape_query: str, scraped_at: str) -> dict[str, Any]:

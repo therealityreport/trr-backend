@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from trr_backend.socials.twitter.scraper import TwitterScrapeConfig
+from trr_backend.socials.twitter.scraper import TwitterScrapeConfig, normalize_twitter_search_window
 
 DATE_START = datetime(2026, 1, 1)
 DATE_END = datetime(2026, 1, 11)
@@ -31,7 +31,7 @@ def test_plain_text_wrapped():
 
 
 def test_advanced_passthrough():
-    raw = 'from:BravoTV OR from:Andy'
+    raw = "from:BravoTV OR from:Andy"
     q = _config(raw).build_search_query()
     assert q.startswith(raw)
 
@@ -40,4 +40,14 @@ def test_date_filters_always_appended():
     for term in ("#RHOSLC", "@BravoTV", "RHOSLC"):
         q = _config(term).build_search_query()
         assert "since:2026-01-01" in q
-        assert "until:2026-01-11" in q
+        assert "until:2026-01-12" in q
+
+
+def test_whole_day_window_normalization_ignores_time_components():
+    start, end_exclusive = normalize_twitter_search_window(
+        datetime(2026, 1, 1, 9, 30, 45),
+        datetime(2026, 1, 11, 17, 45, 12),
+    )
+
+    assert start.isoformat() == "2026-01-01T00:00:00"
+    assert end_exclusive.isoformat() == "2026-01-12T00:00:00"
