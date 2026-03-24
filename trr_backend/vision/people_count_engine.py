@@ -1061,6 +1061,9 @@ def _compute_people_count_dict(payload: dict[str, object]) -> dict[str, object]:
 
     _ensure_detectors_available(mode)
 
+    prefer_fast_pass = (
+        bool(payload.get("prefer_fast_pass")) if isinstance(payload.get("prefer_fast_pass"), bool) else False
+    )
     candidate_person_ids = _normalize_candidate_person_ids(
         payload.get("candidate_person_ids") if isinstance(payload.get("candidate_person_ids"), list) else None
     )
@@ -1073,17 +1076,21 @@ def _compute_people_count_dict(payload: dict[str, object]) -> dict[str, object]:
     person_reference_images = _normalize_person_reference_images(
         payload.get("person_reference_images") if isinstance(payload.get("person_reference_images"), list) else None
     )
-    owner_reference_centroid, reference_profile = _build_owner_reference_centroid_profile(
-        owner_person_id=owner_person_id,
-        owner_reference_images=owner_reference_images,
-    )
-    runtime_reference_centroids = _build_person_reference_centroids(person_reference_images)
-    if owner_person_id and owner_reference_centroid is not None:
-        runtime_reference_centroids[owner_person_id] = {
-            "person_id": owner_person_id,
-            "person_name": None,
-            "embedding": owner_reference_centroid,
-        }
+    owner_reference_centroid = None
+    reference_profile = None
+    runtime_reference_centroids: dict[str, dict[str, object]] = {}
+    if not prefer_fast_pass:
+        owner_reference_centroid, reference_profile = _build_owner_reference_centroid_profile(
+            owner_person_id=owner_person_id,
+            owner_reference_images=owner_reference_images,
+        )
+        runtime_reference_centroids = _build_person_reference_centroids(person_reference_images)
+        if owner_person_id and owner_reference_centroid is not None:
+            runtime_reference_centroids[owner_person_id] = {
+                "person_id": owner_person_id,
+                "person_name": None,
+                "embedding": owner_reference_centroid,
+            }
 
     face_count = 0
     face_count_raw = 0

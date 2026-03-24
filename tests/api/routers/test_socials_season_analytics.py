@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
@@ -205,6 +206,27 @@ def test_get_social_account_profile_posts(client: TestClient, monkeypatch: pytes
     assert mocked.call_args.kwargs["page_size"] == 10
 
 
+def test_get_social_account_profile_posts_forwards_search(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [],
+        "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 1},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_posts",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/posts?page=1&page_size=25&search=%23BravoCon",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["search"] == "#BravoCon"
+
+
 def test_get_social_account_catalog_posts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -335,6 +357,76 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
 
 
+def test_post_social_account_catalog_backfill_ignores_date_bounds_for_full_history(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+                return_value={
+                    "run_id": "catalog-run-full-history",
+                    "status": "queued",
+                    "ingest_mode": "shared_account_catalog_backfill",
+                },
+            ) as mocked:
+                response = client.post(
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={
+                        "backfill_scope": "full_history",
+                        "date_start": "2026-01-01T00:00:00Z",
+                        "date_end": "2026-01-08T00:00:00Z",
+                    },
+                )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["date_start"] is None
+    assert mocked.call_args.kwargs["date_end"] is None
+
+
+def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+                return_value={
+                    "run_id": "catalog-run-windowed",
+                    "status": "queued",
+                    "ingest_mode": "shared_account_catalog_backfill",
+                },
+            ) as mocked:
+                response = client.post(
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={
+                        "backfill_scope": "bounded_window",
+                        "date_start": "2026-01-01T00:00:00Z",
+                        "date_end": "2026-01-08T00:00:00Z",
+                    },
+                )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    assert mocked.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 0, 0, tzinfo=UTC)
+
+
 def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -372,6 +464,7 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
         ("twitter", "bravotv", "catalog-run-tw-1"),
         ("threads", "bravotv", "catalog-run-th-1"),
         ("youtube", "bravo", "catalog-run-yt-1"),
+        ("facebook", "bravotv", "catalog-run-fb-1"),
     ],
 )
 def test_post_social_account_catalog_backfill_additional_supported_platforms(
@@ -651,6 +744,7 @@ def test_get_social_account_profile_collaborators_tags(client: TestClient, monke
     expected = {
         "collaborators": [{"handle": "andycohen", "usage_count": 3}],
         "tags": [{"handle": "bravoandy", "usage_count": 5}],
+        "mentions": [{"handle": "peacock", "usage_count": 8}],
     }
 
     with patch(
@@ -666,6 +760,7 @@ def test_get_social_account_profile_collaborators_tags(client: TestClient, monke
     body = response.json()
     assert body["collaborators"][0]["handle"] == "andycohen"
     assert body["tags"][0]["handle"] == "bravoandy"
+    assert body["mentions"][0]["handle"] == "peacock"
 
 
 def test_social_account_profile_summary_invalid_platform_returns_400(
@@ -3363,6 +3458,38 @@ def test_get_run_progress_endpoint_returns_payload(
     assert response.json() == expected
 
 
+def test_get_run_progress_endpoint_uses_threadpool(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    run_id = str(uuid4())
+    expected = {"season_id": season_id, "run_id": run_id, "recent_log": []}
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_admin_repo_call(func: Any, *args: Any, **kwargs: Any) -> Any:
+        captured["func"] = func
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected
+
+    with (
+        patch("api.routers.socials._run_admin_repo_call", side_effect=_fake_run_admin_repo_call) as mocked_threadpool,
+        patch("trr_backend.repositories.social_season_analytics.get_run_progress_snapshot") as mocked_repo,
+    ):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress?recent_log_limit=15",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked_threadpool.call_count == 1
+    mocked_repo.assert_not_called()
+    assert captured["func"] is mocked_repo
+    assert captured["args"] == (season_id, run_id)
+    assert captured["kwargs"]["recent_log_limit"] == 15
+
+
 def test_create_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -3475,6 +3602,38 @@ def test_get_sync_session_endpoint_returns_payload(client: TestClient, monkeypat
     mocked.assert_called_once_with(sync_session_id)
 
 
+def test_get_sync_session_endpoint_uses_threadpool(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    sync_session_id = str(uuid4())
+    expected = {"sync_session_id": sync_session_id, "season_id": season_id, "status": "pass_running"}
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_admin_repo_call(func: Any, *args: Any, **kwargs: Any) -> Any:
+        captured["func"] = func
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected
+
+    with (
+        patch("api.routers.socials._run_admin_repo_call", side_effect=_fake_run_admin_repo_call) as mocked_threadpool,
+        patch("trr_backend.repositories.social_sync_orchestrator.evaluate_sync_session") as mocked_repo,
+    ):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked_threadpool.call_count == 1
+    mocked_repo.assert_not_called()
+    assert captured["func"] is mocked_repo
+    assert captured["args"] == (sync_session_id,)
+    assert captured["kwargs"] == {}
+
+
 def test_stream_sync_session_endpoint_emits_event_stream(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -3541,7 +3700,7 @@ def test_build_sync_session_stream_payload_includes_run_progress(monkeypatch: py
         ) as mocked_progress:
             from api.routers.socials import _build_sync_session_stream_payload
 
-            payload = _build_sync_session_stream_payload(sync_session_id)
+            payload = asyncio.run(_build_sync_session_stream_payload(sync_session_id))
 
     assert payload["sync_session"] == expected_sync_session
     assert payload["run_progress"] == expected_run_progress
@@ -4246,6 +4405,50 @@ def test_get_analytics_endpoint_accepts_facebook_threads_platform_filters(
     assert mocked.call_args.kwargs["platforms"] == ["facebook", "threads"]
 
 
+def test_get_analytics_endpoint_returns_additive_reddit_block(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "window": {"week": None},
+        "summary": {
+            "total_posts": 0,
+            "total_comments": 0,
+            "total_engagement": 0,
+            "sentiment_mix": {
+                "positive": 0,
+                "neutral": 0,
+                "negative": 0,
+                "counts": {"positive": 0, "neutral": 0, "negative": 0},
+            },
+        },
+        "weekly": [],
+        "platform_breakdown": [],
+        "themes": {"positive": [], "negative": []},
+        "leaderboards": {"bravo_content": [], "viewer_discussion": []},
+        "jobs": [],
+        "reddit": {
+            "tracked_post_count": 660,
+            "show_match_post_count": 401,
+            "comment_count": 18841,
+            "deep_link": {"path": "/admin/social/reddit/BravoRealHousewives/rhoslc/s6"},
+        },
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_analytics", return_value=expected):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics?source_scope=bravo",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["reddit"]["tracked_post_count"] == 660
+    assert response.json()["reddit"]["deep_link"]["path"].endswith("/rhoslc/s6")
+
+
 def test_get_week_detail_endpoint_returns_facebook_threads_platform_maps(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -4371,6 +4574,50 @@ def test_get_analytics_include_slices_forwarded(client: TestClient, monkeypatch:
     assert mocked.call_args.kwargs["include_flags"] is False
     assert mocked.call_args.kwargs["include_schedule"] is False
     assert mocked.call_args.kwargs["include_benchmark"] is True
+
+
+def test_get_analytics_endpoint_uses_threadpool(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    expected = {
+        "window": {"week": None},
+        "summary": {},
+        "weekly": [],
+        "weekly_platform_engagement": [],
+        "weekly_daily_activity": [],
+        "platform_breakdown": [],
+        "themes": {"positive": [], "negative": []},
+        "leaderboards": {"bravo_content": [], "viewer_discussion": []},
+        "jobs": [],
+    }
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_in_threadpool(func: Any, *args: Any, **kwargs: Any) -> Any:
+        captured["func"] = func
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected
+
+    with (
+        patch("api.routers.socials.run_in_threadpool", side_effect=_fake_run_in_threadpool) as mocked_threadpool,
+        patch("trr_backend.repositories.social_season_analytics.get_analytics") as mocked_get_analytics,
+    ):
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics?include=rows,benchmark",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked_threadpool.call_count == 1
+    mocked_get_analytics.assert_not_called()
+    assert captured["func"] is mocked_get_analytics
+    assert captured["args"] == (season_id,)
+    assert captured["kwargs"]["include_rows"] is True
+    assert captured["kwargs"]["include_flags"] is False
+    assert captured["kwargs"]["include_schedule"] is False
+    assert captured["kwargs"]["include_benchmark"] is True
 
 
 def test_get_ingest_run_summary_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

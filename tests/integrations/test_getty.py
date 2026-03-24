@@ -5,6 +5,10 @@ import json
 from trr_backend.integrations import getty
 
 
+def test_getty_search_page_cap_is_100() -> None:
+    assert getty.MAX_SEARCH_PAGES == 100
+
+
 def test_search_editorial_assets_reports_progress(monkeypatch) -> None:
     monkeypatch.setattr(
         getty,
@@ -168,7 +172,7 @@ def test_extract_search_asset_candidates_reads_prerender_search_payload_from_sea
     ]
 
 
-def test_fetch_asset_detail_exposes_preview_image_url(monkeypatch) -> None:
+def test_fetch_asset_detail_exposes_original_and_preview_image_urls(monkeypatch) -> None:
     detail_payload = {
         "asset": {
             "objectName": "NUP_209430_00480.jpg",
@@ -202,7 +206,8 @@ def test_fetch_asset_detail_exposes_preview_image_url(monkeypatch) -> None:
     detail = getty.fetch_asset_detail("https://www.gettyimages.com/detail/news-photo/example/2254325572")
 
     assert detail is not None
-    assert detail["preview_image_url"] == "https://media.gettyimages.com/gallery-high.jpg"
+    assert detail["original_image_url"] == "https://media.gettyimages.com/gallery-high.jpg"
+    assert detail["preview_image_url"] == "https://media.gettyimages.com/comp.jpg"
     assert detail["comp_url"] == "https://media.gettyimages.com/comp.jpg"
     assert detail["thumb_url"] == "https://media.gettyimages.com/thumb.jpg"
 
@@ -573,7 +578,7 @@ def test_extract_detail_section_fields_stops_at_tag_cloud() -> None:
 
 
 def test_fetch_asset_detail_prefers_largest_image_url(monkeypatch) -> None:
-    """preview_image_url should prefer downloadableCompUrl over compUrl."""
+    """original_image_url should prefer downloadableCompUrl over smaller preview variants."""
     from unittest.mock import MagicMock
 
     asset_json = {
@@ -595,13 +600,12 @@ def test_fetch_asset_detail_prefers_largest_image_url(monkeypatch) -> None:
 
     result = getty.fetch_asset_detail("https://www.gettyimages.com/detail/news-photo/test/123")
     assert result is not None
-    assert "2048x2048" in result["preview_image_url"], (
-        f"Expected largest URL, got: {result['preview_image_url']}"
-    )
+    assert "2048x2048" in result["original_image_url"], f"Expected largest URL, got: {result['original_image_url']}"
+    assert "594x594" in result["preview_image_url"], f"Expected preview URL, got: {result['preview_image_url']}"
 
 
 def test_extract_best_image_urls_from_display_sizes() -> None:
-    """_extract_best_image_urls should pick up URLs from displaySizes when top-level keys are missing."""
+    """_extract_best_image_urls should preserve preview-only URLs without promoting them to original."""
     asset_json = {
         "thumbUrl": "https://media.gettyimages.com/thumb.jpg",
         "displaySizes": [
@@ -613,8 +617,56 @@ def test_extract_best_image_urls_from_display_sizes() -> None:
     urls = getty._extract_best_image_urls(asset_json)
     assert urls["highResCompUrl"] == "https://media.gettyimages.com/highres.jpg"
     assert urls["compUrl"] == "https://media.gettyimages.com/comp.jpg"
-    assert urls["downloadableCompUrl"] == "https://media.gettyimages.com/preview.jpg"
+    assert urls["previewUrl"] == "https://media.gettyimages.com/preview.jpg"
     assert urls["thumbUrl"] == "https://media.gettyimages.com/thumb.jpg"
+
+
+def test_fetch_asset_detail_prefers_high_res_url_over_tiny_getty_comp(monkeypatch) -> None:
+    detail_payload = {
+        "asset": {
+            "objectName": "NUP_200213_00303.JPG",
+            "editorialId": "1246182942",
+            "caption": "Watch What Happens Live sample caption",
+            "downloadableCompUrl": (
+                "https://media.gettyimages.com/id/1246182942/photo/"
+                "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&s=594x594&w=gi&k=small"
+            ),
+            "galleryHighResCompUrl": (
+                "https://media.gettyimages.com/id/1246182942/photo/"
+                "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&w=gi&k=large"
+            ),
+            "compUrl": (
+                "https://media.gettyimages.com/id/1246182942/photo/"
+                "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&s=594x594&w=gi&k=small"
+            ),
+        }
+    }
+    html = (
+        "<html><body>"
+        f'<script type="application/json" data-component="AssetDetail">{json.dumps(detail_payload)}</script>'
+        "<span>Max file size:</span><span>3000 x 2000 px (10.00 x 6.67 in) - 300 dpi - 2 MB</span>"
+        "</body></html>"
+    )
+
+    class _Response:
+        text = html
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    class _Session:
+        @staticmethod
+        def get(*args, **kwargs):
+            return _Response()
+
+    monkeypatch.setattr(getty, "_session", lambda session=None: _Session())
+
+    detail = getty.fetch_asset_detail("https://www.gettyimages.com/detail/news-photo/example/1246182942")
+
+    assert detail is not None
+    assert detail["original_image_url"] == detail_payload["asset"]["galleryHighResCompUrl"]
+    assert detail["preview_image_url"] == detail_payload["asset"]["compUrl"]
 
 
 def test_search_grouped_events_passes_numberofpeople_query_param(monkeypatch) -> None:

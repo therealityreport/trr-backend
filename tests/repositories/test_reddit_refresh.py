@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -892,7 +892,7 @@ def test_execute_refresh_run_updates_live_progress(monkeypatch) -> None:
     assert any(int(update.get("comments_rows_upserted") or 0) >= 1 for update in progress_updates)
 
 
-def test_execute_refresh_run_marks_failed_when_discovery_raises_reddit_error(monkeypatch) -> None:
+def test_execute_refresh_run_marks_partial_when_discovery_raises_reddit_403(monkeypatch) -> None:
     run_id = "63a7be5d-0000-4000-8000-000000000099"
     run_row = {
         "id": run_id,
@@ -918,16 +918,22 @@ def test_execute_refresh_run_marks_failed_when_discovery_raises_reddit_error(mon
         lambda run_id_arg, **kwargs: updates.append({"run_id": run_id_arg, **kwargs}),  # noqa: ANN001
     )
     monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(
+        reddit_refresh,
+        "get_refresh_run",
+        lambda run_id_arg: {"run_id": run_id_arg, "status": "partial"},
+    )
 
-    with pytest.raises(reddit_refresh.RedditRefreshError, match=r"Reddit request failed \(403\)"):
-        reddit_refresh.execute_refresh_run(run_id)
+    result = reddit_refresh.execute_refresh_run(run_id)
 
-    failed_update = next((item for item in updates if item.get("status") == "failed"), None)
-    assert failed_update is not None
-    assert failed_update["error_message"] == "Reddit request failed (403)"
-    diagnostics = failed_update.get("diagnostics") or {}
+    assert result == {"run_id": run_id, "status": "partial"}
+    partial_update = next((item for item in updates if item.get("status") == "partial"), None)
+    assert partial_update is not None
+    assert partial_update["error_message"] == "Reddit request failed (403)"
+    diagnostics = partial_update.get("diagnostics") or {}
     assert diagnostics.get("error_type") == "RedditRefreshError"
-    assert diagnostics.get("terminal_summary", {}).get("status") == "failed"
+    assert diagnostics.get("failure_reason_code") == "reddit_http_403"
+    assert diagnostics.get("terminal_summary", {}).get("status") == "partial"
 
 
 def test_get_refresh_run_includes_queue_counters(monkeypatch) -> None:
@@ -1063,6 +1069,85 @@ def test_create_or_reuse_refresh_run_reuses_matching_active_config(monkeypatch) 
 
     assert row["id"] == "active-run"
     assert row["reused"] is True
+
+
+def test_create_or_reuse_refresh_run_recovers_orphaned_matching_queued_run(monkeypatch) -> None:
+    payload = {
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "subreddit": "bravorealhousewives",
+        "coverage_mode": "standard",
+        "max_pages": 500,
+    }
+    old_created_at = datetime(2026, 3, 22, 10, 0, tzinfo=UTC)
+    active_row = {
+        "id": "queued-run",
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "status": "queued",
+        "created_at": old_created_at,
+        "updated_at": old_created_at,
+        "attempt_count": 0,
+        "claimed_by_worker_id": None,
+        "claim_token": None,
+        "heartbeat_at": None,
+        "request_payload": {
+            **payload,
+            "run_config_hash": reddit_refresh._build_run_config_hash(payload),  # noqa: SLF001
+        },
+    }
+    inserted_row = {
+        "id": "fresh-run",
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "pre-season",
+        "status": "queued",
+        "request_payload": {},
+    }
+    recovered_runs: list[dict] = []
+
+    monkeypatch.setattr(reddit_refresh.pg, "execute_returning", lambda *args, **kwargs: [])  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", lambda *args, **kwargs: [active_row])  # noqa: ANN002, ANN003
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: inserted_row)  # noqa: ANN002, ANN003
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_update_run",
+        lambda run_id, **kwargs: recovered_runs.append({"run_id": run_id, **kwargs}),
+    )
+
+    row = reddit_refresh.create_or_reuse_refresh_run(payload=payload)
+
+    assert row["id"] == "fresh-run"
+    assert row["reused"] is False
+    assert recovered_runs[0]["run_id"] == "queued-run"
+    assert recovered_runs[0]["status"] == "failed"
+    assert recovered_runs[0]["diagnostics"]["failure_reason_code"] == "stale_queue"
+    assert recovered_runs[0]["diagnostics"]["stale_queue_recovered"] is True
+
+
+def test_is_orphaned_queued_run_ignores_attempt_count_when_unclaimed() -> None:
+    old_updated_at = datetime.now(tz=UTC) - timedelta(
+        seconds=reddit_refresh.REDDIT_REFRESH_ORPHANED_QUEUED_REUSE_GRACE_SECONDS_DEFAULT + 1
+    )
+    row = {
+        "status": "queued",
+        "attempt_count": 3,
+        "claimed_by_worker_id": None,
+        "claim_token": None,
+        "heartbeat_at": None,
+        "updated_at": old_updated_at.isoformat(),
+        "created_at": old_updated_at.isoformat(),
+    }
+
+    assert (
+        reddit_refresh._is_orphaned_queued_run(
+            row,
+            grace_seconds=reddit_refresh.REDDIT_REFRESH_ORPHANED_QUEUED_REUSE_GRACE_SECONDS_DEFAULT,
+        )
+        is True
+    )
 
 
 def test_create_or_reuse_refresh_run_does_not_reuse_mismatched_active_config(monkeypatch) -> None:
@@ -1545,6 +1630,15 @@ def test_get_reddit_community_analytics_summary_season_scope_filters_season(monk
         }
 
     monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_fetch_reddit_analytics_extras",
+        lambda **kwargs: {  # noqa: ARG005
+            "freshness": {"latest_data_timestamp": None, "latest_run_timestamp": None, "latest_run_status": None},
+            "coverage": {"tracked_post_count": 4, "stale_container_count": 0, "recovered_container_count": 0},
+            "container_statuses": [],
+        },
+    )
 
     payload = reddit_refresh.get_reddit_community_analytics_summary(
         community_id="community-1",
@@ -1556,8 +1650,271 @@ def test_get_reddit_community_analytics_summary_season_scope_filters_season(monk
     assert payload["totals"]["post_count"] == 5
     assert payload["totals"]["tracked_flair_post_count"] == 4
     assert payload["diagnostics"]["row_count"] == 5
+    assert payload["coverage"]["tracked_post_count"] == 4
     assert "m.season_id = %s" in str(captured["query"])
     assert captured["params"] == ["community-1", "season-1"]
+
+
+def test_execute_refresh_run_marks_coverage_incomplete_partial_reason(monkeypatch) -> None:
+    run_id = "63a7be5d-0000-4000-8000-000000000123"
+    run_row = {
+        "id": run_id,
+        "community_id": "community-1",
+        "season_id": "season-1",
+        "period_key": "episode-3",
+        "subreddit": "bravorealhousewives",
+        "request_payload": {"mode": "sync_posts", "coverage_mode": "standard"},
+        "status": "running",
+        "claim_token": "claim-token-1",
+        "updated_at": datetime.now(tz=UTC),
+    }
+    updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", lambda *args, **kwargs: run_row)  # noqa: ANN002, ANN003, ARG005
+    monkeypatch.setattr(reddit_refresh, "_touch_refresh_run_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(reddit_refresh, "_upsert_posts", lambda rows, *, conn: None)  # noqa: ARG005
+    monkeypatch.setattr(reddit_refresh, "_replace_period_matches", lambda **kwargs: None)
+    monkeypatch.setattr(reddit_refresh.pg, "db_connection", lambda: nullcontext(object()))
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_discover_window",
+        lambda *args, **kwargs: {  # noqa: ARG005
+            "subreddit": "bravorealhousewives",
+            "collection_mode": "exhaustive_window",
+            "listing_pages_fetched": 3,
+            "max_pages_applied": 500,
+            "window_exhaustive_complete": False,
+            "search_backfill": {"complete": False, "pages_fetched": 1},
+            "seed_urls": {},
+            "window_start": "2025-09-30T00:00:00Z",
+            "window_end": "2025-10-07T00:00:00Z",
+            "terms": ["rhoslc"],
+            "hints": {"suggested_include_terms": [], "suggested_exclude_terms": []},
+            "threads": [{"reddit_post_id": "post-1", "title": "example"}],
+            "totals": {"fetched_rows": 1, "matched_rows": 1, "tracked_flair_rows": 1},
+        },
+    )
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_update_run",
+        lambda run_id_arg, **kwargs: updates.append({"run_id": run_id_arg, **kwargs}),
+    )
+    monkeypatch.setattr(
+        reddit_refresh,
+        "get_refresh_run",
+        lambda run_id_arg: {"run_id": run_id_arg, "status": "partial"},
+    )
+
+    result = reddit_refresh.execute_refresh_run(run_id)
+
+    assert result == {"run_id": run_id, "status": "partial"}
+    partial_update = next(item for item in updates if item.get("status") == "partial")
+    diagnostics = partial_update.get("diagnostics") or {}
+    assert diagnostics.get("failure_reason_code") == "coverage_incomplete"
+    assert diagnostics.get("status_resolution") == "coverage_incomplete"
+    assert "Analytics remain usable" in str(diagnostics.get("operator_hint") or "")
+
+
+def test_list_reddit_refresh_backfill_targets_selects_stale_latest_runs(monkeypatch) -> None:
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_canonical_reddit_container_keys_for_season",
+        lambda season_id: ["period-preseason", "episode-3", "episode-4", "episode-5", "episode-6"],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_fetch_latest_refresh_runs_for_season",
+        lambda **kwargs: [  # noqa: ARG005
+            {
+                "id": "run-failed",
+                "canonical_container_key": "episode-3",
+                "period_key": "episode-3",
+                "status": "failed",
+                "tracked_flair_rows": 0,
+                "matched_rows": 0,
+                "request_payload": {"period_key": "episode-3", "mode": "sync_full"},
+                "diagnostics": {},
+                "error_message": "boom",
+            },
+            {
+                "id": "run-403",
+                "canonical_container_key": "episode-4",
+                "period_key": "episode-4",
+                "status": "partial",
+                "tracked_flair_rows": 0,
+                "matched_rows": 0,
+                "request_payload": {"period_key": "episode-4", "mode": "sync_full"},
+                "diagnostics": {"failure_reason_code": "reddit_http_403"},
+                "error_message": "Reddit request failed (403)",
+            },
+            {
+                "id": "run-coverage",
+                "canonical_container_key": "episode-5",
+                "period_key": "episode-5",
+                "status": "partial",
+                "tracked_flair_rows": 12,
+                "matched_rows": 15,
+                "request_payload": {"period_key": "episode-5", "mode": "sync_full"},
+                "diagnostics": {"failure_reason_code": "coverage_incomplete"},
+                "error_message": None,
+            },
+            {
+                "id": "run-good",
+                "canonical_container_key": "episode-6",
+                "period_key": "episode-6",
+                "status": "completed",
+                "tracked_flair_rows": 18,
+                "matched_rows": 18,
+                "request_payload": {"period_key": "episode-6", "mode": "sync_full"},
+                "diagnostics": {},
+                "error_message": None,
+            },
+            {
+                "id": "run-debug",
+                "canonical_container_key": "debug-max-coverage-20260303a",
+                "period_key": "debug-max-coverage-20260303a",
+                "status": "completed",
+                "tracked_flair_rows": 999,
+                "matched_rows": 999,
+                "request_payload": {"period_key": "debug-max-coverage-20260303a", "mode": "sync_full"},
+                "diagnostics": {},
+                "error_message": None,
+            },
+        ],
+    )
+
+    payload = reddit_refresh.list_reddit_refresh_backfill_targets(
+        community_id="community-1",
+        season_id="season-1",
+    )
+
+    target_keys = [item["container_key"] for item in payload["targets"]]
+    assert target_keys == ["episode-3", "episode-4", "episode-5"]
+    assert payload["summary"]["stale_container_count"] == 3
+    assert payload["summary"]["requested_container_count"] == 5
+    assert payload["skipped"][0]["container_key"] == "period-preseason"
+    assert payload["skipped"][0]["reason"] == "no_previous_run"
+    assert payload["skipped"][1]["container_key"] == "episode-6"
+    assert payload["skipped"][1]["reason"] == "fresh_successful_run"
+
+
+def test_fetch_reddit_analytics_extras_season_scope_filters_to_canonical_container_keys(
+    monkeypatch,
+) -> None:
+    fetch_one_calls: list[tuple[str, list[object]]] = []
+    fetch_all_calls: list[tuple[str, list[object]]] = []
+
+    monkeypatch.setattr(reddit_refresh, "_column_exists", lambda *args, **kwargs: False)  # noqa: ANN002, ANN003
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_canonical_reddit_container_keys_for_season",
+        lambda season_id: ["period-preseason", "episode-1", "period-postseason"],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        reddit_refresh,
+        "_fetch_latest_refresh_runs_for_season",
+        lambda **kwargs: [  # noqa: ARG005
+            {
+                "id": "run-pre",
+                "canonical_container_key": "period-preseason",
+                "period_key": "period-preseason",
+                "status": "completed",
+                "diagnostics": {},
+                "error_message": None,
+                "updated_at": datetime(2026, 3, 22, 17, 0, tzinfo=UTC),
+                "completed_at": datetime(2026, 3, 22, 17, 0, tzinfo=UTC),
+            },
+            {
+                "id": "run-ep1",
+                "canonical_container_key": "episode-1",
+                "period_key": "episode-1",
+                "status": "partial",
+                "diagnostics": {"failure_reason_code": "coverage_incomplete"},
+                "error_message": None,
+                "updated_at": datetime(2026, 3, 22, 18, 0, tzinfo=UTC),
+                "completed_at": datetime(2026, 3, 22, 18, 0, tzinfo=UTC),
+            },
+        ],
+    )
+
+    def fake_fetch_one(query, params):  # noqa: ANN001
+        fetch_one_calls.append((query, list(params)))
+        if "unmapped_post_count" in query:
+            return {
+                "unmapped_post_count": 28,
+                "unmapped_tracked_post_count": 12,
+            }
+        return {
+            "tracked_post_count": 28,
+            "detail_scraped_post_count": 20,
+            "comment_saved_post_count": 19,
+            "media_post_count": 15,
+            "mirrored_media_post_count": 10,
+            "reported_comment_count": 500,
+            "latest_data_timestamp": datetime(2026, 3, 22, 18, 30, tzinfo=UTC),
+        }
+
+    def fake_fetch_all(query, params):  # noqa: ANN001
+        fetch_all_calls.append((query, list(params)))
+        return [
+            {
+                "canonical_container_key": "period-preseason",
+                "matched_post_count": 8,
+                "tracked_post_count": 8,
+                "show_match_post_count": 5,
+                "detail_scraped_post_count": 8,
+                "comment_saved_post_count": 8,
+                "media_post_count": 6,
+                "mirrored_media_post_count": 4,
+            },
+            {
+                "canonical_container_key": "episode-1",
+                "matched_post_count": 20,
+                "tracked_post_count": 20,
+                "show_match_post_count": 12,
+                "detail_scraped_post_count": 12,
+                "comment_saved_post_count": 11,
+                "media_post_count": 9,
+                "mirrored_media_post_count": 6,
+            },
+            {
+                "canonical_container_key": "unmapped",
+                "matched_post_count": 999,
+                "tracked_post_count": 999,
+                "show_match_post_count": 999,
+                "detail_scraped_post_count": 999,
+                "comment_saved_post_count": 999,
+                "media_post_count": 999,
+                "mirrored_media_post_count": 999,
+            },
+        ]
+
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(reddit_refresh.pg, "fetch_all", fake_fetch_all)
+
+    payload = reddit_refresh._fetch_reddit_analytics_extras(
+        community_id="community-1",
+        scope="season",
+        season_id="season-1",
+    )
+
+    assert payload["coverage"]["tracked_post_count"] == 28
+    assert payload["coverage"]["container_count"] == 3
+    assert payload["coverage"]["stale_container_count"] == 2
+    assert payload["coverage"]["recovered_container_count"] == 1
+    assert [item["container_key"] for item in payload["container_statuses"]] == [
+        "period-preseason",
+        "episode-1",
+        "period-postseason",
+    ]
+    assert payload["container_statuses"][2]["stale_reason_code"] == "no_previous_run"
+    assert payload["freshness"]["latest_run_status"] == "partial"
+    assert any("canonical_container_key" in query for query, _params in fetch_one_calls)
+    assert any("canonical_container_key" in query for query, _params in fetch_all_calls)
+    coverage_query = next(params for query, params in fetch_one_calls if "latest_data_timestamp" in query)
+    assert coverage_query[-1] == ["period-preseason", "episode-1", "period-postseason"]
+    assert payload["coverage"]["scope"] == "canonical_windows"
+    assert payload["coverage"]["unmapped_post_count"] == 28
 
 
 def test_run_reddit_refresh_worker_loop_once_returns_one_when_no_work(monkeypatch) -> None:
@@ -1796,7 +2153,7 @@ def test_list_reddit_community_posts_applies_flair_and_container_filters(monkeyp
     assert payload["flair_key"] == "salt lake city"
     assert payload["pagination"]["total_count"] == 1
     assert payload["posts"][0]["reddit_post_id"] == "abc123"
-    assert any("m.period_key = %s" in query for query, _ in captured_queries)
+    assert any("period-preseason" in params for _query, params in captured_queries)
     assert any("canonical_flair_key" in query for query, _ in captured_queries)
 
 

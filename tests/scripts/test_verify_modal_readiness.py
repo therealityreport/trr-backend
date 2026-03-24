@@ -20,6 +20,14 @@ class _StubFunctionHandle:
         return self._web_url
 
 
+def test_expected_function_names_includes_reddit_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION", raising=False)
+
+    function_names = cli.expected_function_names()
+
+    assert "probe_reddit_refresh_runtime" in function_names
+
+
 def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli,

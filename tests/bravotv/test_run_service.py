@@ -152,15 +152,16 @@ def test_import_supplemental_catalog_preserves_fandom_context_and_generates_vari
 
     with patch("trr_backend.bravotv.run_service.create_supabase_admin_client", return_value=db):
         with patch("trr_backend.bravotv.run_service._fetch_season_map", return_value={6: "season-6"}):
-            with patch("trr_backend.bravotv.run_service.upsert_media_assets") as upsert_mock:
-                with patch("trr_backend.bravotv.run_service.create_media_link_for_entity") as link_mock:
-                    with patch("trr_backend.bravotv.run_service.generate_media_asset_variants") as variants_mock:
-                        summary, imported = run_service._import_supplemental_catalog(
-                            run_id="run-3",
-                            target_person_id="person-1",
-                            target_show_id="show-1",
-                            supplemental_catalog={"fandom": [fandom_row]},
-                        )
+            with patch("trr_backend.bravotv.run_service._fetch_episode_slug_map", return_value={}):
+                with patch("trr_backend.bravotv.run_service.upsert_media_assets") as upsert_mock:
+                    with patch("trr_backend.bravotv.run_service.create_media_link_for_entity") as link_mock:
+                        with patch("trr_backend.bravotv.run_service.generate_media_asset_variants") as variants_mock:
+                            summary, imported = run_service._import_supplemental_catalog(
+                                run_id="run-3",
+                                target_person_id="person-1",
+                                target_show_id="show-1",
+                                supplemental_catalog={"fandom": [fandom_row]},
+                            )
 
     assert summary == {"supplemental_assets_upserted": 1, "supplemental_links_created": 3}
     assert imported == [
@@ -170,6 +171,7 @@ def test_import_supplemental_catalog_preserves_fandom_context_and_generates_vari
             "caption": "Season 6 intro card",
             "context_type": "intro",
             "context_section": "Title Cards",
+            "episode_id": None,
             "supplemental": True,
         }
     ]
@@ -182,3 +184,58 @@ def test_import_supplemental_catalog_preserves_fandom_context_and_generates_vari
     first_context = link_mock.call_args_list[0].kwargs["context"]
     assert first_context["context_type"] == "intro"
     assert first_context["context_section"] == "Title Cards"
+
+
+def test_import_supplemental_catalog_respects_person_show_link_flags_and_resolves_episode() -> None:
+    db = MagicMock()
+
+    bravo_row = {
+        "source_image_id": "bravo-gallery-1",
+        "image_url": "https://cdn.test/bravo/test.jpg",
+        "caption": "Kyle and Adrienne head out to find the proper gift for young Portia.",
+        "position": 2,
+        "season": 3,
+        "context_type": "bravotv_gallery",
+        "context_section": "Portia's Drama Filled Birthday Party",
+        "link_person": False,
+        "link_show": False,
+        "link_season": True,
+        "link_episode": True,
+        "hosted": {
+            "hosted_url": "https://cdn.test/bravo/hosted.jpg",
+            "hosted_key": "shared-media/bravo.jpg",
+            "hosted_sha256": "def456",
+            "hosted_content_type": "image/jpeg",
+            "hosted_bytes": 4321,
+        },
+        "metadata": {
+            "source_variant": "bravotv_gallery",
+            "show_name": "The Real Housewives of Beverly Hills",
+            "season_number": 3,
+            "episode_slug": "portias-drama-filled-birthday-party",
+            "page_title": "Portia's Drama Filled Birthday Party",
+            "source_page_url": (
+                "https://www.bravotv.com/the-real-housewives-of-beverly-hills/photos/portias-drama-filled-birthday-party#9799496"
+            ),
+        },
+    }
+
+    with patch("trr_backend.bravotv.run_service.create_supabase_admin_client", return_value=db):
+        with patch("trr_backend.bravotv.run_service._fetch_season_map", return_value={3: "season-3"}):
+            with patch(
+                "trr_backend.bravotv.run_service._fetch_episode_slug_map",
+                return_value={(3, "portias-drama-filled-birthday-party"): "episode-3x01"},
+            ):
+                with patch("trr_backend.bravotv.run_service.upsert_media_assets"):
+                    with patch("trr_backend.bravotv.run_service.create_media_link_for_entity") as link_mock:
+                        with patch("trr_backend.bravotv.run_service.generate_media_asset_variants"):
+                            summary, imported = run_service._import_supplemental_catalog(
+                                run_id="run-4",
+                                target_person_id="person-1",
+                                target_show_id="show-1",
+                                supplemental_catalog={"bravo": [bravo_row]},
+                            )
+
+    assert summary == {"supplemental_assets_upserted": 1, "supplemental_links_created": 2}
+    assert imported[0]["episode_id"] == "episode-3x01"
+    assert [call.kwargs["entity_type"] for call in link_mock.call_args_list] == ["season", "episode"]

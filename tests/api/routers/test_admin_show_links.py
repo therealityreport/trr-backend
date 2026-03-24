@@ -1940,6 +1940,50 @@ def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> No
     assert tmdb_links[0]["link_group"] == "knowledge"
 
 
+def test_discover_people_links_can_target_single_person() -> None:
+    show_id = str(uuid4())
+    selected_person_id = str(uuid4())
+    other_person_id = str(uuid4())
+    person_rows = [
+        {
+            "id": selected_person_id,
+            "full_name": "Heather Gay",
+            "external_ids": {"imdb": "nm1234567"},
+            "fandom_url": "",
+            "cast_tmdb_imdb_id": "nm1234567",
+            "cast_tmdb_tmdb_id": 12345,
+            "cast_tmdb_wikidata_id": None,
+        },
+        {
+            "id": other_person_id,
+            "full_name": "Whitney Rose",
+            "external_ids": {"imdb": "nm7654321"},
+            "fandom_url": "",
+            "cast_tmdb_imdb_id": "nm7654321",
+            "cast_tmdb_tmdb_id": 54321,
+            "cast_tmdb_wikidata_id": None,
+        },
+    ]
+
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["peacock"]}):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = lambda query, params: person_rows if "FROM core.v_show_cast sc" in query else []
+            with patch(
+                "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
+            ):
+                with patch(
+                    "api.routers.admin_show_links._validated_person_knowledge_url",
+                    side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                ):
+                    with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                        with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                            links = _discover_people_links(show_id, person_ids={selected_person_id})
+
+    assert links
+    assert {str(link.get("entity_id")) for link in links} == {selected_person_id}
+
+
 def test_discover_people_links_emits_social_links_from_cast_tmdb_fields() -> None:
     show_id = str(uuid4())
     person_id = str(uuid4())

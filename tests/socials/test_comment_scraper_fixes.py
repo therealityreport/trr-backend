@@ -63,7 +63,7 @@ def test_tiktok_fetch_comments_adds_required_aid_param(monkeypatch: pytest.Monke
             },
         )
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
 
     comments = scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)
@@ -78,7 +78,7 @@ def test_tiktok_fetch_comments_sets_failure_reason_for_nonzero_status(monkeypatc
     def _fake_get(url: str, params: dict | None = None, **_: object) -> _FakeResponse:
         return _FakeResponse(status_code=200, payload={"status_code": 5, "status_msg": "blocked"})
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
 
     comments = scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)
@@ -98,7 +98,7 @@ def test_tiktok_fetch_user_detail_applies_request_timeout(monkeypatch: pytest.Mo
             payload={"userInfo": {"user": {"secUid": "sec-1", "nickname": "Bravo"}}},
         )
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
 
     payload = scraper.fetch_user_detail("bravotv", delay=0)
@@ -170,7 +170,7 @@ def test_youtube_fetch_channel_videos_applies_request_timeout(monkeypatch: pytes
             text='var ytInitialData = {"contents":{}};',
         )
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
 
     result = scraper.fetch_channel_videos("bravo", delay=0)
@@ -235,7 +235,7 @@ def test_youtube_fetch_transcript_reads_watch_page_caption_tracks_without_ytdlp(
         return _FakeResponse(status_code=200, payload={}, text=html)
 
     monkeypatch.setattr(scraper.session, "get", _fake_get)
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _name: None)
 
     payload = scraper.fetch_transcript("short-vid")
@@ -319,7 +319,7 @@ def test_youtube_scrape_backfills_channel_avatar_and_title_from_channel_metadata
         user_avatar_url=None,
     )
 
-    def _fake_fetch_channel_videos(handle: str, delay: float, surface: str = "videos") -> dict | None:
+    def _fake_fetch_channel_videos(handle: str, delay: float, surface: str = "videos", **_kw: object) -> dict | None:
         return channel_payload if surface == "videos" else None
 
     monkeypatch.setattr(scraper, "fetch_channel_videos", _fake_fetch_channel_videos)
@@ -343,7 +343,7 @@ def test_youtube_scrape_backfills_channel_avatar_and_title_from_channel_metadata
         ),
     )
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: None)
-    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda videos, delay=1.0: None)
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda videos, delay=1.0, **_kw: None)
 
     videos = scraper.scrape(config)
 
@@ -424,7 +424,7 @@ def test_youtube_fetch_comments_applies_request_timeout(monkeypatch: pytest.Monk
         captured_post["timeout"] = kwargs.get("timeout")
         return _FakeResponse(status_code=200, payload={})
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper, "_extract_ytinital_data", lambda text: {"contents": {}})
     monkeypatch.setattr(scraper, "_extract_comment_continuation", lambda data: "token-1")
     monkeypatch.setattr(scraper, "_build_comment_entity_index", lambda data: {})
@@ -551,7 +551,7 @@ def test_youtube_enrich_via_ytdlp_backfills_shorts_likes_from_html(
         "run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
     )
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
 
     def _fake_get(url: str, **kwargs: object) -> _FakeResponse:
         del kwargs
@@ -590,7 +590,7 @@ def test_youtube_fetch_precise_publish_timestamp_parses_iso_upload_date(
         calls += 1
         return _FakeResponse(status_code=200, payload={}, text=html)
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
 
     expected = int(datetime.fromisoformat("2025-10-02T06:00:06-07:00").timestamp())
@@ -620,7 +620,7 @@ def test_youtube_fetch_precise_publish_timestamp_falls_back_to_shorts_page(
         called_urls.append(url)
         return _FakeResponse(status_code=200, payload={}, text=responses[url])
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
 
     expected = int(datetime.fromisoformat("2025-11-18T10:00:53-08:00").timestamp())
@@ -656,7 +656,7 @@ def test_youtube_process_video_data_refines_month_precision_dates(monkeypatch: p
     monkeypatch.setattr(scraper, "_iter_video_renderers", lambda _data: iter([renderer]))
     monkeypatch.setattr(scraper, "_estimate_publish_date", lambda _text: out_of_range_estimate)
 
-    def _fake_precise(video_id: str, delay: float = 2.0) -> int:
+    def _fake_precise(video_id: str, delay: float = 2.0, **_kw: object) -> int:
         del delay
         fetched.append(video_id)
         return precise_in_range
@@ -695,7 +695,7 @@ def test_youtube_process_video_data_refines_low_precision_even_when_initially_in
     monkeypatch.setattr(scraper, "_iter_video_renderers", lambda _data: iter([renderer]))
     monkeypatch.setattr(scraper, "_estimate_publish_date", lambda _text: coarse_in_range)
 
-    def _fake_precise(video_id: str, delay: float = 2.0) -> int:
+    def _fake_precise(video_id: str, delay: float = 2.0, **_kw: object) -> int:
         del delay
         fetched.append(video_id)
         return precise_expected
@@ -729,7 +729,7 @@ def test_youtube_process_video_data_skips_undated_shorts_for_bounded_windows(
     }
 
     monkeypatch.setattr(scraper, "_iter_video_renderers", lambda _data: iter([renderer]))
-    monkeypatch.setattr(scraper, "_fetch_precise_publish_timestamp", lambda _video_id, delay=2.0: 0)
+    monkeypatch.setattr(scraper, "_fetch_precise_publish_timestamp", lambda _video_id, delay=2.0, **_kw: 0)
 
     videos, stats = scraper._process_video_data({}, config, surface="shorts", return_stats=True)  # noqa: SLF001
 
@@ -821,7 +821,7 @@ def test_facebook_scrape_bounded_window_skips_undated_shell_candidates(
 
     monkeypatch.setattr(scraper, "_playwright_fallback_enabled", lambda: False)
 
-    def _fake_fetch_html(url: str, *, delay_seconds: float, referer: str | None = None) -> str:
+    def _fake_fetch_html(url: str, *, delay_seconds: float, referer: str | None = None, **_kw: object) -> str:
         del delay_seconds, referer
         if url == "https://www.facebook.com/bravo":
             return '<a href="https://www.facebook.com/Bravo/posts/pfbid123">candidate</a>'
@@ -854,11 +854,11 @@ def test_facebook_scrape_retries_shell_candidates_with_playwright(
     monkeypatch.setattr(scraper, "_playwright_fallback_enabled", lambda: True)
     monkeypatch.setattr(scraper, "_scrape_feed_with_scroll", lambda handle, cfg: [(candidate_url, "feed")])
 
-    def _fake_fetch_html(url: str, *, delay_seconds: float, referer: str | None = None) -> str:
+    def _fake_fetch_html(url: str, *, delay_seconds: float, referer: str | None = None, **_kw: object) -> str:
         del delay_seconds, referer
         return "<html><body>shell</body></html>"
 
-    def _fake_fetch_html_with_playwright(url: str, *, delay_seconds: float, referer: str | None = None) -> str:
+    def _fake_fetch_html_with_playwright(url: str, *, delay_seconds: float, referer: str | None = None, **_kw: object) -> str:
         del delay_seconds, referer
         playwright_calls.append(url)
         return (
@@ -943,7 +943,7 @@ def test_twitter_reply_fetch_retries_with_missing_feature_flags(monkeypatch: pyt
         requested_urls.append(url)
         return responses.pop(0)
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
     monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda **_kwargs: [])
 
@@ -985,7 +985,7 @@ def test_twitter_reply_fetch_rediscover_hashes_after_404(monkeypatch: pytest.Mon
         requested_timeouts.append(kwargs.get("timeout"))
         return responses.pop(0)
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper, "_discover_graphql_hashes", _fake_discover)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
     monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda **_kwargs: [])
@@ -1008,7 +1008,7 @@ def test_twitter_reply_fetch_sets_reason_on_logical_api_error(monkeypatch: pytes
         del url
         return _FakeResponse(status_code=200, payload={"errors": [{"message": "auth required"}]})
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
     monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda **_kwargs: [])
 
@@ -1028,7 +1028,7 @@ def test_twitter_reply_fetch_falls_back_to_search_on_http_error(monkeypatch: pyt
         return _FakeResponse(status_code=404, payload={"errors": [{"message": "not found"}]})
 
     fallback_reply = SimpleNamespace(tweet_id="reply-1")
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
     monkeypatch.setattr(
         scraper,
@@ -1525,7 +1525,7 @@ def test_twitter_fetch_tweet_quotes_falls_back_to_twikit(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         scraper,
         "_fetch_tweet_quotes_via_twikit",
-        lambda *, tweet_id, max_pages, delay: [quote],  # noqa: ARG005
+        lambda *, tweet_id, max_pages, delay, **_kw: [quote],  # noqa: ARG005
     )
 
     quotes = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
@@ -1704,7 +1704,7 @@ def test_twitter_fetch_tweet_quotes_caches_search_404_between_calls(monkeypatch:
     monkeypatch.setattr(
         scraper,
         "_fetch_tweet_quotes_via_twikit",
-        lambda *, tweet_id, max_pages, delay: [quote],  # noqa: ARG005
+        lambda *, tweet_id, max_pages, delay, **_kw: [quote],  # noqa: ARG005
     )
 
     first = scraper.fetch_tweet_quotes("root-123", delay=0, max_pages=1)
@@ -1777,7 +1777,7 @@ def test_twitter_fetch_quotes_via_tweet_detail_parses_tweet_entries(monkeypatch:
         return _FakeResponse(status_code=200, payload=payload)
 
     monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
 
     quotes = scraper._fetch_quotes_via_tweet_detail("root-123", delay=0)  # noqa: SLF001
@@ -1866,11 +1866,11 @@ def test_twitter_fetch_tweet_replies_falls_back_to_twikit(monkeypatch: pytest.Mo
     monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
     monkeypatch.setattr(scraper, "_discover_graphql_hashes", lambda: None)
     monkeypatch.setattr(scraper.session, "get", _raise_request)
-    monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda *, tweet_id, delay, max_pages: [])  # noqa: ARG005
+    monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", lambda *, tweet_id, delay, max_pages, **_kw: [])  # noqa: ARG005
     monkeypatch.setattr(
         scraper,
         "_fetch_tweet_replies_via_twikit",
-        lambda *, tweet_id, max_pages, delay: [reply],  # noqa: ARG005
+        lambda *, tweet_id, max_pages, delay, **_kw: [reply],  # noqa: ARG005
     )
 
     replies = scraper.fetch_tweet_replies("root-123", delay=0)
@@ -2091,7 +2091,7 @@ def test_twitter_fetch_tweet_replies_combines_tweet_detail_and_search(monkeypatc
         search_called.append(True)
         return [search_reply_b, search_reply_c]
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
     monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", _fake_search)
 
@@ -2220,7 +2220,7 @@ def test_twitter_fetch_tweet_replies_preserves_detail_results_when_search_fails(
     def _fake_search_raises(**kwargs):
         raise RuntimeError("SearchTimeline unavailable")
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
     monkeypatch.setattr(scraper, "_fetch_tweet_replies_via_search", _fake_search_raises)
 
@@ -2465,7 +2465,7 @@ def test_instagram_fetch_post_info_falls_back_to_permalink_media_item_on_html(
     scraper = InstagramScraper(cookies={"sessionid": "ok"})
     node = {"id": "media-1", "video_view_count": 312}
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(
         scraper,
         "_get",
@@ -2600,7 +2600,7 @@ def test_instagram_fetch_comments_paginates_with_headload_flag(monkeypatch: pyte
         seen_params.append(dict(params or {}))
         return responses.pop(0)
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(scraper, "_get", _fake_get)
     monkeypatch.setattr(
         scraper,
@@ -2622,7 +2622,7 @@ def test_instagram_fetch_comments_resets_sticky_auth_flag(monkeypatch: pytest.Mo
     scraper = InstagramScraper(cookies={"sessionid": "ok"})
     scraper.comments_auth_failed = True
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(
         scraper,
         "_get",
@@ -2650,7 +2650,7 @@ def test_instagram_fetch_comments_sets_invalid_shortcode_reason() -> None:
 def test_instagram_fetch_comments_sets_api_status_fail_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "ok"})
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(
         scraper,
         "_get",
@@ -2670,7 +2670,7 @@ def test_instagram_fetch_comments_sets_api_status_fail_reason(monkeypatch: pytes
 def test_instagram_fetch_comment_replies_sets_api_status_fail_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "ok"})
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
     monkeypatch.setattr(
         scraper,
         "_get",
@@ -2691,7 +2691,7 @@ def test_instagram_fetch_comments_handles_request_error_without_response_object(
 ) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "ok"})
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
 
     def _raise_request_error(*_args, **_kwargs):
         raise requests.RequestException("timeout")
@@ -2777,7 +2777,7 @@ def test_tiktok_scrape_backfills_post_avatar_from_user_detail(monkeypatch: pytes
     monkeypatch.setattr(
         scraper,
         "fetch_user_detail",
-        lambda username, delay=0: {
+        lambda username, delay=0, **_kw: {
             "userInfo": {
                 "user": {
                     "secUid": "sec-1",
@@ -2790,7 +2790,7 @@ def test_tiktok_scrape_backfills_post_avatar_from_user_detail(monkeypatch: pytes
     monkeypatch.setattr(
         scraper,
         "fetch_posts",
-        lambda username, sec_uid, cursor=0, delay=0: {
+        lambda username, sec_uid, cursor=0, delay=0, **_kw: {
             "itemList": [
                 {
                     "id": "vid-1",
@@ -2962,7 +2962,7 @@ def test_instagram_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         scraper,
         "fetch_profile_info",
-        lambda username, delay=0: {
+        lambda username, delay=0, **_kw: {
             "data": {
                 "user": {
                     "edge_owner_to_timeline_media": {
@@ -3048,7 +3048,7 @@ def test_instagram_graphql_stops_after_consecutive_no_match_pages(monkeypatch: p
         },
     ]
 
-    def _fake_fetch_posts_graphql(username: str, cursor: str | None = None, delay: float = 2.0) -> dict:
+    def _fake_fetch_posts_graphql(username: str, cursor: str | None = None, delay: float = 2.0, **_kw: object) -> dict:
         del username, delay
         call_cursors.append(cursor)
         return page_payloads[len(call_cursors) - 1]
@@ -3076,12 +3076,12 @@ def test_tiktok_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         scraper,
         "fetch_user_detail",
-        lambda username, delay=0: {"userInfo": {"user": {"secUid": "sec-1", "nickname": "Bravo"}}},
+        lambda username, delay=0, **_kw: {"userInfo": {"user": {"secUid": "sec-1", "nickname": "Bravo"}}},
     )
     monkeypatch.setattr(
         scraper,
         "fetch_posts",
-        lambda username, sec_uid, cursor=0, delay=0: {
+        lambda username, sec_uid, cursor=0, delay=0, **_kw: {
             "itemList": [{"id": "vid-1", "createTime": 1735689600, "desc": "clip"}],
             "hasMore": False,
             "cursor": 0,
@@ -3118,12 +3118,12 @@ def test_tiktok_scrape_skips_items_without_valid_timestamp(monkeypatch: pytest.M
     monkeypatch.setattr(
         scraper,
         "fetch_user_detail",
-        lambda username, delay=0: {"userInfo": {"user": {"secUid": "sec-1", "nickname": "Bravo"}}},
+        lambda username, delay=0, **_kw: {"userInfo": {"user": {"secUid": "sec-1", "nickname": "Bravo"}}},
     )
     monkeypatch.setattr(
         scraper,
         "fetch_posts",
-        lambda username, sec_uid, cursor=0, delay=0: {
+        lambda username, sec_uid, cursor=0, delay=0, **_kw: {
             "itemList": [
                 {
                     "url": "https://www.tiktok.com/@shaiie_foeva/video/7533731959172861206",
@@ -3170,6 +3170,7 @@ def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_yt
         date_end=datetime(2027, 1, 1, tzinfo=UTC),
     )
     calls = {"fetch_posts": 0}
+    progress_events: list[dict[str, object]] = []
 
     def _fake_fetch_user_detail(username: str, delay: float = 0) -> None:
         del username, delay
@@ -3180,7 +3181,7 @@ def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_yt
     monkeypatch.setattr(
         scraper,
         "_fetch_profile_html",
-        lambda username, delay=0: {
+        lambda username, delay=0, **_kw: {
             "__DEFAULT_SCOPE__": {
                 "webapp.user-detail": {
                     "userInfo": {
@@ -3200,7 +3201,16 @@ def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_yt
     monkeypatch.setattr(
         scraper,
         "_scrape_via_ytdlp",
-        lambda cfg: [
+        lambda cfg, **_kwargs: scraper.__dict__.__setitem__(
+            "last_retrieval_meta",
+            {
+                "retrieval_mode": "ytdlp",
+                "posts_checked": 1_200,
+                "videos_scanned": 1_200,
+                "pages_scanned": 0,
+            },
+        )
+        or [
             SimpleNamespace(
                 video_id="vid-1",
                 date_time="2026-01-01 00:00:00",
@@ -3225,12 +3235,90 @@ def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_yt
         ],
     )
 
-    posts = scraper.scrape(config)
+    posts = scraper.scrape(config, progress_cb=progress_events.append)
 
     assert [post.video_id for post in posts] == ["vid-1"]
     assert calls["fetch_posts"] == 0
     assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp_fallback"
+    assert scraper.last_retrieval_meta["videos_scanned"] == 1_200
     assert scraper.last_retrieval_meta["api_pagination_blocked_reason"] == "non_json_response"
+    assert progress_events[-1]["phase"] == "scrape_ytdlp_fallback"
+    assert progress_events[-1]["posts_checked"] == 1_200
+
+
+def test_tiktok_auto_mode_uses_ytdlp_after_empty_browser_intercept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "token"})
+    config = TikTokScrapeConfig(username="bravotv", scrape_mode="auto", ytdlp_max_videos_hint=10_100)
+
+    api_calls = {"count": 0}
+    browser_calls = {"count": 0}
+    ytdlp_calls = {"count": 0}
+
+    def _fake_scrape_api(_config, progress_cb=None):
+        del _config, progress_cb
+        api_calls["count"] += 1
+        scraper.last_retrieval_meta = {
+            "retrieval_mode": "none",
+            "pages_scanned": 0,
+            "posts_checked": 0,
+        }
+        return []
+
+    def _fake_browser_intercept(_config, progress_cb=None):
+        del _config, progress_cb
+        browser_calls["count"] += 1
+        scraper.last_retrieval_meta = {
+            "retrieval_mode": "browser_intercept",
+            "pages_scanned": 5,
+            "posts_checked": 0,
+            "stop_reason": "no_new_data",
+        }
+        return []
+
+    def _fake_scrape_via_ytdlp(_config, **_kwargs):
+        assert _kwargs["max_videos_hint"] == 10_100
+        assert _kwargs["max_posts_hint"] == 10_100
+        del _config
+        ytdlp_calls["count"] += 1
+        return [
+            SimpleNamespace(
+                video_id="vid-1",
+                date_time="2026-01-01 00:00:00",
+                create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
+                description="clip",
+                hashtags=[],
+                mentions=[],
+                likes=1,
+                comments=2,
+                shares=3,
+                saves=4,
+                views=5,
+                url="https://www.tiktok.com/@bravotv/video/vid-1",
+                username="bravotv",
+                author_nickname="Bravo",
+                duration=10,
+                music_title="song",
+                music_author="artist",
+                user_avatar_url=None,
+                thumbnail_url=None,
+            )
+        ]
+
+    monkeypatch.setattr(scraper, "_scrape_api", _fake_scrape_api)
+    monkeypatch.setattr(scraper, "_scrape_browser_intercept", _fake_browser_intercept)
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_scrape_via_ytdlp", _fake_scrape_via_ytdlp)
+
+    posts = scraper.scrape(config)
+
+    assert [post.video_id for post in posts] == ["vid-1"]
+    assert api_calls["count"] == 1
+    assert browser_calls["count"] == 1
+    assert ytdlp_calls["count"] == 1
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp_fallback"
+    assert scraper.last_retrieval_meta["auto_fallback_chain"] == ["api", "browser_intercept", "yt_dlp"]
 
 
 def test_twitter_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3241,7 +3329,7 @@ def test_twitter_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         scraper,
         "_fetch_search",
-        lambda query, cursor=None, delay=0: {
+        lambda query, cursor=None, delay=0, **_kw: {
             "data": {
                 "search_by_raw_query": {
                     "search_timeline": {
@@ -3532,7 +3620,7 @@ def test_youtube_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch)
     scraper = YouTubeScraper()
     events: list[dict[str, int | str]] = []
 
-    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos": {"contents": {}})
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos", **_kw: {"contents": {}})
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: None)
     monkeypatch.setattr(scraper, "_search_via_ytdlp", lambda cfg, **kwargs: [])
@@ -3558,11 +3646,11 @@ def test_youtube_scrape_keeps_paging_through_too_recent_no_hit_pages(monkeypatch
     monkeypatch.setattr(
         scraper,
         "fetch_channel_videos",
-        lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None,
+        lambda handle, delay=0, surface="videos", **_kw: {"contents": {}} if surface == "videos" else None,
     )
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: "token-0")
-    monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0: {"ok": True})
+    monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0, **_kw: {"ok": True})
 
     def _fake_extract(_data: dict) -> tuple[list[dict], str | None]:
         nonlocal page_idx
@@ -3617,7 +3705,7 @@ def test_youtube_scrape_backfills_sparse_video_identity_fields_without_crashing(
     monkeypatch.setattr(
         scraper,
         "fetch_channel_videos",
-        lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None,
+        lambda handle, delay=0, surface="videos", **_kw: {"contents": {}} if surface == "videos" else None,
     )
     monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda data, fallback: ("bravo", "UC123"))
     monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda data: "Bravo")
@@ -3627,7 +3715,7 @@ def test_youtube_scrape_backfills_sparse_video_identity_fields_without_crashing(
     monkeypatch.setattr(
         scraper,
         "_fetch_continuation",
-        lambda token, delay=0: {"ok": True} if token == "token-0" else None,
+        lambda token, delay=0, **_kw: {"ok": True} if token == "token-0" else None,
     )
     monkeypatch.setattr(
         scraper,
@@ -3669,11 +3757,11 @@ def test_youtube_scrape_stops_when_pre_window_cap_is_reached(monkeypatch: pytest
     monkeypatch.setattr(
         scraper,
         "fetch_channel_videos",
-        lambda handle, delay=0, surface="videos": {"contents": {}} if surface == "videos" else None,
+        lambda handle, delay=0, surface="videos", **_kw: {"contents": {}} if surface == "videos" else None,
     )
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: "token-0")
-    monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0: {"ok": True})
+    monkeypatch.setattr(scraper, "_fetch_continuation", lambda token, delay=0, **_kw: {"ok": True})
 
     def _fake_extract(_data: dict) -> tuple[list[dict], str | None]:
         nonlocal page_idx

@@ -19,6 +19,7 @@ from api.routers import admin_nbcumv, admin_person_images
 from trr_backend.media.getty_replacement import ResolvedPublicReplacement
 
 _REAL_IMPORT_NBCUMV_PERSON_MEDIA = admin_person_images._import_nbcumv_person_media
+_REAL_IMPORT_BRAVOTV_PERSON_MEDIA = admin_person_images._import_bravotv_person_media
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -65,6 +66,23 @@ def stub_nbcumv_person_import(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         admin_person_images,
         "_import_nbcumv_person_media",
+        lambda *args, **kwargs: {
+            "fetched": 0,
+            "imported": 0,
+            "skipped": 0,
+            "failed": 0,
+            "gallery_links_created": 0,
+            "asset_ids": [],
+            "errors": [],
+        },
+    )
+
+
+@pytest.fixture(autouse=True)
+def stub_bravotv_person_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        admin_person_images,
+        "_import_bravotv_person_media",
         lambda *args, **kwargs: {
             "fetched": 0,
             "imported": 0,
@@ -171,6 +189,13 @@ def test_resolve_refresh_sources_canonicalizes_getty_alias_to_nbcumv() -> None:
     assert sources == ["imdb", "nbcumv"]
 
 
+def test_resolve_refresh_sources_preserves_bravotv_source() -> None:
+    request = admin_person_images.RefreshImagesRequest(sources=["bravotv", "imdb"])
+    sources, fandom_skipped = admin_person_images._resolve_refresh_sources(MagicMock(), request)
+    assert fandom_skipped is False
+    assert sources == ["bravotv", "imdb"]
+
+
 def test_normalize_source_progress_key_maps_getty_alias_to_shared_bucket() -> None:
     assert admin_person_images._normalize_source_progress_key("getty") == "getty_nbcumv"
     assert admin_person_images._normalize_source_progress_key("nbcumv") == "getty_nbcumv"
@@ -189,6 +214,334 @@ def test_refresh_request_accepts_getty_source_alias() -> None:
 def test_reprocess_request_accepts_getty_source() -> None:
     request = admin_person_images.ReprocessImagesRequest(sources=["getty"])
     assert request.sources == ["getty"]
+
+
+def test_reprocess_request_accepts_bravotv_source() -> None:
+    request = admin_person_images.ReprocessImagesRequest(sources=["bravotv"])
+    assert request.sources == ["bravotv"]
+
+
+def test_should_run_imdb_metadata_repair_for_sources_is_source_aware() -> None:
+    assert admin_person_images._should_run_imdb_metadata_repair_for_sources(["imdb"]) is True
+    assert admin_person_images._should_run_imdb_metadata_repair_for_sources(["getty", "nbcumv"]) is False
+    assert admin_person_images._should_run_imdb_metadata_repair_for_sources(["bravotv"]) is False
+
+
+def test_import_bravotv_person_media_skips_low_quality_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.bravotv import get_images_pipeline, run_service
+
+    good_row = {
+        "file_url": "https://cdn.example.com/good.jpg",
+        "file_name": "good.jpg",
+        "media_uuid": "media-good",
+        "gallery_path": "/gallery/good",
+        "gallery_title": "Good Gallery",
+        "gallery_show_name": "Watch What Happens Live with Andy Cohen",
+        "gallery_people_names": ["Brandi Glanville"],
+        "field_caption": "Brandi Glanville poses backstage.",
+        "gallery_position": 0,
+        "season_number": 19,
+    }
+    low_row = {
+        "file_url": "https://cdn.example.com/low.jpg",
+        "file_name": "low.jpg",
+        "media_uuid": "media-low",
+        "gallery_path": "/gallery/low",
+        "gallery_title": "Low Gallery",
+        "gallery_show_name": "Watch What Happens Live with Andy Cohen",
+        "gallery_people_names": ["Brandi Glanville"],
+        "field_caption": "Brandi Glanville waves backstage.",
+        "gallery_position": 1,
+        "season_number": 19,
+    }
+
+    monkeypatch.setattr(get_images_pipeline, "_collect_bravo_person", lambda *args, **kwargs: [good_row, low_row])
+
+    def _fake_download(source_url: str) -> dict[str, object]:
+        if source_url.endswith("good.jpg"):
+            return {
+                "data": b"good-bytes",
+                "content_type": "image/jpeg",
+                "width": 1600,
+                "height": 900,
+                "size_bytes": 250_000,
+            }
+        return {
+            "data": b"low-bytes",
+            "content_type": "image/jpeg",
+            "width": 640,
+            "height": 360,
+            "size_bytes": 20_000,
+        }
+
+    monkeypatch.setattr(admin_person_images, "_download_bravotv_source_image", _fake_download)
+    monkeypatch.setattr(
+        get_images_pipeline,
+        "_upload_bytes",
+        lambda data, *, content_type=None: {
+            "hosted_url": "https://cdn.example.com/hosted.jpg",
+            "hosted_key": "shared/key.jpg",
+            "hosted_sha256": "sha256",
+            "hosted_content_type": content_type or "image/jpeg",
+            "hosted_bytes": len(data),
+            "hosted_etag": "etag",
+            "hosted_at": "2026-03-21T00:00:00+00:00",
+        },
+    )
+
+    def _fake_import(
+        *,
+        supplemental_catalog: dict[str, object],
+        **kwargs: object,
+    ) -> tuple[dict[str, object], list[dict[str, str]]]:
+        bravo_rows = supplemental_catalog.get("bravo")
+        assert isinstance(bravo_rows, list)
+        assert len(bravo_rows) == 1
+        assert bravo_rows[0]["source_image_id"] == "media-good"
+        return (
+            {"supplemental_assets_upserted": 1, "supplemental_links_created": 2},
+            [{"media_asset_id": "asset-1"}],
+        )
+
+    monkeypatch.setattr(run_service, "_import_supplemental_catalog", _fake_import)
+
+    result = _REAL_IMPORT_BRAVOTV_PERSON_MEDIA(
+        MagicMock(),
+        person_id="person-1",
+        person_name="Brandi Glanville",
+        show_name="Watch What Happens Live with Andy Cohen",
+        limit=10,
+    )
+
+    assert result["fetched"] == 2
+    assert result["imported"] == 1
+    assert result["skipped"] == 1
+    assert result["failed"] == 0
+    assert result["gallery_links_created"] == 2
+
+
+def test_import_bravotv_person_media_skips_castmate_caption_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.bravotv import get_images_pipeline, run_service
+
+    castmate_row = {
+        "file_url": "https://cdn.example.com/kyle.jpg",
+        "file_name": "kyle.jpg",
+        "media_uuid": "media-kyle",
+        "gallery_path": "/the-real-housewives-of-beverly-hills/photos/meet-the-rhobh-season-3-cast",
+        "gallery_item_id": "9783321",
+        "source_page_url": (
+            "https://www.bravotv.com/the-real-housewives-of-beverly-hills/photos/meet-the-rhobh-season-3-cast#9783321"
+        ),
+        "gallery_title": "Meet the RHOBH Season 3 Cast",
+        "gallery_show_name": "The Real Housewives of Beverly Hills",
+        "gallery_people_names": ["Brandi Glanville", "Kyle Richards", "Kim Richards"],
+        "field_caption": "Kyle continues tho struggle with her sister, Kim.",
+        "field_media_image_alt": "Kyle and Kim",
+        "gallery_position": 0,
+        "season_number": 3,
+    }
+
+    monkeypatch.setattr(get_images_pipeline, "_collect_bravo_person", lambda *args, **kwargs: [castmate_row])
+    monkeypatch.setattr(
+        admin_person_images,
+        "_download_bravotv_source_image",
+        lambda _source_url: {
+            "data": b"good-bytes",
+            "content_type": "image/jpeg",
+            "width": 1600,
+            "height": 900,
+            "size_bytes": 250_000,
+        },
+    )
+    monkeypatch.setattr(
+        get_images_pipeline,
+        "_upload_bytes",
+        lambda data, *, content_type=None: {
+            "hosted_url": "https://cdn.example.com/hosted.jpg",
+            "hosted_key": "shared/key.jpg",
+            "hosted_sha256": "sha256",
+            "hosted_content_type": content_type or "image/jpeg",
+            "hosted_bytes": len(data),
+            "hosted_etag": "etag",
+            "hosted_at": "2026-03-21T00:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        run_service,
+        "_import_supplemental_catalog",
+        lambda **kwargs: pytest.fail("castmate rows should not be imported for the wrong person"),
+    )
+
+    result = _REAL_IMPORT_BRAVOTV_PERSON_MEDIA(
+        MagicMock(),
+        person_id="person-1",
+        person_name="Brandi Glanville",
+        show_name="The Real Housewives of Beverly Hills",
+        limit=10,
+    )
+
+    assert result["fetched"] == 1
+    assert result["imported"] == 0
+    assert result["failed"] == 0
+    assert result["attribution_skipped"] == 1
+    assert result["skipped"] == 1
+
+
+def test_import_bravotv_person_media_routes_episode_gallery_without_person_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.bravotv import get_images_pipeline, run_service
+
+    episode_row = {
+        "file_url": "https://cdn.example.com/portia.jpg",
+        "file_name": "portia.jpg",
+        "media_uuid": "media-portia",
+        "gallery_path": "/the-real-housewives-of-beverly-hills/photos/portias-drama-filled-birthday-party",
+        "gallery_item_id": "9799496",
+        "source_page_url": (
+            "https://www.bravotv.com/the-real-housewives-of-beverly-hills/photos/portias-drama-filled-birthday-party#9799496"
+        ),
+        "gallery_title": "Portia's Drama Filled Birthday Party",
+        "gallery_show_name": "The Real Housewives of Beverly Hills",
+        "gallery_people_names": ["Brandi Glanville", "Kyle Richards", "Adrienne Maloof"],
+        "field_caption": "Kyle and Adrienne head out to find the proper gift for young Portia.",
+        "field_media_image_alt": "Kyle and Adrienne shop for Portia's party.",
+        "gallery_position": 0,
+        "season_number": 3,
+        "gallery_page_title": "Portia's Drama Filled Birthday Party",
+    }
+
+    monkeypatch.setattr(get_images_pipeline, "_collect_bravo_person", lambda *args, **kwargs: [episode_row])
+    monkeypatch.setattr(
+        admin_person_images,
+        "_download_bravotv_source_image",
+        lambda _source_url: {
+            "data": b"good-bytes",
+            "content_type": "image/jpeg",
+            "width": 1600,
+            "height": 900,
+            "size_bytes": 250_000,
+        },
+    )
+    monkeypatch.setattr(
+        get_images_pipeline,
+        "_upload_bytes",
+        lambda data, *, content_type=None: {
+            "hosted_url": "https://cdn.example.com/hosted.jpg",
+            "hosted_key": "shared/key.jpg",
+            "hosted_sha256": "sha256",
+            "hosted_content_type": content_type or "image/jpeg",
+            "hosted_bytes": len(data),
+            "hosted_etag": "etag",
+            "hosted_at": "2026-03-21T00:00:00+00:00",
+        },
+    )
+
+    def _fake_import(
+        *,
+        supplemental_catalog: dict[str, object],
+        **kwargs: object,
+    ) -> tuple[dict[str, object], list[dict[str, str]]]:
+        bravo_rows = supplemental_catalog.get("bravo")
+        assert isinstance(bravo_rows, list)
+        assert len(bravo_rows) == 1
+        row = bravo_rows[0]
+        assert row["link_person"] is False
+        assert row["link_show"] is False
+        assert row["link_season"] is True
+        assert row["link_episode"] is True
+        assert row["metadata"]["bravotv_gallery_classification"] == "episode_or_event_gallery"
+        return (
+            {"supplemental_assets_upserted": 1, "supplemental_links_created": 1},
+            [{"media_asset_id": "asset-episode"}],
+        )
+
+    monkeypatch.setattr(run_service, "_import_supplemental_catalog", _fake_import)
+
+    result = _REAL_IMPORT_BRAVOTV_PERSON_MEDIA(
+        MagicMock(),
+        person_id="person-1",
+        person_name="Brandi Glanville",
+        show_name="The Real Housewives of Beverly Hills",
+        limit=10,
+    )
+
+    assert result["fetched"] == 1
+    assert result["imported"] == 1
+    assert result["failed"] == 0
+    assert result["episode_routed"] == 1
+    assert result["attribution_skipped"] == 0
+
+
+def test_import_bravotv_person_media_skips_denylisted_gallery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.bravotv import get_images_pipeline, run_service
+
+    skipped_row = {
+        "file_url": "https://cdn.example.com/home.jpg",
+        "file_name": "home.jpg",
+        "media_uuid": "media-home",
+        "gallery_path": "/the-real-housewives-of-beverly-hills/photos/tour-brandi-glanvilles-home-and-closet",
+        "source_page_url": (
+            "https://www.bravotv.com/the-real-housewives-of-beverly-hills/photos/tour-brandi-glanvilles-home-and-closet"
+        ),
+        "gallery_title": "Tour Brandi Glanville's Home and Closet",
+        "gallery_show_name": "The Real Housewives of Beverly Hills",
+        "gallery_people_names": ["Brandi Glanville"],
+        "field_caption": "Brandi opens the doors to her home.",
+        "field_media_image_alt": "Brandi at home",
+        "gallery_position": 0,
+        "season_number": 3,
+    }
+
+    monkeypatch.setattr(get_images_pipeline, "_collect_bravo_person", lambda *args, **kwargs: [skipped_row])
+    monkeypatch.setattr(
+        admin_person_images,
+        "_download_bravotv_source_image",
+        lambda _source_url: {
+            "data": b"good-bytes",
+            "content_type": "image/jpeg",
+            "width": 1600,
+            "height": 900,
+            "size_bytes": 250_000,
+        },
+    )
+    monkeypatch.setattr(
+        get_images_pipeline,
+        "_upload_bytes",
+        lambda *args, **kwargs: pytest.fail("denylisted Bravo gallery should not upload"),
+    )
+    monkeypatch.setattr(
+        run_service,
+        "_import_supplemental_catalog",
+        lambda **kwargs: pytest.fail("denylisted Bravo gallery should not import"),
+    )
+
+    result = _REAL_IMPORT_BRAVOTV_PERSON_MEDIA(
+        MagicMock(),
+        person_id="person-1",
+        person_name="Brandi Glanville",
+        show_name="The Real Housewives of Beverly Hills",
+        limit=10,
+    )
+
+    assert result["fetched"] == 1
+    assert result["imported"] == 0
+    assert result["failed"] == 0
+    assert result["skip_gallery_count"] == 1
+    assert result["skipped"] == 1
+
+
+def test_auto_count_runtime_batch_size_caps_large_tagging_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRR_AUTO_COUNT_BATCH_SIZE_CAP", raising=False)
+
+    assert admin_person_images._auto_count_runtime_batch_size(48) == 8
+
+
+def test_auto_count_runtime_batch_size_honors_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_AUTO_COUNT_BATCH_SIZE_CAP", "5")
+
+    assert admin_person_images._auto_count_runtime_batch_size(48) == 5
+    assert admin_person_images._auto_count_runtime_batch_size(3) == 3
 
 
 def test_resolve_gallery_bucket_metadata_includes_event_subcategories() -> None:
@@ -316,7 +669,15 @@ def test_import_nbcumv_person_media_persists_getty_unmatched_urls_and_imports_on
                     "object_name": "MATCH.JPG",
                     "title": "Matched Getty Asset",
                     "event_name": "BravoCon 2025 - Panels",
+                    "caption": "BravoCon -- Pictured: Lisa Barlow -- (Photo by: Bravo / Contributor)",
+                    "date_created": "November 16, 2025",
+                    "original_image_url": "https://media.gettyimages.com/match-original.jpg",
                     "preview_image_url": "https://media.gettyimages.com/match-comp.jpg",
+                    "keyword_texts": ["Lisa Barlow", "Season 6", "BravoCon"],
+                    "details": {
+                        "credit_display": "Bravo / Contributor",
+                        "collection_display": "NBCUniversal",
+                    },
                     "people": [{"text": "Lisa Barlow"}],
                 },
                 {
@@ -325,6 +686,7 @@ def test_import_nbcumv_person_media_persists_getty_unmatched_urls_and_imports_on
                     "object_name": "UNMATCHED.JPG",
                     "title": "Unmatched Getty Asset",
                     "event_name": "DIRECTV Plot Twist Featuring Bravo",
+                    "original_image_url": "https://media.gettyimages.com/unmatched-original.jpg",
                     "preview_image_url": "https://media.gettyimages.com/unmatched-comp.jpg",
                     "thumb_url": "https://media.gettyimages.com/unmatched-thumb.jpg",
                     "people": [{"text": "Lisa Barlow"}],
@@ -394,17 +756,30 @@ def test_import_nbcumv_person_media_persists_getty_unmatched_urls_and_imports_on
     assert len(imported_items) == 1
     assert imported_items[0].lbx_filename == "MATCH.JPG"
     assert imported_items[0].gallery_bucket["source_resolution"] == "nbcumv_preferred_shared"
+    assert imported_items[0].getty_asset is not None
+    assert imported_items[0].getty_asset["editorial_id"] == "1"
+    assert imported_items[0].getty_asset["keyword_texts"] == ["Lisa Barlow", "Season 6", "BravoCon"]
+    assert imported_items[0].getty_asset["details"]["credit_display"] == "Bravo / Contributor"
     assert len(imported_getty_rows) == 1
     assert imported_getty_rows[0]["source"] == "getty"
     assert imported_getty_rows[0]["source_image_id"] == "2"
-    assert imported_getty_rows[0]["url"] == "https://media.gettyimages.com/unmatched-comp.jpg"
+    assert imported_getty_rows[0]["url"] == "https://media.gettyimages.com/unmatched-original.jpg"
+    assert imported_getty_rows[0]["original_url"] == "https://media.gettyimages.com/unmatched-original.jpg"
     assert imported_getty_rows[0]["source_page_url"] == "https://www.gettyimages.com/detail/news-photo/unmatched/2"
     assert imported_getty_rows[0]["metadata"]["getty_only_fallback"] is True
     assert imported_getty_rows[0]["metadata"]["getty"]["editorial_id"] == "2"
+    assert (
+        imported_getty_rows[0]["metadata"]["getty_original_image_url"]
+        == "https://media.gettyimages.com/unmatched-original.jpg"
+    )
+    assert (
+        imported_getty_rows[0]["metadata"]["getty_preview_image_url"]
+        == "https://media.gettyimages.com/unmatched-comp.jpg"
+    )
     assert imported_getty_rows[0]["metadata"]["bucket_type"] == "event"
     assert imported_getty_rows[0]["metadata"]["bucket_label"] == "DIRECTV Plot Twist Featuring Bravo"
     assert imported_items[0].gallery_bucket["bucket_type"] == "bravocon"
-    assert captured_searches == [{"phrase": "Lisa Barlow Bravo", "query_params": None}]
+    assert captured_searches == [{"phrase": "Lisa Barlow", "query_params": None}]
 
     payload = captured_snapshot["payload"]
     assert isinstance(payload, dict)
@@ -534,6 +909,8 @@ def test_import_nbcumv_person_media_treats_zero_getty_results_as_clean_completio
     assert result["getty_matched_total"] == 0
     assert result["getty_unmatched_total"] == 0
     assert result["getty_only_imported"] == 0
+    assert result["getty_search_attempted"] is True
+    assert result["getty_zero_result_reason"] == "no_getty_candidates_after_searches"
     assert result["errors"] == []
     assert "direct search" in str(result["summary_message"]).lower()
 
@@ -606,6 +983,161 @@ def test_import_nbcumv_person_media_falls_back_to_direct_nbcumv_caption_search(
     assert imported_items[0].gallery_bucket["resolved_show_name"] == "The Real Housewives of Salt Lake City"
     assert imported_items[0].gallery_bucket["source_resolution"] == "nbcumv_only"
     assert "direct caption search" in str(result["summary_message"]).lower()
+
+
+def test_import_nbcumv_person_media_times_out_stuck_asset_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    imported_filenames: list[str] = []
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(getty_integration, "search_editorial_assets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "resolve_show_by_title",
+        lambda title: {"id": "show-rhoslc", "title": "The Real Housewives of Salt Lake City"},
+    )
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "search_person_show_catalog",
+        lambda person_name, show_id, limit=100, session=None: [
+            {
+                "lbx_id": "70075355",
+                "lbx_filename": "TIMEOUT.JPG",
+                "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/timeout.jpg",
+                "showIds": ["show-rhoslc"],
+                "lbx_showTitle": "The Real Housewives of Salt Lake City",
+                "lbx_headline": "The Real Housewives of Salt Lake City - Timeout",
+                "lbx_caption": 'THE REAL HOUSEWIVES OF SALT LAKE CITY -- "Timeout" -- Pictured: Mary Cosby',
+            },
+            {
+                "lbx_id": "70075356",
+                "lbx_filename": "RECOVERED.JPG",
+                "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/recovered.jpg",
+                "showIds": ["show-rhoslc"],
+                "lbx_showTitle": "The Real Housewives of Salt Lake City",
+                "lbx_headline": "The Real Housewives of Salt Lake City - Recovered",
+                "lbx_caption": 'THE REAL HOUSEWIVES OF SALT LAKE CITY -- "Recovered" -- Pictured: Mary Cosby',
+            },
+        ],
+    )
+    monkeypatch.setattr(nbcumv_integration, "search_images", lambda filters, session=None: [])
+    monkeypatch.setattr(admin_person_images, "_resolve_nbcumv_import_item_timeout_seconds", lambda: 0.01)
+
+    def _fake_import_single_item(*, db, item, assign_people, people_index):
+        if item.lbx_filename == "TIMEOUT.JPG":
+            time.sleep(0.05)
+            return {
+                "asset_id": str(uuid4()),
+                "created_person_ids": [str(item.person_ids[0])] if item.person_ids else [],
+                "created_show_ids": [],
+                "already_imported": False,
+            }
+        imported_filenames.append(item.lbx_filename)
+        return {
+            "asset_id": str(uuid4()),
+            "created_person_ids": [str(item.person_ids[0])] if item.person_ids else [],
+            "created_show_ids": [],
+            "already_imported": False,
+        }
+
+    monkeypatch.setattr(admin_nbcumv, "_import_single_item", _fake_import_single_item)
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        MagicMock(),
+        person_id=str(uuid4()),
+        person_name="Mary Cosby",
+        show_id=None,
+        show_name="The Real Housewives of Salt Lake City",
+        limit=10,
+    )
+
+    assert result["cancelled"] is False
+    assert result["failed"] == 1
+    assert result["imported"] == 1
+    assert result["nbcumv_only_total"] == 2
+    assert result["nbcumv_only_imported"] == 1
+    assert imported_filenames == ["RECOVERED.JPG"]
+    assert any("timed out" in str(error).lower() for error in result["errors"])
+
+
+def test_import_nbcumv_person_media_honors_cancel_between_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    imported_filenames: list[str] = []
+    cancel_checks = {"count": 0}
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(getty_integration, "search_editorial_assets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "resolve_show_by_title",
+        lambda title: {"id": "show-rhoslc", "title": "The Real Housewives of Salt Lake City"},
+    )
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "search_person_show_catalog",
+        lambda person_name, show_id, limit=100, session=None: [
+            {
+                "lbx_id": "70075355",
+                "lbx_filename": "FIRST.JPG",
+                "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/first.jpg",
+                "showIds": ["show-rhoslc"],
+                "lbx_showTitle": "The Real Housewives of Salt Lake City",
+                "lbx_headline": "The Real Housewives of Salt Lake City - First",
+                "lbx_caption": 'THE REAL HOUSEWIVES OF SALT LAKE CITY -- "First" -- Pictured: Lisa Barlow',
+            },
+            {
+                "lbx_id": "70075356",
+                "lbx_filename": "SECOND.JPG",
+                "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/second.jpg",
+                "showIds": ["show-rhoslc"],
+                "lbx_showTitle": "The Real Housewives of Salt Lake City",
+                "lbx_headline": "The Real Housewives of Salt Lake City - Second",
+                "lbx_caption": 'THE REAL HOUSEWIVES OF SALT LAKE CITY -- "Second" -- Pictured: Lisa Barlow',
+            },
+        ],
+    )
+    monkeypatch.setattr(nbcumv_integration, "search_images", lambda filters, session=None: [])
+
+    def _fake_import_single_item(*, db, item, assign_people, people_index):
+        imported_filenames.append(item.lbx_filename)
+        return {
+            "asset_id": str(uuid4()),
+            "created_person_ids": [str(item.person_ids[0])] if item.person_ids else [],
+            "created_show_ids": [],
+            "already_imported": False,
+        }
+
+    def _cancel_requested() -> bool:
+        cancel_checks["count"] += 1
+        return cancel_checks["count"] >= 2
+
+    monkeypatch.setattr(admin_nbcumv, "_import_single_item", _fake_import_single_item)
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        MagicMock(),
+        person_id=str(uuid4()),
+        person_name="Lisa Barlow",
+        show_id=None,
+        show_name="The Real Housewives of Salt Lake City",
+        limit=10,
+        cancel_requested_cb=_cancel_requested,
+    )
+
+    assert result["cancelled"] is True
+    assert result["failed"] == 0
+    assert result["imported"] == 1
+    assert result["nbcumv_only_total"] == 2
+    assert result["nbcumv_only_imported"] == 1
+    assert imported_filenames == ["FIRST.JPG"]
+    assert "cancellation requested" in str(result["summary_message"]).lower()
 
 
 def test_import_nbcumv_person_media_uses_credited_shows_for_direct_nbcumv_search_without_request_context(
@@ -848,12 +1380,21 @@ def test_import_nbcumv_person_media_imports_getty_fallback_when_nbcumv_is_unauth
                 "event_name": 'NV: Bravo\'s "BravoCon 2025" - Day 3',
                 "caption": "BravoCon -- Pictured: Lisa Barlow and Meredith Marks",
                 "preview_image_url": "https://media.gettyimages.com/id/2246511440/photo/sample.jpg",
+                "downloadableCompUrl": (
+                    "https://media.gettyimages.com/id/2246511440/photo/"
+                    "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&s=594x594&w=gi&k=small"
+                ),
+                "galleryHighResCompUrl": (
+                    "https://media.gettyimages.com/id/2246511440/photo/"
+                    "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&w=gi&k=large"
+                ),
                 "thumb_url": "https://media.gettyimages.com/id/2246511440/photo/sample-thumb.jpg",
                 "keyword_texts": ["Lisa Barlow", "Two People", "BravoCon"],
                 "people": [{"text": "Lisa Barlow"}],
                 "details": {
                     "object_name_display": "NUP_209171_01723.JPG",
                     "credit_display": "Bravo / Contributor",
+                    "max_file_size": "3000 x 2000 px (10.00 x 6.67 in) - 300 dpi - 2 MB",
                 },
             }
         ],
@@ -913,8 +1454,16 @@ def test_import_nbcumv_person_media_imports_getty_fallback_when_nbcumv_is_unauth
     assert "nbcumv unavailable" in str(result["summary_message"]).lower()
     assert len(imported_getty_rows) == 1
     assert imported_getty_rows[0]["source"] == "getty"
+    assert imported_getty_rows[0]["url"] == (
+        "https://media.gettyimages.com/id/2246511440/photo/"
+        "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&w=gi&k=large"
+    )
     assert imported_getty_rows[0]["metadata"]["crosswalk_reason"] == "nbcumv_unavailable"
     assert imported_getty_rows[0]["metadata"]["source_resolution"] == "getty_watermark_fallback"
+    assert imported_getty_rows[0]["metadata"]["getty_original_image_url"] == (
+        "https://media.gettyimages.com/id/2246511440/photo/"
+        "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&w=gi&k=large"
+    )
     assert (
         imported_getty_rows[0]["metadata"]["google_reverse_image_search_url"]
         == "https://www.google.com/searchbyimage?image_url=https%3A%2F%2Fmedia.gettyimages.com%2Fid%2F2246511440%2Fphoto%2Fsample.jpg"
@@ -1015,6 +1564,7 @@ def test_import_nbcumv_person_media_auto_replaces_bravocon_getty_asset(
     assert metadata["original_source_url"] == "https://media.gettyimages.com/bravocon-comp.jpg"
     assert metadata["original_source"] == "getty"
     assert metadata["getty_only_fallback"] is False
+    assert result["matched_via_image_search"] == 1
     assert (
         metadata["google_reverse_image_search_url"]
         == "https://www.google.com/searchbyimage?image_url=https%3A%2F%2Fmedia.gettyimages.com%2Fbravocon-comp.jpg"
@@ -3188,6 +3738,48 @@ def test_refresh_stream_metadata_repair_uses_fixing_imdb_details_label(client, m
     assert "Fixing IMDb Details" in response.text
 
 
+def test_mirror_person_media_assets_reports_progress_callbacks() -> None:
+    mock_db = MagicMock()
+    progress_updates: list[tuple[int, int]] = []
+
+    with patch(
+        "api.routers.admin_person_images._fetch_person_media_link_rows",
+        return_value=[
+            {
+                "id": str(uuid4()),
+                "media_asset_id": str(uuid4()),
+                "source": "getty",
+                "source_url": "https://media.gettyimages.com/id/example-1.jpg",
+                "hosted_url": None,
+                "metadata": {},
+                "ingest_status": "pending",
+                "ingest_last_error": None,
+            },
+            {
+                "id": str(uuid4()),
+                "media_asset_id": str(uuid4()),
+                "source": "getty",
+                "source_url": "https://media.gettyimages.com/id/example-2.jpg",
+                "hosted_url": None,
+                "metadata": {},
+                "ingest_status": "pending",
+                "ingest_last_error": None,
+            },
+        ],
+    ):
+        with patch("trr_backend.media.s3_mirror.mirror_media_asset_row", return_value=None):
+            with patch("trr_backend.repositories.media_assets.update_ingest_status"):
+                mirrored, failed = admin_person_images._mirror_person_media_assets(
+                    mock_db,
+                    person_id=str(uuid4()),
+                    progress_cb=lambda done, total: progress_updates.append((done, total)),
+                )
+
+    assert mirrored == 0
+    assert failed == 0
+    assert progress_updates == [(1, 2), (2, 2)]
+
+
 def test_refresh_stream_includes_tmdb_profile_failure_fields_in_complete_payload(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
@@ -3542,9 +4134,110 @@ class TestRefreshPersonImages:
         payload = response.text.replace("\r\n", "\n")
         assert "Searching NBCUMV directly for 'Mary Cosby'" in payload
         assert "Found 3 NBCUMV caption matches" in payload
-        assert '"current": 3' in payload
-        assert '"total": 3' in payload
-        assert "NBCUMV direct caption search queued 3 matches." in payload
+
+    def test_refresh_stream_stops_when_nbcumv_import_reports_cancellation(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Brandi Glanville",
+            "external_ids": {"imdb": "nm12345678"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        def _fake_nbcumv_import(*args, progress_cb=None, **kwargs):
+            if progress_cb:
+                progress_cb(41, 96, "Importing NBCUMV 42/96: NUP_188900_0696.JPG")
+            return {
+                "cancelled": True,
+                "fetched": 41,
+                "imported": 0,
+                "skipped": 0,
+                "failed": 0,
+                "gallery_links_created": 0,
+                "asset_ids": [],
+                "errors": [],
+                "summary_message": "Cancellation requested after importing 0 NBCUMV assets.",
+            }
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id", return_value=None):
+                with patch("trr_backend.ingestion.cast_photo_sources.fetch_all_cast_photos", return_value=[]):
+                    with patch(
+                        "api.routers.admin_person_images._import_nbcumv_person_media",
+                        side_effect=_fake_nbcumv_import,
+                    ):
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                            json={
+                                "sources": ["nbcumv"],
+                                "skip_mirror": True,
+                                "skip_auto_count": True,
+                                "skip_word_detection": True,
+                                "skip_centering": True,
+                                "skip_resize": True,
+                            },
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "x-trr-internal-raw-stream": "1",
+                                "x-trr-admin-operation-id": str(uuid4()),
+                            },
+                        )
+
+        assert response.status_code == 200
+        payload = response.text.replace("\r\n", "\n")
+        assert "Cancellation requested after importing 0 NBCUMV assets." in payload
+        assert "event: complete" not in payload
+
+    def test_ordered_getty_progress_snapshot_preserves_subtask_order_and_breakdown(self):
+        snapshot = admin_person_images._ordered_getty_progress_snapshot(
+            {
+                "status": "completed",
+                "phase": "completed",
+                "subtasks": {
+                    "mirror_imported_assets": {
+                        "id": "mirror_imported_assets",
+                        "label": "Host Imported Assets",
+                        "status": "completed",
+                        "current": 3,
+                        "total": 3,
+                        "message": "Mirrored/hosted Getty and NBCUMV imports.",
+                    },
+                    "primary_person_search": {
+                        "id": "primary_person_search",
+                        "label": "Primary Person Search",
+                        "status": "completed",
+                        "query": "Brandi Glanville Bravo",
+                        "candidates_found": 12,
+                        "current": 12,
+                        "total": 12,
+                        "message": "Found 12 direct Getty candidates.",
+                    },
+                },
+                "breakdown": {
+                    "raw_getty_candidates": 12,
+                    "matched_via_nbcumv": 2,
+                    "getty_only_imported": 1,
+                },
+            }
+        )
+
+        assert snapshot is not None
+        assert snapshot["status"] == "completed"
+        assert snapshot["phase"] == "completed"
+        assert snapshot["subtasks"][0]["id"] == "primary_person_search"
+        assert snapshot["subtasks"][-1]["id"] == "mirror_imported_assets"
+        assert snapshot["breakdown"]["raw_getty_candidates"] == 12
+        assert snapshot["breakdown"]["matched_via_nbcumv"] == 2
+        assert snapshot["breakdown"]["getty_only_imported"] == 1
 
     def test_refresh_tmdb_failure_is_non_terminal_and_sets_status_fields(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
@@ -3577,7 +4270,7 @@ class TestRefreshPersonImages:
                         response = client.post(
                             f"/api/v1/admin/person/{person_id}/refresh-images",
                             json={
-                                "sources": ["imdb"],
+                                "sources": ["imdb", "tmdb"],
                                 "skip_mirror": True,
                                 "skip_auto_count": True,
                                 "skip_word_detection": True,
@@ -3738,6 +4431,47 @@ class TestRefreshPersonImages:
         assert response.status_code == 200
         repair_mock.assert_called_once()
 
+    def test_refresh_skips_existing_imdb_repair_when_imdb_not_selected(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Getty Only Person",
+            "external_ids": {"imdb": "nm12345678"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id", return_value=None):
+                with patch("trr_backend.ingestion.cast_photo_sources.fetch_all_cast_photos", return_value=[]):
+                    with patch(
+                        "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
+                        return_value=(2, 0),
+                    ) as repair_mock:
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/refresh-images",
+                            json={
+                                "sources": ["nbcumv"],
+                                "skip_mirror": True,
+                                "skip_auto_count": True,
+                                "skip_word_detection": True,
+                                "skip_centering": True,
+                                "skip_resize": True,
+                            },
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+        assert response.status_code == 200
+        repair_mock.assert_not_called()
+
     def test_bypasses_show_source_policy_when_disabled(self, client, monkeypatch):
         """enforce_show_source_policy=False should preserve requested sources unchanged."""
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
@@ -3863,6 +4597,54 @@ def test_resize_person_gallery_images_uses_fallback_crop_when_missing(monkeypatc
     assert generate_cast_variants.call_count == 2
     assert generate_cast_variants.call_args_list[0].kwargs["crop"] is None
     assert generate_cast_variants.call_args_list[1].kwargs["crop"]["strategy"] == "resize_center_fallback_v1"
+
+
+def test_resize_person_gallery_images_times_out_stuck_variant_job(monkeypatch):
+    mock_db = MagicMock()
+
+    cast_query = MagicMock()
+    cast_query.select.return_value = cast_query
+    cast_query.eq.return_value = cast_query
+    cast_query.in_.return_value = cast_query
+    cast_query.limit.return_value = cast_query
+    cast_query.not_ = MagicMock()
+    cast_query.not_.is_.return_value = cast_query
+
+    cast_response = MagicMock()
+    cast_response.error = None
+    cast_response.data = [
+        {
+            "id": str(uuid4()),
+            "source": "imdb",
+            "hosted_url": "https://cdn.example.com/photo.jpg",
+            "metadata": {},
+        }
+    ]
+    cast_query.execute.return_value = cast_response
+    mock_db.schema.return_value.table.return_value = cast_query
+    monkeypatch.setenv("TRR_RESIZE_VARIANT_JOB_TIMEOUT_S", "0.01")
+
+    with patch(
+        "api.routers.admin_person_images._fetch_person_media_link_rows",
+        return_value=[],
+    ):
+        with patch(
+            "api.routers.admin_image_counts.auto_count_cast_photo",
+            side_effect=RuntimeError("detector unavailable"),
+        ):
+            with patch(
+                "trr_backend.media.image_variants.generate_cast_photo_variants",
+                side_effect=lambda *args, **kwargs: time.sleep(0.05),
+            ) as generate_cast_variants:
+                result = admin_person_images._resize_person_gallery_images(
+                    mock_db,
+                    person_id=str(uuid4()),
+                    sources=["imdb"],
+                    force=True,
+                )
+
+    assert result == (1, 0, 1, 1, 0, 1)
+    assert generate_cast_variants.call_count == 2
 
 
 def test_mirror_person_media_assets_skips_previously_failed_rows_without_force() -> None:
@@ -4213,6 +4995,95 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
         assert source_progress["getty_nbcumv"]["discovered_total"] == 0
         assert source_progress["getty_nbcumv"]["saved_current"] == 0
 
+    def test_stream_uses_imports_only_hosting_summary_and_warning_source_status(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Brandi Glanville",
+            "external_ids": {"imdb": "nm1234567"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
+                with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
+                    with patch(
+                        "api.routers.admin_person_images._enrich_cast_photos_with_episode_metadata",
+                        return_value=(0, 0),
+                    ):
+                        with patch(
+                            "api.routers.admin_person_images._apply_show_context_to_photos",
+                            return_value=(0, 0),
+                        ):
+                            with patch(
+                                "trr_backend.ingestion.cast_photo_sources.fetch_all_cast_photos",
+                                return_value=[],
+                            ):
+                                with patch(
+                                    "api.routers.admin_person_images._import_nbcumv_person_media",
+                                    return_value={
+                                        "fetched": 96,
+                                        "imported": 35,
+                                        "skipped": 95,
+                                        "failed": 1,
+                                        "covered_existing": 95,
+                                        "nbcumv_only_imported": 35,
+                                        "getty_only_imported": 0,
+                                        "shared_nbcumv_imported": 0,
+                                        "asset_ids": ["asset-1", "asset-2"],
+                                        "getty_only_row_ids": [],
+                                        "errors": ["1 failed"],
+                                        "summary_message": "NBCUMV direct caption search queued 96 matches.",
+                                    },
+                                ):
+                                    with patch(
+                                        "api.routers.admin_person_images._mirror_person_media_assets",
+                                        return_value=(2, 1),
+                                    ) as mirror_media_mock:
+                                        with patch(
+                                            "api.routers.admin_person_images._mirror_person_photos",
+                                            return_value=(0, 0),
+                                        ) as mirror_photo_mock:
+                                            response = client.post(
+                                                f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                                                json={
+                                                    "sources": ["nbcumv"],
+                                                    "skip_auto_count": True,
+                                                    "skip_word_detection": True,
+                                                    "skip_centering": True,
+                                                    "skip_resize": True,
+                                                },
+                                                headers={"Authorization": f"Bearer {token}"},
+                                            )
+
+        assert response.status_code == 200
+        mirror_photo_mock.assert_not_called()
+        mirror_media_mock.assert_called_once()
+        assert mirror_media_mock.call_args.kwargs["asset_ids"] == ["asset-1", "asset-2"]
+
+        normalized_payload = response.text.replace("\r\n", "\n")
+        complete_index = normalized_payload.rfind("event: complete")
+        assert complete_index >= 0
+        data_index = normalized_payload.find("data:", complete_index)
+        json_start = normalized_payload.find("{", data_index)
+        json_end = normalized_payload.find("\n\n", json_start)
+        if json_end == -1:
+            json_end = len(normalized_payload)
+        complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+
+        assert complete_data["hosting_hosted_total"] == 2
+        assert complete_data["hosting_failed_total"] == 1
+        assert complete_data["source_progress"]["getty_nbcumv"]["status"] == "warning"
+
     def test_stream_skips_imdb_when_source_already_fully_mirrored(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
@@ -4385,6 +5256,56 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
         assert complete_data["metadata_repair_attempted"] == 1
         assert complete_data["existing_imdb_rows_repaired"] == 7
         assert complete_data["metadata_enrichment_failed"] == 0
+
+    def test_reprocess_stream_skips_metadata_repair_when_imdb_is_not_selected(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {"imdb": "nm0001086"}}
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
+                return_value=(7, 0),
+            ) as repair_mock:
+                response = client.post(
+                    f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                    json={
+                        "run_metadata": True,
+                        "run_count": False,
+                        "run_id_text": False,
+                        "run_crop": False,
+                        "run_resize": False,
+                        "sources": ["getty", "nbcumv"],
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+        assert response.status_code == 200
+        repair_mock.assert_not_called()
+        assert "Skipping IMDb Details (IMDb source not selected)." in response.text
+
+        normalized_payload = response.text.replace("\r\n", "\n")
+        complete_index = normalized_payload.rfind("event: complete")
+        assert complete_index >= 0
+        data_index = normalized_payload.find("data:", complete_index)
+        assert data_index >= 0
+        json_start = normalized_payload.find("{", data_index)
+        assert json_start >= 0
+        json_end = normalized_payload.find("\n\n", json_start)
+        if json_end == -1:
+            json_end = len(normalized_payload)
+        complete_data = json.loads(normalized_payload[json_start:json_end].strip())
+
+        assert complete_data["metadata_repair_attempted"] == 0
 
     def test_reprocess_stream_retries_auto_count_failures_and_reports_failed_parts(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
@@ -4648,6 +5569,46 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
             )
 
         assert response.status_code == 200
+
+    def test_reprocess_stream_stops_when_admin_operation_cancel_is_requested(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {"id": person_id, "full_name": "Test Person", "external_ids": {}}
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        resize_mock = MagicMock(return_value=(1, 1, 0, 1, 1, 0))
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("api.routers.admin_person_images.admin_operations.is_cancel_requested", return_value=True):
+                with patch("api.routers.admin_person_images._resize_person_gallery_images", resize_mock):
+                    response = client.post(
+                        f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                        json={
+                            "run_metadata": False,
+                            "run_count": False,
+                            "run_tagging": False,
+                            "run_id_text": False,
+                            "run_crop": False,
+                            "run_resize": True,
+                        },
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "x-trr-internal-raw-stream": "1",
+                            "x-trr-admin-operation-id": str(uuid4()),
+                        },
+                    )
+
+        assert response.status_code == 200
+        assert "Cancellation requested. Stopping worker..." in response.text
+        assert "event: complete" not in response.text
+        resize_mock.assert_not_called()
 
 
 class TestUpdateFacebankSeed:

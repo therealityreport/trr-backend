@@ -104,6 +104,56 @@ def test_start_reddit_refresh_run_local_mode_starts_in_api_background(
     assert exec_mock.called is True
 
 
+def test_start_reddit_refresh_run_accepts_sync_full_mode(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "local")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "0")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "0")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    run_id = str(uuid4())
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "episode-1",
+        "period_stable_key": "episode-1",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+        "mode": "sync_full",
+        "fetch_comments": False,
+        "comment_delta_only": True,
+        "max_pages": 10_000,
+    }
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": False},
+    ) as create_mock:
+        with patch("trr_backend.repositories.reddit_refresh.execute_refresh_run", return_value={}):
+            with patch(
+                "trr_backend.repositories.reddit_refresh.get_refresh_run",
+                return_value={
+                    "run_id": run_id,
+                    "status": "queued",
+                    "execution_owner": "local_api",
+                    "execution_mode_canonical": "local",
+                },
+            ):
+                response = client.post(
+                    "/api/v1/admin/socials/reddit/runs",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 200
+    assert create_mock.call_args.kwargs["payload"]["mode"] == "sync_full"
+
+
 def test_start_reddit_refresh_run_remote_mode_does_not_start_in_api(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -181,8 +231,315 @@ def test_start_reddit_refresh_run_modal_dispatches_without_api_background(
         "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
         return_value={"id": run_id, "reused": False},
     ):
-        with patch("api.routers.socials.dispatch_reddit_refresh", return_value=True) as dispatch_mock:
-            with patch("trr_backend.repositories.reddit_refresh.execute_refresh_run", return_value={}) as exec_mock:
+        with patch(
+            "api.routers.socials.get_modal_reddit_runtime_health",
+            return_value={
+                "healthy": True,
+                "reason": "ok",
+                "missing_env": [],
+                "warnings": [],
+                "supports_oauth": True,
+                "user_agent_configured": True,
+                "uses_default_user_agent": False,
+                "effective_user_agent": "TRRTest/1.0",
+            },
+        ):
+            with patch("api.routers.socials.dispatch_reddit_refresh", return_value=True) as dispatch_mock:
+                with patch("trr_backend.repositories.reddit_refresh.execute_refresh_run", return_value={}) as exec_mock:
+                    with patch(
+                        "trr_backend.repositories.reddit_refresh.get_refresh_run",
+                        return_value={
+                            "run_id": run_id,
+                            "status": "queued",
+                            "execution_owner": "remote_worker",
+                            "execution_mode_canonical": "remote",
+                        },
+                    ):
+                        response = client.post(
+                            "/api/v1/admin/socials/reddit/runs",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json=payload,
+                        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["execution_owner"] == "remote_worker"
+    assert body["execution_mode_canonical"] == "remote"
+    assert body["run"]["execution_owner"] == "remote_worker"
+    dispatch_mock.assert_called_once_with(run_id=run_id)
+    exec_mock.assert_not_called()
+
+
+def test_start_reddit_refresh_run_returns_503_when_modal_dispatch_not_ready(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "pre-season",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+    }
+
+    run_id = str(uuid4())
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": False},
+    ):
+        with patch(
+            "trr_backend.repositories.reddit_refresh.get_refresh_run",
+            return_value={
+                "run_id": run_id,
+                "status": "queued",
+                "execution_owner": "remote_worker",
+                "execution_mode_canonical": "remote",
+            },
+        ):
+            with patch("api.routers.socials.modal_dispatch_ready", return_value=(False, "modal_disabled")):
+                response = client.post(
+                    "/api/v1/admin/socials/reddit/runs",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "REDDIT_REMOTE_DISPATCH_UNAVAILABLE"
+    assert detail["execution_mode"] == "remote"
+    assert detail["execution_owner"] == "remote_worker"
+    assert detail["worker_health"]["healthy"] is False
+    assert detail["worker_health"]["reason"] == "modal_disabled"
+
+
+def test_start_reddit_refresh_run_returns_503_when_modal_runtime_lacks_reddit_oauth(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "pre-season",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+    }
+
+    run_id = str(uuid4())
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": False},
+    ):
+        with patch(
+            "trr_backend.repositories.reddit_refresh.get_refresh_run",
+            return_value={
+                "run_id": run_id,
+                "status": "queued",
+                "execution_owner": "remote_worker",
+                "execution_mode_canonical": "remote",
+            },
+        ):
+            with patch("api.routers.socials.modal_dispatch_ready", return_value=(True, None)):
+                with patch(
+                    "api.routers.socials.get_modal_reddit_runtime_health",
+                    return_value={
+                        "healthy": False,
+                        "reason": "reddit_oauth_missing",
+                        "missing_env": ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"],
+                        "warnings": ["REDDIT_USER_AGENT"],
+                        "supports_oauth": False,
+                        "user_agent_configured": False,
+                        "uses_default_user_agent": True,
+                        "effective_user_agent": "TRRBackendRedditRefresh/1.0 (+https://thereality.report)",
+                    },
+                ):
+                    response = client.post(
+                        "/api/v1/admin/socials/reddit/runs",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "REDDIT_REMOTE_RUNTIME_UNHEALTHY"
+    assert "Missing: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET." in detail["message"]
+    assert detail["worker_health"]["healthy"] is False
+    assert detail["worker_health"]["reason"] == "reddit_oauth_missing"
+    assert detail["worker_health"]["missing_env"] == ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"]
+    assert detail["worker_health"]["warnings"] == ["REDDIT_USER_AGENT"]
+
+
+def test_start_reddit_refresh_run_reuses_existing_modal_run_without_runtime_probe(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    run_id = str(uuid4())
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "pre-season",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+    }
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": True},
+    ):
+        with patch(
+            "trr_backend.repositories.reddit_refresh.get_refresh_run",
+            return_value={
+                "run_id": run_id,
+                "status": "running",
+                "claimed_by_worker_id": "modal-worker",
+                "heartbeat_at": "2026-03-22T13:00:00Z",
+                "execution_owner": "remote_worker",
+                "execution_mode_canonical": "remote",
+            },
+        ):
+            with patch("api.routers.socials.get_modal_reddit_runtime_health") as health_mock:
+                with patch("api.routers.socials.dispatch_reddit_refresh", return_value=True) as dispatch_mock:
+                    response = client.post(
+                        "/api/v1/admin/socials/reddit/runs",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    assert response.json()["reused"] is True
+    health_mock.assert_not_called()
+    dispatch_mock.assert_not_called()
+
+
+def test_start_reddit_refresh_run_redispatches_reused_orphaned_modal_run_with_attempts(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    run_id = str(uuid4())
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "pre-season",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+    }
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": True},
+    ):
+        with patch(
+            "trr_backend.repositories.reddit_refresh.get_refresh_run",
+            return_value={
+                "run_id": run_id,
+                "status": "queued",
+                "attempt_count": 2,
+                "claimed_by_worker_id": None,
+                "heartbeat_at": None,
+                "execution_owner": "remote_worker",
+                "execution_mode_canonical": "remote",
+            },
+        ):
+            with patch(
+                "api.routers.socials.get_modal_reddit_runtime_health",
+                return_value={
+                    "healthy": True,
+                    "reason": "ok",
+                    "missing_env": [],
+                    "warnings": [],
+                    "supports_oauth": True,
+                    "user_agent_configured": True,
+                    "uses_default_user_agent": False,
+                    "effective_user_agent": "TRRTest/1.0",
+                },
+            ):
+                with patch("api.routers.socials.dispatch_reddit_refresh", return_value=True) as dispatch_mock:
+                    response = client.post(
+                        "/api/v1/admin/socials/reddit/runs",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    assert response.json()["reused"] is True
+    dispatch_mock.assert_called_once_with(run_id=run_id)
+
+
+def test_start_reddit_refresh_run_returns_503_when_modal_dispatch_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    run_id = str(uuid4())
+    payload = {
+        "community_id": str(uuid4()),
+        "season_id": str(uuid4()),
+        "period_key": "pre-season",
+        "subreddit": "BravoRealHousewives",
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_aliases": ["RHOSLC"],
+        "cast_names": ["Lisa Barlow"],
+    }
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.create_or_reuse_refresh_run",
+        return_value={"id": run_id, "reused": False},
+    ):
+        with patch(
+            "api.routers.socials.get_modal_reddit_runtime_health",
+            return_value={
+                "healthy": True,
+                "reason": "ok",
+                "missing_env": [],
+                "warnings": [],
+                "supports_oauth": True,
+                "user_agent_configured": True,
+                "uses_default_user_agent": False,
+                "effective_user_agent": "TRRTest/1.0",
+            },
+        ):
+            with patch("api.routers.socials.dispatch_reddit_refresh", return_value=False):
                 with patch(
                     "trr_backend.repositories.reddit_refresh.get_refresh_run",
                     return_value={
@@ -198,13 +555,13 @@ def test_start_reddit_refresh_run_modal_dispatches_without_api_background(
                         json=payload,
                     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["execution_owner"] == "remote_worker"
-    assert body["execution_mode_canonical"] == "remote"
-    assert body["run"]["execution_owner"] == "remote_worker"
-    dispatch_mock.assert_called_once_with(run_id=run_id)
-    exec_mock.assert_not_called()
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "REDDIT_REMOTE_DISPATCH_UNAVAILABLE"
+    assert detail["execution_mode"] == "remote"
+    assert detail["execution_owner"] == "remote_worker"
+    assert detail["worker_health"]["healthy"] is False
+    assert detail["worker_health"]["reason"] == "modal_dispatch_failed"
 
 
 def test_get_reddit_refresh_run_returns_404_for_missing_run(
@@ -649,6 +1006,90 @@ def test_get_reddit_analytics_summary_requires_season_id_for_season_scope(
 
     assert response.status_code == 400
     assert "season_id is required" in response.json()["detail"]
+
+
+def test_backfill_reddit_refresh_runs_starts_async_operation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    community_id = str(uuid4())
+    season_id = str(uuid4())
+    with patch(
+        "trr_backend.repositories.reddit_refresh.build_reddit_refresh_backfill_operation_producer",
+        return_value=lambda: iter(()),
+    ) as producer_mock:
+        with patch(
+            "trr_backend.pipeline.admin_operations.start_operation_for_stream",
+            return_value={
+                "id": "op-123",
+                "status": "pending",
+                "attached": False,
+                "execution_owner": "remote_worker",
+                "execution_mode_canonical": "remote",
+            },
+        ) as start_mock:
+            response = client.post(
+                "/api/v1/admin/socials/reddit/runs/backfill",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "community_id": community_id,
+                    "season_id": season_id,
+                    "mode": "sync_full",
+                    "detail_refresh": False,
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "started"
+    assert body["operation_id"] == "op-123"
+    assert body["attached"] is False
+    assert body["requested"]["community_id"] == community_id
+    assert body["requested"]["mode"] == "sync_full"
+    assert body["operation"]["id"] == "op-123"
+    assert body["operation"]["status"] == "pending"
+    producer_mock.assert_called_once()
+    assert start_mock.call_args.kwargs["operation_type"] == "admin_reddit_refresh_backfill"
+
+
+def test_backfill_reddit_refresh_runs_attaches_existing_operation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.reddit_refresh.build_reddit_refresh_backfill_operation_producer",
+        return_value=lambda: iter(()),
+    ):
+        with patch(
+            "trr_backend.pipeline.admin_operations.start_operation_for_stream",
+            return_value={
+                "id": "op-existing",
+                "status": "running",
+                "attached": True,
+            },
+        ):
+            response = client.post(
+                "/api/v1/admin/socials/reddit/runs/backfill",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "community_id": str(uuid4()),
+                    "season_id": str(uuid4()),
+                    "mode": "sync_full",
+                    "detail_refresh": False,
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "attached"
+    assert body["operation_id"] == "op-existing"
+    assert body["attached"] is True
 
 
 def test_get_reddit_analytics_summary_all_scope(

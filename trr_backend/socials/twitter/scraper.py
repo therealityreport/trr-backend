@@ -531,10 +531,16 @@ class TwitterScraper:
                 elif self._consecutive_success >= 5:
                     effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
                 else:
-                    effective_delay = delay * 0.5   # e.g. 0.5 * 0.5 = 0.25s
+                    effective_delay = delay * 0.5  # e.g. 0.5 * 0.5 = 0.25s
             else:
                 effective_delay = delay * 0.5
-            logger.debug(f"Rate limiting: waiting {effective_delay:.3f}s (base={delay}s, fast={fast_mode}, streak={self._consecutive_success})")
+            logger.debug(
+                "Rate limiting: waiting %.3fs (base=%ss, fast=%s, streak=%s)",
+                effective_delay,
+                delay,
+                fast_mode,
+                self._consecutive_success,
+            )
             time.sleep(effective_delay)
         self._request_count += 1
 
@@ -680,7 +686,7 @@ class TwitterScraper:
                     continue
                 size = int(variant.get("bitrate") or 0)
                 if size <= 0:
-                    match = re.search(r"/(\\d+)x(\\d+)/", src)
+                    match = re.search(r"/(\d+)x(\d+)/", src)
                     if match:
                         size = int(match.group(1)) * int(match.group(2))
                 if size >= best_size:
@@ -2692,6 +2698,9 @@ class TwitterScraper:
         fallback_triggered = False
         retrieval_mode = "graphql"
         fallback_attempts: list[str] = []
+        twikit_checked_total = 0
+        syndication_checked_total = 0
+        playwright_checked_total = 0
         cursor = None
         page_num = 0
         graphql_failed = False
@@ -2821,6 +2830,8 @@ class TwitterScraper:
                 time.sleep(3)
                 logger.info("GraphQL yielded no in-window results; trying twikit search fallback...")
                 twikit_tweets = self._scrape_via_twikit(config)
+                twikit_checked_total = len(twikit_tweets)
+                posts_checked_total += twikit_checked_total
                 tweets = self._clamp_tweets_to_window(
                     tweets=twikit_tweets,
                     start_ts=window_start_ts,
@@ -2828,11 +2839,20 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "twikit"
+                    self._emit_progress(
+                        progress_cb,
+                        phase="scrape_twikit_fallback",
+                        pages_scanned=page_num,
+                        posts_checked=posts_checked_total,
+                        matched_posts=len(tweets),
+                    )
             if not tweets:
                 username = from_match.group(1)
                 fallback_attempts.append("syndication")
                 logger.info(f"Falling back to syndication API for @{username}")
                 syndication_tweets = self._scrape_syndication(username, config)
+                syndication_checked_total = len(syndication_tweets)
+                posts_checked_total += syndication_checked_total
                 tweets = self._clamp_tweets_to_window(
                     tweets=syndication_tweets,
                     start_ts=window_start_ts,
@@ -2840,6 +2860,13 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "syndication"
+                    self._emit_progress(
+                        progress_cb,
+                        phase="scrape_syndication_fallback",
+                        pages_scanned=page_num,
+                        posts_checked=posts_checked_total,
+                        matched_posts=len(tweets),
+                    )
             if not tweets:
                 fallback_attempts.append("playwright")
                 logger.info("Primary Twitter search paths empty; trying Playwright search fallback...")
@@ -2849,6 +2876,8 @@ class TwitterScraper:
                     max_pages=config.max_pages or 5,
                     delay=max(config.delay_seconds, 0.2),
                 )
+                playwright_checked_total = len(playwright_tweets)
+                posts_checked_total += playwright_checked_total
                 tweets = self._clamp_tweets_to_window(
                     tweets=playwright_tweets,
                     start_ts=window_start_ts,
@@ -2856,6 +2885,13 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "playwright"
+                    self._emit_progress(
+                        progress_cb,
+                        phase="scrape_playwright_fallback",
+                        pages_scanned=page_num,
+                        posts_checked=posts_checked_total,
+                        matched_posts=len(tweets),
+                    )
         elif graphql_failed and not tweets:
             fallback_triggered = True
             if self._twikit_credentials:
@@ -2865,6 +2901,8 @@ class TwitterScraper:
                 time.sleep(3)
                 logger.info("GraphQL failed; trying twikit search fallback...")
                 twikit_tweets = self._scrape_via_twikit(config)
+                twikit_checked_total = len(twikit_tweets)
+                posts_checked_total += twikit_checked_total
                 tweets = self._clamp_tweets_to_window(
                     tweets=twikit_tweets,
                     start_ts=window_start_ts,
@@ -2872,6 +2910,13 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "twikit"
+                    self._emit_progress(
+                        progress_cb,
+                        phase="scrape_twikit_fallback",
+                        pages_scanned=page_num,
+                        posts_checked=posts_checked_total,
+                        matched_posts=len(tweets),
+                    )
             if not tweets:
                 fallback_attempts.append("playwright")
                 logger.info("GraphQL failed; trying Playwright search fallback...")
@@ -2881,6 +2926,8 @@ class TwitterScraper:
                     max_pages=config.max_pages or 5,
                     delay=max(config.delay_seconds, 0.2),
                 )
+                playwright_checked_total = len(playwright_tweets)
+                posts_checked_total += playwright_checked_total
                 tweets = self._clamp_tweets_to_window(
                     tweets=playwright_tweets,
                     start_ts=window_start_ts,
@@ -2888,12 +2935,23 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "playwright"
+                    self._emit_progress(
+                        progress_cb,
+                        phase="scrape_playwright_fallback",
+                        pages_scanned=page_num,
+                        posts_checked=posts_checked_total,
+                        matched_posts=len(tweets),
+                    )
             if not tweets and not self._twikit_credentials:
                 logger.warning(
                     "Twitter requires authentication for search. "
                     "Set SOCIAL_TWITTER_COOKIES_JSON, TWITTER_COOKIES_FILE, "
                     "or TWIKIT_USERNAME + TWIKIT_PASSWORD env vars."
                 )
+
+        twikit_failure_reason = str(self._last_twikit_search_error or "").strip() or None
+        playwright_failure_reason = str(self._last_playwright_search_error or "").strip() or None
+        fallback_exhausted = not tweets and bool(graphql_failed or twikit_failure_reason or playwright_failure_reason)
 
         logger.info("Search complete: found %d tweets (%d checked)", len(tweets), posts_checked_total)
         self._emit_progress(
@@ -2914,11 +2972,19 @@ class TwitterScraper:
             "graphql_failed": graphql_failed,
             "fallback_triggered": fallback_triggered,
             "fallback_attempts": fallback_attempts,
-            "playwright_failure_reason": self._last_playwright_search_error,
+            "twikit_failure_reason": twikit_failure_reason,
+            "playwright_failure_reason": playwright_failure_reason,
             "pages_scanned": page_num,
             "posts_checked": posts_checked_total,
             "filtered_out_of_window": filtered_out_of_window,
             "stop_reason": stop_reason,
             "tweet_count": len(tweets),
+            "twikit_checked": twikit_checked_total,
+            "syndication_checked": syndication_checked_total,
+            "playwright_checked": playwright_checked_total,
         }
+        if fallback_exhausted:
+            self.last_retrieval_meta["error_code"] = "twitter_search_fallback_exhausted"
+            self.last_retrieval_meta["retryable"] = True
+            self.last_retrieval_meta["error_class"] = "TwitterSearchFallbackError"
         return tweets

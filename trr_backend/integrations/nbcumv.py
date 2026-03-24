@@ -105,6 +105,13 @@ class SearchFilters:
     filename: str | None = None
     lbx_id: str | None = None
     show_id: str | None = None
+    search_text: str | None = None
+    nup_prefix: str | None = None
+    show_name: str | None = None
+    meta_type: str | None = None
+    season: str | None = None
+    episode: str | None = None
+    network: str | None = None
     created_start: str | None = None
     created_end: str | None = None
     live_date_start: str | None = None
@@ -226,22 +233,22 @@ def _graphql_request(query: str, *, session: Session | None = None) -> dict[str,
 def _cloudsearch_request(
     query: str,
     *,
+    fq: str | None = None,
     size: int = CLOUDSEARCH_PAGE_SIZE,
     start: int = 0,
     session: Session | None = None,
 ) -> dict[str, Any]:
     client = _session(session)
     try:
-        response = client.get(
-            CLOUDSEARCH_URL,
-            params={
-                "q": query,
-                "size": max(1, min(CLOUDSEARCH_PAGE_SIZE, int(size or CLOUDSEARCH_PAGE_SIZE))),
-                "start": max(0, int(start or 0)),
-                "return": "_all_fields",
-            },
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-        )
+        params = {
+            "q": query,
+            "size": max(1, min(CLOUDSEARCH_PAGE_SIZE, int(size or CLOUDSEARCH_PAGE_SIZE))),
+            "start": max(0, int(start or 0)),
+            "return": "_all_fields",
+        }
+        if isinstance(fq, str) and fq.strip():
+            params["fq"] = fq.strip()
+        response = client.get(CLOUDSEARCH_URL, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
         response.raise_for_status()
     except RequestException as exc:
         raise RuntimeError(f"NBCUMV CloudSearch request failed: {exc}") from exc
@@ -282,8 +289,11 @@ def _caption_matches(item: dict[str, Any], search_caption: str | None) -> bool:
     needle = str(search_caption or "").strip().casefold()
     if not needle:
         return True
-    caption = str(item.get("lbx_caption") or "").casefold()
-    return needle in caption
+    for field in ("lbx_caption", "lbx_headline", "lbx_keywords"):
+        value = str(item.get(field) or "").casefold()
+        if needle in value:
+            return True
+    return False
 
 
 def _iso_day_start(day: str) -> str:
@@ -311,6 +321,11 @@ def _cloudsearch_field_strings(value: Any) -> list[str]:
     return [cleaned] if cleaned else []
 
 
+def _cloudsearch_field_first(value: Any) -> str | None:
+    values = _cloudsearch_field_strings(value)
+    return values[0] if values else None
+
+
 def _parse_optional_int(value: Any) -> int | None:
     if isinstance(value, int) and value >= 0:
         return value
@@ -322,6 +337,29 @@ def _parse_optional_int(value: Any) -> int | None:
     except ValueError:
         return None
     return parsed if parsed >= 0 else None
+
+
+def _hidden_tags_for_status(status: str | None, existing_tags: list[str] | None = None) -> list[str]:
+    tags = [str(tag).strip() for tag in (existing_tags or []) if str(tag).strip()]
+    hidden = str(status or "").strip() == "0"
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        if tag.casefold() == "hidden":
+            continue
+        lowered = tag.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(tag)
+    if hidden:
+        deduped.append("HIDDEN")
+    return deduped
+
+
+def _coerce_cloudsearch_text(value: Any) -> str | None:
+    cleaned = _cloudsearch_field_first(value)
+    return cleaned if cleaned else None
 
 
 def _cloudsearch_hit_to_image(hit: dict[str, Any]) -> dict[str, Any] | None:
@@ -338,6 +376,10 @@ def _cloudsearch_hit_to_image(hit: dict[str, Any]) -> dict[str, Any] | None:
         return None
     show_ids = _cloudsearch_field_strings(fields.get("show_ids"))
     show_titles = _cloudsearch_field_strings(fields.get("shows"))
+    networks = _cloudsearch_field_strings(fields.get("networks"))
+    meta_types = _cloudsearch_field_strings(fields.get("meta_types"))
+    status = _coerce_cloudsearch_text(fields.get("status")) or _coerce_cloudsearch_text(fields.get("pubStatus"))
+    tags = _hidden_tags_for_status(status)
     return {
         "id": str(fields.get("id") or hit.get("id") or "").strip() or None,
         "lbx_id": lbx_id,
@@ -349,6 +391,20 @@ def _cloudsearch_hit_to_image(hit: dict[str, Any]) -> dict[str, Any] | None:
         "lbx_caption": str(fields.get("description") or "").strip() or None,
         "lbx_headline": str(fields.get("headline") or "").strip() or None,
         "lbx_showTitle": show_titles[0] if show_titles else None,
+        "lbx_episodeTitle": _coerce_cloudsearch_text(fields.get("episode_title")),
+        "lbx_episodeNumber": _coerce_cloudsearch_text(fields.get("episode_number")),
+        "lbx_season": _coerce_cloudsearch_text(fields.get("season")),
+        "lbx_seasonNumber": (
+            _parse_optional_int(fields.get("season_number"))
+            or _parse_optional_int(fields.get("season"))
+        ),
+        "lbx_type": _coerce_cloudsearch_text(fields.get("meta_type")) or (meta_types[0] if meta_types else None),
+        "lbx_keywords": _coerce_cloudsearch_text(fields.get("keywords")),
+        "status": status,
+        "is_hidden": status == "0",
+        "tags": tags,
+        "metaTypes": meta_types,
+        "networkTitles": networks,
         "showIds": show_ids,
         "showTitles": show_titles,
         "cloudsearch_fields": fields,
@@ -356,7 +412,7 @@ def _cloudsearch_hit_to_image(hit: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _annotate_grouped_image_counts(images: list[dict[str, Any]], *, person_match_source: str) -> list[dict[str, Any]]:
+def _annotate_nup_group_counts(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     counts_by_nup_set: dict[str, int] = {}
     for image in images:
         prefix = _nup_set_prefix(image.get("lbx_filename"))
@@ -368,8 +424,240 @@ def _annotate_grouped_image_counts(images: list[dict[str, Any]], *, person_match
         if prefix:
             image["nup_set"] = prefix
             image["grouped_image_count"] = counts_by_nup_set.get(prefix, 1)
+    return images
+
+
+def _annotate_grouped_image_counts(images: list[dict[str, Any]], *, person_match_source: str) -> list[dict[str, Any]]:
+    _annotate_nup_group_counts(images)
+    for image in images:
         image["person_match_source"] = person_match_source
     return images
+
+
+def _cloudsearch_escape(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _expand_show_name_aliases(show_name: str | None) -> list[str]:
+    cleaned = str(show_name or "").strip()
+    if not cleaned:
+        return []
+    variants = [cleaned]
+    lowered = cleaned.casefold()
+    if "ex-wives club" in lowered and "ex-wives clubs" not in lowered:
+        variants.append(re.sub(r"ex-wives club\b", "Ex-Wives Clubs", cleaned, flags=re.IGNORECASE))
+    if "ex-wives clubs" in lowered:
+        variants.append(re.sub(r"ex-wives clubs\b", "Ex-Wives Club", cleaned, flags=re.IGNORECASE))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for variant in variants:
+        key = variant.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(variant)
+    return deduped
+
+
+def _build_cloudsearch_filter_value(field: str, values: list[str]) -> str | None:
+    cleaned_values = [str(value).strip() for value in values if str(value).strip()]
+    if not cleaned_values:
+        return None
+    if len(cleaned_values) == 1:
+        return f"{field}:'{_cloudsearch_escape(cleaned_values[0])}'"
+    inner = " ".join(f"{field}:'{_cloudsearch_escape(value)}'" for value in cleaned_values)
+    return f"(or {inner})"
+
+
+def _build_cloudsearch_fq(filters: SearchFilters) -> str:
+    # NBCUMV Data Quality Notes:
+    # - RHUGT S2 show name typo: "Ex-Wives Clubs" in headline, but "Ex-Wives Club" in shows.
+    # - NUP_195460_02015 caption misspells Tamra as "Tamra Gunvalson".
+    # - NUP_195530 is mislabeled as "Season 1" while containing Season 2 cast imagery.
+    # - RHUGT S2 images can be status:0 only; NEVER filter CloudSearch by status.
+    clauses = ["type:'image'"]
+    show_name_clause = _build_cloudsearch_filter_value("shows", _expand_show_name_aliases(filters.show_name))
+    if show_name_clause:
+        clauses.append(show_name_clause)
+    show_id_clause = _build_cloudsearch_filter_value(
+        "show_ids",
+        [str(filters.show_id).strip()] if str(filters.show_id or "").strip() else [],
+    )
+    if show_id_clause:
+        clauses.append(show_id_clause)
+    meta_type_clause = _build_cloudsearch_filter_value(
+        "meta_types",
+        [str(filters.meta_type).strip()] if str(filters.meta_type or "").strip() else [],
+    )
+    if meta_type_clause:
+        clauses.append(meta_type_clause)
+    network_clause = _build_cloudsearch_filter_value(
+        "networks",
+        [str(filters.network).strip()] if str(filters.network or "").strip() else [],
+    )
+    if network_clause:
+        clauses.append(network_clause)
+    return f"(and {' '.join(clauses)})"
+
+
+def _resolve_cloudsearch_queries(filters: SearchFilters) -> list[str]:
+    if filters.nup_prefix:
+        return [str(filters.nup_prefix).strip()]
+    if filters.search_text:
+        return [str(filters.search_text).strip()]
+    if filters.lbx_id:
+        return [str(filters.lbx_id).strip()]
+    if filters.filename:
+        return _cloudsearch_query_candidates(filters.filename)
+    return ["*"]
+
+
+def _matches_cloudsearch_text_filter(candidate: str | None, needle: str | None) -> bool:
+    normalized_candidate = str(candidate or "").casefold()
+    normalized_needle = str(needle or "").strip().casefold()
+    if not normalized_needle:
+        return True
+    return normalized_needle in normalized_candidate
+
+
+def _match_date_range(value: str | None, start: str | None, end: str | None) -> bool:
+    if not start and not end:
+        return True
+    candidate = str(value or "").strip()
+    if not candidate:
+        return False
+    try:
+        parsed_candidate = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if start:
+        parsed_start = datetime.fromisoformat(_iso_day_start(start).replace("Z", "+00:00"))
+        if parsed_candidate < parsed_start:
+            return False
+    if end:
+        parsed_end = datetime.fromisoformat(_iso_day_end(end).replace("Z", "+00:00"))
+        if parsed_candidate > parsed_end:
+            return False
+    return True
+
+
+def _match_season_filter(image: dict[str, Any], season: str | None) -> bool:
+    needle = str(season or "").strip()
+    if not needle:
+        return True
+    explicit = image.get("lbx_seasonNumber") or image.get("lbx_season")
+    if str(explicit or "").strip() == needle:
+        return True
+    haystack = " ".join(
+        str(image.get(key) or "").strip()
+        for key in ("lbx_headline", "lbx_caption", "lbx_showTitle")
+        if str(image.get(key) or "").strip()
+    )
+    return bool(re.search(rf"\bseason\s+{re.escape(needle)}\b", haystack, re.IGNORECASE))
+
+
+def _match_episode_filter(image: dict[str, Any], episode: str | None) -> bool:
+    needle = str(episode or "").strip()
+    if not needle:
+        return True
+    explicit = image.get("lbx_episodeNumber")
+    if str(explicit or "").strip() == needle:
+        return True
+    for key in ("lbx_episodeTitle", "lbx_headline", "lbx_caption"):
+        if _matches_cloudsearch_text_filter(image.get(key), needle):
+            return True
+    return False
+
+
+def _apply_cloudsearch_post_filters(images: list[dict[str, Any]], filters: SearchFilters) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for image in images:
+        if filters.show_id:
+            show_ids = [str(item).strip() for item in image.get("showIds") or [] if str(item).strip()]
+            if str(filters.show_id).strip() not in show_ids:
+                continue
+        if filters.show_name:
+            expanded_names = _expand_show_name_aliases(filters.show_name)
+            if expanded_names and not any(
+                _matches_cloudsearch_text_filter(image.get("lbx_showTitle"), candidate)
+                or any(
+                    _matches_cloudsearch_text_filter(show_title, candidate)
+                    for show_title in image.get("showTitles") or []
+                )
+                for candidate in expanded_names
+            ):
+                continue
+        if filters.meta_type:
+            meta_types = [str(item).strip() for item in image.get("metaTypes") or [] if str(item).strip()]
+            if meta_types and not any(
+                str(filters.meta_type).strip().casefold() == item.casefold()
+                for item in meta_types
+            ):
+                continue
+        if filters.network:
+            networks = [str(item).strip() for item in image.get("networkTitles") or [] if str(item).strip()]
+            if networks and not any(str(filters.network).strip().casefold() == item.casefold() for item in networks):
+                continue
+        if not _caption_matches(image, filters.search_caption):
+            continue
+        if not _match_date_range(image.get("created"), filters.created_start, filters.created_end):
+            continue
+        if not _match_date_range(image.get("liveDate"), filters.live_date_start, filters.live_date_end):
+            continue
+        if not _match_season_filter(image, filters.season):
+            continue
+        if not _match_episode_filter(image, filters.episode):
+            continue
+        filtered.append(image)
+    return filtered
+
+
+def search_cloudsearch_images(filters: SearchFilters, *, session: Session | None = None) -> list[dict[str, Any]]:
+    limit = max(1, int(filters.limit or 25))
+    fq = _build_cloudsearch_fq(filters)
+    queries = _resolve_cloudsearch_queries(filters)
+    collected: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    for query in queries:
+        start = 0
+        total_found: int | None = None
+        while len(collected) < limit:
+            payload = _cloudsearch_request(
+                query,
+                fq=fq,
+                size=min(CLOUDSEARCH_PAGE_SIZE, limit - len(collected)),
+                start=start,
+                session=session,
+            )
+            hits = payload.get("hits")
+            if not isinstance(hits, dict):
+                break
+            total_found = _parse_optional_int(hits.get("found"))
+            raw_hits = hits.get("hit") or []
+            if not isinstance(raw_hits, list) or not raw_hits:
+                break
+            page_images: list[dict[str, Any]] = []
+            for hit in raw_hits:
+                image = _cloudsearch_hit_to_image(hit)
+                if image is None:
+                    continue
+                dedupe_key = str(image.get("lbx_id") or "").strip() or str(image.get("lbx_filename") or "").strip()
+                if dedupe_key and dedupe_key in seen_keys:
+                    continue
+                if dedupe_key:
+                    seen_keys.add(dedupe_key)
+                page_images.append(image)
+            for image in _apply_cloudsearch_post_filters(page_images, filters):
+                collected.append(image)
+                if len(collected) >= limit:
+                    break
+            start += len(raw_hits)
+            if total_found is not None and start >= total_found:
+                break
+        if len(collected) >= limit:
+            break
+    return _annotate_nup_group_counts(collected[:limit])
 
 
 def search_person_images(
@@ -383,46 +671,14 @@ def search_person_images(
     if not normalized_person_name:
         return []
     capped_limit = max(1, int(limit or DEFAULT_PAGE_SIZE))
-    query = json.dumps(normalized_person_name)
-    collected: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
-    start = 0
-    total_found: int | None = None
-
-    while len(collected) < capped_limit:
-        payload = _cloudsearch_request(
-            query,
-            size=min(CLOUDSEARCH_PAGE_SIZE, capped_limit - len(collected)),
-            start=start,
-            session=session,
-        )
-        hits = payload.get("hits")
-        if not isinstance(hits, dict):
-            break
-        total_found = _parse_optional_int(hits.get("found"))
-        raw_hits = hits.get("hit") or []
-        if not isinstance(raw_hits, list) or not raw_hits:
-            break
-        for hit in raw_hits:
-            image = _cloudsearch_hit_to_image(hit)
-            if image is None:
-                continue
-            if show_id:
-                show_ids = [str(item).strip() for item in image.get("showIds") or [] if str(item).strip()]
-                if str(show_id).strip() not in show_ids:
-                    continue
-            dedupe_key = str(image.get("lbx_id") or "").strip() or str(image.get("lbx_filename") or "").strip()
-            if dedupe_key and dedupe_key in seen_keys:
-                continue
-            if dedupe_key:
-                seen_keys.add(dedupe_key)
-            collected.append(image)
-            if len(collected) >= capped_limit:
-                break
-        start += len(raw_hits)
-        if total_found is not None and start >= total_found:
-            break
-
+    collected = search_cloudsearch_images(
+        SearchFilters(
+            search_text=normalized_person_name,
+            show_id=show_id,
+            limit=capped_limit,
+        ),
+        session=session,
+    )
     return _annotate_grouped_image_counts(collected[:capped_limit], person_match_source="cloudsearch")
 
 
@@ -459,88 +715,28 @@ def search_person_show_catalog(
         return []
 
     capped_limit = max(1, int(limit or DEFAULT_PAGE_SIZE))
-    matches: list[dict[str, Any]] = []
-    for image in list_show_images(normalized_show_id, session=session):
-        if not _caption_matches(image, normalized_person_name):
-            continue
-        matches.append(dict(image))
-        if len(matches) >= capped_limit:
-            break
+    matches = search_cloudsearch_images(
+        SearchFilters(
+            search_text=normalized_person_name,
+            show_id=normalized_show_id,
+            search_caption=normalized_person_name,
+            limit=capped_limit,
+        ),
+        session=session,
+    )
     return _annotate_grouped_image_counts(matches, person_match_source="show_catalog")
 
 
 def search_images(filters: SearchFilters, *, session: Session | None = None) -> list[dict[str, Any]]:
-    limit = max(1, int(filters.limit or 25))
-    items: list[dict[str, Any]] = []
-    local_caption_filter = str(filters.search_caption or "").strip()
-
-    if filters.created_start and filters.created_end:
-        next_token: str | None = None
-        while len(items) < limit:
-            page_limit = DEFAULT_PAGE_SIZE if local_caption_filter else min(DEFAULT_PAGE_SIZE, limit - len(items))
-            filter_payload = _build_search_filter(filters)
-            filter_expr = f"filter: {_render_graphql_input(filter_payload)}," if filter_payload else ""
-            token_expr = _json_graphql(next_token) if next_token else "null"
-            query = f"""
-            query {{
-              listLBXImages(
-                datestart: {_json_graphql(_iso_day_start(filters.created_start))}
-                dateend: {_json_graphql(_iso_day_end(filters.created_end))}
-                {filter_expr}
-                limit: {page_limit}
-                nextToken: {token_expr}
-              ) {{
-                items {{ {_IMAGE_FIELDS} }}
-                nextToken
-              }}
-            }}
-            """
-            payload = _graphql_request(query, session=session).get("listLBXImages") or {}
-            page_items = payload.get("items") or []
-            if local_caption_filter:
-                items.extend(item for item in page_items if _caption_matches(item, local_caption_filter))
-            else:
-                items.extend(page_items)
-            next_token = payload.get("nextToken")
-            if not next_token or not page_items:
-                break
-    else:
-        next_token = None
-        filter_payload = _build_search_filter(filters)
-        while len(items) < limit:
-            page_limit = DEFAULT_PAGE_SIZE if local_caption_filter else min(DEFAULT_PAGE_SIZE, limit - len(items))
-            token_expr = _json_graphql(next_token) if next_token else "null"
-            filter_expr = _render_graphql_input(filter_payload) if filter_payload else "{}"
-            query = f"""
-            query {{
-              searchImages(
-                filter: {filter_expr}
-                limit: {page_limit}
-                nextToken: {token_expr}
-              ) {{
-                items {{ {_IMAGE_FIELDS} }}
-                nextToken
-              }}
-            }}
-            """
-            payload = _graphql_request(query, session=session).get("searchImages") or {}
-            page_items = payload.get("items") or []
-            if local_caption_filter:
-                items.extend(item for item in page_items if _caption_matches(item, local_caption_filter))
-            else:
-                items.extend(page_items)
-            next_token = payload.get("nextToken")
-            if not next_token or not page_items:
-                break
-
+    items = search_cloudsearch_images(filters, session=session)
     if filters.lbx_id and not any(
-        str(item.get("lbx_id") or "").strip() == str(filters.lbx_id).strip() for item in items
+        str(item.get("lbx_id") or "").strip() == str(filters.lbx_id).strip()
+        for item in items
     ):
         matched = _scan_for_lbx_id(str(filters.lbx_id).strip(), session=session)
         if matched is not None:
             items = [matched]
-
-    return items[:limit]
+    return items[: max(1, int(filters.limit or 25))]
 
 
 def _list_show_images_uncached(
@@ -552,43 +748,16 @@ def _list_show_images_uncached(
     normalized_show_id = str(show_id or "").strip()
     if not normalized_show_id:
         return []
-    items: list[dict[str, Any]] = []
-    next_token: str | None = None
-    page_limit = DEFAULT_PAGE_SIZE
-    max_items = max(1, int(limit)) if limit is not None else None
-    while True:
-        token_expr = _json_graphql(next_token) if next_token else "null"
-        query = f"""
-        query {{
-          lookImages(
-            category: show
-            id: {_json_graphql(normalized_show_id)}
-            limit: {page_limit}
-            nextToken: {token_expr}
-          ) {{
-            items {{
-              img {{ {_IMAGE_FIELDS} }}
-            }}
-            nextToken
-          }}
-        }}
-        """
-        payload = _graphql_request(query, session=session).get("lookImages") or {}
-        page_items = payload.get("items") or []
-        if not page_items:
+    max_items = max(1, int(limit)) if limit is not None else 5000
+    show_title = None
+    for item in list_all_shows():
+        if str(item.get("id") or "").strip() == normalized_show_id:
+            show_title = str(item.get("title") or "").strip() or None
             break
-        for row in page_items:
-            if not isinstance(row, dict):
-                continue
-            image = row.get("img")
-            if isinstance(image, dict):
-                items.append(image)
-                if max_items is not None and len(items) >= max_items:
-                    return items[:max_items]
-        next_token = payload.get("nextToken")
-        if not next_token:
-            break
-    return items
+    return search_cloudsearch_images(
+        SearchFilters(show_id=normalized_show_id, show_name=show_title, limit=max_items),
+        session=session,
+    )
 
 
 @lru_cache(maxsize=64)
@@ -724,31 +893,10 @@ def _search_cloudsearch_images_by_filename(
     show_id: str | None = None,
     session: Session | None = None,
 ) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
-    for query in _cloudsearch_query_candidates(filename):
-        payload = _cloudsearch_request(query, size=10, start=0, session=session)
-        hits = payload.get("hits")
-        if not isinstance(hits, dict):
-            continue
-        raw_hits = hits.get("hit") or []
-        if not isinstance(raw_hits, list):
-            continue
-        for hit in raw_hits:
-            image = _cloudsearch_hit_to_image(hit)
-            if image is None:
-                continue
-            if show_id:
-                show_ids = [str(item).strip() for item in image.get("showIds") or [] if str(item).strip()]
-                if str(show_id).strip() not in show_ids:
-                    continue
-            dedupe_key = str(image.get("lbx_id") or "").strip() or str(image.get("lbx_filename") or "").strip()
-            if dedupe_key and dedupe_key in seen_keys:
-                continue
-            if dedupe_key:
-                seen_keys.add(dedupe_key)
-            candidates.append(image)
-    return candidates
+    return search_cloudsearch_images(
+        SearchFilters(filename=filename, show_id=show_id, limit=10),
+        session=session,
+    )
 
 
 def fetch_image_by_identity(

@@ -26,6 +26,10 @@ class _FakeImage:
         self.operations.append(("pip_install_from_requirements", args, dict(kwargs)))
         return self
 
+    def pip_install(self, *args, **kwargs):
+        self.operations.append(("pip_install", args, dict(kwargs)))
+        return self
+
     def add_local_python_source(self, *args, **kwargs):
         self.operations.append(("add_local_python_source", args, dict(kwargs)))
         return self
@@ -191,6 +195,43 @@ def test_inject_modal_runtime_defaults_clears_object_storage_profile_when_static
     assert "OBJECT_STORAGE_PROFILE" not in os.environ
 
 
+def test_reddit_runtime_probe_payload_reports_missing_oauth_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REDDIT_CLIENT_ID", raising=False)
+    monkeypatch.delenv("REDDIT_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("REDDIT_USER_AGENT", raising=False)
+
+    payload = modal_jobs._reddit_runtime_probe_payload()
+
+    assert payload["healthy"] is False
+    assert payload["reason"] == "reddit_oauth_missing"
+    assert payload["missing_env"] == ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"]
+    assert payload["warnings"] == ["REDDIT_USER_AGENT"]
+    assert payload["supports_oauth"] is False
+    assert payload["user_agent_configured"] is False
+    assert payload["uses_default_user_agent"] is True
+
+
+def test_reddit_runtime_probe_payload_reports_healthy_oauth_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REDDIT_CLIENT_ID", "client-id")
+    monkeypatch.setenv("REDDIT_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("REDDIT_USER_AGENT", "TRRTest/1.0")
+
+    payload = modal_jobs._reddit_runtime_probe_payload()
+
+    assert payload["healthy"] is True
+    assert payload["reason"] == "ok"
+    assert payload["missing_env"] == []
+    assert payload["warnings"] == []
+    assert payload["supports_oauth"] is True
+    assert payload["user_agent_configured"] is True
+    assert payload["uses_default_user_agent"] is False
+    assert payload["effective_user_agent"] == "TRRTest/1.0"
+
+
 def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "17")
 
@@ -215,6 +256,7 @@ def test_build_social_image_base_includes_shared_script_payloads() -> None:
     assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
     assert added_files == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_FILES)
     assert added_dirs == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_DIRS)
+    assert _ops_for(image, "pip_install") == [modal_jobs._SOCIAL_IMAGE_PIP_PACKAGES]
     assert _ops_for(image, "apt_install") == []
     assert _ops_for(image, "run_commands") == []
 

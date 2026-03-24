@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from trr_backend.bravotv.get_images_pipeline import (
+    _extract_bravo_image_people_names,
     _extract_people_from_text,
     _normalize_nup_key,
     _refreshed_artifacts,
@@ -32,6 +33,18 @@ def test_extract_people_from_text_matches_known_people_in_editorial_caption() ->
         known_people=["Brandi Glanville", "Adam Rippon", "Andy Cohen"],
     )
     assert people == ["Adam Rippon", "Andy Cohen"]
+
+
+def test_extract_bravo_image_people_names_does_not_fall_back_to_gallery_cast() -> None:
+    people = _extract_bravo_image_people_names(
+        {
+            "field_caption": "Kyle continues tho struggle with her sister, Kim.",
+            "field_media_image_alt": "Kyle and Kim",
+            "gallery_people_names": ["Brandi Glanville", "Kyle Richards", "Kim Richards"],
+        },
+        known_people=["Brandi Glanville", "Kyle Richards", "Kim Richards"],
+    )
+    assert people == ["Kyle Richards", "Kim Richards"]
 
 
 def test_build_bridge_and_catalog_prefers_exact_nup_matches() -> None:

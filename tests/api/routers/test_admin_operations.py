@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 from uuid import uuid4
@@ -151,20 +152,72 @@ def test_stream_operation_replays_after_seq_in_order(client: TestClient, monkeyp
     assert seen_after and seen_after[0] == 1
 
 
+def test_operation_stream_generator_uses_async_state_helpers() -> None:
+    operation_id = str(uuid4())
+    helper_calls: list[tuple[str, int]] = []
+
+    async def _fake_load_events(_operation_id: str, *, after_seq: int, limit: int):
+        helper_calls.append(("events", after_seq))
+        if after_seq == 0:
+            return [
+                {
+                    "operation_id": operation_id,
+                    "event_seq": 1,
+                    "event_type": "progress",
+                    "event_payload": {"stage": "one"},
+                }
+            ]
+        return []
+
+    async def _fake_load_state(_operation_id: str):
+        helper_calls.append(("state", -1))
+        return {"id": operation_id, "status": "completed", "operation_type": "show_sync"}
+
+    async def _read_stream_once() -> list[tuple[str, dict[str, object]]]:
+        raw_chunks: list[str] = []
+        async for chunk in pipeline_admin_operations.operation_stream_generator(
+            operation_id,
+            after_seq=0,
+            request=None,
+        ):
+            raw_chunks.append(chunk)
+        return _parse_sse("".join(raw_chunks))
+
+    with (
+        patch("trr_backend.pipeline.admin_operations._load_operation_stream_events", side_effect=_fake_load_events),
+        patch("trr_backend.pipeline.admin_operations._load_operation_state", side_effect=_fake_load_state),
+        patch("trr_backend.repositories.admin_operations.stream_events_after_seq") as mocked_stream,
+        patch("trr_backend.repositories.admin_operations.get_operation") as mocked_get_operation,
+    ):
+        replayed = asyncio.run(_read_stream_once())
+
+    assert replayed
+    assert helper_calls == [("events", 0), ("state", -1), ("events", 1)]
+    mocked_stream.assert_not_called()
+    mocked_get_operation.assert_not_called()
+
+
 def test_cancel_operation_requests_cancellation_and_emits_event(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     operation_id = str(uuid4())
+    related_operation_id = str(uuid4())
 
     with patch(
-        "api.routers.admin_operations.admin_operations.request_operation_cancel",
-        return_value={"id": operation_id, "status": "cancelling"},
+        "api.routers.admin_operations.admin_operations.request_related_operation_cancels",
+        return_value=[
+            {"id": operation_id, "status": "cancelling"},
+            {"id": related_operation_id, "status": "cancelling"},
+        ],
     ):
         with patch(
             "api.routers.admin_operations.admin_operations.get_operation",
-            return_value={"id": operation_id, "status": "running"},
+            side_effect=[
+                {"id": operation_id, "status": "running"},
+                {"id": operation_id, "status": "cancelling"},
+            ],
         ):
             with patch(
                 "api.routers.admin_operations.admin_operations.append_operation_event",
@@ -184,11 +237,73 @@ def test_cancel_operation_requests_cancellation_and_emits_event(
     payload = response.json()
     assert payload["cancel_requested"] is True
     assert payload["operation"]["status"] == "cancelling"
+    assert payload["cancelled_operations"] == 2
+    assert payload["cancelled_operation_ids"] == [operation_id, related_operation_id]
 
     _, kwargs = append_mock.call_args
     assert kwargs["event_type"] == "progress"
-    assert kwargs["event_payload"]["operation_id"] == operation_id
+    assert kwargs["event_payload"]["operation_id"] in {operation_id, related_operation_id}
     assert kwargs["event_payload"]["cancel_requested"] is True
+
+
+def test_get_admin_operations_health_returns_health_payload(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "summary": {
+            "active_total": 2,
+            "stale_total": 1,
+            "cancelling_total": 1,
+            "runtime_split": {"modal": 1, "local": 1, "other": 0, "unknown": 0},
+        },
+        "active_operations": [],
+        "stale_operations": [],
+        "updated_at": "2026-03-21T00:00:00Z",
+    }
+
+    with patch("api.routers.admin_operations.admin_operations.get_admin_operations_health", return_value=expected):
+        response = client.get(
+            "/api/v1/admin/operations/health?stale_after_seconds=600&cancelling_grace_seconds=90&limit=50",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["active_total"] == 2
+    assert body["summary"]["stale_total"] == 1
+
+
+def test_force_cancel_stale_admin_operations_returns_cleanup_payload(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    operation_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_operations.admin_operations.force_cancel_stale_operations",
+        return_value={
+            "cancelled_operations": 1,
+            "cancelled_operation_ids": [operation_id],
+            "stale_operations_remaining": 0,
+            "active_operations_remaining": 0,
+            "updated_at": "2026-03-21T00:00:00Z",
+        },
+    ) as cleanup_mock:
+        response = client.post(
+            "/api/v1/admin/operations/stale/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"operation_ids": [operation_id], "stale_after_seconds": 600, "cancelling_grace_seconds": 90},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cancelled_operations"] == 1
+    assert body["cancelled_operation_ids"] == [operation_id]
+    assert cleanup_mock.call_args.kwargs["stale_after_seconds"] == 600
+    assert cleanup_mock.call_args.kwargs["cancelling_grace_seconds"] == 90
 
 
 def test_start_operation_emits_operation_envelope_as_first_replayed_event() -> None:
@@ -394,13 +509,73 @@ def test_start_operation_local_mode_dispatches_supported_show_refresh_to_modal(
     assert response["execution_mode_canonical"] == "remote"
 
 
-def test_start_operation_request_can_prefer_local_execution_in_dev(
+def test_start_operation_request_prefers_remote_in_dev_without_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
     monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
     monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
     monkeypatch.setenv("APP_ENV", "development")
+    operation_id = str(uuid4())
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/admin/person/person-1/refresh-images/stream",
+            "headers": [(b"x-trr-prefer-local-execution", b"1")],
+        }
+    )
+
+    with patch(
+        "trr_backend.repositories.admin_operations.create_or_attach_operation",
+        return_value=(
+            {"id": operation_id, "status": "pending", "operation_type": "admin_person_refresh_images"},
+            False,
+        ),
+    ):
+        with patch(
+            "trr_backend.repositories.admin_operations.get_operation",
+            return_value={"id": operation_id, "status": "pending"},
+        ):
+            with patch(
+                "trr_backend.repositories.admin_operations.append_operation_event",
+                return_value={
+                    "operation_id": operation_id,
+                    "event_seq": 1,
+                    "event_type": "operation",
+                    "event_payload": {},
+                },
+            ):
+                with patch("trr_backend.pipeline.admin_operations.ensure_operation_execution") as ensure_mock:
+                    with patch(
+                        "trr_backend.pipeline.admin_operations.dispatch_admin_operation",
+                        return_value=True,
+                    ) as dispatch_mock:
+                        response = pipeline_admin_operations.start_operation_for_stream(
+                            operation_type="admin_person_refresh_images",
+                            producer=lambda: [],
+                            request_payload={"person_id": str(uuid4())},
+                            initiated_by="admin-remote-default",
+                            request=request,
+                        )
+
+    ensure_mock.assert_not_called()
+    dispatch_mock.assert_called_once_with(
+        operation_id=operation_id,
+        operation_type="admin_person_refresh_images",
+    )
+    assert response["execution_owner"] == "remote_worker"
+
+
+def test_start_operation_request_can_prefer_local_execution_when_override_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_LONG_JOB_ENFORCE_REMOTE", "1")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE", "1")
     operation_id = str(uuid4())
 
     request = Request(
@@ -504,11 +679,11 @@ def test_start_operation_loopback_person_refresh_prefers_local_execution_in_dev(
                             request=request,
                         )
 
-    ensure_mock.assert_called_once()
-    dispatch_mock.assert_not_called()
-    assert response["execution_owner"] == "local_api"
-    assert response["execution_mode_canonical"] == "local"
-    assert response["execution_backend_canonical"] == "local"
+    ensure_mock.assert_not_called()
+    dispatch_mock.assert_called_once()
+    assert response["execution_owner"] == "remote_worker"
+    assert response["execution_mode_canonical"] == "remote"
+    assert response["execution_backend_canonical"] == "modal"
 
 
 def test_claim_and_execute_operation_claims_specific_operation() -> None:
@@ -533,6 +708,41 @@ def test_claim_and_execute_operation_claims_specific_operation() -> None:
     assert claimed is True
     claim_mock.assert_called_once()
     run_mock.assert_called_once_with(claimed_row)
+
+
+def test_run_remote_claimed_operation_heartbeats_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    operation_id = str(uuid4())
+    operation = {
+        "id": operation_id,
+        "operation_type": "admin_show_refresh",
+        "request_payload": {"show_id": str(uuid4())},
+        "request_id": "req-123",
+        "claim_token": "claim-123",
+        "attempt_count": 1,
+    }
+
+    monkeypatch.setattr(pipeline_admin_operations, "_OPERATION_CLAIM_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+
+    with patch(
+        "trr_backend.pipeline.admin_operations._resolve_remote_operation_producer",
+        return_value=lambda: [],
+    ):
+        with patch(
+            "trr_backend.pipeline.admin_operations._run_operation_worker",
+            side_effect=lambda *args, **kwargs: time.sleep(0.04),
+        ):
+            with patch(
+                "trr_backend.repositories.admin_operations.heartbeat_operation_claim",
+                return_value=True,
+            ) as heartbeat_mock:
+                with patch(
+                    "trr_backend.repositories.admin_operations.release_operation_claim",
+                    return_value=True,
+                ) as release_mock:
+                    pipeline_admin_operations._run_remote_claimed_operation(operation)
+
+    assert heartbeat_mock.call_count >= 1
+    release_mock.assert_called_once_with(operation_id, claim_token="claim-123")
 
 
 def test_modal_dispatch_emits_operation_and_dispatched_events(monkeypatch: pytest.MonkeyPatch) -> None:

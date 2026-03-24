@@ -11,8 +11,10 @@ from pydantic import ValidationError
 
 from api.main import app
 from api.routers.admin_nbcumv import (
+    NbcumvImportItem,
     NbcumvPreviewRequest,
     _extract_caption_people,
+    _import_single_item,
     _match_people_names,
     _postgres_text_array_literal,
 )
@@ -37,6 +39,24 @@ def client() -> TestClient:
 def test_preview_request_requires_at_least_one_filter() -> None:
     with pytest.raises(ValidationError):
         NbcumvPreviewRequest()
+
+
+def test_preview_request_accepts_new_cloudsearch_filters() -> None:
+    request = NbcumvPreviewRequest(
+        search_text="Brandi Glanville",
+        show_name="The Real Housewives Ultimate Girls Trip: Ex-Wives Club",
+        meta_type="Episodic",
+        season="2",
+        episode="207",
+        network="Peacock",
+    )
+
+    assert request.search_text == "Brandi Glanville"
+    assert request.show_name == "The Real Housewives Ultimate Girls Trip: Ex-Wives Club"
+    assert request.meta_type == "Episodic"
+    assert request.season == "2"
+    assert request.episode == "207"
+    assert request.network == "Peacock"
 
 
 def test_extract_caption_people_parses_pictured_block() -> None:
@@ -70,6 +90,108 @@ def test_postgres_text_array_literal_serializes_aliases() -> None:
     )
 
 
+def test_import_single_item_uses_passed_getty_asset_for_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = {
+        "lbx_id": "70761513",
+        "lbx_filename": "NUP_188900_0304.JPG",
+        "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/NUP_188900/x/NUP_188900_0304.JPG",
+        "lbx_caption": (
+            "WATCH WHAT HAPPENS LIVE WITH ANDY COHEN -- Episode 16173 -- "
+            "Pictured: Andy Cohen, Brandi Glanville, Kelly Dodd -- (Photo by: Charles Sykes/Bravo)"
+        ),
+        "lbx_episodeNumber": "16173",
+        "showIds": ["show-1"],
+    }
+    getty_asset = {
+        "detail_url": "https://www.gettyimages.com/detail/news-photo/example/1246182942",
+        "editorial_id": "1246182942",
+        "object_name": "NUP_188900_0304.JPG",
+        "title": "Watch What Happens Live With Andy Cohen - Season 16",
+        "caption": (
+            "WATCH WHAT HAPPENS LIVE WITH ANDY COHEN -- Episode 16173 -- "
+            "Pictured: (l-r) Andy Cohen, Brandi Glanville, Kelly Dodd -- "
+            "(Photo by: Charles Sykes/Bravo via Getty Images)"
+        ),
+        "event_name": "Watch What Happens Live With Andy Cohen - Season 16",
+        "event_id": "775921530",
+        "event_date": "October 30, 2019",
+        "date_created": "October 30, 2019",
+        "keyword_texts": ["Brandi Glanville", "Kelly Dodd", "Andy Cohen", "Season 16", "Talkshow"],
+        "details": {
+            "credit_display": "Bravo / Contributor",
+            "collection_display": "NBCUniversal",
+        },
+        "people": [
+            {"text": "Andy Cohen - Television Personality"},
+            {"text": "Brandi Glanville"},
+            {"text": "Kelly Dodd"},
+        ],
+        "people_count": 3,
+    }
+    captured: dict[str, object] = {}
+    mock_db = MagicMock()
+    fetch_getty = MagicMock()
+    resolve_getty = MagicMock()
+
+    monkeypatch.setattr("api.routers.admin_nbcumv.getty.fetch_asset_detail", fetch_getty)
+    monkeypatch.setattr("api.routers.admin_nbcumv.getty.resolve_asset_by_object_name", resolve_getty)
+    monkeypatch.setattr("api.routers.admin_nbcumv._existing_asset_by_nbcumv_id", lambda db, lbx_id: None)
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.nbcumv.download_hires_image",
+        lambda lbx_id, filename: (b"jpeg-bytes", "image/jpeg"),
+    )
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.nbcumv.extract_embedded_metadata",
+        lambda image_bytes: {"dimensions": {"width": 4500, "height": 3000}},
+    )
+    monkeypatch.setattr("api.routers.admin_nbcumv.get_s3_bucket", lambda: "media-bucket")
+    monkeypatch.setattr("api.routers.admin_nbcumv.get_s3_client", lambda: MagicMock())
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.upload_bytes_to_s3",
+        lambda client, bucket, key, data, content_type: ("etag-1", len(data)),
+    )
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.build_hosted_url",
+        lambda key: "https://cdn.example.com/media/asset-1.jpg",
+    )
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv._upsert_nbcumv_asset",
+        lambda db, **kwargs: captured.update(kwargs) or {"id": "asset-1", "hosted_url": kwargs.get("hosted_url")},
+    )
+    monkeypatch.setattr("api.routers.admin_nbcumv._existing_person_links", lambda db, asset_id: [])
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.generate_media_asset_variants",
+        lambda db, asset_id, force=False: None,
+    )
+
+    result = _import_single_item(
+        db=mock_db,
+        item=NbcumvImportItem(
+            lbx_id="70761513",
+            lbx_filename="NUP_188900_0304.JPG",
+            location=image["location"],
+            nbcumv_image=image,
+            getty_asset=getty_asset,
+            getty_detail_url="https://www.gettyimages.com/detail/news-photo/example/1246182942",
+            show_ids=["show-1"],
+        ),
+        assign_people=False,
+        people_index={},
+    )
+
+    metadata = captured["metadata"]
+    assert result["asset_id"] == "asset-1"
+    assert isinstance(metadata, dict)
+    assert metadata["getty"]["editorial_id"] == "1246182942"
+    assert metadata["getty_tags"] == ["Brandi Glanville", "Kelly Dodd", "Andy Cohen", "Season 16", "Talkshow"]
+    assert metadata["getty_event_title"] == "Watch What Happens Live With Andy Cohen - Season 16"
+    assert metadata["source_page_url"] == "https://www.gettyimages.com/detail/news-photo/example/1246182942"
+    assert metadata["people_names"] == ["Andy Cohen", "Brandi Glanville", "Kelly Dodd"]
+    assert metadata["episode_number"] == 16173
+    fetch_getty.assert_not_called()
+    resolve_getty.assert_not_called()
+
+
 def test_preview_endpoint_returns_resolved_people_and_existing_asset(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -86,6 +208,9 @@ def test_preview_endpoint_returns_resolved_people_and_existing_asset(
             "WATCH WHAT HAPPENS LIVE WITH ANDY COHEN -- Pictured: Mac Forehand -- (Photo by: Charles Sykes/Bravo)"
         ),
         "showIds": ["show-1"],
+        "status": "0",
+        "is_hidden": True,
+        "tags": ["HIDDEN"],
     }
     getty_asset = {
         "detail_url": "https://www.gettyimages.com/detail/news-photo/x/2264300032",
@@ -124,6 +249,51 @@ def test_preview_endpoint_returns_resolved_people_and_existing_asset(
     assert item["already_imported"] is True
     assert item["existing_asset_id"] == "asset-1"
     assert item["existing_person_ids"] == ["person-1"]
+    assert item["status"] == "0"
+    assert item["is_hidden"] is True
+    assert item["effective_tags"] == ["HIDDEN"]
+
+
+def test_preview_endpoint_forwards_new_cloudsearch_filters(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    mock_db = MagicMock()
+    captured: dict[str, object] = {}
+
+    def _fake_search_images(filters):
+        captured["filters"] = filters
+        return []
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch("api.routers.admin_nbcumv._ensure_sources"):
+            with patch("api.routers.admin_nbcumv.nbcumv.search_images", side_effect=_fake_search_images):
+                with patch("api.routers.admin_nbcumv._load_eligible_people_index", return_value={}):
+                    response = client.post(
+                        "/api/v1/admin/nbcumv/preview",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={
+                            "search_text": "Brandi Glanville",
+                            "nup_prefix": "NUP_195460",
+                            "show_name": "The Real Housewives Ultimate Girls Trip: Ex-Wives Club",
+                            "meta_type": "Episodic",
+                            "season": "2",
+                            "episode": "207",
+                            "network": "Peacock",
+                        },
+                    )
+
+    assert response.status_code == 200
+    filters = captured["filters"]
+    assert filters.search_text == "Brandi Glanville"
+    assert filters.nup_prefix == "NUP_195460"
+    assert filters.show_name == "The Real Housewives Ultimate Girls Trip: Ex-Wives Club"
+    assert filters.meta_type == "Episodic"
+    assert filters.season == "2"
+    assert filters.episode == "207"
+    assert filters.network == "Peacock"
 
 
 def test_import_endpoint_creates_gallery_links_for_resolved_people(
@@ -303,3 +473,123 @@ def test_import_endpoint_skips_download_for_existing_hosted_asset(
     payload = response.json()
     assert payload["skipped_duplicates"] == 1
     download_image.assert_not_called()
+
+
+def test_import_single_item_adds_hidden_tag_for_status_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = {
+        "lbx_id": "70761513",
+        "lbx_filename": "NUP_195460_02015.JPG",
+        "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/NUP_195460/x/NUP_195460_02015.JPG",
+        "lbx_caption": "The Real Housewives Ultimate Girls Trip -- Pictured: Brandi Glanville",
+        "showIds": ["show-1"],
+        "status": "0",
+        "is_hidden": True,
+        "tags": ["HIDDEN"],
+    }
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("api.routers.admin_nbcumv.getty.fetch_asset_detail", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.routers.admin_nbcumv.getty.resolve_asset_by_object_name", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.routers.admin_nbcumv._existing_asset_by_nbcumv_id", lambda db, lbx_id: None)
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.nbcumv.download_hires_image",
+        lambda lbx_id, filename: (b"jpeg-bytes", "image/jpeg"),
+    )
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.nbcumv.extract_embedded_metadata",
+        lambda image_bytes: {"dimensions": {"width": 4500, "height": 3000}},
+    )
+    monkeypatch.setattr("api.routers.admin_nbcumv.get_s3_bucket", lambda: "media-bucket")
+    monkeypatch.setattr("api.routers.admin_nbcumv.get_s3_client", lambda: MagicMock())
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.upload_bytes_to_s3",
+        lambda client, bucket, key, data, content_type: ("etag-1", len(data)),
+    )
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.build_hosted_url",
+        lambda key: "https://cdn.example.com/media/asset-1.jpg",
+    )
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv._upsert_nbcumv_asset",
+        lambda db, **kwargs: captured.update(kwargs) or {"id": "asset-1", "hosted_url": kwargs.get("hosted_url")},
+    )
+    monkeypatch.setattr("api.routers.admin_nbcumv._existing_person_links", lambda db, asset_id: [])
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.generate_media_asset_variants",
+        lambda db, asset_id, force=False: None,
+    )
+
+    _import_single_item(
+        db=MagicMock(),
+        item=NbcumvImportItem(
+            lbx_id="70761513",
+            lbx_filename="NUP_195460_02015.JPG",
+            location=image["location"],
+            nbcumv_image=image,
+            show_ids=["show-1"],
+        ),
+        assign_people=False,
+        people_index={},
+    )
+
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["status"] == "0"
+    assert metadata["is_hidden"] is True
+    assert "HIDDEN" in metadata["tags"]
+
+
+def test_import_single_item_removes_hidden_tag_when_status_becomes_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = {
+        "lbx_id": "70761513",
+        "lbx_filename": "NUP_195460_02015.JPG",
+        "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/NUP_195460/x/NUP_195460_02015.JPG",
+        "lbx_caption": "The Real Housewives Ultimate Girls Trip -- Pictured: Brandi Glanville",
+        "showIds": ["show-1"],
+        "status": "1",
+        "is_hidden": False,
+    }
+    captured: dict[str, object] = {}
+    existing_asset = {
+        "id": "asset-1",
+        "hosted_url": "https://cdn.example.com/media/asset-1.jpg",
+        "hosted_bucket": "media-bucket",
+        "hosted_key": "media/ab/asset.jpg",
+        "hosted_etag": "etag-1",
+        "metadata": {
+            "embedded_file": {"dimensions": {"width": 2000, "height": 3000}},
+            "tags": ["Bravo", "HIDDEN"],
+        },
+    }
+
+    monkeypatch.setattr("api.routers.admin_nbcumv.getty.fetch_asset_detail", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.routers.admin_nbcumv.getty.resolve_asset_by_object_name", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.routers.admin_nbcumv._existing_asset_by_nbcumv_id", lambda db, lbx_id: existing_asset)
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv._upsert_nbcumv_asset",
+        lambda db, **kwargs: captured.update(kwargs) or {"id": "asset-1", "hosted_url": kwargs.get("hosted_url")},
+    )
+    monkeypatch.setattr("api.routers.admin_nbcumv._existing_person_links", lambda db, asset_id: [])
+    monkeypatch.setattr(
+        "api.routers.admin_nbcumv.generate_media_asset_variants",
+        lambda db, asset_id, force=False: None,
+    )
+
+    _import_single_item(
+        db=MagicMock(),
+        item=NbcumvImportItem(
+            lbx_id="70761513",
+            lbx_filename="NUP_195460_02015.JPG",
+            location=image["location"],
+            nbcumv_image=image,
+            show_ids=["show-1"],
+        ),
+        assign_people=False,
+        people_index={},
+    )
+
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["status"] == "1"
+    assert metadata["is_hidden"] is False
+    assert metadata["tags"] == ["Bravo"]

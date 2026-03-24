@@ -1789,6 +1789,13 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
             return _serialize_sync_session(row)
         current_run = _current_run_payload(str(row.get("current_run_id") or ""))
         if current_run is None:
+            if status == "cancelling":
+                row = _update_sync_session(
+                    sync_session_id,
+                    status="cancelled",
+                    cancelled_at=_now_utc(),
+                    follow_up_reason="cancelled",
+                )
             return _serialize_sync_session(row)
         run_status = str(current_run.get("status") or "").strip().lower()
         active_run_statuses = {"queued", "pending", "retrying", "running"}

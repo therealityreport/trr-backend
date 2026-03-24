@@ -148,6 +148,7 @@ _SOCIAL_BROWSER_APT_PACKAGES: Final[tuple[str, ...]] = (
     "libatspi2.0-0",
 )
 _SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = ("playwright install chromium",)
+_SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ("yt-dlp",)
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_JOB_PLANE_MODE": "remote",
     "TRR_LONG_JOB_ENFORCE_REMOTE": "1",
@@ -174,6 +175,7 @@ def _build_social_image_base(*, include_browser_runtime: bool = False, image_fac
     if include_browser_runtime:
         image = image.apt_install(*_SOCIAL_BROWSER_APT_PACKAGES)
     image = image.pip_install_from_requirements(str(_BACKEND_ROOT / "requirements.lock.txt"))
+    image = image.pip_install(*_SOCIAL_IMAGE_PIP_PACKAGES)
     if include_browser_runtime:
         image = image.run_commands(*_SOCIAL_BROWSER_SETUP_COMMANDS)
     image = image.add_local_python_source("api", "trr_backend")
@@ -387,6 +389,42 @@ def run_reddit_refresh(run_id: str) -> dict[str, object]:
         "status": str(result.get("status") or ""),
         "worker_id": worker_id,
     }
+
+
+def _reddit_runtime_probe_payload() -> dict[str, object]:
+    from trr_backend.repositories.reddit_refresh import REDDIT_USER_AGENT_DEFAULT
+
+    client_id = (os.getenv("REDDIT_CLIENT_ID") or "").strip()
+    client_secret = (os.getenv("REDDIT_CLIENT_SECRET") or "").strip()
+    user_agent = (os.getenv("REDDIT_USER_AGENT") or "").strip()
+    missing_env = []
+    if not client_id:
+        missing_env.append("REDDIT_CLIENT_ID")
+    if not client_secret:
+        missing_env.append("REDDIT_CLIENT_SECRET")
+    warnings = []
+    if not user_agent:
+        warnings.append("REDDIT_USER_AGENT")
+    healthy = not missing_env
+    return {
+        "healthy": healthy,
+        "reason": "ok" if healthy else "reddit_oauth_missing",
+        "missing_env": missing_env,
+        "warnings": warnings,
+        "supports_oauth": healthy,
+        "user_agent_configured": bool(user_agent),
+        "uses_default_user_agent": not bool(user_agent),
+        "effective_user_agent": user_agent or REDDIT_USER_AGENT_DEFAULT,
+    }
+
+
+@app.function(
+    secrets=_secrets,
+    retries=0,
+    timeout=60,
+)
+def probe_reddit_refresh_runtime() -> dict[str, object]:
+    return _reddit_runtime_probe_payload()
 
 
 @app.function(

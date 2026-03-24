@@ -4597,6 +4597,7 @@ def _discover_related_person_fandom_urls(
 def _discover_people_links(
     show_id: str,
     *,
+    person_ids: set[str] | None = None,
     show_fandom_seed_urls: list[str] | None = None,
     stats: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -4694,6 +4695,7 @@ def _discover_people_links(
         )
         housewife_friend_ids = {str(row.get("person_id") or "").strip() for row in role_rows if row.get("person_id")}
 
+    person_id_filter = {str(value).strip() for value in (person_ids or set()) if str(value).strip()}
     rows = pg.fetch_all(
         """
         SELECT DISTINCT
@@ -4719,6 +4721,8 @@ def _discover_people_links(
         """,
         [show_id],
     )
+    if person_id_filter:
+        rows = [row for row in rows if str(row.get("id") or "").strip() in person_id_filter]
     people_fandom_seed_urls = _collect_show_fandom_seed_urls(
         show_id,
         show_name=show_name,

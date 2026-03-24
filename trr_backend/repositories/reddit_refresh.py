@@ -11,17 +11,26 @@ import socket
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from hashlib import sha1
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 from psycopg2.extras import Json
 
 from trr_backend.db import pg
 from trr_backend.job_plane import canonical_execution_mode, execution_backend_canonical, execution_owner_label
+from trr_backend.modal_dispatch import (
+    dispatch_reddit_refresh,
+    get_modal_reddit_runtime_health,
+    modal_dispatch_ready,
+    modal_execution_metadata,
+    modal_reddit_refresh_function_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +47,14 @@ REDDIT_COMMENT_TREE_DEPTH_DEFAULT = 12
 REDDIT_COMMENT_LIMIT_DEFAULT = 500
 REDDIT_REFRESH_STALE_QUEUED_SECONDS_DEFAULT = 300
 REDDIT_REFRESH_STALE_RUNNING_SECONDS_DEFAULT = 1200
+REDDIT_REFRESH_ORPHANED_QUEUED_REUSE_GRACE_SECONDS_DEFAULT = 300
 REDDIT_ADAPTIVE_DEEP_MAX_PAGES = 10_000
 REDDIT_ADAPTIVE_DEEP_MAX_BACKFILL_QUERIES = 30
 REDDIT_ADAPTIVE_DEEP_MAX_BACKFILL_PAGES_PER_QUERY = 50
 REDDIT_REFRESH_CLAIM_LEASE_SECONDS_DEFAULT = 300
+REDDIT_BACKFILL_OPERATION_TYPE = "admin_reddit_refresh_backfill"
+REDDIT_BACKFILL_POLL_SECONDS_DEFAULT = 2.0
+REDDIT_ANALYTICS_TIMEZONE = "America/New_York"
 
 FRANCHISE_EXCLUDE_TERMS = (
     "rhoa",
@@ -254,6 +267,195 @@ def _normalize_string_list(values: Any) -> list[str]:
     return [deduped[key] for key in sorted(deduped.keys())]
 
 
+def _is_canonical_reddit_container_key(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"period-preseason", "period-postseason"}:
+        return True
+    return bool(re.fullmatch(r"episode-\d+", normalized))
+
+
+def _canonical_reddit_container_sort_key(value: str | None) -> tuple[int, int]:
+    normalized = str(value or "").strip().lower()
+    if normalized == "period-preseason":
+        return (0, 0)
+    if normalized == "period-postseason":
+        return (2, 0)
+    match = re.fullmatch(r"episode-(\d+)", normalized)
+    if match:
+        return (1, int(match.group(1)))
+    return (9, 0)
+
+
+def _canonical_reddit_container_keys_for_season(season_id: str) -> list[str]:
+    rows = pg.fetch_all(
+        """
+        select distinct episode_number
+        from core.episodes
+        where season_id = %s
+          and episode_number is not null
+          and episode_number >= 1
+        order by episode_number asc
+        """,
+        [season_id],
+    )
+    episode_keys = [
+        f"episode-{int(row.get('episode_number'))}"
+        for row in rows
+        if isinstance(row.get("episode_number"), int) and int(row.get("episode_number")) >= 1
+    ]
+    if not episode_keys:
+        return ["period-preseason", "episode-1", "period-postseason"]
+    return ["period-preseason", *episode_keys, "period-postseason"]
+
+
+def _raw_reddit_container_key_sql(*, period_key_expr: str) -> str:
+    lowered = f"lower(coalesce({period_key_expr}, ''))"
+    return f"""
+        case
+          when {lowered} in ('period-preseason', 'period-postseason') then {lowered}
+          when {lowered} ~ '^episode-[0-9]+$' then {lowered}
+          when {lowered} ~ '^community:[^:]+:season:[^:]+:container:[a-z0-9-]+$'
+            then substring({lowered} from 'container:([a-z0-9-]+)$')
+          else null
+        end
+    """
+
+
+def _canonical_reddit_match_window_ranges_for_season(season_id: str) -> list[dict[str, str]]:
+    zone = ZoneInfo(REDDIT_ANALYTICS_TIMEZONE)
+    rows = pg.fetch_all(
+        """
+        select episode_number, air_date
+        from core.episodes
+        where season_id = %s
+          and air_date is not null
+          and episode_number is not null
+        order by episode_number asc, air_date asc
+        """,
+        [season_id],
+    )
+    episode_starts: list[tuple[int, datetime]] = []
+    seen_numbers: set[int] = set()
+    for row in rows:
+        raw_num = row.get("episode_number")
+        air_date = row.get("air_date")
+        if not isinstance(raw_num, int) or raw_num < 1 or not isinstance(air_date, date):
+            continue
+        if raw_num in seen_numbers:
+            continue
+        seen_numbers.add(raw_num)
+        episode_starts.append(
+            (
+                raw_num,
+                datetime.combine(air_date, dt_time.min, tzinfo=zone).astimezone(UTC),
+            )
+        )
+    if not episode_starts:
+        return []
+
+    ranges: list[dict[str, str]] = []
+    preseason_start = (episode_starts[0][1] - timedelta(days=45)).isoformat()
+    ranges.append(
+        {
+            "container_key": "period-preseason",
+            "start": preseason_start,
+            "end": episode_starts[0][1].isoformat(),
+        }
+    )
+    for index, (episode_number, start_utc) in enumerate(episode_starts):
+        next_start = episode_starts[index + 1][1] if index + 1 < len(episode_starts) else start_utc + timedelta(days=7)
+        if next_start <= start_utc:
+            next_start = start_utc + timedelta(days=7)
+        ranges.append(
+            {
+                "container_key": f"episode-{episode_number}",
+                "start": start_utc.isoformat(),
+                "end": next_start.isoformat(),
+            }
+        )
+    last_end = datetime.fromisoformat(ranges[-1]["end"])
+    ranges.append(
+        {
+            "container_key": "period-postseason",
+            "start": last_end.isoformat(),
+            "end": (last_end + timedelta(days=7)).isoformat(),
+        }
+    )
+    return ranges
+
+
+def _canonical_reddit_match_container_key_sql(
+    *,
+    season_id: str | None,
+    period_key_expr: str,
+    period_start_expr: str,
+    period_end_expr: str,
+    posted_at_expr: str,
+) -> str:
+    direct_container_sql = _raw_reddit_container_key_sql(period_key_expr=period_key_expr)
+    normalized_season_id = str(season_id or "").strip()
+    if not normalized_season_id:
+        return f"coalesce({direct_container_sql}, 'unmapped')"
+
+    window_ranges = _canonical_reddit_match_window_ranges_for_season(normalized_season_id)
+    if not window_ranges:
+        return f"coalesce({direct_container_sql}, 'unmapped')"
+
+    fallback_clauses: list[str] = []
+    for window in window_ranges:
+        start = window["start"]
+        end = window["end"]
+        container_key = window["container_key"]
+        fallback_clauses.append(
+            f"""
+            when {period_start_expr} is not null
+             and {period_end_expr} is not null
+             and {period_start_expr} >= timestamptz '{start}'
+             and {period_end_expr} <= timestamptz '{end}'
+            then '{container_key}'
+            """
+        )
+        fallback_clauses.append(
+            f"""
+            when {posted_at_expr} is not null
+             and {posted_at_expr} >= timestamptz '{start}'
+             and {posted_at_expr} < timestamptz '{end}'
+            then '{container_key}'
+            """
+        )
+    fallback_sql = "\n".join(fallback_clauses)
+    return f"""
+        coalesce(
+          {direct_container_sql},
+          case
+            {fallback_sql}
+            else 'unmapped'
+          end
+        )
+    """
+
+
+def _canonical_reddit_container_key_sql(
+    *,
+    period_key_expr: str,
+    request_payload_expr: str | None = None,
+) -> str:
+    request_container_expr = "null"
+    request_stable_expr = "null"
+    if request_payload_expr:
+        request_container_expr = f"nullif(lower(coalesce({request_payload_expr}->>'container_key', '')), '')"
+        request_stable_expr = f"nullif(lower(coalesce({request_payload_expr}->>'period_stable_key', '')), '')"
+    return f"""
+        lower(
+          coalesce(
+            {request_container_expr},
+            {request_stable_expr},
+            nullif({period_key_expr}, '')
+          )
+        )
+    """
+
+
 def _build_run_config_hash(payload: dict[str, Any]) -> str:
     canonical_payload = {
         "mode": str(payload.get("mode") or "sync_posts").strip().lower() or "sync_posts",
@@ -326,6 +528,101 @@ def _derive_refresh_run_phase(diagnostics: dict[str, Any], status: str) -> str |
     return None
 
 
+def _derive_failure_reason_code(
+    *,
+    status: str,
+    diagnostics: dict[str, Any],
+    error_message: str | None,
+    stalled: bool,
+) -> str | None:
+    direct_code = str(diagnostics.get("failure_reason_code") or "").strip().lower()
+    if direct_code:
+        return direct_code
+    normalized_error = str(error_message or "").strip().lower()
+    normalized_status = str(status or "").strip().lower()
+    if "queued reddit refresh run expired before execution" in normalized_error:
+        return "stale_queue"
+    if "reddit request failed (403)" in normalized_error:
+        return "reddit_http_403"
+    if normalized_status == "partial" and str(diagnostics.get("status_resolution") or "").strip().lower() in {
+        "strict_completeness",
+        "coverage_incomplete",
+    }:
+        final_completeness = diagnostics.get("final_completeness")
+        if isinstance(final_completeness, dict):
+            listing_complete = final_completeness.get("listing_complete")
+            backfill_complete = final_completeness.get("backfill_complete")
+            if listing_complete is False or backfill_complete is False:
+                return "coverage_incomplete"
+    if stalled and normalized_status in {"queued", "running", "cancelling"}:
+        return "stalled_heartbeat"
+    return None
+
+
+def _default_operator_hint(reason_code: str | None, *, status: str) -> str | None:
+    if reason_code == "reddit_http_403":
+        return (
+            "Reddit blocked the live scrape for this window. "
+            "Showing cached posts when available and continuing season sync."
+        )
+    if reason_code == "worker_unavailable":
+        return "No healthy remote worker or dispatcher is available right now. Retry after worker health is restored."
+    if reason_code == "stale_queue":
+        return "This queued Reddit refresh never started and was expired. Start the sync again."
+    if reason_code == "stalled_heartbeat":
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "queued":
+            return "This queued Reddit refresh appears stranded in the backend queue. Retry the window sync."
+        return "This Reddit refresh stopped reporting heartbeats and appears stalled. Retry the window sync."
+    if reason_code == "coverage_incomplete":
+        return (
+            "Posts were stored for this Reddit window, but the crawl could not prove exhaustive coverage. "
+            "Analytics remain usable while this container stays marked partial."
+        )
+    return None
+
+
+def _derive_operator_hint(
+    *,
+    status: str,
+    diagnostics: dict[str, Any],
+    error_message: str | None,
+    stalled: bool,
+) -> str | None:
+    direct_hint = str(diagnostics.get("operator_hint") or "").strip()
+    if direct_hint:
+        return direct_hint
+    return _default_operator_hint(
+        _derive_failure_reason_code(
+            status=status,
+            diagnostics=diagnostics,
+            error_message=error_message,
+            stalled=stalled,
+        ),
+        status=status,
+    )
+
+
+def _is_orphaned_queued_run(
+    row: Mapping[str, Any],
+    *,
+    grace_seconds: int,
+) -> bool:
+    status = str(row.get("status") or "").strip().lower()
+    if status != "queued":
+        return False
+    if str(row.get("claimed_by_worker_id") or "").strip():
+        return False
+    if str(row.get("claim_token") or "").strip():
+        return False
+    if _parse_iso(row.get("heartbeat_at")) is not None:
+        return False
+    reference_time = _parse_iso(row.get("updated_at")) or _parse_iso(row.get("created_at"))
+    if reference_time is None:
+        return False
+    return (datetime.now(tz=UTC) - reference_time) >= timedelta(seconds=grace_seconds)
+
+
 def _collect_partial_failures(
     *,
     status: str,
@@ -336,9 +633,17 @@ def _collect_partial_failures(
     normalized_status = str(status or "").strip().lower()
     normalized_error = str(error_message or "").strip()
     if normalized_error and normalized_status in {"partial", "failed"}:
-        failures.append(
-            {"phase": _derive_refresh_run_phase(diagnostics, normalized_status), "reason": normalized_error}
-        )
+        failure: dict[str, Any] = {
+            "phase": _derive_refresh_run_phase(diagnostics, normalized_status),
+            "reason": normalized_error,
+        }
+        reason_code = str(diagnostics.get("failure_reason_code") or "").strip().lower()
+        if reason_code:
+            failure["failure_reason_code"] = reason_code
+        operator_hint = str(diagnostics.get("operator_hint") or "").strip()
+        if operator_hint:
+            failure["operator_hint"] = operator_hint
+        failures.append(failure)
 
     final_completeness = (
         diagnostics.get("final_completeness") if isinstance(diagnostics.get("final_completeness"), dict) else {}
@@ -431,6 +736,24 @@ def _build_refresh_run_meta(row: Mapping[str, Any]) -> dict[str, Any]:
         cache_status = "stale" if cache_age_seconds is not None and cache_age_seconds > 86_400 else "fresh"
     else:
         cache_status = "miss"
+    stalled = _is_refresh_run_stalled(
+        status=status,
+        heartbeat_at=heartbeat_at,
+        updated_at=updated_at,
+        created_at=created_at,
+    )
+    failure_reason_code = _derive_failure_reason_code(
+        status=status,
+        diagnostics=diagnostics,
+        error_message=str(row.get("error_message") or "").strip() or None,
+        stalled=stalled,
+    )
+    operator_hint = _derive_operator_hint(
+        status=status,
+        diagnostics=diagnostics,
+        error_message=str(row.get("error_message") or "").strip() or None,
+        stalled=stalled,
+    )
     return {
         "phase": _derive_refresh_run_phase(diagnostics, status),
         "partial_failures": _collect_partial_failures(
@@ -438,12 +761,9 @@ def _build_refresh_run_meta(row: Mapping[str, Any]) -> dict[str, Any]:
             diagnostics=diagnostics,
             error_message=str(row.get("error_message") or "").strip() or None,
         ),
-        "stalled": _is_refresh_run_stalled(
-            status=status,
-            heartbeat_at=heartbeat_at,
-            updated_at=updated_at,
-            created_at=created_at,
-        ),
+        "stalled": stalled,
+        "failure_reason_code": failure_reason_code,
+        "operator_hint": operator_hint,
         "cache_status": cache_status,
         "cache_age_seconds": cache_age_seconds,
         "run_status": status,
@@ -2467,6 +2787,12 @@ def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
         minimum=120,
         maximum=86_400,
     )
+    orphaned_queued_reuse_grace_seconds = _env_int(
+        "REDDIT_REFRESH_ORPHANED_QUEUED_REUSE_GRACE_SECONDS",
+        REDDIT_REFRESH_ORPHANED_QUEUED_REUSE_GRACE_SECONDS_DEFAULT,
+        minimum=15,
+        maximum=3_600,
+    )
 
     active_runs = pg.fetch_all(
         """
@@ -2510,6 +2836,29 @@ def create_or_reuse_refresh_run(*, payload: dict[str, Any]) -> dict[str, Any]:
                     set_completed=True,
                 )
                 continue  # Skip this stale run — let dedup continue or create a new run
+        if existing_status == "queued" and _is_orphaned_queued_run(
+            existing,
+            grace_seconds=orphaned_queued_reuse_grace_seconds,
+        ):
+            existing_id = str(existing.get("id") or "")
+            logger.warning(
+                "[reddit_refresh_orphaned_queue_recovered] marking orphaned queued run=%s as failed",
+                existing_id[:8],
+            )
+            _update_run(
+                existing_id,
+                status="failed",
+                diagnostics={
+                    "stale_queue_recovered": True,
+                    "stale_queue_reuse_grace_seconds": orphaned_queued_reuse_grace_seconds,
+                    "failure_reason_code": "stale_queue",
+                    "operator_hint": _default_operator_hint("stale_queue", status="failed"),
+                    "recovered_during": "dedup_check",
+                },
+                error_message="Queued reddit refresh run expired before execution. Start a new refresh.",
+                set_completed=True,
+            )
+            continue
 
         existing_payload = existing.get("request_payload") if isinstance(existing.get("request_payload"), dict) else {}
         existing_hash = str(existing_payload.get("run_config_hash") or "").strip().lower()
@@ -3778,6 +4127,11 @@ def execute_refresh_run(
             (detail_result or {}).get("errors") if isinstance((detail_result or {}).get("errors"), list) else []
         )
         error_count = comment_errors + len(detail_errors)
+        useful_posts_stored = any(
+            _safe_int(result.get("totals", {}).get(metric)) > 0
+            for metric in ("fetched_rows", "matched_rows", "tracked_flair_rows")
+        )
+        coverage_incomplete = discovery_status == "partial" and useful_posts_stored
 
         diagnostics = {
             "mode": "sync_full" if run_full_sync else "sync_posts",
@@ -3822,7 +4176,7 @@ def execute_refresh_run(
             "status_resolution": (
                 "listing_incomplete_backfill_complete_max_coverage"
                 if listing_incomplete_non_fatal
-                else "strict_completeness"
+                else ("coverage_incomplete" if coverage_incomplete else "strict_completeness")
             ),
             "terminal_summary": _build_terminal_summary(
                 mode="sync_full" if run_full_sync else "sync_posts",
@@ -3843,6 +4197,9 @@ def execute_refresh_run(
             },
             "result": result,
         }
+        if coverage_incomplete:
+            diagnostics["failure_reason_code"] = "coverage_incomplete"
+            diagnostics["operator_hint"] = _default_operator_hint("coverage_incomplete", status=status)
 
         logger.info(
             "[reddit_refresh_execute_complete] run_id=%s mode=%s status=%s rows_matched=%s error_count=%s",
@@ -3866,12 +4223,57 @@ def execute_refresh_run(
         )
         return get_refresh_run(run_id)
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, RedditRefreshError) and exc.status == 403:
+            logger.warning("[reddit_refresh_partial_403] run_id=%s", run_id)
+            partial_diagnostics = {
+                "error_type": exc.__class__.__name__,
+                "failure_reason_code": "reddit_http_403",
+                "operator_hint": _default_operator_hint("reddit_http_403", status="partial"),
+                "terminal_summary": _build_terminal_summary(
+                    mode=str(request_payload.get("mode") or "sync_posts").strip() or "sync_posts",
+                    status="partial",
+                    progress={**progress, "stage": "finalizing"},
+                    error_count=1,
+                ),
+                "lifecycle": {
+                    "worker_id": str(worker_id or "").strip() or None,
+                    "claim_token_prefix": claim_token[:8] if claim_token else None,
+                    "claim_released": True,
+                },
+                "progress": {
+                    **progress,
+                    "stage": "finalizing",
+                    "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+                },
+            }
+            _update_run(
+                run_id,
+                status="partial",
+                diagnostics=partial_diagnostics,
+                error_message=str(exc),
+                set_completed=True,
+                claim_token=claim_token,
+                release_claim=True,
+            )
+            return get_refresh_run(run_id)
         logger.exception("[reddit_refresh_failed] run_id=%s", run_id)
         _update_run(
             run_id,
             status="failed",
             diagnostics={
                 "error_type": exc.__class__.__name__,
+                "failure_reason_code": _derive_failure_reason_code(
+                    status="failed",
+                    diagnostics={},
+                    error_message=str(exc),
+                    stalled=False,
+                ),
+                "operator_hint": _derive_operator_hint(
+                    status="failed",
+                    diagnostics={},
+                    error_message=str(exc),
+                    stalled=False,
+                ),
                 "terminal_summary": _build_terminal_summary(
                     mode=str(request_payload.get("mode") or "sync_posts").strip() or "sync_posts",
                     status="failed",
@@ -4036,6 +4438,8 @@ def get_refresh_run(run_id: str) -> dict[str, Any]:
         "phase": run_meta.get("phase"),
         "partial_failures": run_meta.get("partial_failures"),
         "stalled": run_meta.get("stalled"),
+        "failure_reason_code": run_meta.get("failure_reason_code"),
+        "operator_hint": run_meta.get("operator_hint"),
     }
 
 
@@ -4130,9 +4534,692 @@ def list_refresh_runs(
                 "phase": run_meta.get("phase"),
                 "partial_failures": run_meta.get("partial_failures"),
                 "stalled": run_meta.get("stalled"),
+                "failure_reason_code": run_meta.get("failure_reason_code"),
+                "operator_hint": run_meta.get("operator_hint"),
             }
         )
     return results
+
+
+def _fetch_latest_refresh_runs_for_season(
+    *,
+    community_id: str,
+    season_id: str,
+    canonical_only: bool = False,
+) -> list[dict[str, Any]]:
+    if canonical_only:
+        container_key_sql = _canonical_reddit_container_key_sql(
+            period_key_expr="period_key",
+            request_payload_expr="request_payload",
+        )
+        rows = pg.fetch_all(
+            f"""
+            with scoped as (
+              select
+                *,
+                {container_key_sql} as canonical_container_key
+              from social.reddit_refresh_runs
+              where community_id = %s
+                and season_id = %s
+            ),
+            ranked as (
+              select *,
+                     row_number() over (
+                       partition by canonical_container_key
+                       order by created_at desc, updated_at desc, id desc
+                     ) as rn
+              from scoped
+              where canonical_container_key in ('period-preseason', 'period-postseason')
+                 or canonical_container_key ~ '^episode-[0-9]+$'
+            )
+            select *
+            from ranked
+            where rn = 1
+            order by created_at asc, canonical_container_key asc
+            """,
+            [community_id, season_id],
+        )
+    else:
+        rows = pg.fetch_all(
+            """
+            with ranked as (
+              select *,
+                     row_number() over (
+                       partition by period_key
+                       order by created_at desc, updated_at desc, id desc
+                     ) as rn
+              from social.reddit_refresh_runs
+              where community_id = %s
+                and season_id = %s
+            )
+            select *
+            from ranked
+            where rn = 1
+            order by created_at asc, period_key asc
+            """,
+            [community_id, season_id],
+        )
+    return [dict(row) for row in rows]
+
+
+def _classify_reddit_backfill_candidate(row: Mapping[str, Any]) -> tuple[bool, str | None]:
+    status = str(row.get("status") or "").strip().lower()
+    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    error_message = str(row.get("error_message") or "").strip() or None
+    failure_reason_code = _derive_failure_reason_code(
+        status=status,
+        diagnostics=diagnostics,
+        error_message=error_message,
+        stalled=False,
+    )
+    tracked_flair_rows = _safe_int(row.get("tracked_flair_rows"))
+    if status == "failed":
+        return True, "failed"
+    if failure_reason_code in {"reddit_http_403", "coverage_incomplete"}:
+        return True, failure_reason_code
+    if tracked_flair_rows <= 0 and status in {"partial", "failed"}:
+        return True, "zero_tracked"
+    return False, None
+
+
+def _fetch_reddit_container_enrichment_coverage(
+    *,
+    community_id: str,
+    season_id: str,
+) -> dict[str, dict[str, int]]:
+    has_detail_scraped_at = _column_exists("social", "reddit_posts", "detail_scraped_at")
+    detail_scraped_expr = "p.detail_scraped_at is not null" if has_detail_scraped_at else "false"
+    canonical_container_sql = _canonical_reddit_match_container_key_sql(
+        season_id=season_id,
+        period_key_expr="m.period_key",
+        period_start_expr="m.period_start",
+        period_end_expr="m.period_end",
+        posted_at_expr="p.posted_at",
+    )
+    rows = pg.fetch_all(
+        f"""
+        with scoped as (
+          select
+            {canonical_container_sql} as canonical_container_key,
+            m.reddit_post_id,
+            m.passes_flair_filter,
+            {detail_scraped_expr} as detail_scraped,
+            exists(
+              select 1
+              from social.reddit_comments rc
+              where rc.reddit_post_id = m.reddit_post_id
+            ) as has_saved_comments,
+            exists(
+              select 1
+              from social.reddit_media_mirrors rmm
+              where rmm.reddit_post_id = m.reddit_post_id
+            ) as has_media
+          from social.reddit_period_post_matches m
+          join social.reddit_posts p on p.reddit_post_id = m.reddit_post_id
+          where m.community_id = %s
+            and m.season_id = %s
+        ),
+        dedup as (
+          select distinct on (canonical_container_key, reddit_post_id)
+                 canonical_container_key,
+                 reddit_post_id,
+                 passes_flair_filter,
+                 detail_scraped,
+                 has_saved_comments,
+                 has_media
+          from scoped
+          where canonical_container_key = any(%s)
+          order by canonical_container_key, reddit_post_id
+        )
+        select
+          canonical_container_key,
+          count(*) filter (where passes_flair_filter)::int as tracked_post_count,
+          count(*) filter (where passes_flair_filter and detail_scraped)::int as detail_scraped_post_count,
+          count(*) filter (where passes_flair_filter and has_saved_comments)::int as comment_saved_post_count,
+          count(*) filter (where passes_flair_filter and has_media)::int as media_post_count
+        from dedup
+        group by canonical_container_key
+        """,
+        [community_id, season_id, _canonical_reddit_container_keys_for_season(season_id)],
+    )
+    coverage: dict[str, dict[str, int]] = {}
+    for row in rows:
+        key = str(row.get("canonical_container_key") or "").strip().lower()
+        if not key:
+            continue
+        coverage[key] = {
+            "tracked_post_count": _safe_int(row.get("tracked_post_count")),
+            "detail_scraped_post_count": _safe_int(row.get("detail_scraped_post_count")),
+            "comment_saved_post_count": _safe_int(row.get("comment_saved_post_count")),
+            "media_post_count": _safe_int(row.get("media_post_count")),
+        }
+    return coverage
+
+
+def list_reddit_refresh_backfill_targets(
+    *,
+    community_id: str,
+    season_id: str,
+    container_keys: list[str] | None = None,
+    detail_refresh: bool = False,
+) -> dict[str, Any]:
+    normalized_container_keys = [
+        str(item or "").strip().lower()
+        for item in (container_keys or [])
+        if _is_canonical_reddit_container_key(str(item or "").strip())
+    ]
+    requested_keys = set(normalized_container_keys)
+    latest_rows = _fetch_latest_refresh_runs_for_season(
+        community_id=community_id,
+        season_id=season_id,
+        canonical_only=True,
+    )
+    rows_by_container_key = {
+        str(row.get("canonical_container_key") or row.get("period_key") or "").strip().lower(): row
+        for row in latest_rows
+        if str(row.get("canonical_container_key") or row.get("period_key") or "").strip()
+    }
+    enrichment_coverage = (
+        _fetch_reddit_container_enrichment_coverage(community_id=community_id, season_id=season_id)
+        if detail_refresh
+        else {}
+    )
+
+    targets: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    if requested_keys:
+        ordered_keys = sorted(requested_keys, key=_canonical_reddit_container_sort_key)
+    else:
+        ordered_keys = _canonical_reddit_container_keys_for_season(season_id)
+
+    for period_key in ordered_keys:
+        row = rows_by_container_key.get(period_key)
+        if row is None:
+            skipped.append(
+                {
+                    "container_key": period_key,
+                    "reason": "no_previous_run",
+                    "latest_run_id": None,
+                    "latest_run_status": None,
+                }
+            )
+            continue
+
+        diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+        request_payload = row.get("request_payload") if isinstance(row.get("request_payload"), dict) else {}
+        latest_run_status = str(row.get("status") or "").strip().lower() or None
+        latest_run_id = str(row.get("id") or "").strip() or None
+        stale, stale_reason_code = _classify_reddit_backfill_candidate(row)
+
+        coverage = enrichment_coverage.get(period_key) or {}
+        needs_enrichment = bool(
+            detail_refresh
+            and (
+                _safe_int(coverage.get("tracked_post_count")) > _safe_int(coverage.get("detail_scraped_post_count"))
+                or _safe_int(coverage.get("tracked_post_count")) > _safe_int(coverage.get("comment_saved_post_count"))
+                or _safe_int(coverage.get("tracked_post_count")) > _safe_int(coverage.get("media_post_count"))
+            )
+        )
+
+        if requested_keys or stale or needs_enrichment:
+            targets.append(
+                {
+                    "container_key": period_key,
+                    "latest_run_id": latest_run_id,
+                    "latest_run_status": latest_run_status,
+                    "stale": stale,
+                    "stale_reason_code": stale_reason_code,
+                    "failure_reason_code": _derive_failure_reason_code(
+                        status=latest_run_status or "",
+                        diagnostics=diagnostics,
+                        error_message=str(row.get("error_message") or "").strip() or None,
+                        stalled=False,
+                    ),
+                    "operator_hint": _derive_operator_hint(
+                        status=latest_run_status or "",
+                        diagnostics=diagnostics,
+                        error_message=str(row.get("error_message") or "").strip() or None,
+                        stalled=False,
+                    ),
+                    "tracked_flair_rows": _safe_int(row.get("tracked_flair_rows")),
+                    "matched_rows": _safe_int(row.get("matched_rows")),
+                    "needs_enrichment": needs_enrichment,
+                    "enrichment_coverage": coverage,
+                    "request_payload": request_payload,
+                }
+            )
+            continue
+
+        skipped.append(
+            {
+                "container_key": period_key,
+                "reason": "fresh_successful_run",
+                "latest_run_id": latest_run_id,
+                "latest_run_status": latest_run_status,
+                "failure_reason_code": _derive_failure_reason_code(
+                    status=latest_run_status or "",
+                    diagnostics=diagnostics,
+                    error_message=str(row.get("error_message") or "").strip() or None,
+                    stalled=False,
+                ),
+                "tracked_flair_rows": _safe_int(row.get("tracked_flair_rows")),
+                "needs_enrichment": needs_enrichment,
+            }
+        )
+
+    return {
+        "targets": targets,
+        "skipped": skipped,
+        "summary": {
+            "requested_container_count": len(ordered_keys),
+            "target_count": len(targets),
+            "stale_container_count": sum(1 for item in targets if bool(item.get("stale"))),
+            "enrichment_target_count": sum(1 for item in targets if bool(item.get("needs_enrichment"))),
+            "requested_container_keys": ordered_keys,
+        },
+    }
+
+
+def _reddit_backfill_sse_chunk(event_type: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=True, default=str)}\n\n"
+
+
+def _kickoff_reddit_refresh_run_for_backfill(
+    *,
+    serialized_payload: dict[str, Any],
+    operation_worker_id: str,
+) -> dict[str, Any]:
+    run_row = create_or_reuse_refresh_run(payload=serialized_payload)
+    run_id = str(run_row.get("id") or "").strip()
+    if not run_id:
+        raise RuntimeError("reddit_refresh_run_id_missing")
+
+    reused = bool(run_row.get("reused"))
+    run = get_refresh_run(run_id)
+    execution_mode = canonical_execution_mode()
+    execution_owner = execution_owner_label()
+    execution_backend = execution_backend_canonical()
+    should_dispatch_modal = execution_backend == "modal" and (
+        not reused
+        or (
+            isinstance(run, dict)
+            and str(run.get("status") or "").strip().lower() == "queued"
+            and not str(run.get("claimed_by_worker_id") or "").strip()
+            and not str(run.get("heartbeat_at") or "").strip()
+        )
+    )
+    modal_dispatched = False
+    if should_dispatch_modal:
+        modal_ready, modal_reason = modal_dispatch_ready(function_name=modal_reddit_refresh_function_name())
+        if not modal_ready:
+            raise RuntimeError(f"REDDIT_REMOTE_DISPATCH_UNAVAILABLE:{modal_reason or 'modal_dispatch_unavailable'}")
+        reddit_runtime_health = get_modal_reddit_runtime_health()
+        if not bool(reddit_runtime_health.get("healthy")):
+            missing_env = reddit_runtime_health.get("missing_env")
+            missing_env_list = (
+                [str(item).strip() for item in missing_env if str(item).strip()]
+                if isinstance(missing_env, list)
+                else []
+            )
+            missing_env_text = f" Missing: {', '.join(missing_env_list)}." if missing_env_list else ""
+            raise RuntimeError(
+                "REDDIT_REMOTE_RUNTIME_UNHEALTHY:"
+                f"{str(reddit_runtime_health.get('reason') or 'reddit_runtime_unhealthy').strip()}{missing_env_text}"
+            )
+        modal_dispatched = dispatch_reddit_refresh(run_id=run_id)
+        if not modal_dispatched:
+            raise RuntimeError("REDDIT_REMOTE_DISPATCH_UNAVAILABLE:modal_dispatch_failed")
+        metadata = modal_execution_metadata()
+        execution_mode = metadata["execution_mode_canonical"]
+        execution_owner = metadata["execution_owner"]
+        execution_backend = metadata["execution_backend_canonical"]
+        run = get_refresh_run(run_id)
+    elif not reused and execution_mode == "local":
+        execute_refresh_run(run_id, worker_id=operation_worker_id)
+        run = get_refresh_run(run_id)
+
+    if modal_dispatched and isinstance(run, dict):
+        run = {**run, **modal_execution_metadata()}
+    return {
+        "run": run,
+        "reused": reused,
+        "execution_owner": execution_owner,
+        "execution_mode_canonical": execution_mode,
+        "execution_backend_canonical": execution_backend,
+    }
+
+
+def build_reddit_refresh_backfill_operation_producer(
+    *,
+    request_payload: dict[str, Any],
+    operation_id: str | None = None,
+):
+    from trr_backend.repositories import admin_operations
+
+    community_id = str(request_payload.get("community_id") or "").strip()
+    season_id = str(request_payload.get("season_id") or "").strip()
+    if not community_id:
+        raise ValueError("request_payload.community_id is required")
+    if not season_id:
+        raise ValueError("request_payload.season_id is required")
+
+    raw_container_keys_value = request_payload.get("container_keys")
+    raw_container_keys = raw_container_keys_value if isinstance(raw_container_keys_value, list) else []
+    requested_container_keys = [
+        str(item or "").strip().lower()
+        for item in raw_container_keys
+        if _is_canonical_reddit_container_key(str(item or "").strip())
+    ]
+    mode = str(request_payload.get("mode") or "sync_full").strip().lower() or "sync_full"
+    if mode not in {"sync_posts", "sync_details", "sync_full"}:
+        mode = "sync_full"
+    detail_refresh = bool(request_payload.get("detail_refresh"))
+    poll_seconds = _env_float(
+        "REDDIT_BACKFILL_OPERATION_POLL_SECONDS",
+        REDDIT_BACKFILL_POLL_SECONDS_DEFAULT,
+        minimum=0.5,
+        maximum=30.0,
+    )
+    normalized_operation_id = str(operation_id or "").strip() or None
+    operation_worker_id = f"admin-op:reddit-backfill:{normalized_operation_id or 'local'}"
+
+    def _producer() -> Iterator[str]:
+        plan = list_reddit_refresh_backfill_targets(
+            community_id=community_id,
+            season_id=season_id,
+            container_keys=requested_container_keys,
+            detail_refresh=detail_refresh,
+        )
+        targets = list(plan.get("targets") or [])
+        skipped = list(plan.get("skipped") or [])
+        started: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        total_targets = len(targets)
+
+        yield _reddit_backfill_sse_chunk(
+            "progress",
+            {
+                "stage": "planning",
+                "message": (
+                    "Planned Reddit detail-enrichment session."
+                    if detail_refresh
+                    else "Planned Reddit stale-window recovery session."
+                ),
+                "community_id": community_id,
+                "season_id": season_id,
+                "mode": "sync_details" if detail_refresh else mode,
+                "detail_refresh": detail_refresh,
+                "summary": {
+                    **(plan.get("summary") or {}),
+                    "started_count": 0,
+                    "failed_count": 0,
+                    "completed_count": 0,
+                },
+                "targets": [
+                    {
+                        "container_key": item.get("container_key"),
+                        "latest_run_id": item.get("latest_run_id"),
+                        "latest_run_status": item.get("latest_run_status"),
+                        "stale_reason_code": item.get("stale_reason_code"),
+                        "needs_enrichment": item.get("needs_enrichment"),
+                    }
+                    for item in targets
+                ],
+                "skipped": skipped,
+            },
+        )
+
+        if total_targets == 0:
+            yield _reddit_backfill_sse_chunk(
+                "complete",
+                {
+                    "status": "completed",
+                    "message": (
+                        "No Reddit season windows need detail enrichment."
+                        if detail_refresh
+                        else "No stale Reddit season windows needed recovery."
+                    ),
+                    "community_id": community_id,
+                    "season_id": season_id,
+                    "started": [],
+                    "skipped": skipped,
+                    "summary": {
+                        **(plan.get("summary") or {}),
+                        "started_count": 0,
+                        "failed_count": 0,
+                        "completed_count": 0,
+                    },
+                },
+            )
+            return
+
+        for index, target in enumerate(targets, start=1):
+            if normalized_operation_id and admin_operations.is_cancel_requested(normalized_operation_id):
+                yield _reddit_backfill_sse_chunk(
+                    "error",
+                    {
+                        "stage": "operation",
+                        "message": (
+                            "Reddit detail-enrichment session cancelled by operator."
+                            if detail_refresh
+                            else "Reddit backfill session cancelled by operator."
+                        ),
+                        "cancel_requested": True,
+                        "started": started,
+                        "skipped": skipped,
+                        "failures": failures,
+                    },
+                )
+                return
+
+            request_payload_row = (
+                target.get("request_payload") if isinstance(target.get("request_payload"), dict) else {}
+            )
+            if not request_payload_row:
+                missing_payload = {
+                    "container_key": target.get("container_key"),
+                    "reason": "missing_request_payload",
+                    "latest_run_id": target.get("latest_run_id"),
+                }
+                skipped.append(missing_payload)
+                yield _reddit_backfill_sse_chunk(
+                    "progress",
+                    {
+                        "stage": "skipping",
+                        "message": f"Skipping {target.get('container_key')} because request payload is unavailable.",
+                        "current_index": index,
+                        "target_count": total_targets,
+                        "current_target": missing_payload,
+                        "started": started,
+                        "skipped": skipped,
+                        "failures": failures,
+                    },
+                )
+                continue
+
+            container_key = str(target.get("container_key") or "").strip().lower()
+            yield _reddit_backfill_sse_chunk(
+                "progress",
+                {
+                    "stage": "dispatching",
+                    "message": (
+                        f"Starting Reddit detail enrichment for {container_key}."
+                        if detail_refresh
+                        else f"Starting Reddit recovery for {container_key}."
+                    ),
+                    "current_index": index,
+                    "target_count": total_targets,
+                    "current_target": {
+                        "container_key": container_key,
+                        "latest_run_id": target.get("latest_run_id"),
+                        "latest_run_status": target.get("latest_run_status"),
+                        "stale_reason_code": target.get("stale_reason_code"),
+                    },
+                    "started": started,
+                    "skipped": skipped,
+                    "failures": failures,
+                },
+            )
+
+            run_payload = dict(request_payload_row)
+            run_payload["mode"] = "sync_details" if detail_refresh else mode
+            run_payload.pop("run_config_hash", None)
+            if detail_refresh:
+                run_payload["force_rescrape"] = False
+
+            try:
+                kickoff = _kickoff_reddit_refresh_run_for_backfill(
+                    serialized_payload=run_payload,
+                    operation_worker_id=operation_worker_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = {
+                    "container_key": container_key,
+                    "latest_run_id": target.get("latest_run_id"),
+                    "latest_run_status": target.get("latest_run_status"),
+                    "error": str(exc),
+                }
+                failures.append(failure)
+                yield _reddit_backfill_sse_chunk(
+                    "progress",
+                    {
+                        "stage": "dispatch_failed",
+                        "message": (
+                            f"Failed to start Reddit detail enrichment for {container_key}."
+                            if detail_refresh
+                            else f"Failed to start Reddit recovery for {container_key}."
+                        ),
+                        "current_index": index,
+                        "target_count": total_targets,
+                        "current_target": failure,
+                        "started": started,
+                        "skipped": skipped,
+                        "failures": failures,
+                    },
+                )
+                continue
+
+            initial_run = kickoff.get("run") if isinstance(kickoff.get("run"), dict) else {}
+            current_run = initial_run
+            run_id = str(initial_run.get("run_id") or "").strip() or None
+            started_entry = {
+                "container_key": container_key,
+                "latest_run_id": target.get("latest_run_id"),
+                "latest_run_status": target.get("latest_run_status"),
+                "stale": bool(target.get("stale")),
+                "stale_reason_code": target.get("stale_reason_code"),
+                "reused": bool(kickoff.get("reused")),
+                "execution_owner": kickoff.get("execution_owner"),
+                "execution_mode_canonical": kickoff.get("execution_mode_canonical"),
+                "execution_backend_canonical": kickoff.get("execution_backend_canonical"),
+                "run": current_run,
+            }
+            started.append(started_entry)
+
+            yield _reddit_backfill_sse_chunk(
+                "progress",
+                {
+                    "stage": "waiting_for_run",
+                    "message": (
+                        f"Waiting for Reddit detail-enrichment run for {container_key}."
+                        if detail_refresh
+                        else f"Waiting for Reddit recovery run for {container_key}."
+                    ),
+                    "current_index": index,
+                    "target_count": total_targets,
+                    "current_target": started_entry,
+                    "started": started,
+                    "skipped": skipped,
+                    "failures": failures,
+                },
+            )
+
+            if run_id:
+                while True:
+                    if normalized_operation_id and admin_operations.is_cancel_requested(normalized_operation_id):
+                        yield _reddit_backfill_sse_chunk(
+                            "error",
+                            {
+                                "stage": "operation",
+                                "message": (
+                                    "Reddit detail-enrichment session cancelled by operator."
+                                    if detail_refresh
+                                    else "Reddit backfill session cancelled by operator."
+                                ),
+                                "cancel_requested": True,
+                                "started": started,
+                                "skipped": skipped,
+                                "failures": failures,
+                            },
+                        )
+                        return
+                    current_run = get_refresh_run(run_id)
+                    started_entry["run"] = current_run
+                    current_status = str(current_run.get("status") or "").strip().lower()
+                    yield _reddit_backfill_sse_chunk(
+                        "progress",
+                        {
+                            "stage": "waiting_for_run",
+                            "message": (
+                                f"Reddit detail-enrichment run for {container_key} is {current_status or 'unknown'}."
+                                if detail_refresh
+                                else f"Reddit recovery run for {container_key} is {current_status or 'unknown'}."
+                            ),
+                            "current_index": index,
+                            "target_count": total_targets,
+                            "current_target": started_entry,
+                            "started": started,
+                            "skipped": skipped,
+                            "failures": failures,
+                        },
+                    )
+                    if current_status in {"completed", "partial", "failed", "cancelled"}:
+                        break
+                    time.sleep(poll_seconds)
+
+            if str((started_entry.get("run") or {}).get("status") or "").strip().lower() == "failed":
+                failures.append(
+                    {
+                        "container_key": container_key,
+                        "latest_run_id": target.get("latest_run_id"),
+                        "latest_run_status": target.get("latest_run_status"),
+                        "run_id": run_id,
+                        "error": (started_entry.get("run") or {}).get("error"),
+                    }
+                )
+
+        completed_count = sum(
+            1
+            for item in started
+            if str((item.get("run") or {}).get("status") or "").strip().lower() in {"completed", "partial"}
+        )
+        failed_count = len(failures)
+        yield _reddit_backfill_sse_chunk(
+            "complete",
+            {
+                "status": "completed",
+                "message": (
+                    "Reddit detail-enrichment session finished."
+                    if detail_refresh
+                    else "Reddit stale-window recovery session finished."
+                ),
+                "community_id": community_id,
+                "season_id": season_id,
+                "started": started,
+                "skipped": skipped,
+                "failures": failures,
+                "summary": {
+                    **(plan.get("summary") or {}),
+                    "started_count": len(started),
+                    "skipped_count": len(skipped),
+                    "completed_count": completed_count,
+                    "failed_count": failed_count,
+                },
+            },
+        )
+
+    return _producer
 
 
 def _normalize_analytics_scope(scope: str | None) -> str:
@@ -4163,7 +5250,18 @@ def _build_analytics_filters(
 
     normalized_container_key = str(container_key or "").strip()
     if normalized_container_key:
-        clauses.append("m.period_key = %s")
+        if normalized_scope == "season" and season_id:
+            canonical_container_sql = _canonical_reddit_match_container_key_sql(
+                season_id=season_id,
+                period_key_expr="m.period_key",
+                period_start_expr="m.period_start",
+                period_end_expr="m.period_end",
+                posted_at_expr="p.posted_at",
+            )
+            clauses.append(f"{canonical_container_sql} = %s")
+        else:
+            direct_container_sql = _raw_reddit_container_key_sql(period_key_expr="m.period_key")
+            clauses.append(f"coalesce({direct_container_sql}, 'unmapped') = %s")
         params.append(normalized_container_key)
 
     normalized_flair_key = to_canonical_flair_key(flair_key)
@@ -4172,6 +5270,316 @@ def _build_analytics_filters(
         params.append(normalized_flair_key)
 
     return " and ".join(clauses), params
+
+
+def _fetch_reddit_analytics_extras(
+    *,
+    community_id: str,
+    scope: str,
+    season_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_scope = _normalize_analytics_scope(scope)
+    has_detail_scraped_at = _column_exists("social", "reddit_posts", "detail_scraped_at")
+    detail_scraped_expr = "p.detail_scraped_at is not null" if has_detail_scraped_at else "false"
+    where_sql, where_params = _build_analytics_filters(
+        community_id=community_id,
+        scope=normalized_scope,
+        season_id=season_id,
+    )
+    canonical_container_keys: list[str] = []
+    analytics_where_sql = where_sql
+    analytics_where_params = list(where_params)
+    canonical_container_sql = _canonical_reddit_match_container_key_sql(
+        season_id=season_id,
+        period_key_expr="m.period_key",
+        period_start_expr="m.period_start",
+        period_end_expr="m.period_end",
+        posted_at_expr="p.posted_at",
+    )
+    if normalized_scope == "season" and season_id:
+        canonical_container_keys = _canonical_reddit_container_keys_for_season(season_id)
+        analytics_where_sql = f"{where_sql} and {canonical_container_sql} = any(%s)"
+        analytics_where_params.append(canonical_container_keys)
+    coverage_row = (
+        pg.fetch_one(
+            f"""
+        with dedup as (
+          select distinct on (canonical_container_key, m.reddit_post_id)
+                 {canonical_container_sql} as canonical_container_key,
+                 m.reddit_post_id,
+                 m.is_show_match,
+                 m.passes_flair_filter,
+                 p.num_comments,
+                 {detail_scraped_expr} as detail_scraped,
+                 exists(
+                   select 1
+                   from social.reddit_comments rc
+                   where rc.reddit_post_id = m.reddit_post_id
+                 ) as has_saved_comments,
+                 exists(
+                   select 1
+                   from social.reddit_media_mirrors rmm
+                   where rmm.reddit_post_id = m.reddit_post_id
+                 ) as has_media,
+                 exists(
+                   select 1
+                   from social.reddit_media_mirrors rmm
+                   where rmm.reddit_post_id = m.reddit_post_id
+                     and rmm.status = 'mirrored'
+                 ) as has_mirrored_media,
+                 greatest(
+                   coalesce(p.updated_at, 'epoch'::timestamptz),
+                   coalesce(m.updated_at, 'epoch'::timestamptz)
+                 ) as row_updated_at
+          from social.reddit_period_post_matches m
+          join social.reddit_posts p on p.reddit_post_id = m.reddit_post_id
+          where {analytics_where_sql}
+          order by canonical_container_key, m.reddit_post_id, m.updated_at desc
+        )
+        select
+          count(*)::int as post_count,
+          count(*) filter (where passes_flair_filter)::int as tracked_post_count,
+          count(*) filter (where is_show_match)::int as show_match_post_count,
+          count(*) filter (where passes_flair_filter and detail_scraped)::int as detail_scraped_post_count,
+          count(*) filter (where passes_flair_filter and has_saved_comments)::int as comment_saved_post_count,
+          count(*) filter (where passes_flair_filter and has_media)::int as media_post_count,
+          count(*) filter (where passes_flair_filter and has_mirrored_media)::int as mirrored_media_post_count,
+          coalesce(sum(num_comments), 0)::bigint as reported_comment_count,
+          max(row_updated_at) as latest_data_timestamp
+        from dedup
+        """,
+            analytics_where_params,
+        )
+        or {}
+    )
+
+    container_statuses: list[dict[str, Any]] = []
+    latest_run_timestamp: str | None = None
+    latest_run_status: str | None = None
+    unmapped_post_count = 0
+    unmapped_tracked_post_count = 0
+
+    if normalized_scope == "season" and season_id:
+        unmapped_row = (
+            pg.fetch_one(
+                f"""
+                with dedup as (
+                  select distinct on (m.reddit_post_id)
+                         m.reddit_post_id,
+                         m.passes_flair_filter
+                  from social.reddit_period_post_matches m
+                  join social.reddit_posts p on p.reddit_post_id = m.reddit_post_id
+                  where {where_sql}
+                    and {canonical_container_sql} = 'unmapped'
+                  order by m.reddit_post_id, m.updated_at desc
+                )
+                select
+                  count(*)::int as unmapped_post_count,
+                  count(*) filter (where passes_flair_filter)::int as unmapped_tracked_post_count
+                from dedup
+                """,
+                where_params,
+            )
+            or {}
+        )
+        unmapped_post_count = _safe_int(unmapped_row.get("unmapped_post_count"))
+        unmapped_tracked_post_count = _safe_int(unmapped_row.get("unmapped_tracked_post_count"))
+        latest_rows = _fetch_latest_refresh_runs_for_season(
+            community_id=community_id,
+            season_id=season_id,
+            canonical_only=True,
+        )
+        coverage_by_period_rows = pg.fetch_all(
+            f"""
+            with dedup as (
+              select distinct on (canonical_container_key, m.reddit_post_id)
+                     {canonical_container_sql} as canonical_container_key,
+                     m.reddit_post_id,
+                     m.is_show_match,
+                     m.passes_flair_filter,
+                     {detail_scraped_expr} as detail_scraped,
+                     exists(
+                       select 1
+                       from social.reddit_comments rc
+                       where rc.reddit_post_id = m.reddit_post_id
+                     ) as has_saved_comments,
+                     exists(
+                       select 1
+                       from social.reddit_media_mirrors rmm
+                       where rmm.reddit_post_id = m.reddit_post_id
+                     ) as has_media,
+                     exists(
+                       select 1
+                       from social.reddit_media_mirrors rmm
+                       where rmm.reddit_post_id = m.reddit_post_id
+                         and rmm.status = 'mirrored'
+                     ) as has_mirrored_media
+              from social.reddit_period_post_matches m
+              join social.reddit_posts p on p.reddit_post_id = m.reddit_post_id
+              where {analytics_where_sql}
+              order by canonical_container_key, m.reddit_post_id, m.updated_at desc
+            )
+            select
+              canonical_container_key,
+              count(*)::int as matched_post_count,
+              count(*) filter (where passes_flair_filter)::int as tracked_post_count,
+              count(*) filter (where is_show_match)::int as show_match_post_count,
+              count(*) filter (where passes_flair_filter and detail_scraped)::int as detail_scraped_post_count,
+              count(*) filter (where passes_flair_filter and has_saved_comments)::int as comment_saved_post_count,
+              count(*) filter (where passes_flair_filter and has_media)::int as media_post_count,
+              count(*) filter (where passes_flair_filter and has_mirrored_media)::int as mirrored_media_post_count
+            from dedup
+            group by canonical_container_key
+            """,
+            analytics_where_params,
+        )
+        coverage_by_period = {
+            str(row.get("canonical_container_key") or "").strip(): row
+            for row in coverage_by_period_rows
+            if str(row.get("canonical_container_key") or "").strip()
+        }
+        rows_by_container_key = {
+            str(row.get("canonical_container_key") or row.get("period_key") or "").strip().lower(): row
+            for row in latest_rows
+            if str(row.get("canonical_container_key") or row.get("period_key") or "").strip()
+        }
+        for period_key in canonical_container_keys:
+            row = rows_by_container_key.get(period_key)
+            coverage_row_by_period = coverage_by_period.get(period_key) or {}
+            tracked_post_count = _safe_int(coverage_row_by_period.get("tracked_post_count"))
+            detail_scraped_post_count = _safe_int(coverage_row_by_period.get("detail_scraped_post_count"))
+            comment_saved_post_count = _safe_int(coverage_row_by_period.get("comment_saved_post_count"))
+            media_post_count = _safe_int(coverage_row_by_period.get("media_post_count"))
+            mirrored_media_post_count = _safe_int(coverage_row_by_period.get("mirrored_media_post_count"))
+            if row is None:
+                container_statuses.append(
+                    {
+                        "container_key": period_key,
+                        "latest_run_id": None,
+                        "latest_run_status": None,
+                        "latest_run_timestamp": None,
+                        "failure_reason_code": None,
+                        "operator_hint": "No Reddit refresh run recorded for this season window yet.",
+                        "stale": True,
+                        "stale_reason_code": "no_previous_run",
+                        "tracked_post_count": tracked_post_count,
+                        "matched_post_count": _safe_int(coverage_row_by_period.get("matched_post_count")),
+                        "show_match_post_count": _safe_int(coverage_row_by_period.get("show_match_post_count")),
+                        "detail_scraped_post_count": detail_scraped_post_count,
+                        "comment_saved_post_count": comment_saved_post_count,
+                        "media_post_count": media_post_count,
+                        "mirrored_media_post_count": mirrored_media_post_count,
+                        "detail_coverage_pct": round((detail_scraped_post_count / tracked_post_count) * 100, 1)
+                        if tracked_post_count > 0
+                        else None,
+                        "comment_coverage_pct": round((comment_saved_post_count / tracked_post_count) * 100, 1)
+                        if tracked_post_count > 0
+                        else None,
+                        "media_coverage_pct": round((media_post_count / tracked_post_count) * 100, 1)
+                        if tracked_post_count > 0
+                        else None,
+                        "mirrored_media_coverage_pct": round((mirrored_media_post_count / tracked_post_count) * 100, 1)
+                        if tracked_post_count > 0
+                        else None,
+                    }
+                )
+                continue
+            diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+            latest_status = str(row.get("status") or "").strip().lower()
+            failure_reason_code = _derive_failure_reason_code(
+                status=latest_status,
+                diagnostics=diagnostics,
+                error_message=str(row.get("error_message") or "").strip() or None,
+                stalled=False,
+            )
+            operator_hint = _derive_operator_hint(
+                status=latest_status,
+                diagnostics=diagnostics,
+                error_message=str(row.get("error_message") or "").strip() or None,
+                stalled=False,
+            )
+            stale, stale_reason_code = _classify_reddit_backfill_candidate(row)
+            latest_run_at = _iso_utc(_parse_iso(row.get("completed_at")) or _parse_iso(row.get("updated_at")))
+            if latest_run_at and (
+                latest_run_timestamp is None
+                or (_parse_iso(latest_run_at) or datetime.min.replace(tzinfo=UTC))
+                > (_parse_iso(latest_run_timestamp) or datetime.min.replace(tzinfo=UTC))
+            ):
+                latest_run_timestamp = latest_run_at
+                latest_run_status = latest_status or None
+            container_statuses.append(
+                {
+                    "container_key": period_key,
+                    "latest_run_id": str(row.get("id") or "").strip() or None,
+                    "latest_run_status": latest_status or None,
+                    "latest_run_timestamp": latest_run_at,
+                    "failure_reason_code": failure_reason_code,
+                    "operator_hint": operator_hint,
+                    "stale": stale,
+                    "stale_reason_code": stale_reason_code,
+                    "tracked_post_count": tracked_post_count,
+                    "matched_post_count": _safe_int(coverage_row_by_period.get("matched_post_count")),
+                    "show_match_post_count": _safe_int(coverage_row_by_period.get("show_match_post_count")),
+                    "detail_scraped_post_count": detail_scraped_post_count,
+                    "comment_saved_post_count": comment_saved_post_count,
+                    "media_post_count": media_post_count,
+                    "mirrored_media_post_count": mirrored_media_post_count,
+                    "detail_coverage_pct": round((detail_scraped_post_count / tracked_post_count) * 100, 1)
+                    if tracked_post_count > 0
+                    else None,
+                    "comment_coverage_pct": round((comment_saved_post_count / tracked_post_count) * 100, 1)
+                    if tracked_post_count > 0
+                    else None,
+                    "media_coverage_pct": round((media_post_count / tracked_post_count) * 100, 1)
+                    if tracked_post_count > 0
+                    else None,
+                    "mirrored_media_coverage_pct": round((mirrored_media_post_count / tracked_post_count) * 100, 1)
+                    if tracked_post_count > 0
+                    else None,
+                }
+            )
+
+    tracked_post_count = _safe_int(coverage_row.get("tracked_post_count"))
+    detail_scraped_post_count = _safe_int(coverage_row.get("detail_scraped_post_count"))
+    comment_saved_post_count = _safe_int(coverage_row.get("comment_saved_post_count"))
+    media_post_count = _safe_int(coverage_row.get("media_post_count"))
+    mirrored_media_post_count = _safe_int(coverage_row.get("mirrored_media_post_count"))
+
+    return {
+        "freshness": {
+            "latest_data_timestamp": _iso_utc(_parse_iso(coverage_row.get("latest_data_timestamp"))),
+            "latest_run_timestamp": latest_run_timestamp,
+            "latest_canonical_run_timestamp": latest_run_timestamp,
+            "latest_run_status": latest_run_status,
+        },
+        "coverage": {
+            "tracked_post_count": tracked_post_count,
+            "detail_scraped_post_count": detail_scraped_post_count,
+            "comment_saved_post_count": comment_saved_post_count,
+            "media_post_count": media_post_count,
+            "mirrored_media_post_count": mirrored_media_post_count,
+            "reported_comment_count": _safe_int(coverage_row.get("reported_comment_count")),
+            "detail_coverage_pct": round((detail_scraped_post_count / tracked_post_count) * 100, 1)
+            if tracked_post_count > 0
+            else None,
+            "comment_coverage_pct": round((comment_saved_post_count / tracked_post_count) * 100, 1)
+            if tracked_post_count > 0
+            else None,
+            "media_coverage_pct": round((media_post_count / tracked_post_count) * 100, 1)
+            if tracked_post_count > 0
+            else None,
+            "mirrored_media_coverage_pct": round((mirrored_media_post_count / tracked_post_count) * 100, 1)
+            if tracked_post_count > 0
+            else None,
+            "scope": "canonical_windows" if normalized_scope == "season" and season_id else "all_posts",
+            "container_count": len(container_statuses),
+            "stale_container_count": sum(1 for item in container_statuses if bool(item.get("stale"))),
+            "recovered_container_count": sum(1 for item in container_statuses if not bool(item.get("stale"))),
+            "unmapped_post_count": unmapped_post_count,
+            "unmapped_tracked_post_count": unmapped_tracked_post_count,
+        },
+        "container_statuses": container_statuses,
+    }
 
 
 def get_reddit_community_analytics_summary(
@@ -4220,6 +5628,11 @@ def get_reddit_community_analytics_summary(
         )
         or {}
     )
+    extras = _fetch_reddit_analytics_extras(
+        community_id=community_id,
+        scope=scope,
+        season_id=season_id,
+    )
     return {
         "scope": _normalize_analytics_scope(scope),
         "season_id": season_id,
@@ -4236,6 +5649,9 @@ def get_reddit_community_analytics_summary(
             "source_table": "social.reddit_period_post_matches",
             "row_count": _safe_int(row.get("post_count")),
         },
+        "freshness": extras.get("freshness"),
+        "coverage": extras.get("coverage"),
+        "container_statuses": extras.get("container_statuses"),
     }
 
 
@@ -4287,6 +5703,11 @@ def get_reddit_community_show_breakdown(
         """,
         where_params,
     )
+    extras = _fetch_reddit_analytics_extras(
+        community_id=community_id,
+        scope=scope,
+        season_id=season_id,
+    )
     return {
         "scope": _normalize_analytics_scope(scope),
         "season_id": season_id,
@@ -4303,6 +5724,9 @@ def get_reddit_community_show_breakdown(
             }
             for row in rows
         ],
+        "freshness": extras.get("freshness"),
+        "coverage": extras.get("coverage"),
+        "container_statuses": extras.get("container_statuses"),
     }
 
 
@@ -4352,6 +5776,11 @@ def get_reddit_community_flair_breakdown(
         """,
         where_params,
     )
+    extras = _fetch_reddit_analytics_extras(
+        community_id=community_id,
+        scope=scope,
+        season_id=season_id,
+    )
     return {
         "scope": _normalize_analytics_scope(scope),
         "season_id": season_id,
@@ -4368,6 +5797,9 @@ def get_reddit_community_flair_breakdown(
             }
             for row in rows
         ],
+        "freshness": extras.get("freshness"),
+        "coverage": extras.get("coverage"),
+        "container_statuses": extras.get("container_statuses"),
     }
 
 
@@ -4444,6 +5876,11 @@ def list_reddit_community_posts(
         """,
         [*where_params, normalized_per_page, offset],
     )
+    extras = _fetch_reddit_analytics_extras(
+        community_id=community_id,
+        scope=scope,
+        season_id=season_id,
+    )
     return {
         "scope": _normalize_analytics_scope(scope),
         "season_id": season_id,
@@ -4455,6 +5892,9 @@ def list_reddit_community_posts(
             "total_count": _safe_int(count_row.get("total_count")),
         },
         "posts": [_base_thread_projection(row) for row in rows],
+        "freshness": extras.get("freshness"),
+        "coverage": extras.get("coverage"),
+        "container_statuses": extras.get("container_statuses"),
     }
 
 
@@ -4496,6 +5936,11 @@ def get_reddit_community_flair_detail(
         )
         or {}
     )
+    extras = _fetch_reddit_analytics_extras(
+        community_id=community_id,
+        scope=scope,
+        season_id=season_id,
+    )
     return {
         "scope": _normalize_analytics_scope(scope),
         "season_id": season_id,
@@ -4506,4 +5951,7 @@ def get_reddit_community_flair_detail(
         },
         "posts": posts_payload.get("posts", []),
         "pagination": posts_payload.get("pagination", {}),
+        "freshness": extras.get("freshness"),
+        "coverage": extras.get("coverage"),
+        "container_statuses": extras.get("container_statuses"),
     }

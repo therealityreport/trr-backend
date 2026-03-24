@@ -54,10 +54,28 @@ class YouTubeScrapeConfig:
     max_pages: int | None = None  # continuation page limit
     enforce_keyword_filter: bool = True
 
+    # Performance tuning
+    fast_mode: bool = False
+    """When True, uses aggressive rate-limiting tiers for faster scraping."""
+
+    fetch_comment_replies: bool = True
+    """When False, only fetch top-level comments and skip reply chains."""
+
     # Metadata for tracking
     show_id: int | None = None
     season_number: int | None = None
     person_id: int | None = None
+
+    def __post_init__(self):
+        """Apply fast_mode overrides when enabled."""
+        if self.fast_mode:
+            # Use a lower base delay unless explicitly overridden
+            if self.delay_seconds == 2.0:  # Only override if at default
+                self.delay_seconds = 0.5
+            logger.info(
+                "YouTubeScrapeConfig fast_mode enabled: delay=%.2fs",
+                self.delay_seconds,
+            )
 
     @property
     def start_timestamp(self) -> float:
@@ -68,7 +86,7 @@ class YouTubeScrapeConfig:
         if self.date_end:
             # Use end of day so the entire date is included
             return self.date_end.replace(hour=23, minute=59, second=59).timestamp()
-        return datetime.now().timestamp()
+        return datetime.now(UTC).timestamp()
 
     def matches_keywords(self, text: str) -> bool:
         """Check if text contains any of the configured keywords."""
@@ -423,8 +441,11 @@ class YouTubeScraper:
         self.api_key = api_key
         self.session = self._create_session()
         self._request_count = 0
+        self._last_429_at: float = 0.0
+        self._consecutive_success: int = 0
         self.last_retrieval_meta: dict[str, Any] = {}
         self.last_comment_fetch_reason: str | None = None
+        self._last_channel_continuation_error: str | None = None
         self.comments_auth_failed = False
         self._precise_publish_ts_cache: dict[str, int] = {}
         self._precise_publish_attempts = 0
@@ -494,12 +515,46 @@ class YouTubeScraper:
             ),
         }
 
-    def _rate_limit(self, delay: float):
-        """Apply rate limiting between requests."""
+    def _rate_limit(self, delay: float, *, fast_mode: bool = False):
+        """Apply adaptive rate limiting between requests.
+
+        Standard mode: starts at 50% of the base delay.
+        Fast mode: uses aggressive tiers that ramp down with consecutive successes.
+        Both modes: double delay for 60s after any 429 response.
+        """
         if self._request_count > 0:
-            logger.debug(f"Rate limiting: waiting {delay}s")
-            time.sleep(delay)
+            now = time.monotonic()
+            if self._last_429_at and (now - self._last_429_at) < 60.0:
+                effective_delay = delay * 2.0
+            elif fast_mode:
+                # Aggressive tiers: ramp down as we prove the session is healthy
+                if self._consecutive_success >= 20:
+                    effective_delay = delay * 0.15  # e.g. 0.5 * 0.15 = 0.075s
+                elif self._consecutive_success >= 5:
+                    effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
+                else:
+                    effective_delay = delay * 0.5  # e.g. 0.5 * 0.5 = 0.25s
+            elif self._consecutive_success >= 20:
+                effective_delay = delay * 0.5
+            else:
+                effective_delay = delay * 0.5
+            logger.debug(
+                "Rate limiting: waiting %.3fs (base=%ss, fast=%s, streak=%s)",
+                effective_delay,
+                delay,
+                fast_mode,
+                self._consecutive_success,
+            )
+            time.sleep(effective_delay)
         self._request_count += 1
+
+    def _track_response_status(self, status_code: int) -> None:
+        """Track response status for adaptive rate limiting."""
+        if status_code == 429:
+            self._last_429_at = time.monotonic()
+            self._consecutive_success = 0
+        elif 200 <= status_code < 400:
+            self._consecutive_success += 1
 
     def _parse_duration(self, duration_str: str) -> int:
         """Parse ISO 8601 duration to seconds."""
@@ -867,7 +922,9 @@ class YouTubeScraper:
             video_id=video_id,
             title=title,
             description=description,
-            date_time=datetime.fromtimestamp(published_at).strftime("%Y-%m-%d %H:%M:%S") if published_at else "",
+            date_time=datetime.fromtimestamp(published_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+            if published_at
+            else "",
             published_at=published_at,
             channel_id="",
             channel_title=channel_title,
@@ -1001,7 +1058,7 @@ class YouTubeScraper:
                     return ts
         return 0
 
-    def _fetch_precise_publish_timestamp(self, video_id: str, delay: float = 2.0) -> int:
+    def _fetch_precise_publish_timestamp(self, video_id: str, delay: float = 2.0, *, fast_mode: bool = False) -> int:
         """Fetch exact upload date from watch-page and Shorts-page metadata."""
         cached = self._precise_publish_ts_cache.get(video_id)
         if cached is not None:
@@ -1012,15 +1069,19 @@ class YouTubeScraper:
             self.VIDEO_WATCH_URL.format(video_id=video_id),
             f"https://www.youtube.com/shorts/{video_id}",
         ):
-            self._rate_limit(delay)
+            self._rate_limit(delay, fast_mode=fast_mode)
             try:
                 response = self.session.get(
                     url,
                     headers=self._get_headers(),
                     timeout=self.REQUEST_TIMEOUT_SECONDS,
                 )
+                self._track_response_status(response.status_code)
                 response.raise_for_status()
             except requests.exceptions.RequestException as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code:
+                    self._track_response_status(status_code)
                 logger.debug("Failed to fetch precise publish timestamp for %s via %s: %s", video_id, url, e)
                 continue
             ts = self._extract_precise_publish_timestamp_from_html(response.text or "")
@@ -1043,19 +1104,23 @@ class YouTubeScraper:
                 return likes
         return 0
 
-    def _fetch_shorts_like_count(self, video_id: str, delay: float = 2.0) -> int:
+    def _fetch_shorts_like_count(self, video_id: str, delay: float = 2.0, *, fast_mode: bool = False) -> int:
         normalized_video_id = str(video_id or "").strip()
         if not normalized_video_id:
             return 0
-        self._rate_limit(delay)
+        self._rate_limit(delay, fast_mode=fast_mode)
         try:
             response = self.session.get(
                 f"https://www.youtube.com/shorts/{normalized_video_id}",
                 headers=self._get_headers(),
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
+            self._track_response_status(response.status_code)
             response.raise_for_status()
         except requests.exceptions.RequestException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code:
+                self._track_response_status(status_code)
             logger.debug("Failed to fetch Shorts like count for %s: %s", normalized_video_id, exc)
             return 0
         return self._extract_shorts_like_count_from_html(response.text or "")
@@ -1218,7 +1283,7 @@ class YouTubeScraper:
         if is_short:
             self._shorts_precise_publish_attempts += 1
         precise_delay = min(max(float(config.delay_seconds or 0.0) * 0.25, 0.05), 0.35)
-        precise_ts = self._fetch_precise_publish_timestamp(video.video_id, precise_delay)
+        precise_ts = self._fetch_precise_publish_timestamp(video.video_id, precise_delay, fast_mode=config.fast_mode)
         if precise_ts <= 0:
             self._precise_publish_failures += 1
             if is_short:
@@ -1244,26 +1309,35 @@ class YouTubeScraper:
         handle: str,
         delay: float = 2.0,
         surface: str = "videos",
+        *,
+        fast_mode: bool = False,
     ) -> dict | None:
         """Fetch videos or shorts from a YouTube channel page."""
-        self._rate_limit(delay)
+        self._rate_limit(delay, fast_mode=fast_mode)
 
         url = self._channel_surface_url(handle, surface)
         headers = self._get_headers()
 
         try:
             response = self.session.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SECONDS)
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             return self._extract_ytinital_data(response.text)
         except requests.exceptions.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code:
+                self._track_response_status(status_code)
             logger.error("Failed to fetch channel %s surface=%s: %s", f"@{handle}", surface, e)
             return None
 
-    def _fetch_continuation(self, continuation_token: str, delay: float = 2.0) -> dict | None:
+    def _fetch_continuation(
+        self, continuation_token: str, delay: float = 2.0, *, fast_mode: bool = False
+    ) -> dict | None:
         """Fetch next page of channel videos using continuation token."""
         import json
 
-        self._rate_limit(delay)
+        self._rate_limit(delay, fast_mode=fast_mode)
+        self._last_channel_continuation_error = None
 
         payload = {
             "context": self.INNERTUBE_CONTEXT,
@@ -1280,9 +1354,14 @@ class YouTubeScraper:
                 data=json.dumps(payload),
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code:
+                self._track_response_status(status_code)
+            self._last_channel_continuation_error = "request_error"
             logger.error(f"Continuation fetch failed: {e}")
             return None
 
@@ -1326,9 +1405,11 @@ class YouTubeScraper:
 
         return renderers, next_token
 
-    def search_channel_videos(self, handle: str, query: str, delay: float = 2.0) -> dict | None:
+    def search_channel_videos(
+        self, handle: str, query: str, delay: float = 2.0, *, fast_mode: bool = False
+    ) -> dict | None:
         """Search for videos from a specific channel with a query."""
-        self._rate_limit(delay)
+        self._rate_limit(delay, fast_mode=fast_mode)
 
         # YouTube search with channel filter
         search_query = f"{query} site:youtube.com/@{handle}"
@@ -1342,9 +1423,13 @@ class YouTubeScraper:
                 headers=headers,
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             return self._extract_ytinital_data(response.text)
         except requests.exceptions.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code:
+                self._track_response_status(status_code)
             logger.error(f"Search failed: {e}")
             return None
 
@@ -1506,6 +1591,8 @@ class YouTubeScraper:
         after_window_pages = 0
         ownership_filtered = 0
         scan_capped_reason: str | None = None
+        continuation_failure_reason: str | None = None
+        continuation_failure_count = 0
         first_page_counts: dict[str, int] = {"videos": 0, "shorts": 0}
         canonical_handle = self._normalize_handle(handle)
         canonical_channel_id = ""
@@ -1529,7 +1616,7 @@ class YouTubeScraper:
             surface_pre_window_pages = 0
             surface_after_window_pages = 0
             initial_ownership_counter = [0]
-            data = self.fetch_channel_videos(handle, config.delay_seconds, surface=surface)
+            data = self.fetch_channel_videos(handle, config.delay_seconds, surface=surface, fast_mode=config.fast_mode)
             if not data:
                 logger.warning("Failed to fetch channel page for @%s (surface=%s)", handle, surface)
                 continue
@@ -1614,8 +1701,12 @@ class YouTubeScraper:
                     page_num,
                 )
                 logger.info(f"Fetching {surface} page {page_num}...")
-                cont_data = self._fetch_continuation(continuation_token, config.delay_seconds)
+                cont_data = self._fetch_continuation(
+                    continuation_token, config.delay_seconds, fast_mode=config.fast_mode
+                )
                 if not cont_data:
+                    continuation_failure_count += 1
+                    continuation_failure_reason = self._last_channel_continuation_error or "request_error"
                     break
 
                 renderers, continuation_token = self._extract_continuation_videos_and_token(cont_data)
@@ -1718,7 +1809,7 @@ class YouTubeScraper:
                 unique_videos.append(video)
 
         # Enrich channel-page results with likes/comments/tags via yt-dlp.
-        self._enrich_videos_via_ytdlp(unique_videos, delay=config.delay_seconds)
+        self._enrich_videos_via_ytdlp(unique_videos, delay=config.delay_seconds, fast_mode=config.fast_mode)
 
         # Supplement with yt-dlp when channel browsing found no matches or was capped.
         should_supplement = len(unique_videos) == 0 or scan_capped_reason is not None
@@ -1790,6 +1881,9 @@ class YouTubeScraper:
             "retrieval_mode": "channel_continuation",
             "continuation_pages": continuation_pages_total,
             "continuation_pages_by_surface": dict(continuation_pages_by_surface),
+            "pages_scanned": max(1, _total_pages_scanned()),
+            "posts_checked": checked_renderers,
+            "matched_posts": len(unique_videos),
             "checked_renderers": checked_renderers,
             "timestamp_unknown_count": timestamp_unknown_count,
             "in_range_hits": in_range_hits,
@@ -1806,6 +1900,8 @@ class YouTubeScraper:
             "surface_cap_override_applied": bool(surface_cap_override_applied),
             "requested_max_results": int(config.max_results) if config.max_results is not None else None,
             "effective_max_results": effective_result_cap,
+            "continuation_failure_reason": continuation_failure_reason,
+            "continuation_failure_count": continuation_failure_count,
             "precise_publish_attempts": self._precise_publish_attempts,
             "precise_publish_successes": self._precise_publish_successes,
             "precise_publish_failures": self._precise_publish_failures,
@@ -1818,12 +1914,18 @@ class YouTubeScraper:
             "resolved_channel_title": resolved_channel_title,
             "resolved_channel_avatar_url": resolved_channel_avatar_url,
         }
+        if continuation_failure_count > 0:
+            self.last_retrieval_meta["error_code"] = "youtube_continuation_fetch_failed"
+            self.last_retrieval_meta["retryable"] = True
+            self.last_retrieval_meta["error_class"] = "YouTubeContinuationFetchError"
         return unique_videos
 
     def _enrich_videos_via_ytdlp(
         self,
         videos: list[YouTubeVideo],
         delay: float = 1.0,
+        *,
+        fast_mode: bool = False,
     ) -> None:
         """Enrich videos with likes, comments, tags, and duration via yt-dlp.
 
@@ -1878,7 +1980,9 @@ class YouTubeScraper:
             is_short = bool(getattr(video, "is_short", False)) or self._video_surface(video) == "shorts"
             if resolved_like_count <= 0 and is_short:
                 fallback_delay = min(max(float(delay or 0.0) * 0.25, 0.05), 0.35)
-                resolved_like_count = self._fetch_shorts_like_count(video.video_id, delay=fallback_delay)
+                resolved_like_count = self._fetch_shorts_like_count(
+                    video.video_id, delay=fallback_delay, fast_mode=fast_mode
+                )
             video.likes = resolved_like_count
             video.comments = data.get("comment_count", 0) or 0
             video.views = data.get("view_count", video.views) or video.views
@@ -2062,6 +2166,7 @@ class YouTubeScraper:
                     source_surface="search",
                     show_id=config.show_id,
                     season_number=config.season_number,
+                    person_id=config.person_id,
                 )
                 all_videos.append(video)
                 logger.info(f"yt-dlp found: {vid_id} - {video.title[:50]}... ({dt_str})")
@@ -2162,6 +2267,8 @@ class YouTubeScraper:
         max_comments: int | None = None,
         fetch_replies: bool = True,
         delay: float = 2.0,
+        *,
+        fast_mode: bool = False,
     ) -> list[YouTubeComment]:
         """
         Fetch comments for a YouTube video including replies.
@@ -2171,6 +2278,7 @@ class YouTubeScraper:
             max_comments: Maximum number of top-level comments to fetch
             fetch_replies: Whether to fetch replies to comments
             delay: Delay between API requests
+            fast_mode: When True, uses aggressive rate-limiting tiers
 
         Returns:
             List of YouTubeComment objects with nested replies
@@ -2185,15 +2293,19 @@ class YouTubeScraper:
         continuation_token = None
         bootstrap_failures: list[str] = []
         for bootstrap_url in (watch_video_url, shorts_video_url):
-            self._rate_limit(delay)
+            self._rate_limit(delay, fast_mode=fast_mode)
             try:
                 response = self.session.get(
                     bootstrap_url,
                     headers=self._get_headers(),
                     timeout=self.REQUEST_TIMEOUT_SECONDS,
                 )
+                self._track_response_status(response.status_code)
                 response.raise_for_status()
             except requests.exceptions.RequestException as exc:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                if status_code:
+                    self._track_response_status(status_code)
                 bootstrap_failures.append("request_error")
                 logger.warning("Failed to fetch YouTube comment bootstrap page (%s): %s", bootstrap_url, exc)
                 continue
@@ -2225,7 +2337,7 @@ class YouTubeScraper:
         continuation_retry_count = 0
 
         while continuation_token:
-            self._rate_limit(delay)
+            self._rate_limit(delay, fast_mode=fast_mode)
 
             # Fetch comments using continuation
             comment_data = self._fetch_comment_continuation(continuation_token, delay)
@@ -2265,6 +2377,7 @@ class YouTubeScraper:
                     fetch_replies,
                     delay,
                     entity_index=entity_index,
+                    fast_mode=fast_mode,
                 )
                 if comment:
                     comments.append(comment)
@@ -2772,6 +2885,8 @@ class YouTubeScraper:
         fetch_replies: bool = True,
         delay: float = 2.0,
         entity_index: dict[str, dict] | None = None,
+        *,
+        fast_mode: bool = False,
     ) -> YouTubeComment | None:
         """Parse a comment thread into YouTubeComment."""
         try:
@@ -2809,7 +2924,12 @@ class YouTubeScraper:
 
                 if reply_continuation:
                     replies = self._fetch_comment_replies(
-                        reply_continuation, video_id, video_url, comment.comment_id, delay
+                        reply_continuation,
+                        video_id,
+                        video_url,
+                        comment.comment_id,
+                        delay,
+                        fast_mode=fast_mode,
                     )
                     comment.replies = replies
 
@@ -2853,7 +2973,7 @@ class YouTubeScraper:
             author_channel_id=author_channel_id,
             likes=likes,
             created_at=created_at,
-            date_time=datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S") if created_at else "",
+            date_time=datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if created_at else "",
             is_reply=is_reply,
             parent_comment_id=parent_id,
             reply_count=reply_count,
@@ -2903,7 +3023,9 @@ class YouTubeScraper:
                 author_channel_id=author_channel_id,
                 likes=likes,
                 created_at=created_at,
-                date_time=datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S") if created_at else "",
+                date_time=datetime.fromtimestamp(created_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+                if created_at
+                else "",
                 is_reply=is_reply,
                 parent_comment_id=parent_id,
                 reply_count=reply_count,
@@ -2937,12 +3059,14 @@ class YouTubeScraper:
         video_url: str,
         parent_id: str,
         delay: float = 2.0,
+        *,
+        fast_mode: bool = False,
     ) -> list[YouTubeComment]:
         """Fetch replies to a comment."""
         replies = []
 
         while continuation_token:
-            self._rate_limit(delay)
+            self._rate_limit(delay, fast_mode=fast_mode)
             data = self._fetch_comment_continuation(continuation_token, delay)
             if not data:
                 break

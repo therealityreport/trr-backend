@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from trr_backend.job_plane import execution_backend_canonical
@@ -21,13 +23,30 @@ _SUPPORTED_ADMIN_OPERATION_TYPES = frozenset(
         "admin_show_refresh",
         "admin_show_refresh_photos",
         "admin_person_refresh_images",
+        "admin_person_refresh_profile",
         "admin_person_reprocess_images",
+        "admin_reddit_refresh_backfill",
     }
 )
 
 _REMOTE_EXECUTION_MODE = "remote"
 _REMOTE_EXECUTION_OWNER = "remote_worker"
 _MODAL_EXECUTION_BACKEND = "modal"
+_REDDIT_RUNTIME_HEALTH_CACHE_TTL_SECONDS = max(
+    5,
+    int(str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_HEALTH_CACHE_TTL_SECONDS") or "60").strip() or "60"),
+)
+_REDDIT_RUNTIME_HEALTH_CACHE: dict[str, Any] = {
+    "expires_at": 0.0,
+    "payload": None,
+}
+_REDDIT_RUNTIME_HEALTH_CACHE_LOCK = Lock()
+_MODAL_PENDING_INVOCATION_STATUS = "pending"
+_MODAL_RUNNING_INVOCATION_STATUS = "running"
+_MODAL_COMPLETED_INVOCATION_STATUS = "completed"
+_MODAL_FAILED_INVOCATION_STATUS = "failed"
+_MODAL_UNKNOWN_INVOCATION_STATUS = "unknown"
+_MODAL_FAILED_INPUT_STATUSES = frozenset({"failure", "init_failure", "terminated", "timeout"})
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -51,6 +70,10 @@ def modal_google_news_function_name() -> str:
 
 def modal_reddit_refresh_function_name() -> str:
     return str(os.getenv("TRR_MODAL_REDDIT_REFRESH_FUNCTION") or "run_reddit_refresh").strip()
+
+
+def modal_reddit_runtime_probe_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION") or "probe_reddit_refresh_runtime").strip()
 
 
 def modal_social_job_function_name() -> str:
@@ -83,6 +106,7 @@ def modal_dispatch_config() -> dict[str, str]:
         "admin_function": modal_admin_function_name(),
         "google_news_function": modal_google_news_function_name(),
         "reddit_refresh_function": modal_reddit_refresh_function_name(),
+        "reddit_runtime_probe_function": modal_reddit_runtime_probe_function_name(),
         "social_job_function": modal_social_job_function_name(),
         "social_recovery_function": modal_social_recovery_function_name(),
         "socialblade_function": modal_socialblade_function_name(),
@@ -101,6 +125,174 @@ def modal_dispatch_ready(*, function_name: str) -> tuple[bool, str | None]:
     if not normalized_function:
         return False, "modal_function_name_missing"
     return True, None
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def _iter_modal_input_infos(nodes: list[Any] | None) -> Any:
+    for node in nodes or []:
+        yield node
+        children = getattr(node, "children", None)
+        if isinstance(children, list):
+            yield from _iter_modal_input_infos(children)
+
+
+def inspect_modal_function_call(function_call_id: str) -> dict[str, Any]:
+    normalized_call_id = str(function_call_id or "").strip()
+    checked_at = _utcnow_iso()
+    payload: dict[str, Any] = {
+        "function_call_id": normalized_call_id or None,
+        "status": _MODAL_UNKNOWN_INVOCATION_STATUS,
+        "raw_status": None,
+        "task_id": None,
+        "checked_at": checked_at,
+        "reason": None,
+        "nonterminal": False,
+        "terminal": False,
+    }
+    if not normalized_call_id:
+        payload["reason"] = "modal_call_id_missing"
+        return payload
+
+    if not modal_app_name():
+        payload["reason"] = "modal_app_name_missing"
+        return payload
+
+    try:
+        import modal
+    except Exception as exc:  # noqa: BLE001
+        payload["reason"] = "modal_sdk_unavailable"
+        payload["error"] = str(exc)
+        return payload
+
+    try:
+        function_call = modal.FunctionCall.from_id(normalized_call_id)
+        call_graph = function_call.get_call_graph()
+    except Exception as exc:  # noqa: BLE001
+        payload["reason"] = "modal_call_inspection_failed"
+        payload["error"] = str(exc)
+        return payload
+
+    target = None
+    for input_info in _iter_modal_input_infos(call_graph if isinstance(call_graph, list) else []):
+        if str(getattr(input_info, "function_call_id", "") or "").strip() == normalized_call_id:
+            target = input_info
+            break
+
+    if target is None:
+        payload["reason"] = "modal_call_not_found"
+        return payload
+
+    raw_status_value = getattr(getattr(target, "status", None), "name", getattr(target, "status", None))
+    raw_status = str(raw_status_value or "").strip().lower()
+    task_id = str(getattr(target, "task_id", "") or "").strip() or None
+    normalized_status = _MODAL_UNKNOWN_INVOCATION_STATUS
+    blocked_reason: str | None = None
+
+    if raw_status == "pending":
+        if task_id:
+            normalized_status = _MODAL_RUNNING_INVOCATION_STATUS
+        else:
+            normalized_status = _MODAL_PENDING_INVOCATION_STATUS
+            blocked_reason = "modal_capacity_pending"
+    elif raw_status == "success":
+        normalized_status = _MODAL_COMPLETED_INVOCATION_STATUS
+    elif raw_status in _MODAL_FAILED_INPUT_STATUSES:
+        normalized_status = _MODAL_FAILED_INVOCATION_STATUS
+        blocked_reason = f"modal_{raw_status}"
+    else:
+        blocked_reason = "modal_call_status_unknown"
+
+    payload.update(
+        {
+            "status": normalized_status,
+            "raw_status": raw_status or None,
+            "task_id": task_id,
+            "reason": blocked_reason,
+            "nonterminal": normalized_status in {_MODAL_PENDING_INVOCATION_STATUS, _MODAL_RUNNING_INVOCATION_STATUS},
+            "terminal": normalized_status in {_MODAL_COMPLETED_INVOCATION_STATUS, _MODAL_FAILED_INVOCATION_STATUS},
+        }
+    )
+    return payload
+
+
+def _normalize_reddit_runtime_health_payload(raw: Any) -> dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    healthy = bool(payload.get("healthy"))
+    reason = str(payload.get("reason") or ("ok" if healthy else "reddit_runtime_probe_failed")).strip()
+    missing_env = payload.get("missing_env")
+    warnings = payload.get("warnings")
+    return {
+        "healthy": healthy,
+        "reason": reason,
+        "missing_env": [str(item).strip() for item in missing_env if str(item).strip()]
+        if isinstance(missing_env, list)
+        else [],
+        "warnings": [str(item).strip() for item in warnings if str(item).strip()]
+        if isinstance(warnings, list)
+        else [],
+        "supports_oauth": bool(payload.get("supports_oauth")),
+        "user_agent_configured": bool(payload.get("user_agent_configured")),
+        "uses_default_user_agent": bool(payload.get("uses_default_user_agent")),
+        "effective_user_agent": str(payload.get("effective_user_agent") or "").strip() or None,
+        "execution_backend_canonical": _MODAL_EXECUTION_BACKEND,
+    }
+
+
+def get_modal_reddit_runtime_health(*, force_refresh: bool = False) -> dict[str, Any]:
+    if not force_refresh:
+        with _REDDIT_RUNTIME_HEALTH_CACHE_LOCK:
+            cached_payload = _REDDIT_RUNTIME_HEALTH_CACHE.get("payload")
+            cached_expires_at = float(_REDDIT_RUNTIME_HEALTH_CACHE.get("expires_at") or 0.0)
+            if isinstance(cached_payload, dict) and monotonic() < cached_expires_at:
+                return dict(cached_payload)
+
+    probe_function_name = modal_reddit_runtime_probe_function_name()
+    ready, reason = modal_dispatch_ready(function_name=probe_function_name)
+    if not ready:
+        payload = {
+            "healthy": False,
+            "reason": reason or "modal_dispatch_unavailable",
+            "missing_env": [],
+            "warnings": [],
+            "supports_oauth": False,
+            "user_agent_configured": False,
+            "uses_default_user_agent": False,
+            "effective_user_agent": None,
+            "execution_backend_canonical": _MODAL_EXECUTION_BACKEND,
+        }
+    else:
+        app_name = modal_app_name()
+        try:
+            import modal
+
+            probe = modal.Function.from_name(app_name, probe_function_name)
+            payload = _normalize_reddit_runtime_health_payload(probe.remote())
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Failed to probe Reddit runtime health from Modal: app=%s function=%s",
+                app_name,
+                probe_function_name,
+            )
+            payload = {
+                "healthy": False,
+                "reason": "reddit_runtime_probe_failed",
+                "error": str(exc),
+                "missing_env": [],
+                "warnings": [],
+                "supports_oauth": False,
+                "user_agent_configured": False,
+                "uses_default_user_agent": False,
+                "effective_user_agent": None,
+                "execution_backend_canonical": _MODAL_EXECUTION_BACKEND,
+            }
+
+    with _REDDIT_RUNTIME_HEALTH_CACHE_LOCK:
+        _REDDIT_RUNTIME_HEALTH_CACHE["payload"] = dict(payload)
+        _REDDIT_RUNTIME_HEALTH_CACHE["expires_at"] = monotonic() + _REDDIT_RUNTIME_HEALTH_CACHE_TTL_SECONDS
+    return dict(payload)
 
 
 def _dispatcher_worker_id(dispatcher_name: str) -> str:
@@ -179,7 +371,7 @@ def _spawn_named_modal_function(
             status="idle",
             metadata_updates={
                 "dispatch_enabled": True,
-                "last_dispatch_success_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+                "last_dispatch_success_at": _utcnow_iso(),
                 "last_dispatch_error": None,
                 "last_dispatch_label": log_label,
                 "last_dispatch_function": normalized_function,
@@ -208,7 +400,7 @@ def _spawn_named_modal_function(
             metadata_updates={
                 "dispatch_enabled": True,
                 "last_dispatch_error": str(exc),
-                "last_dispatch_error_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+                "last_dispatch_error_at": _utcnow_iso(),
                 "last_dispatch_label": log_label,
                 "last_dispatch_function": normalized_function,
                 "last_dispatch_kwargs": kwargs,

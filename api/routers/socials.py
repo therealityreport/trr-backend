@@ -29,15 +29,23 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from api.auth import AdminUser
 from trr_backend.job_plane import (
     canonical_execution_mode,
+    execution_backend_canonical,
     execution_metadata,
     execution_owner_label,
     is_remote_job_plane_enabled,
 )
-from trr_backend.modal_dispatch import dispatch_reddit_refresh, modal_execution_metadata
+from trr_backend.modal_dispatch import (
+    dispatch_reddit_refresh,
+    get_modal_reddit_runtime_health,
+    modal_dispatch_ready,
+    modal_execution_metadata,
+    modal_reddit_refresh_function_name,
+)
 from trr_backend.observability import get_trace_id
 from trr_backend.repositories.twitter_standalone import upsert_standalone_tweets
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
@@ -45,6 +53,26 @@ from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
+
+
+def _reddit_refresh_worker_health_payload(
+    *,
+    healthy: bool,
+    reason: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "healthy": healthy,
+        "healthy_workers": 1 if healthy else 0,
+        "active_workers": 1 if healthy else 0,
+        "total_workers": 1 if healthy else 0,
+        "reason": reason,
+        "execution_backend_canonical": execution_backend_canonical(),
+    }
+    if isinstance(extra, dict):
+        payload.update(extra)
+    return payload
+
 
 _WEEK_DETAIL_CACHE_TTL_SECONDS = int(os.getenv("WEEK_DETAIL_CACHE_TTL_SECONDS", "90"))
 _WEEK_DETAIL_CACHE_MAX_ENTRIES = int(os.getenv("WEEK_DETAIL_CACHE_MAX_ENTRIES", "256"))
@@ -125,6 +153,11 @@ def _inline_execution_timeout_seconds() -> int:
         minimum=30,
         maximum=7200,
     )
+
+
+async def _run_admin_repo_call(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Keep async admin routes from blocking the event loop on sync repository work."""
+    return await run_in_threadpool(func, *args, **kwargs)
 
 
 def _execute_with_timeout(
@@ -621,6 +654,7 @@ def _account_profile_cache_key(
     account_handle: str,
     page: int | None = None,
     page_size: int | None = None,
+    search: str | None = None,
 ) -> tuple[Any, ...]:
     return (
         surface,
@@ -628,6 +662,7 @@ def _account_profile_cache_key(
         str(account_handle or "").strip().lower().lstrip("@"),
         page,
         page_size,
+        str(search or "").strip().lower() or None,
     )
 
 
@@ -1429,6 +1464,8 @@ async def search_twitter(
                 "include_links": request.include_links,
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Twitter search failed: {e}", exc_info=True)
         return TwitterSearchResponse(
@@ -1477,6 +1514,8 @@ async def fetch_tweet_replies(
             replies_found=len(replies),
             replies=[_tweet_to_response(r) for r in replies],
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Twitter replies fetch failed: {e}", exc_info=True)
         return TweetRepliesResponse(
@@ -1525,6 +1564,8 @@ async def fetch_tweet_quotes(
             source_used=quote_meta.get("source_used"),
             failure_reason=scraper.last_quote_fetch_reason or quote_meta.get("failure_reason"),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Twitter quotes fetch failed: {e}", exc_info=True)
         return TweetQuotesResponse(
@@ -1650,6 +1691,8 @@ async def scrape_youtube(
                 "date_end": request.date_end.isoformat(),
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"YouTube scrape failed: {e}", exc_info=True)
         return YouTubeScrapeResponse(
@@ -2417,9 +2460,17 @@ class RedditRefreshRunRequest(BaseModel):
     fetch_comments: bool = Field(default=False)
     comment_delta_only: bool = Field(default=True)
     max_pages: int = Field(default=10_000, ge=1, le=10_000)
-    mode: Literal["sync_posts", "sync_details"] = Field(default="sync_posts")
+    mode: Literal["sync_posts", "sync_details", "sync_full"] = Field(default="sync_posts")
     client_session_id: str | None = Field(default=None, max_length=200)
     client_workflow_id: str | None = Field(default=None, max_length=200)
+
+
+class RedditRefreshBackfillRequest(BaseModel):
+    community_id: UUID
+    season_id: UUID
+    container_keys: list[str] = Field(default_factory=list, max_length=100)
+    mode: Literal["sync_posts", "sync_details", "sync_full"] = Field(default="sync_full")
+    detail_refresh: bool = Field(default=False)
 
 
 class RedditCacheBulkRequest(BaseModel):
@@ -2449,6 +2500,137 @@ def _serialize_reddit_refresh_payload(payload: RedditRefreshRunRequest) -> dict[
     return data
 
 
+def _normalize_reddit_backfill_container_keys(values: list[str]) -> list[str]:
+    return [item.strip() for item in values if isinstance(item, str) and item.strip()]
+
+
+def _serialize_reddit_backfill_payload(payload: RedditRefreshBackfillRequest) -> dict[str, Any]:
+    return {
+        "community_id": str(payload.community_id),
+        "season_id": str(payload.season_id),
+        "container_keys": _normalize_reddit_backfill_container_keys(payload.container_keys),
+        "mode": payload.mode,
+        "detail_refresh": bool(payload.detail_refresh),
+    }
+
+
+def _start_reddit_refresh_run_from_serialized_payload(
+    *,
+    serialized_payload: dict[str, Any],
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    from trr_backend.repositories.reddit_refresh import (
+        create_or_reuse_refresh_run,
+        execute_refresh_run,
+        get_refresh_run,
+    )
+
+    remote_mode = is_remote_job_plane_enabled()
+    runtime_execution = execution_metadata()
+    execution_mode = canonical_execution_mode()
+    execution_owner = execution_owner_label()
+    execution_backend = str(runtime_execution.get("execution_backend_canonical") or "local")
+    run_row = create_or_reuse_refresh_run(payload=serialized_payload)
+    run_id = str(run_row.get("id"))
+    reused = bool(run_row.get("reused"))
+    run = get_refresh_run(run_id)
+    should_dispatch_modal = execution_backend == "modal" and (
+        not reused
+        or (
+            isinstance(run, dict)
+            and str(run.get("status") or "").strip().lower() == "queued"
+            and not str(run.get("claimed_by_worker_id") or "").strip()
+            and not str(run.get("heartbeat_at") or "").strip()
+        )
+    )
+    modal_dispatched = False
+    if should_dispatch_modal:
+        modal_ready, modal_reason = modal_dispatch_ready(function_name=modal_reddit_refresh_function_name())
+        if not modal_ready:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "REDDIT_REMOTE_DISPATCH_UNAVAILABLE",
+                    "message": ("Reddit refresh remote-worker ownership is enforced and Modal dispatch is not ready."),
+                    "execution_mode": execution_mode,
+                    "execution_owner": execution_owner,
+                    "worker_health": _reddit_refresh_worker_health_payload(
+                        healthy=False,
+                        reason=modal_reason or "modal_dispatch_unavailable",
+                    ),
+                },
+            )
+        reddit_runtime_health = get_modal_reddit_runtime_health()
+        if not bool(reddit_runtime_health.get("healthy")):
+            missing_env = reddit_runtime_health.get("missing_env")
+            missing_env_list = (
+                [str(item).strip() for item in missing_env if str(item).strip()]
+                if isinstance(missing_env, list)
+                else []
+            )
+            missing_env_text = f" Missing: {', '.join(missing_env_list)}." if missing_env_list else ""
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "REDDIT_REMOTE_RUNTIME_UNHEALTHY",
+                    "message": (
+                        f"Reddit refresh remote worker is missing Reddit OAuth configuration.{missing_env_text}"
+                    ),
+                    "execution_mode": execution_mode,
+                    "execution_owner": execution_owner,
+                    "worker_health": _reddit_refresh_worker_health_payload(
+                        healthy=False,
+                        reason=str(reddit_runtime_health.get("reason") or "reddit_runtime_unhealthy"),
+                        extra=reddit_runtime_health,
+                    ),
+                },
+            )
+        modal_dispatched = dispatch_reddit_refresh(run_id=run_id)
+        if not modal_dispatched:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "REDDIT_REMOTE_DISPATCH_UNAVAILABLE",
+                    "message": "Reddit refresh remote-worker dispatch could not be started.",
+                    "execution_mode": execution_mode,
+                    "execution_owner": execution_owner,
+                    "worker_health": _reddit_refresh_worker_health_payload(
+                        healthy=False,
+                        reason="modal_dispatch_failed",
+                    ),
+                },
+            )
+        modal_metadata = modal_execution_metadata()
+        execution_mode = modal_metadata["execution_mode_canonical"]
+        execution_owner = modal_metadata["execution_owner"]
+        execution_backend = modal_metadata["execution_backend_canonical"]
+        logger.info(
+            "Queued reddit refresh run for Modal ownership: run_id=%s reused=%s",
+            run_id,
+            reused,
+        )
+        run = get_refresh_run(run_id)
+    elif not reused:
+        if remote_mode:
+            logger.info(
+                "Queued reddit refresh run for remote worker ownership: run_id=%s execution_mode=%s",
+                run_id,
+                execution_mode,
+            )
+        else:
+            background_tasks.add_task(execute_refresh_run, run_id, worker_id="api-background:reddit-refresh")
+            logger.info("Queued reddit refresh run for API background execution: run_id=%s", run_id)
+    if modal_dispatched and isinstance(run, dict):
+        run = {**run, **modal_execution_metadata()}
+    return {
+        "run": run,
+        "reused": reused,
+        "execution_owner": execution_owner,
+        "execution_mode_canonical": execution_mode,
+        "execution_backend_canonical": execution_backend,
+    }
+
+
 @router.get("/seasons/{season_id}/targets")
 async def get_season_targets(
     season_id: UUID,
@@ -2459,7 +2641,7 @@ async def get_season_targets(
 
     started_at = perf_counter()
     try:
-        payload = get_targets(str(season_id), source_scope=source_scope)
+        payload = await _run_admin_repo_call(get_targets, str(season_id), source_scope=source_scope)
         duration_ms = int((perf_counter() - started_at) * 1000)
         logger.info(
             "Social targets request completed: season=%s source_scope=%s duration_ms=%s",
@@ -2491,7 +2673,8 @@ async def put_season_targets(
 
     try:
         rows = [target.model_dump() for target in payload.targets]
-        return put_targets(
+        return await _run_admin_repo_call(
+            put_targets,
             str(season_id),
             source_scope=payload.source_scope,
             targets=rows,
@@ -2615,7 +2798,8 @@ async def ingest_season_social(
                     ) from exc
 
         inline_worker_id = "api-background" if not queue_enabled else None
-        run_payload = ingest_season(
+        run_payload = await _run_admin_repo_call(
+            ingest_season,
             sid,
             platforms=payload.platforms,
             accounts_override=payload.accounts_override,
@@ -2854,7 +3038,8 @@ async def orchestrate_season_social_ingest(
         )
 
     try:
-        result = orchestrate_season_ingest(
+        result = await _run_admin_repo_call(
+            orchestrate_season_ingest,
             sid,
             platforms=payload.platforms,
             source_scope=payload.source_scope,
@@ -2988,7 +3173,8 @@ async def create_season_sync_session(
         config = payload.model_dump()
         config["date_start"] = resolved_date_start
         config["date_end"] = resolved_date_end
-        result = create_sync_session(
+        result = await _run_admin_repo_call(
+            create_sync_session,
             sid,
             source_scope=payload.source_scope,
             platforms=payload.platforms,
@@ -3011,7 +3197,7 @@ def _social_sync_sse_chunk(event_type: str, payload: dict[str, Any]) -> bytes:
     return f"event: {event_type}\ndata: {json.dumps(jsonable_encoder(payload))}\n\n".encode()
 
 
-def _build_sync_session_stream_payload(sync_session_id: str) -> dict[str, Any]:
+def _build_sync_session_stream_payload_sync(sync_session_id: str) -> dict[str, Any]:
     from trr_backend.repositories import social_season_analytics as social_repo
     from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
 
@@ -3030,6 +3216,10 @@ def _build_sync_session_stream_payload(sync_session_id: str) -> dict[str, Any]:
     }
 
 
+async def _build_sync_session_stream_payload(sync_session_id: str) -> dict[str, Any]:
+    return await _run_admin_repo_call(_build_sync_session_stream_payload_sync, sync_session_id)
+
+
 @router.get("/seasons/{season_id}/sync-sessions/{sync_session_id}")
 async def get_season_sync_session(
     season_id: UUID,
@@ -3039,7 +3229,7 @@ async def get_season_sync_session(
     from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
 
     try:
-        payload = evaluate_sync_session(str(sync_session_id))
+        payload = await _run_admin_repo_call(evaluate_sync_session, str(sync_session_id))
         if payload.get("season_id") != str(season_id):
             raise HTTPException(status_code=404, detail="sync_session_not_found")
         return payload
@@ -3070,7 +3260,7 @@ async def stream_season_sync_session(
             if await request.is_disconnected():
                 break
             try:
-                payload = _build_sync_session_stream_payload(sync_session_token)
+                payload = await _build_sync_session_stream_payload(sync_session_token)
                 session_payload = payload.get("sync_session") if isinstance(payload.get("sync_session"), dict) else {}
                 if str(session_payload.get("season_id") or "") != season_token:
                     yield _social_sync_sse_chunk(
@@ -3126,7 +3316,8 @@ async def cancel_season_sync_session(
     from trr_backend.repositories.social_sync_orchestrator import cancel_sync_session
 
     try:
-        return cancel_sync_session(
+        return await _run_admin_repo_call(
+            cancel_sync_session,
             str(season_id),
             str(sync_session_id),
             cancelled_by=(user or {}).get("email"),
@@ -3151,7 +3342,8 @@ async def retry_season_sync_session(
     from trr_backend.repositories.social_sync_orchestrator import retry_sync_session
 
     try:
-        return retry_sync_session(
+        return await _run_admin_repo_call(
+            retry_sync_session,
             str(season_id),
             str(sync_session_id),
             retry_kind=payload.retry_kind,
@@ -3202,7 +3394,8 @@ async def get_season_ingest_schedule_preview(
             date_start=date_start,
             date_end=date_end,
         )
-        return preview_ingest_schedule(
+        return await _run_admin_repo_call(
+            preview_ingest_schedule,
             str(season_id),
             platforms=parsed_platforms,
             source_scope=source_scope,
@@ -3307,6 +3500,7 @@ def get_social_account_profile_posts_route(
     account_handle: str,
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
+    search: str | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_posts
@@ -3317,6 +3511,7 @@ def get_social_account_profile_posts_route(
         account_handle=account_handle,
         page=page,
         page_size=page_size,
+        search=search,
     )
     cached_payload = _get_ttl_cached_payload(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK, cache_key)
     if cached_payload is not None:
@@ -3327,6 +3522,7 @@ def get_social_account_profile_posts_route(
             account_handle=account_handle,
             page=page,
             page_size=page_size,
+            search=search,
         )
         _set_ttl_cached_payload(
             _ACCOUNT_PROFILE_POSTS_CACHE,
@@ -4302,50 +4498,12 @@ async def start_reddit_refresh_run(
     background_tasks: BackgroundTasks,
     _: AdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.repositories.reddit_refresh import (
-        create_or_reuse_refresh_run,
-        execute_refresh_run,
-        get_refresh_run,
-    )
-
     try:
-        remote_mode = is_remote_job_plane_enabled()
-        runtime_execution = execution_metadata()
-        execution_mode = canonical_execution_mode()
-        execution_owner = execution_owner_label()
-        execution_backend = str(runtime_execution.get("execution_backend_canonical") or "local")
         serialized = _serialize_reddit_refresh_payload(payload)
-        run_row = create_or_reuse_refresh_run(payload=serialized)
-        run_id = str(run_row.get("id"))
-        reused = bool(run_row.get("reused"))
-        modal_dispatched = False
-        if not reused:
-            modal_dispatched = dispatch_reddit_refresh(run_id=run_id)
-            if modal_dispatched:
-                modal_metadata = modal_execution_metadata()
-                execution_mode = modal_metadata["execution_mode_canonical"]
-                execution_owner = modal_metadata["execution_owner"]
-                execution_backend = modal_metadata["execution_backend_canonical"]
-                logger.info("Queued reddit refresh run for Modal ownership: run_id=%s", run_id)
-            elif remote_mode:
-                logger.info(
-                    "Queued reddit refresh run for remote worker ownership: run_id=%s execution_mode=%s",
-                    run_id,
-                    execution_mode,
-                )
-            else:
-                background_tasks.add_task(execute_refresh_run, run_id, worker_id="api-background:reddit-refresh")
-                logger.info("Queued reddit refresh run for API background execution: run_id=%s", run_id)
-        run = get_refresh_run(run_id)
-        if modal_dispatched and isinstance(run, dict):
-            run = {**run, **modal_execution_metadata()}
-        return {
-            "run": run,
-            "reused": reused,
-            "execution_owner": execution_owner,
-            "execution_mode_canonical": execution_mode,
-            "execution_backend_canonical": execution_backend,
-        }
+        return _start_reddit_refresh_run_from_serialized_payload(
+            serialized_payload=serialized,
+            background_tasks=background_tasks,
+        )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -4356,6 +4514,51 @@ async def start_reddit_refresh_run(
             payload.community_id,
             payload.season_id,
             payload.period_key,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/reddit/runs/backfill")
+async def backfill_reddit_refresh_runs(
+    payload: RedditRefreshBackfillRequest,
+    request: Request,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.pipeline.admin_operations import start_operation_for_stream
+    from trr_backend.repositories.reddit_refresh import (
+        REDDIT_BACKFILL_OPERATION_TYPE,
+        build_reddit_refresh_backfill_operation_producer,
+    )
+
+    serialized_backfill = _serialize_reddit_backfill_payload(payload)
+    try:
+        producer = build_reddit_refresh_backfill_operation_producer(
+            request_payload=serialized_backfill,
+        )
+        operation = start_operation_for_stream(
+            operation_type=REDDIT_BACKFILL_OPERATION_TYPE,
+            producer=producer,
+            request_payload=serialized_backfill,
+            initiated_by=None,
+            request=request,
+        )
+
+        return {
+            "status": "attached" if bool(operation.get("attached")) else "started",
+            "requested": serialized_backfill,
+            "operation": operation,
+            "operation_id": str(operation.get("id") or "").strip() or None,
+            "attached": bool(operation.get("attached")),
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to start reddit refresh backfill: community_id=%s season_id=%s",
+            payload.community_id,
+            payload.season_id,
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -4373,7 +4576,8 @@ async def list_reddit_refresh_runs(
 
     statuses = [item.strip().lower() for item in (status or "").split(",") if item.strip()]
     try:
-        runs = list_refresh_runs(
+        runs = await _run_admin_repo_call(
+            list_refresh_runs,
             community_id=str(community_id) if community_id else None,
             season_id=str(season_id) if season_id else None,
             period_key=period_key.strip() if isinstance(period_key, str) else None,
@@ -4399,7 +4603,7 @@ async def get_reddit_refresh_run(run_id: UUID, _: AdminUser = None) -> dict[str,
     from trr_backend.repositories.reddit_refresh import get_refresh_run
 
     try:
-        return get_refresh_run(str(run_id))
+        return await _run_admin_repo_call(get_refresh_run, str(run_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -4420,13 +4624,15 @@ async def get_reddit_cached_period_payload(
     )
 
     try:
-        payload = get_cached_period_payload_snapshot(
+        payload = await _run_admin_repo_call(
+            get_cached_period_payload_snapshot,
             community_id=str(community_id),
             season_id=str(season_id),
             period_key=period_key.strip(),
         )
         if payload is None:
-            legacy_payload = get_cached_period_payload(
+            legacy_payload = await _run_admin_repo_call(
+                get_cached_period_payload,
                 community_id=str(community_id),
                 season_id=str(season_id),
                 period_key=period_key.strip(),
@@ -4509,7 +4715,8 @@ async def get_reddit_cached_period_payload_bulk(
         season_id = str(payload.season_id)
 
         for period_key in unique_period_keys:
-            resolved_candidate_key = resolve_cached_period_key(
+            resolved_candidate_key = await _run_admin_repo_call(
+                resolve_cached_period_key,
                 community_id=community_id,
                 season_id=season_id,
                 period_key=period_key,
@@ -4523,13 +4730,15 @@ async def get_reddit_cached_period_payload_bulk(
             break
 
         if resolved_period_key:
-            snapshot = get_cached_period_payload_snapshot(
+            snapshot = await _run_admin_repo_call(
+                get_cached_period_payload_snapshot,
                 community_id=community_id,
                 season_id=season_id,
                 period_key=resolved_period_key,
             )
             if snapshot is None:
-                legacy_payload = get_cached_period_payload(
+                legacy_payload = await _run_admin_repo_call(
+                    get_cached_period_payload,
                     community_id=community_id,
                     season_id=season_id,
                     period_key=resolved_period_key,
@@ -4591,7 +4800,8 @@ async def get_reddit_community_analytics_summary(
     try:
         if scope == "season" and season_id is None:
             raise HTTPException(status_code=400, detail="season_id is required when scope=season")
-        return get_reddit_community_analytics_summary(
+        return await _run_admin_repo_call(
+            get_reddit_community_analytics_summary,
             community_id=str(community_id),
             scope=scope,
             season_id=str(season_id) if season_id else None,
@@ -4622,7 +4832,8 @@ async def get_reddit_community_analytics_shows(
     try:
         if scope == "season" and season_id is None:
             raise HTTPException(status_code=400, detail="season_id is required when scope=season")
-        return get_reddit_community_show_breakdown(
+        return await _run_admin_repo_call(
+            get_reddit_community_show_breakdown,
             community_id=str(community_id),
             scope=scope,
             season_id=str(season_id) if season_id else None,
@@ -4653,7 +4864,8 @@ async def get_reddit_community_analytics_flairs(
     try:
         if scope == "season" and season_id is None:
             raise HTTPException(status_code=400, detail="season_id is required when scope=season")
-        return get_reddit_community_flair_breakdown(
+        return await _run_admin_repo_call(
+            get_reddit_community_flair_breakdown,
             community_id=str(community_id),
             scope=scope,
             season_id=str(season_id) if season_id else None,
@@ -4688,7 +4900,8 @@ async def get_reddit_community_analytics_flair_detail(
     try:
         if scope == "season" and season_id is None:
             raise HTTPException(status_code=400, detail="season_id is required when scope=season")
-        return get_reddit_community_flair_detail(
+        return await _run_admin_repo_call(
+            get_reddit_community_flair_detail,
             community_id=str(community_id),
             flair_key=flair_key,
             scope=scope,
@@ -4728,7 +4941,8 @@ async def get_reddit_community_analytics_posts(
     try:
         if scope == "season" and season_id is None:
             raise HTTPException(status_code=400, detail="season_id is required when scope=season")
-        return list_reddit_community_posts(
+        return await _run_admin_repo_call(
+            list_reddit_community_posts,
             community_id=str(community_id),
             scope=scope,
             season_id=str(season_id) if season_id else None,
@@ -4781,7 +4995,8 @@ async def auto_categorize_community_flairs(
     from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs
 
     try:
-        return auto_categorize_flairs(
+        return await _run_admin_repo_call(
+            auto_categorize_flairs,
             community_id=str(community_id),
             show_id=str(body.show_id),
         )
@@ -4803,7 +5018,7 @@ async def auto_categorize_flairs_batch(
     from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs_batch
 
     try:
-        return auto_categorize_flairs_batch(show_id=str(body.show_id))
+        return await _run_admin_repo_call(auto_categorize_flairs_batch, show_id=str(body.show_id))
     except HTTPException:
         raise
     except ValueError as exc:
@@ -4826,7 +5041,8 @@ async def get_season_ingest_jobs(
     from trr_backend.repositories.social_season_analytics import list_jobs
 
     try:
-        jobs = list_jobs(
+        jobs = await _run_admin_repo_call(
+            list_jobs,
             str(season_id),
             limit=limit,
             offset=offset,
@@ -4873,7 +5089,8 @@ async def get_season_ingest_runs(
 
     started_at = perf_counter()
     try:
-        runs = list_runs(
+        runs = await _run_admin_repo_call(
+            list_runs,
             str(season_id),
             limit=limit,
             status=status,
@@ -4940,7 +5157,8 @@ async def get_season_ingest_runs_summary(
 
     started_at = perf_counter()
     try:
-        summaries = list_run_summaries(
+        summaries = await _run_admin_repo_call(
+            list_run_summaries,
             str(season_id),
             limit=limit,
             source_scope=source_scope,
@@ -4996,7 +5214,8 @@ async def get_season_ingest_run_progress(
 
     started_at = perf_counter()
     try:
-        payload = get_run_progress_snapshot(
+        payload = await _run_admin_repo_call(
+            get_run_progress_snapshot,
             str(season_id),
             str(run_id),
             recent_log_limit=recent_log_limit,
@@ -5037,7 +5256,12 @@ async def cancel_season_ingest_run(
     from trr_backend.repositories.social_season_analytics import cancel_run
 
     try:
-        payload = cancel_run(str(season_id), str(run_id), cancelled_by=(user or {}).get("email"))
+        payload = await _run_admin_repo_call(
+            cancel_run,
+            str(season_id),
+            str(run_id),
+            cancelled_by=(user or {}).get("email"),
+        )
         return payload
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -5074,7 +5298,8 @@ async def get_season_analytics_week_live_health(
         return cached_payload
     started_at = perf_counter()
     try:
-        payload = get_week_live_health_snapshot(
+        payload = await _run_admin_repo_call(
+            get_week_live_health_snapshot,
             str(season_id),
             week_index=week_index,
             platforms=parsed_platforms,
@@ -5158,7 +5383,8 @@ async def get_season_analytics(
         )
         if cached_payload is not None:
             return cached_payload
-        payload = get_analytics(
+        payload = await run_in_threadpool(
+            get_analytics,
             str(season_id),
             platforms=parsed_platforms,
             timezone=timezone,
@@ -5238,7 +5464,8 @@ async def get_season_analytics_week_summary(
 
     try:
         if include == "full":
-            payload = get_week_detail_summary(
+            payload = await _run_admin_repo_call(
+                get_week_detail_summary,
                 str(season_id),
                 week_index=week_index,
                 platforms=parsed_platforms,
@@ -5249,7 +5476,8 @@ async def get_season_analytics_week_summary(
                 sort_dir=sort_dir,
             )
         else:
-            payload = get_week_detail_summary_fast(
+            payload = await _run_admin_repo_call(
+                get_week_detail_summary_fast,
                 str(season_id),
                 week_index=week_index,
                 platforms=parsed_platforms,
@@ -5331,7 +5559,8 @@ async def get_season_analytics_week_detail(
     try:
         base_payload: dict[str, Any] | None = cached_payload
         if base_payload is None:
-            base_payload = get_week_detail(
+            base_payload = await _run_admin_repo_call(
+                get_week_detail,
                 str(season_id),
                 week_index=week_index,
                 platforms=parsed_platforms,
@@ -5354,7 +5583,8 @@ async def get_season_analytics_week_detail(
                 cached_total += int(platform_payload.get("total_posts", fallback_count) or 0)
 
             if requested_end > cached_posts and cached_total > cached_posts:
-                base_payload = get_week_detail(
+                base_payload = await _run_admin_repo_call(
+                    get_week_detail,
                     str(season_id),
                     week_index=week_index,
                     platforms=parsed_platforms,
@@ -5488,7 +5718,8 @@ async def get_season_comments_coverage(
         return cached_payload
 
     try:
-        payload = get_comments_coverage(
+        payload = await _run_admin_repo_call(
+            get_comments_coverage,
             str(season_id),
             platforms=parsed_platforms,
             timezone=timezone,
@@ -5542,7 +5773,8 @@ async def get_season_mirror_coverage(
         return cached_payload
 
     try:
-        payload = get_mirror_coverage(
+        payload = await _run_admin_repo_call(
+            get_mirror_coverage,
             str(season_id),
             platforms=parsed_platforms,
             timezone=timezone,
@@ -5576,7 +5808,7 @@ async def get_post_comments(
     from trr_backend.repositories.social_season_analytics import get_post_comments as _get
 
     try:
-        return _get(str(season_id), platform=platform, source_id=source_id)
+        return await _run_admin_repo_call(_get, str(season_id), platform=platform, source_id=source_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -5603,7 +5835,8 @@ async def get_season_tiktok_overview(
     from trr_backend.repositories.social_season_analytics import get_tiktok_overview
 
     try:
-        return get_tiktok_overview(
+        return await _run_admin_repo_call(
+            get_tiktok_overview,
             str(season_id),
             date_start=date_start,
             date_end=date_end,
@@ -5629,7 +5862,12 @@ async def get_season_tiktok_cast_members(
     from trr_backend.repositories.social_season_analytics import get_tiktok_cast_members
 
     try:
-        return get_tiktok_cast_members(str(season_id), date_start=date_start, date_end=date_end)
+        return await _run_admin_repo_call(
+            get_tiktok_cast_members,
+            str(season_id),
+            date_start=date_start,
+            date_end=date_end,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok cast members: season=%s", season_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -5646,7 +5884,8 @@ async def get_season_tiktok_hashtags(
     from trr_backend.repositories.social_season_analytics import get_tiktok_hashtags
 
     try:
-        return get_tiktok_hashtags(
+        return await _run_admin_repo_call(
+            get_tiktok_hashtags,
             str(season_id),
             token_type=token_type,
             date_start=date_start,
@@ -5671,7 +5910,8 @@ async def get_season_tiktok_sounds(
     from trr_backend.repositories.social_season_analytics import get_tiktok_sounds
 
     try:
-        return get_tiktok_sounds(
+        return await _run_admin_repo_call(
+            get_tiktok_sounds,
             str(season_id),
             date_start=date_start,
             date_end=date_end,
@@ -5700,7 +5940,8 @@ async def get_season_tiktok_content_health(
     from trr_backend.repositories.social_season_analytics import get_tiktok_content_health
 
     try:
-        return get_tiktok_content_health(
+        return await _run_admin_repo_call(
+            get_tiktok_content_health,
             str(season_id),
             date_start=date_start,
             date_end=date_end,
@@ -5726,7 +5967,7 @@ async def get_season_tiktok_sound_detail(
     from trr_backend.repositories.social_season_analytics import get_tiktok_sound_detail
 
     try:
-        return get_tiktok_sound_detail(str(season_id), sound_id=sound_id)
+        return await _run_admin_repo_call(get_tiktok_sound_detail, str(season_id), sound_id=sound_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -5744,7 +5985,7 @@ async def get_season_tiktok_sound_posts(
     from trr_backend.repositories.social_season_analytics import get_tiktok_sound_posts
 
     try:
-        return get_tiktok_sound_posts(str(season_id), sound_id=sound_id, limit=limit)
+        return await _run_admin_repo_call(get_tiktok_sound_posts, str(season_id), sound_id=sound_id, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -5761,7 +6002,7 @@ async def get_season_tiktok_post_detail(
     from trr_backend.repositories.social_season_analytics import get_tiktok_post_detail
 
     try:
-        return get_tiktok_post_detail(str(season_id), post_id=post_id)
+        return await _run_admin_repo_call(get_tiktok_post_detail, str(season_id), post_id=post_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -5779,7 +6020,12 @@ async def get_season_tiktok_sentiment_trends(
     from trr_backend.repositories.social_season_analytics import get_tiktok_sentiment_trends
 
     try:
-        return get_tiktok_sentiment_trends(str(season_id), date_start=date_start, date_end=date_end)
+        return await _run_admin_repo_call(
+            get_tiktok_sentiment_trends,
+            str(season_id),
+            date_start=date_start,
+            date_end=date_end,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch TikTok sentiment trends: season=%s", season_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -5803,7 +6049,8 @@ async def refresh_post_comments_for_post(
     request_payload = payload or PostCommentRefreshRequest()
 
     try:
-        refresh_summary = _refresh_post(
+        refresh_summary = await _run_admin_repo_call(
+            _refresh_post,
             str(season_id),
             platform=platform,
             source_id=source_id,
@@ -5811,7 +6058,12 @@ async def refresh_post_comments_for_post(
             fetch_replies=request_payload.fetch_replies,
         )
         invalidate_week_detail_cache()
-        refreshed = _get_post_comments(str(season_id), platform=platform, source_id=source_id)
+        refreshed = await _run_admin_repo_call(
+            _get_post_comments,
+            str(season_id),
+            platform=platform,
+            source_id=source_id,
+        )
         refreshed["refresh"] = refresh_summary
         return refreshed
     except ValueError as exc:
@@ -5839,7 +6091,8 @@ async def requeue_instagram_mirror_jobs(
     from trr_backend.repositories.social_season_analytics import requeue_instagram_media_mirror_jobs
 
     try:
-        return requeue_instagram_media_mirror_jobs(
+        return await _run_admin_repo_call(
+            requeue_instagram_media_mirror_jobs,
             str(season_id),
             source_scope=source_scope,
             limit=limit,
@@ -5873,7 +6126,8 @@ async def requeue_platform_mirror_jobs(
 
     normalized_platform = (platform or "").strip().lower()
     try:
-        return requeue_media_mirror_jobs(
+        return await _run_admin_repo_call(
+            requeue_media_mirror_jobs,
             str(season_id),
             platform=normalized_platform,
             source_scope=source_scope,
@@ -5909,7 +6163,8 @@ async def export_season_analytics_csv(
     if platforms and platforms.strip():
         parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
     try:
-        snapshot = get_analytics(
+        snapshot = await _run_admin_repo_call(
+            get_analytics,
             str(season_id),
             platforms=parsed_platforms,
             timezone=timezone,
@@ -5917,7 +6172,7 @@ async def export_season_analytics_csv(
             source_scope=source_scope,
             include_rows=True,
         )
-        csv_text = build_csv(snapshot)
+        csv_text = await _run_admin_repo_call(build_csv, snapshot)
         filename = f"social_report_{season_id}_{datetime.now().strftime('%Y%m%d')}.csv"
         return Response(
             content=csv_text,
@@ -5950,7 +6205,8 @@ async def export_season_analytics_pdf(
     if platforms and platforms.strip():
         parsed_platforms = [item.strip().lower() for item in platforms.split(",") if item.strip()]
     try:
-        snapshot = get_analytics(
+        snapshot = await _run_admin_repo_call(
+            get_analytics,
             str(season_id),
             platforms=parsed_platforms,
             timezone=timezone,
@@ -5958,7 +6214,7 @@ async def export_season_analytics_pdf(
             source_scope=source_scope,
             include_rows=False,
         )
-        pdf_bytes = build_pdf(snapshot)
+        pdf_bytes = await _run_admin_repo_call(build_pdf, snapshot)
         summary = snapshot.get("summary") or {}
         filename = pdf_filename(
             str(summary.get("show_id") or "show"),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -123,6 +124,62 @@ def _fetch_season_map(show_id: str) -> dict[int, str]:
         if season_id:
             mapping[season_number] = season_id
     return mapping
+
+
+def _slugify_lookup_key(value: str | None) -> str:
+    text = re.sub(r"[^a-z0-9]+", "-", str(value or "").casefold())
+    return re.sub(r"-{2,}", "-", text).strip("-")
+
+
+def _fetch_episode_slug_map(show_id: str) -> dict[tuple[int | None, str], str]:
+    db = create_supabase_admin_client()
+    response = db.schema("core").table("episodes").select("id,title,season_number").eq("show_id", show_id).execute()
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Failed to load episodes: {response.error}")
+    mapping: dict[tuple[int | None, str], str] = {}
+    for row in response.data or []:
+        episode_id = str(row.get("id") or "").strip()
+        title_slug = _slugify_lookup_key(row.get("title"))
+        if not episode_id or not title_slug:
+            continue
+        season_number_raw = row.get("season_number")
+        try:
+            season_number = int(season_number_raw) if season_number_raw is not None else None
+        except (TypeError, ValueError):
+            season_number = None
+        mapping[(season_number, title_slug)] = episode_id
+        mapping.setdefault((None, title_slug), episode_id)
+    return mapping
+
+
+def _resolve_episode_id_for_row(
+    *,
+    row: dict[str, Any],
+    row_metadata: dict[str, Any],
+    episode_slug_map: dict[tuple[int | None, str], str],
+) -> str | None:
+    explicit_episode_id = str(row.get("episode_id") or row_metadata.get("episode_id") or "").strip()
+    if explicit_episode_id:
+        return explicit_episode_id
+    season_number = row.get("season") or row_metadata.get("season_number")
+    try:
+        season_number_int = int(season_number) if season_number is not None else None
+    except (TypeError, ValueError):
+        season_number_int = None
+    candidates = (
+        row_metadata.get("episode_slug"),
+        row_metadata.get("page_title"),
+        row.get("context_section"),
+    )
+    for candidate in candidates:
+        slug = _slugify_lookup_key(candidate)
+        if not slug:
+            continue
+        if (season_number_int, slug) in episode_slug_map:
+            return episode_slug_map[(season_number_int, slug)]
+        if (None, slug) in episode_slug_map:
+            return episode_slug_map[(None, slug)]
+    return None
 
 
 def _load_people_index(db: Any) -> dict[str, list[dict[str, str]]]:
@@ -506,6 +563,7 @@ def _import_supplemental_catalog(
         return {"supplemental_assets_upserted": 0, "supplemental_links_created": 0}, []
     db = create_supabase_admin_client()
     season_map = _fetch_season_map(target_show_id) if target_show_id else {}
+    episode_slug_map = _fetch_episode_slug_map(target_show_id) if target_show_id else {}
     imported: list[dict[str, Any]] = []
     assets_upserted = 0
     links_created = 0
@@ -523,12 +581,25 @@ def _import_supplemental_catalog(
             if asset_id is None:
                 continue
             season_number = row.get("season") or row_metadata.get("season_number")
+            link_person = bool(target_person_id) and bool(row.get("link_person", True))
+            link_show = bool(target_show_id) and bool(row.get("link_show", True))
+            link_season = bool(row.get("link_season", True))
+            link_episode = bool(row.get("link_episode", False))
             content_type = str(row_metadata.get("content_type") or "").strip() or None
             context_type = str(row.get("context_type") or "").strip() or None
             context_section = (
                 str(row_metadata.get("fandom_section_label") or "").strip()
                 or str(row.get("context_section") or "").strip()
                 or None
+            )
+            episode_id = (
+                _resolve_episode_id_for_row(
+                    row=row,
+                    row_metadata=row_metadata,
+                    episode_slug_map=episode_slug_map,
+                )
+                if link_episode
+                else None
             )
             asset_metadata = {
                 **row_metadata,
@@ -537,6 +608,7 @@ def _import_supplemental_catalog(
                 "people_names": row.get("people_names") or row_metadata.get("people_names") or [],
                 "show_name": row_metadata.get("show_name"),
                 "season_number": season_number,
+                "episode_id": episode_id,
                 "source_page_url": row.get("source_page_url") or row_metadata.get("source_page_url"),
             }
             if content_type:
@@ -573,22 +645,24 @@ def _import_supplemental_catalog(
                 "supplemental_source": source,
                 "show_name": row_metadata.get("show_name"),
                 "season_number": season_number,
+                "episode_id": episode_id,
                 "people_names": row.get("people_names") or row_metadata.get("people_names") or [],
                 "context_type": context_type,
                 "context_section": context_section,
                 "source_variant": asset_metadata.get("source_variant"),
             }
-            create_media_link_for_entity(
-                db,
-                entity_type="person",
-                entity_id=target_person_id,
-                media_asset_id=str(asset_id),
-                kind="gallery",
-                position=row.get("position"),
-                context=link_context,
-            )
-            links_created += 1
-            if target_show_id:
+            if link_person:
+                create_media_link_for_entity(
+                    db,
+                    entity_type="person",
+                    entity_id=target_person_id,
+                    media_asset_id=str(asset_id),
+                    kind="gallery",
+                    position=row.get("position"),
+                    context=link_context,
+                )
+                links_created += 1
+            if link_show and target_show_id:
                 create_media_link_for_entity(
                     db,
                     entity_type="show",
@@ -599,11 +673,22 @@ def _import_supplemental_catalog(
                     context=link_context,
                 )
                 links_created += 1
-            if isinstance(season_number, int) and season_number in season_map:
+            if link_season and isinstance(season_number, int) and season_number in season_map:
                 create_media_link_for_entity(
                     db,
                     entity_type="season",
                     entity_id=season_map[season_number],
+                    media_asset_id=str(asset_id),
+                    kind="gallery",
+                    position=row.get("position"),
+                    context=link_context,
+                )
+                links_created += 1
+            if link_episode and episode_id:
+                create_media_link_for_entity(
+                    db,
+                    entity_type="episode",
+                    entity_id=episode_id,
                     media_asset_id=str(asset_id),
                     kind="gallery",
                     position=row.get("position"),
@@ -617,6 +702,7 @@ def _import_supplemental_catalog(
                     "caption": row.get("caption"),
                     "context_type": context_type,
                     "context_section": context_section,
+                    "episode_id": episode_id,
                     "supplemental": True,
                 }
             )

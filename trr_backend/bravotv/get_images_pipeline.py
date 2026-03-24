@@ -281,6 +281,8 @@ def _parse_season_from_text(value: str | None) -> int | None:
 
 def _best_text(*values: Any) -> str | None:
     for value in values:
+        if isinstance(value, dict):
+            value = value.get("value")
         text = str(value or "").strip()
         if text:
             return text
@@ -292,6 +294,60 @@ def _absolute_path_url(path: str | None) -> str | None:
     if not cleaned:
         return None
     return cleaned if cleaned.startswith("http") else f"https://www.bravotv.com{cleaned}"
+
+
+def _extract_bravo_image_people_names(
+    asset: Mapping[str, Any],
+    *,
+    known_people: Sequence[str],
+) -> list[str]:
+    unique_first_name_map: dict[str, str] = {}
+    duplicate_first_names: set[str] = set()
+    for candidate in known_people:
+        clean = str(candidate).strip()
+        first_name = clean.split(" ", 1)[0].strip()
+        normalized_first = first_name.casefold()
+        if not normalized_first:
+            continue
+        if normalized_first in unique_first_name_map:
+            duplicate_first_names.add(normalized_first)
+        else:
+            unique_first_name_map[normalized_first] = clean
+    for duplicate_first_name in duplicate_first_names:
+        unique_first_name_map.pop(duplicate_first_name, None)
+
+    text_candidates = [
+        _best_text(asset.get("field_caption")),
+        _best_text(asset.get("field_image_description")),
+        _best_text(asset.get("field_media_image_alt")),
+    ]
+    for text in text_candidates:
+        extracted = _extract_people_from_text(text, known_people=known_people)
+        if extracted:
+            return extracted
+        haystack = str(text or "").strip().casefold()
+        if not haystack:
+            continue
+        first_name_matches = [
+            full_name
+            for first_name, full_name in unique_first_name_map.items()
+            if re.search(rf"\b{re.escape(first_name)}\b", haystack)
+        ]
+        if first_name_matches:
+            return first_name_matches
+    return []
+
+
+def _resolve_bravo_source_page_url(asset: Mapping[str, Any]) -> str | None:
+    explicit = _best_text(asset.get("source_page_url"))
+    if explicit:
+        return explicit
+    gallery_path = _best_text(asset.get("gallery_path"))
+    gallery_url = _absolute_path_url(gallery_path)
+    gallery_item_id = _best_text(asset.get("gallery_item_id"))
+    if gallery_url and gallery_item_id:
+        return f"{gallery_url}#{gallery_item_id}"
+    return gallery_url
 
 
 def _normalize_getty_record(asset: dict[str, Any], *, known_people: Sequence[str]) -> dict[str, Any]:
@@ -381,10 +437,7 @@ def _normalize_nbcumv_record(asset: dict[str, Any], *, known_people: Sequence[st
 def _normalize_bravo_record(asset: dict[str, Any], *, known_people: Sequence[str]) -> dict[str, Any]:
     file_name = _best_text(asset.get("file_name"), _file_name_from_url(asset.get("file_url")))
     caption = _best_text(asset.get("field_caption"))
-    gallery_people = [str(value).strip() for value in (asset.get("gallery_people_names") or []) if str(value).strip()]
-    people_names = (
-        _extract_people_from_text(caption, known_people=list(known_people) + gallery_people) or gallery_people
-    )
+    people_names = _extract_bravo_image_people_names(asset, known_people=known_people)
     return {
         "source": "bravo",
         "source_id": _best_text(asset.get("media_uuid"), asset.get("file_uuid"), file_name),
@@ -402,7 +455,7 @@ def _normalize_bravo_record(asset: dict[str, Any], *, known_people: Sequence[str
         "air_date": _parse_iso_date(_best_text(asset.get("gallery_published_date"), asset.get("gallery_created"))),
         "keywords": [],
         "source_url": _best_text(asset.get("file_url")),
-        "source_page_url": _absolute_path_url(asset.get("gallery_path")),
+        "source_page_url": _resolve_bravo_source_page_url(asset),
         "width": None,
         "height": None,
         "raw": asset,

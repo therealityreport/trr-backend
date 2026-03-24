@@ -21,7 +21,7 @@ BASE_URL = "https://www.gettyimages.com"
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_DETAIL_CANDIDATES = 6
 DEFAULT_SEARCH_PAGE_SIZE = 60
-MAX_SEARCH_PAGES = 50
+MAX_SEARCH_PAGES = 100
 DEFAULT_DETAIL_BATCH_SIZE = 25
 DEFAULT_DETAIL_MAX_WORKERS = 8
 DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT = 6
@@ -135,7 +135,8 @@ def search_editorial_assets(
         query_params=query_params,
         limit=limit,
     )
-    total = min(len(candidates), max(0, int(limit)))
+    # limit <= 0 means unlimited — process all candidates
+    total = len(candidates) if limit <= 0 else min(len(candidates), max(0, int(limit)))
     if progress_cb:
         progress_cb(0, total, f"Getty search found {total} candidate asset pages.")
     results: list[dict[str, Any]] = []
@@ -166,7 +167,7 @@ def search_editorial_assets(
                 object_name = str(detail.get("object_name") or "").strip()
                 label = object_name or str(detail.get("editorial_id") or detail_url)
                 progress_cb(index, total, f"Fetched Getty asset {index}/{total}: {label}")
-            if len(results) >= limit:
+            if limit > 0 and len(results) >= limit:
                 return results
     return results
 
@@ -197,7 +198,8 @@ def search_grouped_events(
         session=session,
         query_params=grouped_query_params,
     )
-    total = min(len(candidates), max(0, int(limit)))
+    # limit <= 0 means unlimited — process all candidates
+    total = len(candidates) if limit <= 0 else min(len(candidates), max(0, int(limit)))
     if progress_cb:
         progress_cb(0, total, f"Getty grouped-event search found {total} candidate event pages.")
 
@@ -514,22 +516,24 @@ def scan_event_page_for_person(
     matched_assets: list[dict[str, Any]] = []
     all_scanned: list[dict[str, Any]] = []
 
-    for index, candidate in enumerate(candidates_to_scan, start=1):
-        detail_url = str(candidate.get("detail_url") or "").strip()
-        if not detail_url:
-            continue
-        if progress_cb:
-            progress_cb(index - 1, total, f"Scanning event asset {index}/{total}: {detail_url}")
-        detail = fetch_asset_detail(detail_url, session=session)
-        if not detail:
-            continue
-        merged = _merge_search_candidate_with_detail(candidate, detail)
-        all_scanned.append(merged)
-        match_details = describe_asset_person_match(merged, person_name)
-        if match_details.get("matched"):
-            matched_assets.append({**merged, "person_match": match_details})
-        if progress_cb:
-            progress_cb(index, total, f"Scanned {index}/{total}, {len(matched_assets)} matches so far")
+    # Fetch details in parallel for performance
+    detail_urls = [str(c.get("detail_url") or "").strip() for c in candidates_to_scan]
+    valid_pairs = [(c, u) for c, u in zip(candidates_to_scan, detail_urls) if u]
+    if valid_pairs:
+        batch_candidates, batch_urls = zip(*valid_pairs)
+        workers = min(DEFAULT_DETAIL_MAX_WORKERS, len(batch_urls))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            batch_details = list(executor.map(fetch_asset_detail, batch_urls))
+        for index, (candidate, detail) in enumerate(zip(batch_candidates, batch_details), start=1):
+            if not detail:
+                continue
+            merged = _merge_search_candidate_with_detail(candidate, detail)
+            all_scanned.append(merged)
+            match_details = describe_asset_person_match(merged, person_name)
+            if match_details.get("matched"):
+                matched_assets.append({**merged, "person_match": match_details})
+            if progress_cb:
+                progress_cb(index, total, f"Scanned {index}/{total}, {len(matched_assets)} matches so far")
 
     return {
         "event_url": cleaned_url,
@@ -615,7 +619,7 @@ def _search_asset_candidates_for_phrase(
             seen.add(absolute)
             deduped.append(candidate)
             page_new += 1
-            if len(deduped) >= limit:
+            if limit > 0 and len(deduped) >= limit:
                 return deduped
         if page_new == 0 or len(page_candidates) < DEFAULT_SEARCH_PAGE_SIZE:
             break
@@ -792,24 +796,18 @@ def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> di
     )
     result["getty_event_group_title"] = result["event_name"]
     image_urls = _extract_best_image_urls(asset_json)
+    max_file_size = detail_fields.get("max_file_size")
     result["thumb_url"] = image_urls.get("thumbUrl") or _first_present(asset_json, "thumbUrl")
     result["comp_url"] = image_urls.get("compUrl") or _first_present(asset_json, "compUrl")
-    result["preview_image_url"] = (
-        image_urls.get("downloadableCompUrl")
-        or image_urls.get("galleryHighResCompUrl")
-        or image_urls.get("highResCompUrl")
-        or image_urls.get("galleryComp1024Url")
-        or image_urls.get("compUrl")
-        or image_urls.get("mainImageUrl")
-        or image_urls.get("thumbUrl")
-    )
+    result["original_image_url"] = _select_best_original_image_url(image_urls, max_file_size=max_file_size)
+    result["preview_image_url"] = _select_best_preview_image_url(image_urls) or result["original_image_url"]
     result["keywords"] = asset_json.get("keywords") if isinstance(asset_json.get("keywords"), list) else []
     result["keyword_texts"] = keyword_texts
     result["people_overlay_names"] = overlay_people
     result["restrictions"] = detail_fields.get("restrictions")
     result["release_info"] = detail_fields.get("release_info")
     result["source"] = detail_fields.get("source_display") or _first_present(asset_json, "source")
-    result["max_file_size"] = detail_fields.get("max_file_size")
+    result["max_file_size"] = max_file_size
     result["editorial_number"] = detail_fields.get("editorial_number") or editorial_id
     result["object_name_display"] = detail_fields.get("object_name_display") or object_name
     result["people_count"] = people_count
@@ -864,10 +862,141 @@ def _extract_best_image_urls(asset_json: dict[str, Any]) -> dict[str, str]:
                     urls["compUrl"] = uri
                 elif name == "thumb" and "thumbUrl" not in urls:
                     urls["thumbUrl"] = uri
-                elif name == "preview" and "downloadableCompUrl" not in urls:
-                    urls["downloadableCompUrl"] = uri
+                elif name == "preview" and "previewUrl" not in urls:
+                    urls["previewUrl"] = uri
 
     return urls
+
+
+def _parse_max_file_dimensions(value: str | None) -> tuple[int | None, int | None]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    match = re.search(r"(\d{2,5})\s*x\s*(\d{2,5})", text, flags=re.IGNORECASE)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _parse_image_url_dimensions(url: str | None) -> tuple[int | None, int | None]:
+    cleaned = str(url or "").strip()
+    if not cleaned:
+        return None, None
+    parsed = urlparse(cleaned)
+    query = parse_qs(parsed.query)
+    raw_size = next(iter(query.get("s", [])), "").strip()
+    size_match = re.search(r"(\d{2,5})x(\d{2,5})", raw_size, flags=re.IGNORECASE)
+    if size_match:
+        return int(size_match.group(1)), int(size_match.group(2))
+    width = next((value for value in query.get("w", []) if value.isdigit()), "")
+    height = next((value for value in query.get("h", []) if value.isdigit()), "")
+    if width and height:
+        return int(width), int(height)
+    size_match = re.search(r"(\d{2,5})x(\d{2,5})", cleaned, flags=re.IGNORECASE)
+    if size_match:
+        return int(size_match.group(1)), int(size_match.group(2))
+    return None, None
+
+
+def _is_significantly_smaller_than_expected(
+    dimensions: tuple[int | None, int | None],
+    expected_dimensions: tuple[int | None, int | None],
+) -> bool:
+    width, height = dimensions
+    expected_width, expected_height = expected_dimensions
+    if not width or not height or not expected_width or not expected_height:
+        return False
+    area = width * height
+    expected_area = expected_width * expected_height
+    longest_side = max(width, height)
+    expected_longest_side = max(expected_width, expected_height)
+    return area < (expected_area * 0.25) or longest_side < (expected_longest_side * 0.45)
+
+
+def _score_original_image_url_candidate(
+    key: str,
+    url: str,
+    *,
+    expected_dimensions: tuple[int | None, int | None],
+) -> tuple[int, int, int]:
+    tier = {
+        "downloadableCompUrl": 80,
+        "galleryHighResCompUrl": 75,
+        "highResCompUrl": 70,
+        "galleryComp1024Url": 60,
+        "mainImageUrl": 50,
+        "compUrl": 45,
+        "previewUrl": 35,
+        "thumbUrl": 10,
+    }.get(key, 0)
+    width, height = _parse_image_url_dimensions(url)
+    area = (width or 0) * (height or 0)
+    if area > 0 and _is_significantly_smaller_than_expected((width, height), expected_dimensions):
+        signal = 0
+    elif area > 0:
+        signal = 2
+    elif tier >= 70:
+        signal = 1
+    else:
+        signal = 0
+    return signal, area, tier
+
+
+def _select_best_original_image_url(image_urls: dict[str, str], *, max_file_size: str | None = None) -> str | None:
+    expected_dimensions = _parse_max_file_dimensions(max_file_size)
+    candidates = [
+        (key, url)
+        for key in (
+            "downloadableCompUrl",
+            "galleryHighResCompUrl",
+            "highResCompUrl",
+            "galleryComp1024Url",
+            "mainImageUrl",
+            "compUrl",
+            "previewUrl",
+            "thumbUrl",
+        )
+        if (url := str(image_urls.get(key) or "").strip())
+    ]
+    if not candidates:
+        return None
+    best_key, best_url = max(
+        candidates,
+        key=lambda item: _score_original_image_url_candidate(
+            item[0],
+            item[1],
+            expected_dimensions=expected_dimensions,
+        ),
+    )
+    if best_key == "previewUrl" and len(candidates) > 1:
+        non_preview = [candidate for candidate in candidates if candidate[0] != "previewUrl"]
+        if non_preview:
+            _, best_url = max(
+                non_preview,
+                key=lambda item: _score_original_image_url_candidate(
+                    item[0],
+                    item[1],
+                    expected_dimensions=expected_dimensions,
+                ),
+            )
+    return best_url
+
+
+def _select_best_preview_image_url(image_urls: dict[str, str]) -> str | None:
+    for key in (
+        "galleryComp1024Url",
+        "compUrl",
+        "previewUrl",
+        "mainImageUrl",
+        "thumbUrl",
+        "downloadableCompUrl",
+        "galleryHighResCompUrl",
+        "highResCompUrl",
+    ):
+        value = str(image_urls.get(key) or "").strip()
+        if value:
+            return value
+    return None
 
 
 def _extract_object_name(html: str, asset_json: dict[str, Any]) -> str | None:
@@ -1214,11 +1343,16 @@ def _summarize_grouped_event_asset(asset: dict[str, Any]) -> dict[str, Any]:
     preview_url = (
         str(asset.get("preview_image_url") or asset.get("comp_url") or asset.get("thumb_url") or "").strip() or None
     )
+    original_image_url = (
+        str(asset.get("original_image_url") or asset.get("preview_image_url") or asset.get("comp_url") or "").strip()
+        or None
+    )
     return {
         "detail_url": str(asset.get("detail_url") or "").strip() or None,
         "editorial_id": str(asset.get("editorial_id") or "").strip() or None,
         "object_name": str(asset.get("object_name") or "").strip() or None,
         "caption": str(asset.get("caption") or "").strip() or None,
+        "original_image_url": original_image_url,
         "preview_image_url": preview_url,
     }
 

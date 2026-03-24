@@ -116,6 +116,8 @@ def expected_function_names() -> tuple[str, ...]:
         or "run_admin_operation_v2",
         str(os.getenv("TRR_MODAL_GOOGLE_NEWS_FUNCTION") or "run_google_news_sync").strip() or "run_google_news_sync",
         str(os.getenv("TRR_MODAL_REDDIT_REFRESH_FUNCTION") or "run_reddit_refresh").strip() or "run_reddit_refresh",
+        str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION") or "probe_reddit_refresh_runtime").strip()
+        or "probe_reddit_refresh_runtime",
         str(os.getenv("TRR_MODAL_SOCIAL_JOB_FUNCTION") or "run_social_job").strip() or "run_social_job",
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
         or "sweep_social_dispatch_queue",

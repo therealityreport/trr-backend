@@ -204,6 +204,7 @@ def test_threads_scrape_retries_profile_fetch_without_cookies_on_authenticated_4
         referer: str | None = None,
         document: bool = False,
         cookies_override: dict[str, str] | None = None,
+        **_kw: object,
     ) -> str:
         del delay_seconds, referer, document
         calls.append(cookies_override)
@@ -230,6 +231,43 @@ def test_threads_scrape_retries_profile_fetch_without_cookies_on_authenticated_4
     assert posts == []
     assert calls == [None, {}]
     assert scraper.last_retrieval_meta["profile_fetch_mode"] == "anonymous_fallback"
+
+
+def test_threads_scrape_via_graphql_marks_page_fetch_failure_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = ThreadsScraper(cookies={"csrftoken": "token"})
+    tokens = _PageTokens(fb_dtsg="fb-dtsg", lsd="lsd", jazoest="26474", user_id="123")
+    calls = {"count": 0}
+
+    def _fake_fetch_profile_posts_page(**_kwargs: Any):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return ([_graphql_edge(impression_count=120)], "cursor-2", True)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(scraper, "_extract_page_tokens", lambda _html: tokens)
+    monkeypatch.setattr(scraper, "_fetch_profile_posts_page", _fake_fetch_profile_posts_page)
+
+    posts = scraper._scrape_via_graphql(  # noqa: SLF001
+        ThreadsScrapeConfig(
+            username="bravotv",
+            date_start=datetime(2025, 8, 1, tzinfo=UTC),
+            date_end=datetime(2025, 8, 31, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=3,
+        ),
+        page_html="<html></html>",
+        profile_url="https://www.threads.com/@bravotv",
+    )
+
+    assert posts is not None
+    assert len(posts) == 1
+    assert scraper.last_retrieval_meta["error_code"] == "threads_graphql_page_fetch_failed"
+    assert scraper.last_retrieval_meta["retryable"] is True
+    assert scraper.last_retrieval_meta["posts_checked"] == 1
+    assert scraper.last_retrieval_meta["last_cursor"] == "cursor-2"
+    assert scraper.last_retrieval_meta["stop_reason"] == "page_fetch_failed"
 
 
 def test_build_post_from_html_uses_deterministic_fallback_post_id() -> None:

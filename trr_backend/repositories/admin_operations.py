@@ -13,6 +13,12 @@ OperationStatus = Literal["pending", "running", "completed", "failed", "cancelle
 
 ACTIVE_STATUSES: set[str] = {"pending", "running", "cancelling"}
 TERMINAL_STATUSES: set[str] = {"completed", "failed", "cancelled"}
+DEFAULT_OPERATION_STALE_AFTER_SECONDS = 300
+DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS = 60
+_PERSON_SCOPED_OPERATION_TYPES: set[str] = {
+    "admin_person_refresh_images",
+    "admin_person_reprocess_images",
+}
 
 _OPERATION_COLUMNS = """
   id::text,
@@ -64,6 +70,129 @@ def _normalize_operation(row: dict[str, Any] | None) -> dict[str, Any] | None:
     return normalized
 
 
+def _extract_person_scoped_operation_person_id(
+    operation_type: str,
+    request_payload: dict[str, Any] | None,
+) -> str | None:
+    if str(operation_type or "").strip() not in _PERSON_SCOPED_OPERATION_TYPES:
+        return None
+    if not isinstance(request_payload, dict):
+        return None
+    return _clean_text(request_payload.get("person_id"))
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
+
+
+def _safe_positive_seconds(value: int | None, *, default: int) -> int:
+    if value is None:
+        return default
+    return max(15, int(value))
+
+
+def _health_row_query() -> str:
+    return f"""
+        select
+          {_OPERATION_COLUMNS},
+          coalesce(dispatch_event.event_payload->>'execution_owner', '') as execution_owner,
+          coalesce(dispatch_event.event_payload->>'execution_mode_canonical', '') as execution_mode_canonical,
+          coalesce(dispatch_event.event_payload->>'execution_backend_canonical', '') as execution_backend_canonical,
+          coalesce(progress_stage.phase, progress_stage.stage, '') as latest_phase,
+          greatest(
+            0,
+            floor(extract(epoch from (now() - coalesce(op.started_at, op.created_at))))
+          )::bigint as age_seconds,
+          greatest(
+            0,
+            floor(extract(epoch from (now() - coalesce(op.heartbeat_at, op.updated_at, op.created_at))))
+          )::bigint as last_update_age_seconds,
+          case
+            when op.cancel_requested_at is null then null
+            else greatest(0, floor(extract(epoch from (now() - op.cancel_requested_at))))::bigint
+          end as cancel_requested_age_seconds
+        from core.admin_operations op
+        left join lateral (
+          select event_payload
+          from core.admin_operation_events
+          where operation_id = op.id
+            and event_type in ('operation', 'dispatched_to_modal')
+          order by event_seq desc
+          limit 1
+        ) dispatch_event on true
+        left join lateral (
+          select
+            event_payload->>'phase' as phase,
+            event_payload->>'stage' as stage
+          from core.admin_operation_events
+          where operation_id = op.id
+            and event_type = 'progress'
+          order by event_seq desc
+          limit 1
+        ) progress_stage on true
+    """
+
+
+def _is_operation_row_stale(
+    row: dict[str, Any],
+    *,
+    stale_after_seconds: int,
+    cancelling_grace_seconds: int,
+) -> tuple[bool, str | None]:
+    status = str(row.get("status") or "").strip().lower()
+    if status not in ACTIVE_STATUSES:
+        return False, None
+
+    cancel_age = _coerce_int(row.get("cancel_requested_age_seconds"))
+    last_update_age = _coerce_int(row.get("last_update_age_seconds"))
+    age_seconds = _coerce_int(row.get("age_seconds"))
+
+    if status == "cancelling" and cancel_age is not None and cancel_age >= cancelling_grace_seconds:
+        return True, "cancelling_grace_exceeded"
+    if last_update_age is not None and last_update_age >= stale_after_seconds:
+        return True, "stale_heartbeat"
+    if status == "pending" and age_seconds is not None and age_seconds >= stale_after_seconds:
+        return True, "pending_timeout"
+    return False, None
+
+
+def _normalize_operation_health_row(
+    row: dict[str, Any],
+    *,
+    stale_after_seconds: int,
+    cancelling_grace_seconds: int,
+) -> dict[str, Any]:
+    normalized = _normalize_operation(row) or {}
+    normalized["execution_owner"] = _clean_text(str(normalized.get("execution_owner") or "")) or None
+    normalized["execution_mode_canonical"] = _clean_text(str(normalized.get("execution_mode_canonical") or "")) or None
+    normalized["execution_backend_canonical"] = _clean_text(
+        str(normalized.get("execution_backend_canonical") or "")
+    ) or None
+    normalized["latest_phase"] = _clean_text(str(normalized.get("latest_phase") or "")) or None
+    normalized["age_seconds"] = _coerce_int(normalized.get("age_seconds")) or 0
+    normalized["last_update_age_seconds"] = _coerce_int(normalized.get("last_update_age_seconds")) or 0
+    normalized["cancel_requested_age_seconds"] = _coerce_int(normalized.get("cancel_requested_age_seconds"))
+    is_stale, stale_reason = _is_operation_row_stale(
+        normalized,
+        stale_after_seconds=stale_after_seconds,
+        cancelling_grace_seconds=cancelling_grace_seconds,
+    )
+    normalized["is_stale"] = is_stale
+    normalized["stale_reason"] = stale_reason
+    return normalized
+
+
 def create_or_attach_operation(
     *,
     operation_type: str,
@@ -81,6 +210,8 @@ def create_or_attach_operation(
 
     session_id = _clean_text(client_session_id)
     workflow_id = _clean_text(client_workflow_id)
+
+    person_scoped_person_id = _extract_person_scoped_operation_person_id(op_type, request_payload)
 
     if allow_attach and session_id:
         if workflow_id:
@@ -113,6 +244,30 @@ def create_or_attach_operation(
                 """,
                 [op_type, session_id, _to_json(request_payload)],
             )
+        if attached:
+            return _normalize_operation(attached) or {}, True
+
+    if allow_attach and person_scoped_person_id:
+        attached = pg.fetch_one(
+            f"""
+            select
+              {_OPERATION_COLUMNS}
+            from core.admin_operations
+            where operation_type = %s
+              and request_payload->>'person_id' = %s
+              and status in ('pending', 'running', 'cancelling')
+            order by
+              case
+                when status = 'running' then 0
+                when status = 'cancelling' then 1
+                else 2
+              end,
+              coalesce(heartbeat_at, updated_at, created_at) desc,
+              created_at desc
+            limit 1
+            """,
+            [op_type, person_scoped_person_id],
+        )
         if attached:
             return _normalize_operation(attached) or {}, True
 
@@ -251,6 +406,7 @@ def update_operation_progress(operation_id: str, *, progress_payload: dict[str, 
           started_at = coalesce(started_at, now()),
           heartbeat_at = now()
         where id = %s::uuid
+          and status not in ('completed', 'failed', 'cancelled')
         returning id
         """,
         [_to_json(progress_payload), operation_id],
@@ -343,6 +499,274 @@ def request_operation_cancel(operation_id: str) -> dict[str, Any] | None:
     return _normalize_operation(row)
 
 
+def request_related_operation_cancels(operation_id: str) -> list[dict[str, Any]]:
+    operation = get_operation(operation_id)
+    if not operation:
+        return []
+
+    operation_type = str(operation.get("operation_type") or "").strip()
+    person_scoped_person_id = _extract_person_scoped_operation_person_id(
+        operation_type,
+        operation.get("request_payload") if isinstance(operation.get("request_payload"), dict) else None,
+    )
+
+    if not person_scoped_person_id:
+        row = request_operation_cancel(operation_id)
+        return [row] if row else []
+
+    rows = pg.fetch_all(
+        f"""
+        update core.admin_operations
+        set
+          cancel_requested_at = coalesce(cancel_requested_at, now()),
+          status = case
+            when status in ('pending', 'running') then 'cancelling'
+            else status
+          end,
+          heartbeat_at = now()
+        where operation_type = %s
+          and request_payload->>'person_id' = %s
+          and status in ('pending', 'running', 'cancelling')
+        returning
+          {_OPERATION_COLUMNS}
+        """,
+        [operation_type, person_scoped_person_id],
+    )
+    return [_normalize_operation(dict(row)) or {} for row in rows]
+
+
+def list_active_operations(
+    *,
+    operation_types: Iterable[str] | None = None,
+    limit: int = 200,
+    stale_after_seconds: int = DEFAULT_OPERATION_STALE_AFTER_SECONDS,
+    cancelling_grace_seconds: int = DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 500))
+    normalized_types = [str(item).strip() for item in (operation_types or []) if str(item).strip()]
+    where_type = ""
+    params: list[Any] = []
+    if normalized_types:
+        where_type = "and op.operation_type = any(%s::text[])"
+        params.append(normalized_types)
+    params.append(safe_limit)
+    rows = pg.fetch_all(
+        f"""
+        {_health_row_query()}
+        where op.status in ('pending', 'running', 'cancelling')
+          {where_type}
+        order by coalesce(op.heartbeat_at, op.updated_at, op.created_at) desc, op.created_at desc
+        limit %s
+        """,
+        params,
+    )
+    return [
+        _normalize_operation_health_row(
+            dict(row),
+            stale_after_seconds=stale_after_seconds,
+            cancelling_grace_seconds=cancelling_grace_seconds,
+        )
+        for row in rows
+    ]
+
+
+def list_stale_operations(
+    *,
+    operation_types: Iterable[str] | None = None,
+    limit: int = 200,
+    stale_after_seconds: int = DEFAULT_OPERATION_STALE_AFTER_SECONDS,
+    cancelling_grace_seconds: int = DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS,
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in list_active_operations(
+            operation_types=operation_types,
+            limit=limit,
+            stale_after_seconds=stale_after_seconds,
+            cancelling_grace_seconds=cancelling_grace_seconds,
+        )
+        if row.get("is_stale") is True
+    ]
+
+
+def get_admin_operations_health(
+    *,
+    operation_types: Iterable[str] | None = None,
+    limit: int = 200,
+    stale_after_seconds: int = DEFAULT_OPERATION_STALE_AFTER_SECONDS,
+    cancelling_grace_seconds: int = DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS,
+) -> dict[str, Any]:
+    active_operations = list_active_operations(
+        operation_types=operation_types,
+        limit=limit,
+        stale_after_seconds=stale_after_seconds,
+        cancelling_grace_seconds=cancelling_grace_seconds,
+    )
+    stale_operations = [row for row in active_operations if row.get("is_stale") is True]
+    by_status: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    runtime_counts = {"modal": 0, "local": 0, "other": 0, "unknown": 0}
+    for row in active_operations:
+        status = str(row.get("status") or "").strip().lower() or "unknown"
+        by_status[status] = by_status.get(status, 0) + 1
+        operation_type = str(row.get("operation_type") or "").strip() or "unknown"
+        by_type[operation_type] = by_type.get(operation_type, 0) + 1
+        backend = str(row.get("execution_backend_canonical") or "").strip().lower()
+        if backend == "modal":
+            runtime_counts["modal"] += 1
+        elif backend == "local":
+            runtime_counts["local"] += 1
+        elif backend:
+            runtime_counts["other"] += 1
+        else:
+            runtime_counts["unknown"] += 1
+
+    return {
+        "summary": {
+            "active_total": len(active_operations),
+            "stale_total": len(stale_operations),
+            "cancelling_total": by_status.get("cancelling", 0),
+            "by_status": by_status,
+            "by_type": by_type,
+            "runtime_split": runtime_counts,
+            "stale_after_seconds": stale_after_seconds,
+            "cancelling_grace_seconds": cancelling_grace_seconds,
+        },
+        "active_operations": active_operations,
+        "stale_operations": stale_operations,
+        "updated_at": now_iso(),
+    }
+
+
+def force_cancel_stale_operations(
+    *,
+    operation_ids: Iterable[str] | None = None,
+    cancelled_by: str | None = None,
+    stale_after_seconds: int = DEFAULT_OPERATION_STALE_AFTER_SECONDS,
+    cancelling_grace_seconds: int = DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS,
+    force_selected: bool = False,
+) -> dict[str, Any]:
+    normalized_ids = [str(item).strip() for item in (operation_ids or []) if str(item).strip()]
+    active_rows = list_active_operations(
+        limit=max(len(normalized_ids), 200),
+        stale_after_seconds=stale_after_seconds,
+        cancelling_grace_seconds=cancelling_grace_seconds,
+    )
+    if normalized_ids:
+        candidate_rows = [row for row in active_rows if str(row.get("id") or "") in set(normalized_ids)]
+    else:
+        candidate_rows = [row for row in active_rows if row.get("is_stale") is True]
+
+    target_rows = (
+        candidate_rows
+        if (force_selected and normalized_ids)
+        else [row for row in candidate_rows if row.get("is_stale") is True]
+    )
+    target_ids = [str(row.get("id") or "") for row in target_rows if str(row.get("id") or "").strip()]
+    if not target_ids:
+        health = get_admin_operations_health(
+            stale_after_seconds=stale_after_seconds,
+            cancelling_grace_seconds=cancelling_grace_seconds,
+        )
+        return {
+            "cancelled_operations": 0,
+            "cancelled_operation_ids": [],
+            "stale_operations_remaining": len(health["stale_operations"]),
+            "active_operations_remaining": len(health["active_operations"]),
+            "updated_at": health["updated_at"],
+        }
+
+    stale_ids = [str(row.get("id") or "") for row in target_rows]
+    reason_by_id = {
+        str(row.get("id") or ""): (
+            "force_selected"
+            if force_selected and normalized_ids
+            else str(row.get("stale_reason") or "stale_cleanup")
+        )
+        for row in target_rows
+    }
+    cancellation_code = (
+        "FORCE_CANCELLED_BY_OPERATOR"
+        if force_selected and normalized_ids
+        else "STALE_OPERATION_CANCELLED"
+    )
+    cancellation_message = (
+        "Admin operation force-cancelled by operator."
+        if force_selected and normalized_ids
+        else "Stale admin operation cancelled by health cleanup policy."
+    )
+    update_rows = pg.fetch_all(
+        f"""
+        update core.admin_operations
+        set
+          status = 'cancelled',
+          completed_at = coalesce(completed_at, now()),
+          claimed_by_worker_id = null,
+          claim_token = null,
+          lease_expires_at = null,
+          next_retry_at = null,
+          heartbeat_at = now(),
+          error_payload = coalesce(error_payload, '{{}}'::jsonb) || %s::jsonb,
+          progress_payload = coalesce(progress_payload, '{{}}'::jsonb) || %s::jsonb
+        where id = any(%s::uuid[])
+          and status in ('pending', 'running', 'cancelling')
+        returning
+          {_OPERATION_COLUMNS}
+        """,
+        [
+            _to_json(
+                {
+                    "code": cancellation_code,
+                    "message": cancellation_message,
+                    "cancelled_by": _clean_text(cancelled_by),
+                    "stale_cleanup": not (force_selected and normalized_ids),
+                    "force_cancelled": bool(force_selected and normalized_ids),
+                }
+            ),
+            _to_json(
+                {
+                    "message": cancellation_message,
+                    "stale_cleanup": not (force_selected and normalized_ids),
+                    "force_cancelled": bool(force_selected and normalized_ids),
+                }
+            ),
+            stale_ids,
+        ],
+    )
+    cancelled_ids: list[str] = []
+    for row in update_rows:
+        normalized = _normalize_operation(row) or {}
+        operation_id = str(normalized.get("id") or "").strip()
+        if not operation_id:
+            continue
+        cancelled_ids.append(operation_id)
+        append_operation_event(
+            operation_id,
+            event_type="error",
+            event_payload={
+                "operation_id": operation_id,
+                "status": "cancelled",
+                "message": cancellation_message,
+                "stale_cleanup": not (force_selected and normalized_ids),
+                "force_cancelled": bool(force_selected and normalized_ids),
+                "stale_reason": reason_by_id.get(operation_id),
+                "cancelled_by": _clean_text(cancelled_by),
+            },
+        )
+
+    health = get_admin_operations_health(
+        stale_after_seconds=stale_after_seconds,
+        cancelling_grace_seconds=cancelling_grace_seconds,
+    )
+    return {
+        "cancelled_operations": len(cancelled_ids),
+        "cancelled_operation_ids": cancelled_ids,
+        "stale_operations_remaining": len(health["stale_operations"]),
+        "active_operations_remaining": len(health["active_operations"]),
+        "updated_at": health["updated_at"],
+    }
+
+
 def is_cancel_requested(operation_id: str) -> bool:
     row = pg.fetch_one(
         """
@@ -367,6 +791,11 @@ def claim_next_operation(
     normalized_worker = _clean_text(worker_id)
     if not normalized_worker:
         raise ValueError("worker_id is required")
+
+    force_cancel_stale_operations(
+        stale_after_seconds=DEFAULT_OPERATION_STALE_AFTER_SECONDS,
+        cancelling_grace_seconds=DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS,
+    )
 
     safe_lease_seconds = max(15, int(lease_seconds))
     normalized_types = [str(item).strip() for item in (operation_types or []) if str(item).strip()]
@@ -454,6 +883,12 @@ def claim_operation(
     normalized_worker = _clean_text(worker_id)
     if not normalized_worker:
         raise ValueError("worker_id is required")
+
+    force_cancel_stale_operations(
+        operation_ids=[operation_id],
+        stale_after_seconds=DEFAULT_OPERATION_STALE_AFTER_SECONDS,
+        cancelling_grace_seconds=DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS,
+    )
 
     safe_lease_seconds = max(15, int(lease_seconds))
     normalized_types = [str(item).strip() for item in (operation_types or []) if str(item).strip()]

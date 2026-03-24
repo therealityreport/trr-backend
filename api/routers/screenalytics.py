@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import psycopg2
 from fastapi import APIRouter, Depends, Query
 
 from api.screenalytics_auth import require_screenalytics_service_token
@@ -14,6 +15,13 @@ from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.repositories.tagging_references import build_owner_facebank_initial_reference_profile
 
 router = APIRouter(prefix="/screenalytics", tags=["screenalytics"])
+
+
+def _fetch_all_or_empty_when_view_missing(sql: str, params: list[object]) -> list[dict]:
+    try:
+        return pg.fetch_all(sql, params)
+    except psycopg2.errors.UndefinedTable:
+        return []
 
 
 def _select_initial_facebank_photos(
@@ -75,7 +83,7 @@ def get_episode_cast(
     if credit_category:
         params.append(credit_category)
     params.extend([limit, offset])
-    return pg.fetch_all(sql, params)
+    return _fetch_all_or_empty_when_view_missing(sql, params)
 
 
 @router.get("/seasons/{season_id}/cast")
@@ -86,7 +94,7 @@ def get_season_cast(
     _: None = Depends(require_screenalytics_service_token),
 ) -> list[dict]:
     sql = "SELECT * FROM core.v_season_cast WHERE season_id = %s ORDER BY episodes_in_season DESC LIMIT %s OFFSET %s"
-    return pg.fetch_all(sql, [str(season_id), limit, offset])
+    return _fetch_all_or_empty_when_view_missing(sql, [str(season_id), limit, offset])
 
 
 @router.get("/people/{person_id}/photos")

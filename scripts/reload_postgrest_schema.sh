@@ -18,7 +18,35 @@ set -euo pipefail
 
 # Load .env if it exists
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    tmp_env_exports="$(mktemp)"
+    python - <<'PY' > "$tmp_env_exports"
+from pathlib import Path
+import ast
+import shlex
+
+for raw_line in Path(".env").read_text().splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if line.startswith("export "):
+        line = line[7:].strip()
+    if "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if not key:
+        continue
+    if value[:1] in {"'", '"'} and value[-1:] == value[:1]:
+        try:
+            value = ast.literal_eval(value)
+        except Exception:
+            value = value[1:-1]
+    print(f"export {key}={shlex.quote(value)}")
+PY
+    # shellcheck disable=SC1090
+    . "$tmp_env_exports"
+    rm -f "$tmp_env_exports"
 fi
 
 # Check if SUPABASE_DB_URL is set

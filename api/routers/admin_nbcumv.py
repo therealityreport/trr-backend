@@ -49,6 +49,13 @@ class NbcumvPreviewRequest(BaseModel):
     filename: str | None = None
     lbx_id: str | None = None
     show_id: str | None = None
+    search_text: str | None = None
+    nup_prefix: str | None = None
+    show_name: str | None = None
+    meta_type: str | None = None
+    season: str | None = None
+    episode: str | None = None
+    network: str | None = None
     created_start: str | None = None
     created_end: str | None = None
     live_date_start: str | None = None
@@ -63,6 +70,13 @@ class NbcumvPreviewRequest(BaseModel):
                 self.filename,
                 self.lbx_id,
                 self.show_id,
+                self.search_text,
+                self.nup_prefix,
+                self.show_name,
+                self.meta_type,
+                self.season,
+                self.episode,
+                self.network,
                 self.created_start,
                 self.created_end,
                 self.live_date_start,
@@ -84,6 +98,7 @@ class NbcumvImportItem(BaseModel):
     lbx_filename: str
     location: str | None = None
     nbcumv_image: dict[str, Any] | None = None
+    getty_asset: dict[str, Any] | None = None
     show_ids: list[str] = Field(default_factory=list)
     link_show_ids: list[UUID] = Field(default_factory=list)
     getty_detail_url: str | None = None
@@ -371,6 +386,11 @@ def _merge_dict(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str,
     return merged
 
 
+def _effective_nbcumv_tags(image: dict[str, Any], existing_tags: list[str] | None = None) -> list[str]:
+    status = str(image.get("status") or "").strip() or None
+    return nbcumv._hidden_tags_for_status(status, existing_tags)
+
+
 def _parse_int_field(image: dict[str, Any], *keys: str) -> int | None:
     """Extract the first integer value from a dict by trying multiple keys."""
     for key in keys:
@@ -427,6 +447,12 @@ def _build_asset_metadata(
     getty = getty_asset or {}
     getty_details = dict(getty.get("details") or {}) if isinstance(getty.get("details"), dict) else {}
     getty_tags = list(getty.get("keyword_texts") or []) if isinstance(getty.get("keyword_texts"), list) else []
+    existing_tags = (
+        list(existing_metadata.get("tags") or [])
+        if isinstance(existing_metadata, dict) and isinstance(existing_metadata.get("tags"), list)
+        else []
+    )
+    effective_tags = _effective_nbcumv_tags(image, existing_tags)
     nbcumv_enriched = dict(image)
     # Derive `company` from lbx_copyright/lbx_credit for frontend extractNbcumvFields()
     if "company" not in nbcumv_enriched:
@@ -454,6 +480,9 @@ def _build_asset_metadata(
         "tagged_people": tagged_people,
         "published_at": published_at,
         "source_page_url": getty.get("detail_url"),
+        "status": str(image.get("status") or "").strip() or None,
+        "is_hidden": bool(image.get("is_hidden")),
+        "tags": effective_tags,
         "nbcumv": nbcumv_enriched,
         "getty": getty,
         "getty_details": getty_details,
@@ -648,16 +677,22 @@ def _import_single_item(
         )
     if image is None:
         raise HTTPException(status_code=404, detail=f"NBCUMV image not found: {item.lbx_filename}")
+    if str(image.get("status") or "").strip() == "0":
+        logger.info("Importing HIDDEN image (status:0): %s", image.get("lbx_filename"))
 
-    try:
-        getty_asset = (
-            getty.fetch_asset_detail(item.getty_detail_url)
-            if item.getty_detail_url
-            else getty.resolve_asset_by_object_name(item.lbx_filename)
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Getty enrichment failed for %s: %s", item.lbx_filename, exc)
-        getty_asset = None
+    getty_asset = dict(item.getty_asset) if isinstance(item.getty_asset, dict) else None
+    if getty_asset and item.getty_detail_url and not str(getty_asset.get("detail_url") or "").strip():
+        getty_asset["detail_url"] = item.getty_detail_url
+    if getty_asset is None:
+        try:
+            getty_asset = (
+                getty.fetch_asset_detail(item.getty_detail_url)
+                if item.getty_detail_url
+                else getty.resolve_asset_by_object_name(item.lbx_filename)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Getty enrichment failed for %s: %s", item.lbx_filename, exc)
+            getty_asset = None
     tagged_people = _extract_tagged_people(image, getty_asset)
 
     if assign_people:
@@ -808,6 +843,13 @@ def preview_nbcumv_import(
         filename=request.filename,
         lbx_id=request.lbx_id,
         show_id=request.show_id,
+        search_text=request.search_text,
+        nup_prefix=request.nup_prefix,
+        show_name=request.show_name,
+        meta_type=request.meta_type,
+        season=request.season,
+        episode=request.episode,
+        network=request.network,
         created_start=request.created_start,
         created_end=request.created_end,
         live_date_start=request.live_date_start,
@@ -831,12 +873,21 @@ def preview_nbcumv_import(
         matches = _match_people_names(people_index, tagged_people)
         existing_asset = _existing_asset_by_nbcumv_id(db, str(image.get("lbx_id") or ""))
         existing_person_ids = _existing_person_links(db, str(existing_asset["id"])) if existing_asset else []
+        effective_tags = _effective_nbcumv_tags(
+            image,
+            list((existing_asset or {}).get("metadata", {}).get("tags") or [])
+            if isinstance((existing_asset or {}).get("metadata"), dict)
+            else [],
+        )
 
         preview_items.append(
             {
                 "lbx_id": str(image.get("lbx_id") or ""),
                 "lbx_filename": image.get("lbx_filename"),
                 "location": image.get("location"),
+                "status": str(image.get("status") or "").strip() or None,
+                "is_hidden": bool(image.get("is_hidden")),
+                "effective_tags": effective_tags,
                 "show_ids": image.get("showIds") or [],
                 "nbcumv": image,
                 "getty": getty_asset,

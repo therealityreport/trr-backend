@@ -11,11 +11,12 @@ import socket
 import time
 from collections.abc import AsyncGenerator, Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any
 
 from fastapi import Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from trr_backend.job_plane import (
     execution_metadata,
@@ -33,13 +34,21 @@ _RETENTION_HOURS = max(1, int(os.getenv("TRR_ADMIN_OPERATION_RETENTION_HOURS", "
 _OPERATION_CLAIM_LEASE_SECONDS = max(30, int(os.getenv("TRR_ADMIN_OPERATION_CLAIM_LEASE_SECONDS", "300")))
 _OPERATION_RETRY_BASE_SECONDS = max(5, int(os.getenv("TRR_ADMIN_OPERATION_RETRY_BASE_SECONDS", "20")))
 _OPERATION_RETRY_MAX_ATTEMPTS = max(1, int(os.getenv("TRR_ADMIN_OPERATION_RETRY_MAX_ATTEMPTS", "3")))
+_OPERATION_CLAIM_HEARTBEAT_INTERVAL_SECONDS = max(
+    1.0,
+    float(
+        os.getenv(
+            "TRR_ADMIN_OPERATION_CLAIM_HEARTBEAT_SECONDS",
+            str(max(5, _OPERATION_CLAIM_LEASE_SECONDS // 3)),
+        )
+    ),
+)
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=_OPERATION_WORKERS, thread_name_prefix="admin-op")
 _FUTURES: dict[str, Future[Any]] = {}
 _FUTURES_LOCK = Lock()
 _LAST_PURGE_MONOTONIC = 0.0
 _LOCAL_RUNTIME_MARKERS = frozenset({"local", "dev", "development", "test"})
-_LOCAL_ADMIN_OPERATION_TYPES = frozenset({"admin_person_refresh_images", "admin_person_reprocess_images"})
 
 
 def _env_truthy(name: str) -> bool:
@@ -80,11 +89,11 @@ def _prefer_local_execution_for_request(request: Request | None, *, operation_ty
     if request is None or not _is_local_or_dev_runtime():
         return False
 
-    if _header_truthy(request.headers.get("x-trr-prefer-local-execution")):
-        return True
-
-    normalized_operation_type = str(operation_type or "").strip().lower()
-    if normalized_operation_type in _LOCAL_ADMIN_OPERATION_TYPES:
+    # Remote is the default when the job plane is available. Only allow
+    # request-driven local execution when an explicit operator override is set.
+    if _env_truthy("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE") and _header_truthy(
+        request.headers.get("x-trr-prefer-local-execution")
+    ):
         return True
 
     return False
@@ -194,6 +203,9 @@ def _append_event_and_update(
     payload: dict[str, Any],
     request_id: str | None,
 ) -> None:
+    current_operation = admin_operations.get_operation(operation_id)
+    if admin_operations.operation_is_terminal((current_operation or {}).get("status")):
+        return
     enriched = _ensure_operation_payload(operation_id, payload, request_id=request_id)
     event_row = admin_operations.append_operation_event(
         operation_id,
@@ -345,6 +357,24 @@ def _stream_headers() -> dict[str, str]:
     }
 
 
+async def _load_operation_stream_events(
+    operation_id: str,
+    *,
+    after_seq: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return await run_in_threadpool(
+        admin_operations.stream_events_after_seq,
+        operation_id,
+        after_seq=after_seq,
+        limit=limit,
+    )
+
+
+async def _load_operation_state(operation_id: str) -> dict[str, Any] | None:
+    return await run_in_threadpool(admin_operations.get_operation, operation_id)
+
+
 async def operation_stream_generator(
     operation_id: str,
     *,
@@ -356,7 +386,7 @@ async def operation_stream_generator(
     while True:
         replay_after = next_seq
         events = admin_operations.normalize_operation_events(
-            admin_operations.stream_events_after_seq(operation_id, after_seq=next_seq, limit=500)
+            await _load_operation_stream_events(operation_id, after_seq=next_seq, limit=500)
         )
         if events:
             logger.info(
@@ -379,7 +409,7 @@ async def operation_stream_generator(
             event_type = str(event.get("event_type") or "message")
             yield _sse_chunk(event_type, payload)
 
-        operation = admin_operations.get_operation(operation_id)
+        operation = await _load_operation_state(operation_id)
         if not operation:
             error_payload = {
                 "operation_id": operation_id,
@@ -391,7 +421,7 @@ async def operation_stream_generator(
 
         if admin_operations.operation_is_terminal(str(operation.get("status") or "")):
             final_events = admin_operations.normalize_operation_events(
-                admin_operations.stream_events_after_seq(operation_id, after_seq=next_seq, limit=500)
+                await _load_operation_stream_events(operation_id, after_seq=next_seq, limit=500)
             )
             for event in final_events:
                 seq = int(event.get("event_seq") or 0)
@@ -433,6 +463,7 @@ def operation_stream_response(
 
 def _resolve_remote_operation_producer(
     *,
+    operation_id: str,
     operation_type: str,
     request_payload: dict[str, Any],
 ) -> Callable[[], Any] | None:
@@ -465,11 +496,31 @@ def _resolve_remote_operation_producer(
     if normalized_type == "admin_person_refresh_images":
         from api.routers.admin_person_images import build_person_refresh_images_operation_producer
 
-        return build_person_refresh_images_operation_producer(request_payload=request_payload)
+        return build_person_refresh_images_operation_producer(
+            request_payload=request_payload,
+            operation_id=operation_id,
+        )
+    if normalized_type == "admin_person_refresh_profile":
+        from api.routers.admin_person_profile import build_person_refresh_profile_operation_producer
+
+        return build_person_refresh_profile_operation_producer(
+            request_payload=request_payload,
+            operation_id=operation_id,
+        )
     if normalized_type == "admin_person_reprocess_images":
         from api.routers.admin_person_images import build_person_reprocess_images_operation_producer
 
-        return build_person_reprocess_images_operation_producer(request_payload=request_payload)
+        return build_person_reprocess_images_operation_producer(
+            request_payload=request_payload,
+            operation_id=operation_id,
+        )
+    if normalized_type == "admin_reddit_refresh_backfill":
+        from trr_backend.repositories.reddit_refresh import build_reddit_refresh_backfill_operation_producer
+
+        return build_reddit_refresh_backfill_operation_producer(
+            request_payload=request_payload,
+            operation_id=operation_id,
+        )
     if normalized_type == "admin_bravotv_image_run":
         from api.routers.admin_bravotv_images import build_bravotv_image_operation_producer
 
@@ -487,7 +538,11 @@ def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
     request_id = str(operation.get("request_id") or "").strip() or None
     claim_token = str(operation.get("claim_token") or "").strip() or None
 
-    producer = _resolve_remote_operation_producer(operation_type=operation_type, request_payload=request_payload)
+    producer = _resolve_remote_operation_producer(
+        operation_id=operation_id,
+        operation_type=operation_type,
+        request_payload=request_payload,
+    )
     if producer is None:
         logger.error(
             "Unsupported remote admin operation type: operation_id=%s operation_type=%s request_id=%s",
@@ -511,6 +566,43 @@ def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
         admin_operations.release_operation_claim(operation_id, claim_token=claim_token)
         return
 
+    heartbeat_stop: Event | None = None
+    heartbeat_thread: Thread | None = None
+
+    if claim_token:
+        heartbeat_stop = Event()
+
+        def _heartbeat_loop() -> None:
+            assert heartbeat_stop is not None
+            while not heartbeat_stop.wait(_OPERATION_CLAIM_HEARTBEAT_INTERVAL_SECONDS):
+                try:
+                    alive = admin_operations.heartbeat_operation_claim(
+                        operation_id,
+                        claim_token=claim_token,
+                        lease_seconds=_OPERATION_CLAIM_LEASE_SECONDS,
+                    )
+                    if not alive:
+                        logger.warning(
+                            "Admin operation heartbeat rejected: operation_id=%s operation_type=%s",
+                            operation_id,
+                            operation_type,
+                        )
+                        return
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Admin operation heartbeat failed: operation_id=%s operation_type=%s",
+                        operation_id,
+                        operation_type,
+                        exc_info=True,
+                    )
+
+        heartbeat_thread = Thread(
+            target=_heartbeat_loop,
+            name=f"admin-op-heartbeat:{operation_id}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
     try:
         _run_operation_worker(operation_id, producer, request_id=request_id)
     except Exception as exc:  # noqa: BLE001
@@ -531,6 +623,10 @@ def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
             max_attempts=_OPERATION_RETRY_MAX_ATTEMPTS,
         )
     finally:
+        if heartbeat_stop is not None:
+            heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
         admin_operations.release_operation_claim(operation_id, claim_token=claim_token)
 
 

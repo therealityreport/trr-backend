@@ -70,6 +70,10 @@ def _is_transient_transport_error(error: Exception) -> bool:
         "temporary failure in name resolution",
         "name or service not known",
         "nodename nor servname provided",
+        "cursor already closed",
+        "connection already closed",
+        "connection not open",
+        "ssl connection has been closed unexpectedly",
         "ssl syscall error: eof detected",
         "server closed the connection unexpectedly",
         "connection reset by peer",
@@ -199,7 +203,11 @@ def db_connection():
             pass
         raise
     finally:
-        pool.putconn(conn)
+        try:
+            pool.putconn(conn)
+        except PoolError as error:
+            if "pool is closed" not in _error_message(error):
+                raise
 
 
 @contextmanager

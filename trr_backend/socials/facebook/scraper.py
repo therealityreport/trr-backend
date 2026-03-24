@@ -75,6 +75,8 @@ _FB_VIDEO_VIEW_COUNT_RE = re.compile(r'"video_view_count"\s*:\s*"?([0-9]+(?:\.[0
 _FB_VIDEO_VIEW_COUNT_REDUCED_RE = re.compile(r'"video_view_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_PLAY_COUNT_RE = re.compile(r'"play_count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_PLAY_COUNT_REDUCED_RE = re.compile(r'"play_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
+# 2026-03: Facebook SPA renders view counts in og:title as "69K views · 8.5K reactions | ..."
+_FB_OG_TITLE_VIEWS_RE = re.compile(r'([\d,.]+[KkMmBb]?)\s*views', re.IGNORECASE)
 _FB_SHARE_COUNT_RE = re.compile(r'"share_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_RESHARE_COUNT_RE = re.compile(r'"reshare_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_SHARE_COUNT_REDUCED_RE = re.compile(
@@ -92,6 +94,13 @@ _FB_REACTION_EDGE_RE = re.compile(
     r'"(?:reaction_count|count)"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?',
     re.IGNORECASE | re.DOTALL,
 )
+# 2026-03 Facebook SSR format: engagement inside unified_reactors and flat
+# share_count_reduced in the feedback block (reaction_count is gone).
+_FB_UNIFIED_REACTORS_COUNT_RE = re.compile(
+    r'"unified_reactors"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?'
+)
+_FB_FLAT_SHARE_COUNT_REDUCED_RE = re.compile(r'"share_count_reduced"\s*:\s*"([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"')
+
 # JSON-based patterns for authenticated SPA responses (no OG meta tags)
 _FB_MESSAGE_TEXT_RE = re.compile(r'"message":\{"text":"((?:[^"\\]|\\.)*)"')
 _FB_PERMALINK_URL_RE = re.compile(r'"permalink_url":"((?:[^"\\]|\\.)*)"')
@@ -165,10 +174,28 @@ class FacebookScrapeConfig:
     include_reels: bool = True
     include_photos: bool = True
 
+    # Performance tuning
+    fast_mode: bool = False
+    """When True, uses aggressive rate-limiting tiers for faster scraping."""
+
+    fetch_comment_replies: bool = True
+    """When False, only fetch top-level comments and skip reply chains."""
+
     show_id: int | None = None
     season_number: int | None = None
     person_id: int | None = None
     max_scroll_iterations: int = 50
+
+    def __post_init__(self):
+        """Apply fast_mode overrides when enabled."""
+        if self.fast_mode:
+            # Use a lower base delay unless explicitly overridden
+            if self.delay_seconds == 1.25:  # Only override if at default
+                self.delay_seconds = 0.5
+            logger.info(
+                "FacebookScrapeConfig fast_mode enabled: delay=%.2fs",
+                self.delay_seconds,
+            )
 
     @property
     def normalized_handle(self) -> str:
@@ -323,6 +350,8 @@ class FacebookScraper:
         self.last_comment_fetch_reason: str | None = None
         self.comments_auth_failed = False
         self._request_count = 0
+        self._last_429_at: float = 0.0
+        self._consecutive_success: int = 0
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
@@ -370,10 +399,44 @@ class FacebookScraper:
             headers["referer"] = referer
         return headers
 
-    def _rate_limit(self, delay_seconds: float) -> None:
-        if self._request_count > 0 and delay_seconds > 0:
-            time.sleep(delay_seconds)
+    def _rate_limit(self, delay: float, *, fast_mode: bool = False) -> None:
+        """Apply adaptive rate limiting between requests.
+
+        Standard mode: uses the base delay as-is.
+        Fast mode: uses aggressive tiers that ramp down with consecutive successes.
+        Both modes: double delay for 60s after any 429 response.
+        """
+        if self._request_count > 0 and delay > 0:
+            now = time.monotonic()
+            if self._last_429_at and (now - self._last_429_at) < 60.0:
+                effective_delay = delay * 2.0
+            elif fast_mode:
+                # Aggressive tiers: ramp down as we prove the session is healthy
+                if self._consecutive_success >= 20:
+                    effective_delay = delay * 0.15
+                elif self._consecutive_success >= 5:
+                    effective_delay = delay * 0.25
+                else:
+                    effective_delay = delay * 0.5
+            else:
+                effective_delay = delay
+            logger.debug(
+                "Rate limiting: waiting %.3fs (base=%.2fs, fast=%s, streak=%d)",
+                effective_delay,
+                delay,
+                fast_mode,
+                self._consecutive_success,
+            )
+            time.sleep(effective_delay)
         self._request_count += 1
+
+    def _track_response_status(self, status_code: int) -> None:
+        """Track response status for adaptive rate limiting."""
+        if status_code == 429:
+            self._last_429_at = time.monotonic()
+            self._consecutive_success = 0
+        elif 200 <= status_code < 400:
+            self._consecutive_success += 1
 
     def _playwright_cookie_list(self) -> list[dict[str, Any]]:
         cookies: list[dict[str, Any]] = []
@@ -407,8 +470,10 @@ class FacebookScraper:
                 logger.debug("[facebook] failed to load cookies into playwright context", exc_info=True)
         return browser, context
 
-    def _fetch_html(self, url: str, *, delay_seconds: float, referer: str | None = None) -> str:
-        self._rate_limit(delay_seconds)
+    def _fetch_html(
+        self, url: str, *, delay_seconds: float, referer: str | None = None, fast_mode: bool = False
+    ) -> str:
+        self._rate_limit(delay_seconds, fast_mode=fast_mode)
         try:
             response = self.session.get(
                 url,
@@ -416,6 +481,7 @@ class FacebookScraper:
                 headers=self._headers(referer=referer),
                 cookies=self.cookies,
             )
+            self._track_response_status(response.status_code)
             response.raise_for_status()
             return response.text or ""
         except Exception as exc:  # noqa: BLE001
@@ -431,18 +497,41 @@ class FacebookScraper:
         raw = (os.getenv("SOCIAL_FACEBOOK_PLAYWRIGHT_FALLBACK", "true") or "").strip().lower()
         return raw not in {"0", "false", "off", "no"}
 
-    def _fetch_html_with_playwright(self, url: str, *, delay_seconds: float, referer: str | None = None) -> str:
+    def _fetch_html_with_playwright(
+        self,
+        url: str,
+        *,
+        delay_seconds: float,
+        referer: str | None = None,
+        wait_for_spa: bool = False,
+        skip_cookies: bool = False,
+    ) -> str:
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("Playwright fallback requested but playwright is unavailable") from exc
 
         with sync_playwright() as playwright:
-            browser, context = self._new_playwright_context(playwright, referer=referer)
+            if skip_cookies:
+                # Unauthenticated context: Facebook's SPA render includes view
+                # counts in og:title when no session cookies are present.
+                browser = playwright.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=self._headers(referer=referer).get("user-agent", ""),
+                    locale="en-US",
+                )
+            else:
+                browser, context = self._new_playwright_context(playwright, referer=referer)
             page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            if delay_seconds > 0:
-                page.wait_for_timeout(max(500, int(delay_seconds * 1000)))
+            if wait_for_spa:
+                # SPA enrichment: wait for network to settle so async payloads
+                # containing view/play counts are loaded into the DOM.
+                page.goto(url, wait_until="networkidle", timeout=60_000)
+                page.wait_for_timeout(3000)
+            else:
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                if delay_seconds > 0:
+                    page.wait_for_timeout(max(500, int(delay_seconds * 1000)))
             try:
                 page.keyboard.press("Escape")
             except Exception:  # noqa: BLE001
@@ -477,7 +566,6 @@ class FacebookScraper:
 
     @staticmethod
     def _build_search_url(config: FacebookSearchConfig) -> str:
-        quote(config.normalized_query)
         if config.search_url:
             parsed = urlparse(config.search_url)
             params = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -886,6 +974,74 @@ class FacebookScraper:
         logger.info("[facebook] scroll scrape discovered %d post URLs for %s", len(all_post_urls), handle)
         return all_post_urls
 
+    def _scrape_surface_with_scroll(
+        self,
+        surface_url: str,
+        *,
+        handle: str,
+        config: FacebookScrapeConfig,
+    ) -> list[tuple[str, str]]:
+        """Render a surface page (reels, photos) with Playwright and scroll to discover post URLs.
+
+        Facebook surface pages (e.g. /BravoTV/reels/) are SPA shells with
+        ssrEnabled:false — the initial HTML contains no reel/video URLs.  This
+        method launches Playwright, waits for client-side content to render,
+        then scrolls to discover additional post URLs.
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("Playwright unavailable for surface scroll") from exc
+
+        all_post_urls: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        with sync_playwright() as playwright:
+            browser, context = self._new_playwright_context(playwright)
+            page = context.new_page()
+            try:
+                page.goto(surface_url, wait_until="domcontentloaded", timeout=45_000)
+                # Wait longer than the standard fetch for SPA content to render.
+                page.wait_for_timeout(3000)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(500)
+
+                max_scroll = min(config.max_scroll_iterations, 15)
+                stagnant_cycles = 0
+                for cycle in range(max_scroll):
+                    html_text = page.content() or ""
+                    candidates = self._extract_post_urls(html_text, handle=handle)
+                    new_count = 0
+                    for candidate_url, kind in candidates:
+                        if candidate_url not in seen:
+                            seen.add(candidate_url)
+                            all_post_urls.append((candidate_url, kind))
+                            new_count += 1
+
+                    if new_count == 0:
+                        stagnant_cycles += 1
+                        if stagnant_cycles >= 3:
+                            logger.info(
+                                "[facebook] surface scroll stagnation after %d cycles, %d URLs",
+                                cycle + 1,
+                                len(all_post_urls),
+                            )
+                            break
+                    else:
+                        stagnant_cycles = 0
+
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(max(1000, int(config.delay_seconds * 1000)))
+            finally:
+                context.close()
+                browser.close()
+
+        logger.info("[facebook] surface scroll discovered %d post URLs from %s", len(all_post_urls), surface_url)
+        return all_post_urls
+
     @staticmethod
     def _has_primary_post_signals(html_text: str) -> bool:
         if not html_text:
@@ -1173,6 +1329,11 @@ class FacebookScraper:
                 rc_match_alt = _FB_REACTION_I18N_RE.search(html_text)
                 if rc_match_alt:
                     engagement["reaction_count"] = FacebookScraper._coerce_engagement_count(rc_match_alt.group(1))
+        # 2026-03: Facebook replaced reaction_count with unified_reactors.count
+        if engagement["reaction_count"] == 0:
+            ur_match = _FB_UNIFIED_REACTORS_COUNT_RE.search(html_text)
+            if ur_match:
+                engagement["reaction_count"] = FacebookScraper._coerce_engagement_count(ur_match.group(1))
 
         if engagement["view_count"] == 0:
             vc_match = _FB_VIDEO_VIEW_COUNT_RE.search(html_text)
@@ -1192,6 +1353,14 @@ class FacebookScraper:
                 if pc_match:
                     engagement["play_count"] = FacebookScraper._coerce_engagement_count(pc_match.group(1))
 
+        # 2026-03: SPA-rendered pages embed views in og:title as "69K views · ..."
+        if engagement["view_count"] == 0 and engagement["play_count"] == 0:
+            og_title_match = _OG_TITLE_RE.search(html_text)
+            if og_title_match:
+                title_views = _FB_OG_TITLE_VIEWS_RE.search(og_title_match.group(1))
+                if title_views:
+                    engagement["view_count"] = FacebookScraper._coerce_engagement_count(title_views.group(1))
+
         if engagement["share_count"] == 0:
             sc_match = _FB_SHARE_COUNT_RE.search(html_text)
             if sc_match:
@@ -1200,6 +1369,11 @@ class FacebookScraper:
                 sc_match = _FB_SHARE_COUNT_REDUCED_RE.search(html_text)
                 if sc_match:
                     engagement["share_count"] = FacebookScraper._coerce_engagement_count(sc_match.group(1))
+        # 2026-03: Facebook now emits flat "share_count_reduced":"N" in feedback
+        if engagement["share_count"] == 0:
+            fsc_match = _FB_FLAT_SHARE_COUNT_REDUCED_RE.search(html_text)
+            if fsc_match:
+                engagement["share_count"] = FacebookScraper._coerce_engagement_count(fsc_match.group(1))
 
         if not engagement["reactions"]:
             # In authenticated responses, the post's top_reactions may not be
@@ -1373,6 +1547,7 @@ class FacebookScraper:
         fetch_share_list: bool = False,
         max_shares: int = 100,
         allow_cross_platform_media_fallback: bool = True,
+        fast_mode: bool = False,
     ) -> tuple[FacebookPost | None, list[FacebookComment]]:
         """Scrape a single Facebook post URL for engagement metrics and comments.
 
@@ -1382,7 +1557,7 @@ class FacebookScraper:
         is populated when *fetch_comment_list* is True.
         """
         try:
-            html_text = self._fetch_html(post_url, delay_seconds=delay_seconds)
+            html_text = self._fetch_html(post_url, delay_seconds=delay_seconds, fast_mode=fast_mode)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[facebook] scrape_post failed for %s: %s", post_url, exc)
             return None, []
@@ -1487,6 +1662,8 @@ class FacebookScraper:
         pages_scanned = 0
         posts_checked = 0
         matched_posts = 0
+        surface_fetch_failures = 0
+        candidate_fetch_failures = 0
 
         # When a date window is specified and Playwright is available, use
         # scroll-based pagination on the feed to reach older posts.
@@ -1497,6 +1674,7 @@ class FacebookScraper:
                 pages_scanned += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[facebook] scroll scrape failed for %s: %s — falling back to static fetch", handle, exc)
+                surface_fetch_failures += 1
 
         # Process scroll-discovered feed candidates first.
         if feed_candidates_from_scroll:
@@ -1504,8 +1682,11 @@ class FacebookScraper:
             for candidate_url, kind in feed_candidates_from_scroll:
                 posts_checked += 1
                 try:
-                    post_html = self._fetch_html(candidate_url, delay_seconds=config.delay_seconds, referer=feed_url)
+                    post_html = self._fetch_html(
+                        candidate_url, delay_seconds=config.delay_seconds, referer=feed_url, fast_mode=config.fast_mode
+                    )
                 except Exception:  # noqa: BLE001
+                    candidate_fetch_failures += 1
                     continue
                 if (
                     (config.date_start is not None or config.date_end is not None)
@@ -1526,6 +1707,32 @@ class FacebookScraper:
                     username=handle,
                     post_type_hint=kind,
                 )
+                # Playwright enrichment: Facebook SSR omits view/play counts for
+                # video content.  Re-fetch with SPA rendering to extract from og:title.
+                if (
+                    post.views == 0
+                    and post.likes > 0
+                    and ("/reel/" in candidate_url or "/videos/" in candidate_url or post.post_type in ("reel", "video"))
+                    and self._playwright_fallback_enabled()
+                ):
+                    try:
+                        pw_html = self._fetch_html_with_playwright(
+                            candidate_url,
+                            delay_seconds=config.delay_seconds,
+                            referer=feed_url,
+                            wait_for_spa=True,
+                            skip_cookies=True,
+                        )
+                        pw_eng = self._extract_engagement(pw_html)
+                        enriched_views = pw_eng["view_count"] or pw_eng["play_count"]
+                        if enriched_views:
+                            post.views = enriched_views
+                            if post.raw_data:
+                                post.raw_data["video_view_count"] = pw_eng["view_count"]
+                                post.raw_data["play_count"] = pw_eng["play_count"]
+                                post.raw_data["views_enriched_via_playwright"] = True
+                    except Exception:  # noqa: BLE001
+                        pass
                 if not post.post_id or post.post_id in seen_ids:
                     continue
                 posted_dt = datetime.fromtimestamp(post.posted_at, tz=UTC) if isinstance(post.posted_at, int) else None
@@ -1555,19 +1762,47 @@ class FacebookScraper:
             if config.max_pages is not None and pages_scanned >= max(1, int(config.max_pages)):
                 break
             try:
-                html_text = self._fetch_html(surface_url, delay_seconds=config.delay_seconds)
+                html_text = self._fetch_html(
+                    surface_url, delay_seconds=config.delay_seconds, fast_mode=config.fast_mode
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[facebook] failed to fetch %s: %s", surface_url, exc)
+                surface_fetch_failures += 1
                 continue
             pages_scanned += 1
             candidates = self._extract_post_urls(html_text, handle=handle)
+
+            # Facebook surfaces like /reels/ and /photos serve SPA shells with
+            # ssrEnabled:false — no content in the initial HTML.  When requests
+            # returns an empty shell, fall back to Playwright scroll to discover
+            # post URLs from the rendered DOM.
+            if not candidates and self._playwright_fallback_enabled():
+                try:
+                    candidates = self._scrape_surface_with_scroll(
+                        surface_url,
+                        handle=handle,
+                        config=config,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[facebook] playwright surface scroll failed for %s: %s",
+                        surface_url,
+                        exc,
+                    )
+
             for candidate_url, kind in candidates:
                 if config.max_pages is not None and posts_checked >= max(1, int(config.max_pages)) * 100:
                     break
                 posts_checked += 1
                 try:
-                    post_html = self._fetch_html(candidate_url, delay_seconds=config.delay_seconds, referer=surface_url)
+                    post_html = self._fetch_html(
+                        candidate_url,
+                        delay_seconds=config.delay_seconds,
+                        referer=surface_url,
+                        fast_mode=config.fast_mode,
+                    )
                 except Exception:  # noqa: BLE001
+                    candidate_fetch_failures += 1
                     continue
                 if (
                     (config.date_start is not None or config.date_end is not None)
@@ -1588,6 +1823,32 @@ class FacebookScraper:
                     username=handle,
                     post_type_hint=kind,
                 )
+                # Playwright enrichment: Facebook SSR omits view/play counts for
+                # video content.  Re-fetch with SPA rendering to extract from og:title.
+                if (
+                    post.views == 0
+                    and post.likes > 0
+                    and ("/reel/" in candidate_url or "/videos/" in candidate_url or post.post_type in ("reel", "video"))
+                    and self._playwright_fallback_enabled()
+                ):
+                    try:
+                        pw_html = self._fetch_html_with_playwright(
+                            candidate_url,
+                            delay_seconds=config.delay_seconds,
+                            referer=surface_url,
+                            wait_for_spa=True,
+                            skip_cookies=True,
+                        )
+                        pw_eng = self._extract_engagement(pw_html)
+                        enriched_views = pw_eng["view_count"] or pw_eng["play_count"]
+                        if enriched_views:
+                            post.views = enriched_views
+                            if post.raw_data:
+                                post.raw_data["video_view_count"] = pw_eng["view_count"]
+                                post.raw_data["play_count"] = pw_eng["play_count"]
+                                post.raw_data["views_enriched_via_playwright"] = True
+                    except Exception:  # noqa: BLE001
+                        pass  # keep post with 0 views rather than losing it
                 if not post.post_id or post.post_id in seen_ids:
                     continue
                 posted_dt = datetime.fromtimestamp(post.posted_at, tz=UTC) if isinstance(post.posted_at, int) else None
@@ -1612,7 +1873,13 @@ class FacebookScraper:
             "posts_checked": posts_checked,
             "matched_posts": matched_posts,
             "cookies_supplied": bool(self.cookies),
+            "surface_fetch_failures": surface_fetch_failures,
+            "candidate_fetch_failures": candidate_fetch_failures,
         }
+        if matched_posts == 0 and (surface_fetch_failures > 0 or candidate_fetch_failures > 0):
+            self.last_retrieval_meta["error_code"] = "facebook_catalog_fetch_failed"
+            self.last_retrieval_meta["retryable"] = True
+            self.last_retrieval_meta["error_class"] = "FacebookCatalogFetchError"
         return posts
 
     # Regex for extracting comments from Facebook SSR HTML payloads
@@ -1630,6 +1897,7 @@ class FacebookScraper:
         max_comments: int = 0,
         fetch_replies: bool = True,
         delay_seconds: float = 1.25,
+        fast_mode: bool = False,
     ) -> list[FacebookComment]:
         """Extract comments from Facebook post SSR HTML.
 
@@ -1648,7 +1916,7 @@ class FacebookScraper:
         post_url = post_url_or_id if post_url_or_id.startswith("http") else f"{self.BASE_URL}/reel/{post_url_or_id}"
 
         try:
-            html_text = self._fetch_html(post_url, delay_seconds=delay_seconds)
+            html_text = self._fetch_html(post_url, delay_seconds=delay_seconds, fast_mode=fast_mode)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[facebook] comment fetch failed for %s: %s", post_url, exc)
             self.last_comment_fetch_reason = "facebook_fetch_failed"

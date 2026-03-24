@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -58,6 +59,38 @@ def test_season_cast_ok():
     )
     assert response.status_code == 200
     assert isinstance(response.json(), list)
+
+
+def test_episode_cast_returns_empty_when_view_missing(monkeypatch):
+    def raise_undefined_table(*_args, **_kwargs):
+        raise psycopg2.errors.UndefinedTable("relation does not exist")
+
+    monkeypatch.setattr(screenalytics_router.pg, "fetch_all", raise_undefined_table)
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/screenalytics/episodes/{uuid4()}/cast",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_season_cast_returns_empty_when_view_missing(monkeypatch):
+    def raise_undefined_table(*_args, **_kwargs):
+        raise psycopg2.errors.UndefinedTable("relation does not exist")
+
+    monkeypatch.setattr(screenalytics_router.pg, "fetch_all", raise_undefined_table)
+    client = TestClient(app)
+
+    response = client.get(
+        f"/api/v1/screenalytics/seasons/{uuid4()}/cast",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def test_person_photos_ok():

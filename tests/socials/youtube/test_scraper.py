@@ -119,6 +119,74 @@ def test_scrape_progress_reports_non_zero_shorts_initial_pages(monkeypatch) -> N
     assert int(shorts_initial.get("pages_scanned") or 0) > 0
 
 
+def test_scrape_marks_continuation_fetch_failure_as_retryable(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+
+    def _fake_fetch_channel_videos(handle: str, delay: float, *, surface: str, fast_mode: bool = False):
+        del handle, delay, fast_mode
+        return {"surface": surface}
+
+    def _fake_process_video_data(*_args, **kwargs):
+        surface = kwargs.get("surface")
+        if surface == "videos":
+            return [
+                _build_video(
+                    "video-1", surface="videos", published_at=int(datetime(2025, 8, 14, tzinfo=UTC).timestamp())
+                )
+            ], {
+                "checked_renderers": 1,
+                "before_window_items": 0,
+                "after_window_items": 0,
+                "window_candidate_items": 1,
+                "timestamp_unknown": 0,
+                "in_range_hits": 1,
+            }
+        return [], {
+            "checked_renderers": 0,
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", _fake_fetch_channel_videos)
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "_extract_channel_continuation_token",
+        lambda data: "continuation-token" if data.get("surface") == "videos" else None,
+    )
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+
+    def _fake_fetch_continuation(*_args, **_kwargs):
+        scraper._last_channel_continuation_error = "request_error"  # noqa: SLF001
+        return None
+
+    monkeypatch.setattr(scraper, "_fetch_continuation", _fake_fetch_continuation)
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=[],
+            date_start=datetime(2025, 8, 1, tzinfo=UTC),
+            date_end=datetime(2025, 8, 31, tzinfo=UTC),
+            delay_seconds=0,
+            max_results=None,
+        )
+    )
+
+    assert len(videos) == 1
+    assert scraper.last_retrieval_meta["error_code"] == "youtube_continuation_fetch_failed"
+    assert scraper.last_retrieval_meta["retryable"] is True
+    assert scraper.last_retrieval_meta["continuation_failure_reason"] == "request_error"
+    assert scraper.last_retrieval_meta["continuation_failure_count"] == 1
+    assert scraper.last_retrieval_meta["posts_checked"] == 1
+
+
 def test_fetch_comments_falls_back_to_shorts_bootstrap_when_watch_has_no_token(monkeypatch) -> None:
     scraper = YouTubeScraper()
     called_urls: list[str] = []
@@ -126,6 +194,7 @@ def test_fetch_comments_falls_back_to_shorts_bootstrap_when_watch_has_no_token(m
     class _FakeResponse:
         def __init__(self, text: str):
             self.text = text
+            self.status_code = 200
 
         def raise_for_status(self) -> None:
             return None
@@ -134,7 +203,7 @@ def test_fetch_comments_falls_back_to_shorts_bootstrap_when_watch_has_no_token(m
         called_urls.append(url)
         return _FakeResponse(url)
 
-    monkeypatch.setattr(scraper, "_rate_limit", lambda _delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda _delay, **_kw: None)
     monkeypatch.setattr(scraper.session, "get", _fake_get)
     monkeypatch.setattr(
         scraper,
@@ -213,7 +282,7 @@ def test_parse_comment_response_reads_on_response_received_actions() -> None:
 
 def test_fetch_comment_replies_parses_nested_comment_view_model(monkeypatch) -> None:
     scraper = YouTubeScraper()
-    monkeypatch.setattr(scraper, "_rate_limit", lambda _delay: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda _delay, **_kw: None)
     monkeypatch.setattr(
         scraper,
         "_fetch_comment_continuation",

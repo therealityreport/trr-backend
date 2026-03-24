@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from trr_backend.socials.facebook.scraper import FacebookScraper, FacebookSearchConfig
+from trr_backend.socials.facebook.scraper import FacebookScrapeConfig, FacebookScraper, FacebookSearchConfig
 
 # Minimal SSR HTML fragment that mirrors the real Facebook feedback JSON structure
 _SAMPLE_FEEDBACK_HTML = """
@@ -135,6 +135,28 @@ class TestExtractEngagement:
         assert result["reactions"]["Haha"] == 400
 
 
+# 2026-03 Facebook format: unified_reactors + flat share_count_reduced + feedback.total_comment_count
+_SAMPLE_2026_FORMAT_HTML = """
+<html><head></head><body><script>
+{"data":{"node":{"unified_reactors":{"count":970},"reaction_display_config":{"reaction_display_strategy":"USE_REACTION_SHEET_STRING_ONLY"}},"feedback":{"total_comment_count":590,"cross_universe_feedback_info":{"ig_comment_count":null},"id":"ZmVlZGJhY2s6MTMwODI5NzEwNzgzMDEzMw==","share_count_reduced":"20"},"post_id":"1308297107830133"}}
+</script></body></html>
+"""
+
+
+class TestExtractEngagement2026Format:
+    def test_extracts_unified_reactors_count(self) -> None:
+        result = FacebookScraper._extract_engagement(_SAMPLE_2026_FORMAT_HTML)
+        assert result["reaction_count"] == 970
+
+    def test_extracts_total_comment_count_from_feedback(self) -> None:
+        result = FacebookScraper._extract_engagement(_SAMPLE_2026_FORMAT_HTML)
+        assert result["comment_count"] == 590
+
+    def test_extracts_flat_share_count_reduced(self) -> None:
+        result = FacebookScraper._extract_engagement(_SAMPLE_2026_FORMAT_HTML)
+        assert result["share_count"] == 20
+
+
 class TestBuildPostEngagement:
     def test_build_post_populates_engagement(self) -> None:
         scraper = FacebookScraper()
@@ -237,6 +259,40 @@ class TestFacebookPostDataclass:
         )
         d = post.to_dict()
         assert d["reactions"] == {"Like": 50}
+
+
+def test_facebook_scrape_marks_surface_fetch_failures_as_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = FacebookScraper(cookies={"c_user": "1", "xs": "token"})
+
+    monkeypatch.setattr(scraper, "_playwright_fallback_enabled", lambda: False)
+    monkeypatch.setattr(
+        scraper,
+        "_surface_urls",
+        lambda _handle, _config: [
+            "https://www.facebook.com/bravotv",
+            "https://www.facebook.com/bravotv/reels",
+        ],
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_html",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    posts = scraper.scrape(
+        FacebookScrapeConfig(
+            page_handle="bravotv",
+            date_start=datetime(2025, 8, 1, tzinfo=UTC),
+            date_end=datetime(2025, 8, 31, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=2,
+        )
+    )
+
+    assert posts == []
+    assert scraper.last_retrieval_meta["error_code"] == "facebook_catalog_fetch_failed"
+    assert scraper.last_retrieval_meta["retryable"] is True
+    assert scraper.last_retrieval_meta["surface_fetch_failures"] == 2
 
 
 class TestFacebookSearchAndShareHelpers:
@@ -431,3 +487,68 @@ class TestFacebookSearchAndShareHelpers:
         assert post.media_urls == []
         assert post.media_provenance.platform == "facebook"
         assert post.media_provenance.fallback_used is False
+
+    def test_scrape_falls_back_to_surface_scroll_when_extract_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When _extract_post_urls returns empty from requests-based fetch,
+        scrape() should fall back to _scrape_surface_with_scroll if Playwright
+        is enabled."""
+        from trr_backend.socials.facebook.scraper import FacebookScrapeConfig
+
+        scraper = FacebookScraper()
+        # Simulate requests returning an SPA shell (no post URLs)
+        monkeypatch.setattr(
+            scraper,
+            "_fetch_html",
+            lambda *args, **kwargs: "<html>empty SPA shell</html>",
+        )
+        monkeypatch.setattr(
+            FacebookScraper,
+            "_playwright_fallback_enabled",
+            staticmethod(lambda: True),
+        )
+
+        surface_scroll_called: list[str] = []
+
+        def fake_surface_scroll(surface_url, *, handle, config):
+            surface_scroll_called.append(surface_url)
+            return [
+                ("https://www.facebook.com/reel/111", "reel"),
+                ("https://www.facebook.com/reel/222", "reel"),
+            ]
+
+        monkeypatch.setattr(scraper, "_scrape_surface_with_scroll", fake_surface_scroll)
+
+        # Also mock _build_post_from_html so we don't need real HTML
+        def fake_build_post(url, html_text, username, post_type_hint):
+            from trr_backend.socials.facebook.scraper import FacebookPost
+
+            post_id = url.rsplit("/", 2)[-2] if url.endswith("/") else url.rsplit("/", 1)[-1]
+            return FacebookPost(
+                post_id=post_id,
+                username=username,
+                post_type=post_type_hint,
+                posted_at=int(datetime.now(UTC).timestamp()),
+                url=url,
+                caption="test",
+                media_urls=[],
+                thumbnail_url=None,
+            )
+
+        monkeypatch.setattr(scraper, "_build_post_from_html", fake_build_post)
+
+        config = FacebookScrapeConfig(
+            page_handle="TestPage",
+            include_feed=False,
+            include_reels=True,
+            include_photos=False,
+            max_pages=2,
+            fast_mode=True,
+        )
+        posts = scraper.scrape(config)
+
+        assert len(surface_scroll_called) == 1
+        assert "reels" in surface_scroll_called[0]
+        assert len(posts) == 2
+        assert {p.post_id for p in posts} == {"111", "222"}

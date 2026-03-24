@@ -94,6 +94,15 @@
   "unique_constraints": [],
   "indexes": [
     {
+      "name": "credit_occurrences_episode_credit_idx",
+      "columns": [
+        "episode_id",
+        "credit_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX credit_occurrences_episode_credit_idx ON core.credit_occurrences USING btree (episode_id, credit_id)"
+    },
+    {
       "name": "credit_occurrences_episode_id_idx",
       "columns": [
         "episode_id"

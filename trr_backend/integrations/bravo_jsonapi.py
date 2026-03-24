@@ -20,6 +20,14 @@ _SETTINGS_RE = re.compile(
     r'<script[^>]*data-drupal-selector="drupal-settings-json"[^>]*>(.*?)</script>',
     re.DOTALL,
 )
+_GALLERY_ITEM_ID_RE = re.compile(
+    r'<div[^>]*class=["\'][^"\']*js-gallery-item-id[^"\']*["\'][^>]*>\s*(?P<item_id>\d+)\s*</div>',
+    re.IGNORECASE | re.DOTALL,
+)
+_GALLERY_IMAGE_ATTR_RE = re.compile(
+    r'(?:src|data-src|data-lazy-src)=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
 
 
 def _client(client: httpx.Client | None = None) -> httpx.Client:
@@ -79,6 +87,133 @@ def _extract_file_url(attributes: dict[str, Any]) -> str | None:
         if absolute:
             return absolute
     return None
+
+
+def _strip_html_text(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("value")
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    normalized = " ".join(text.split())
+    return normalized or None
+
+
+def _build_gallery_item_source_page_url(gallery_path: str | None, gallery_item_id: str | None) -> str | None:
+    gallery_url = _absolute_url(gallery_path)
+    if not gallery_url:
+        return None
+    cleaned_item_id = str(gallery_item_id or "").strip()
+    if not cleaned_item_id:
+        return gallery_url
+    return f"{gallery_url}#{cleaned_item_id}"
+
+
+def _extract_gallery_item_id_lookup(
+    page_html: str,
+    *,
+    gallery_path: str | None,
+) -> dict[str, str]:
+    cleaned_gallery_path = str(gallery_path or "").strip()
+    if not page_html.strip() or not cleaned_gallery_path:
+        return {}
+
+    lookup: dict[str, str] = {}
+    for match in _GALLERY_ITEM_ID_RE.finditer(page_html):
+        item_id = str(match.group("item_id") or "").strip()
+        if not item_id:
+            continue
+        context_before = page_html[max(0, match.start() - 4000) : match.start()]
+        context_after = page_html[match.end() : min(len(page_html), match.end() + 1500)]
+        for context in (context_before, context_after):
+            src_matches = list(_GALLERY_IMAGE_ATTR_RE.finditer(context))
+            if not src_matches:
+                continue
+            for src_match in reversed(src_matches):
+                src = _absolute_url(src_match.group(1))
+                file_name = _parse_file_name(src)
+                if not file_name or file_name in lookup:
+                    continue
+                lookup[file_name] = item_id
+                break
+            else:
+                continue
+            break
+        else:
+            continue
+    return lookup
+
+
+def _coerce_gallery_item_id(value: Any) -> str | None:
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _is_anchored_source_page_url(source_page_url: str | None) -> bool:
+    text = str(source_page_url or "").strip()
+    return bool(text and "#" in text.rsplit("/", 1)[-1])
+
+
+def _build_gallery_row(
+    *,
+    gallery: dict[str, Any],
+    metadata: dict[str, Any],
+    gallery_uuid: str,
+    gallery_path: str,
+    season_number: int | None,
+    position: int,
+    media_id: str,
+    media_attributes: dict[str, Any],
+    media_internal_id: str | None,
+    file_id: str,
+    file_url: str,
+    file_name: str | None,
+    file_attributes: dict[str, Any],
+    image_alt: str | None,
+    gallery_item_id: str | None,
+) -> dict[str, Any]:
+    source_page_url = _build_gallery_item_source_page_url(gallery_path, gallery_item_id)
+    row = {
+        "gallery_uuid": gallery_uuid,
+        "gallery_title": gallery.get("title"),
+        "gallery_nid": gallery.get("nid"),
+        "gallery_path": gallery.get("path"),
+        "gallery_item_id": gallery_item_id,
+        "media_internal_id": media_internal_id,
+        "gallery_anchor_resolved": _is_anchored_source_page_url(source_page_url),
+        "gallery_created": gallery.get("created"),
+        "gallery_published": gallery.get("published"),
+        "gallery_position": position,
+        "gallery_people_names": metadata.get("people_names"),
+        "gallery_show_name": metadata.get("show_name"),
+        "gallery_season_name": metadata.get("season_name"),
+        "gallery_episode_slug": metadata.get("episode_slug"),
+        "gallery_published_date": metadata.get("published_date"),
+        "gallery_page_title": metadata.get("page_title"),
+        "season_number": season_number,
+        "media_uuid": media_id or None,
+        "media_name": media_attributes.get("name"),
+        "field_caption": media_attributes.get("field_caption"),
+        "field_credit": media_attributes.get("field_credit"),
+        "field_image_description": media_attributes.get("field_image_description"),
+        "field_media_image_alt": image_alt,
+        "file_uuid": file_id or None,
+        "file_url": file_url,
+        "file_name": file_name,
+        "file_mime": file_attributes.get("filemime"),
+        "file_size": file_attributes.get("filesize"),
+        "source_page_url": source_page_url,
+    }
+    if not gallery_item_id:
+        row["bravotv_unanchored"] = True
+    return {key: value for key, value in row.items() if value not in (None, "", [], {})}
 
 
 def extract_drupal_settings(page_html: str) -> dict[str, Any]:
@@ -290,12 +425,16 @@ def fetch_gallery_assets(
 
     gallery_path = str(gallery.get("path") or "").strip()
     metadata: dict[str, Any] = {}
+    gallery_item_id_lookup: dict[str, str] = {}
     if gallery_path:
         try:
-            settings = extract_drupal_settings(_get_html(api_client, f"{BRAVO_BASE_URL}{gallery_path}"))
+            gallery_html = _get_html(api_client, f"{BRAVO_BASE_URL}{gallery_path}")
+            settings = extract_drupal_settings(gallery_html)
             metadata = extract_gallery_metadata(settings)
+            gallery_item_id_lookup = _extract_gallery_item_id_lookup(gallery_html, gallery_path=gallery_path)
         except Exception:
             metadata = {}
+            gallery_item_id_lookup = {}
     season_number = resolve_season_number(metadata)
 
     rows: list[dict[str, Any]] = []
@@ -327,31 +466,32 @@ def fetch_gallery_assets(
         )
         if not file_url:
             continue
+        media_internal_id = _coerce_gallery_item_id(media_attributes.get("drupal_internal__mid"))
+        gallery_item_id = None
+        for candidate_name in (file_name, _parse_file_name(file_url)):
+            if candidate_name and candidate_name in gallery_item_id_lookup:
+                gallery_item_id = gallery_item_id_lookup[candidate_name]
+                break
+        image_meta = file_ref.get("meta") if isinstance(file_ref, dict) else {}
+        image_alt = image_meta.get("alt") if isinstance(image_meta, dict) else None
 
-        row = {
-            "gallery_uuid": gallery_uuid,
-            "gallery_title": gallery.get("title"),
-            "gallery_nid": gallery.get("nid"),
-            "gallery_path": gallery.get("path"),
-            "gallery_created": gallery.get("created"),
-            "gallery_published": gallery.get("published"),
-            "gallery_position": position,
-            "gallery_people_names": metadata.get("people_names"),
-            "gallery_show_name": metadata.get("show_name"),
-            "gallery_season_name": metadata.get("season_name"),
-            "gallery_episode_slug": metadata.get("episode_slug"),
-            "gallery_published_date": metadata.get("published_date"),
-            "gallery_page_title": metadata.get("page_title"),
-            "season_number": season_number,
-            "media_uuid": media_id or None,
-            "media_name": media_attributes.get("name"),
-            "field_caption": media_attributes.get("field_caption"),
-            "field_credit": media_attributes.get("field_credit"),
-            "file_uuid": file_id or None,
-            "file_url": file_url,
-            "file_name": file_name,
-            "file_mime": file_attributes.get("filemime"),
-            "file_size": file_attributes.get("filesize"),
-        }
-        rows.append({key: value for key, value in row.items() if value not in (None, "", [], {})})
+        rows.append(
+            _build_gallery_row(
+                gallery=gallery,
+                metadata=metadata,
+                gallery_uuid=gallery_uuid,
+                gallery_path=gallery_path,
+                season_number=season_number,
+                position=position,
+                media_id=media_id,
+                media_attributes=media_attributes,
+                media_internal_id=media_internal_id,
+                file_id=file_id,
+                file_url=file_url,
+                file_name=file_name,
+                file_attributes=file_attributes,
+                image_alt=image_alt,
+                gallery_item_id=gallery_item_id,
+            )
+        )
     return rows

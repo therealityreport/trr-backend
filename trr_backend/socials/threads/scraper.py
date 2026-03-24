@@ -103,9 +103,27 @@ class ThreadsScrapeConfig:
     delay_seconds: float = 1.0
     max_pages: int | None = 1
 
+    # Performance tuning
+    fast_mode: bool = False
+    """When True, uses aggressive rate-limiting tiers for faster scraping."""
+
+    fetch_comment_replies: bool = True
+    """When False, only fetch top-level comments and skip reply chains."""
+
     show_id: int | None = None
     season_number: int | None = None
     person_id: int | None = None
+
+    def __post_init__(self):
+        """Apply fast_mode overrides when enabled."""
+        if self.fast_mode:
+            # Use a lower base delay unless explicitly overridden
+            if self.delay_seconds == 1.0:  # Only override if at default
+                self.delay_seconds = 0.5
+            logger.info(
+                "ThreadsScrapeConfig fast_mode enabled: delay=%.2fs",
+                self.delay_seconds,
+            )
 
     @property
     def normalized_username(self) -> str:
@@ -184,6 +202,8 @@ class ThreadsScraper:
         self.last_comment_fetch_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self._request_count = 0
+        self._last_429_at: float = 0.0
+        self._consecutive_success: int = 0
         self._page_tokens: _PageTokens | None = None
 
     # ------------------------------------------------------------------
@@ -260,10 +280,44 @@ class ThreadsScraper:
             headers["x-csrftoken"] = csrf
         return headers
 
-    def _rate_limit(self, delay_seconds: float) -> None:
-        if self._request_count > 0 and delay_seconds > 0:
-            time.sleep(delay_seconds)
+    def _rate_limit(self, delay: float, *, fast_mode: bool = False) -> None:
+        """Apply adaptive rate limiting between requests.
+
+        Standard mode: uses the base delay as-is.
+        Fast mode: uses aggressive tiers that ramp down with consecutive successes.
+        Both modes: double delay for 60s after any 429 response.
+        """
+        if self._request_count > 0 and delay > 0:
+            now = time.monotonic()
+            if self._last_429_at and (now - self._last_429_at) < 60.0:
+                effective_delay = delay * 2.0
+            elif fast_mode:
+                # Aggressive tiers: ramp down as we prove the session is healthy
+                if self._consecutive_success >= 20:
+                    effective_delay = delay * 0.15
+                elif self._consecutive_success >= 5:
+                    effective_delay = delay * 0.25
+                else:
+                    effective_delay = delay * 0.5
+            else:
+                effective_delay = delay
+            logger.debug(
+                "Rate limiting: waiting %.3fs (base=%.2fs, fast=%s, streak=%d)",
+                effective_delay,
+                delay,
+                fast_mode,
+                self._consecutive_success,
+            )
+            time.sleep(effective_delay)
         self._request_count += 1
+
+    def _track_response_status(self, status_code: int) -> None:
+        """Track response status for adaptive rate limiting."""
+        if status_code == 429:
+            self._last_429_at = time.monotonic()
+            self._consecutive_success = 0
+        elif 200 <= status_code < 400:
+            self._consecutive_success += 1
 
     @staticmethod
     def _normalize_post_limit(max_pages: int | None) -> int | None:
@@ -280,14 +334,16 @@ class ThreadsScraper:
         referer: str | None = None,
         document: bool = False,
         cookies_override: dict[str, str] | None = None,
+        fast_mode: bool = False,
     ) -> str:
-        self._rate_limit(delay_seconds)
+        self._rate_limit(delay_seconds, fast_mode=fast_mode)
         response = self.session.get(
             url,
             timeout=(10, 45),
             headers=self._headers(referer=referer, document=document),
             cookies=self.cookies if cookies_override is None else cookies_override,
         )
+        self._track_response_status(response.status_code)
         response.raise_for_status()
         return response.text or ""
 
@@ -298,12 +354,14 @@ class ThreadsScraper:
         delay_seconds: float,
         referer: str | None = None,
         document: bool = False,
+        fast_mode: bool = False,
     ) -> str:
         return self._fetch_html_with_cookies(
             url,
             delay_seconds=delay_seconds,
             referer=referer,
             document=document,
+            fast_mode=fast_mode,
         )
 
     # ------------------------------------------------------------------
@@ -351,9 +409,10 @@ class ThreadsScraper:
         friendly_name: str,
         referer: str | None = None,
         delay_seconds: float = 1.0,
+        fast_mode: bool = False,
     ) -> dict[str, Any]:
         """Execute a Threads GraphQL query and return parsed JSON."""
-        self._rate_limit(delay_seconds)
+        self._rate_limit(delay_seconds, fast_mode=fast_mode)
 
         body = {
             "av": "17841449018491289",
@@ -380,6 +439,7 @@ class ThreadsScraper:
             headers=headers,
             cookies=self.cookies,
         )
+        self._track_response_status(response.status_code)
         response.raise_for_status()
         return response.json()
 
@@ -392,6 +452,7 @@ class ThreadsScraper:
         page_size: int = _THREADS_DEFAULT_PAGE_SIZE,
         referer: str | None = None,
         delay_seconds: float = 1.0,
+        fast_mode: bool = False,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         """Fetch one page of profile posts via GraphQL.
 
@@ -414,6 +475,7 @@ class ThreadsScraper:
             friendly_name="BarcelonaProfileThreadsTabDirectQuery",
             referer=referer,
             delay_seconds=delay_seconds,
+            fast_mode=fast_mode,
         )
 
         edges = (result.get("data") or {}).get("mediaData", {}).get("edges", [])
@@ -445,6 +507,7 @@ class ThreadsScraper:
         post_pk: str,
         referer: str | None = None,
         delay_seconds: float = 1.0,
+        fast_mode: bool = False,
     ) -> int | None:
         """Fetch post views (impression_count) from Threads post-activity GraphQL query."""
         if not post_pk:
@@ -457,6 +520,7 @@ class ThreadsScraper:
                 friendly_name="BarcelonaPostViewCountQuery",
                 referer=referer,
                 delay_seconds=delay_seconds,
+                fast_mode=fast_mode,
             )
         except Exception:  # noqa: BLE001
             logger.debug("[threads] failed to fetch post view count for pk=%s", post_pk, exc_info=True)
@@ -835,6 +899,7 @@ class ThreadsScraper:
         delay_seconds: float = 1.0,
         fetch_comment_list: bool = False,
         max_comments: int = 100,
+        fast_mode: bool = False,
     ) -> tuple[ThreadsPost | None, list[ThreadsComment]]:
         """Scrape a single Threads post URL for metadata and optional comments."""
         normalized_url = str(post_url or "").strip()
@@ -842,7 +907,9 @@ class ThreadsScraper:
             return None, []
 
         try:
-            html_text = self._fetch_html(normalized_url, delay_seconds=delay_seconds, document=True)
+            html_text = self._fetch_html(
+                normalized_url, delay_seconds=delay_seconds, document=True, fast_mode=fast_mode
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[threads] scrape_post failed for %s: %s", normalized_url, exc)
             return None, []
@@ -870,6 +937,7 @@ class ThreadsScraper:
                     post_pk=post_pk,
                     referer=normalized_url,
                     delay_seconds=delay_seconds,
+                    fast_mode=fast_mode,
                 )
                 if view_count is not None:
                     post.views = view_count
@@ -886,6 +954,7 @@ class ThreadsScraper:
                     max_comments=max_comments,
                     fetch_replies=True,
                     delay_seconds=delay_seconds,
+                    fast_mode=fast_mode,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[threads] scrape_post comments failed for %s: %s", normalized_url, exc)
@@ -925,6 +994,9 @@ class ThreadsScraper:
         posts_checked = 0
         matched_posts = 0
         stop_pagination = False
+        stop_reason = "complete"
+        graph_fetch_failed = False
+        last_cursor: str | None = None
 
         while not stop_pagination:
             pages_scanned += 1
@@ -935,12 +1007,16 @@ class ThreadsScraper:
                     cursor=cursor,
                     referer=profile_url,
                     delay_seconds=config.delay_seconds,
+                    fast_mode=config.fast_mode,
                 )
             except Exception:
                 logger.warning("[threads] GraphQL page fetch failed at page %d", pages_scanned, exc_info=True)
+                graph_fetch_failed = True
+                stop_reason = "page_fetch_failed"
                 break
 
             if not edges:
+                stop_reason = "no_edges"
                 break
 
             for edge in edges:
@@ -974,6 +1050,7 @@ class ThreadsScraper:
                         post_pk=post_pk,
                         referer=post.url or profile_url,
                         delay_seconds=config.delay_seconds,
+                        fast_mode=config.fast_mode,
                     )
                     if view_count is not None:
                         post.views = view_count
@@ -999,10 +1076,13 @@ class ThreadsScraper:
 
                 if max_post_limit is not None and matched_posts >= max_post_limit:
                     stop_pagination = True
+                    stop_reason = "max_posts_reached"
                     break
 
+            last_cursor = next_cursor
             cursor = next_cursor
             if not has_next or not cursor:
+                stop_reason = "no_cursor" if not cursor else "complete"
                 break
 
         self.last_retrieval_meta = {
@@ -1012,7 +1092,13 @@ class ThreadsScraper:
             "matched_posts": matched_posts,
             "cookies_supplied": bool(self.cookies),
             "user_id": user_id,
+            "stop_reason": stop_reason,
+            "last_cursor": last_cursor,
         }
+        if graph_fetch_failed:
+            self.last_retrieval_meta["error_code"] = "threads_graphql_page_fetch_failed"
+            self.last_retrieval_meta["retryable"] = True
+            self.last_retrieval_meta["error_class"] = "ThreadsGraphqlPageFetchError"
         return posts
 
     def _scrape_via_fallback(
@@ -1031,8 +1117,10 @@ class ThreadsScraper:
         posts: list[ThreadsPost] = []
         seen_ids: set[str] = set()
         preview_by_url: dict[str, str] = {}
+        failed_candidate_fetches = 0
 
         candidate_urls = self._extract_post_urls(page_html)
+        candidate_urls_found = len(candidate_urls)
         source = "public_meta_fallback"
         if not candidate_urls and self._playwright_discovery_enabled():
             discovered = self._discover_posts_with_playwright(
@@ -1050,12 +1138,16 @@ class ThreadsScraper:
             }
             if candidate_urls:
                 source = "playwright_profile_discovery"
+            candidate_urls_found = len(candidate_urls)
 
         for candidate_url in candidate_urls:
             posts_checked += 1
             try:
-                post_html = self._fetch_html(candidate_url, delay_seconds=config.delay_seconds, referer=profile_url)
+                post_html = self._fetch_html(
+                    candidate_url, delay_seconds=config.delay_seconds, referer=profile_url, fast_mode=config.fast_mode
+                )
             except Exception:
+                failed_candidate_fetches += 1
                 continue
             post = self._build_post_from_html(url=candidate_url, html_text=post_html, username=username)
             preview_text = preview_by_url.get(candidate_url, "")
@@ -1090,7 +1182,13 @@ class ThreadsScraper:
             "posts_checked": posts_checked,
             "matched_posts": matched_posts,
             "cookies_supplied": bool(self.cookies),
+            "candidate_urls_found": candidate_urls_found,
+            "failed_candidate_fetches": failed_candidate_fetches,
         }
+        if matched_posts == 0 and failed_candidate_fetches > 0:
+            self.last_retrieval_meta["error_code"] = "threads_fallback_post_fetch_failed"
+            self.last_retrieval_meta["retryable"] = True
+            self.last_retrieval_meta["error_class"] = "ThreadsFallbackPostFetchError"
         return posts
 
     def scrape(
@@ -1109,7 +1207,9 @@ class ThreadsScraper:
         # full SSR payload (with preloader data containing userID + tokens).
         profile_fetch_mode = "authenticated" if self.cookies else "anonymous"
         try:
-            page_html = self._fetch_html(profile_url, delay_seconds=config.delay_seconds, document=True)
+            page_html = self._fetch_html(
+                profile_url, delay_seconds=config.delay_seconds, document=True, fast_mode=config.fast_mode
+            )
         except requests.HTTPError as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code != 404 or not self.cookies:
@@ -1123,6 +1223,7 @@ class ThreadsScraper:
                 delay_seconds=config.delay_seconds,
                 document=True,
                 cookies_override={},
+                fast_mode=config.fast_mode,
             )
             profile_fetch_mode = "anonymous_fallback"
 
@@ -1167,6 +1268,7 @@ class ThreadsScraper:
         fetch_replies: bool = True,
         fetch_quotes: bool = True,
         delay_seconds: float = 1.0,
+        fast_mode: bool = False,
     ) -> list[ThreadsComment]:
         """Fetch comments/replies for a Threads post via the Instagram REST API.
 
@@ -1187,7 +1289,7 @@ class ThreadsScraper:
             return []
 
         # Resolve numeric pk
-        post_pk = self._resolve_post_pk(post_url_or_id, delay_seconds=delay_seconds)
+        post_pk = self._resolve_post_pk(post_url_or_id, delay_seconds=delay_seconds, fast_mode=fast_mode)
         if not post_pk:
             self.last_comment_fetch_reason = "threads_pk_resolve_failed"
             return []
@@ -1200,7 +1302,7 @@ class ThreadsScraper:
 
         while len(comments) < max_comments and page < max_pages:
             page += 1
-            self._rate_limit(delay_seconds)
+            self._rate_limit(delay_seconds, fast_mode=fast_mode)
             try:
                 batch, paging_token, has_more = self._fetch_replies_page(post_pk, paging_token=paging_token)
             except Exception as exc:  # noqa: BLE001
@@ -1235,7 +1337,7 @@ class ThreadsScraper:
             has_more_quotes = True
             while len(comments) < max_comments and quote_pages < max_pages and has_more_quotes:
                 quote_pages += 1
-                self._rate_limit(delay_seconds)
+                self._rate_limit(delay_seconds, fast_mode=fast_mode)
                 try:
                     batch, quote_token, has_more_quotes = self._fetch_quotes_page(post_pk, paging_token=quote_token)
                 except Exception as exc:  # noqa: BLE001
@@ -1278,7 +1380,7 @@ class ThreadsScraper:
             self.last_comment_fetch_reason = "threads_no_replies"
         return comments
 
-    def _resolve_post_pk(self, post_url_or_id: str, *, delay_seconds: float) -> str | None:
+    def _resolve_post_pk(self, post_url_or_id: str, *, delay_seconds: float, fast_mode: bool = False) -> str | None:
         """Resolve a Threads post URL, shortcode, or pk to the numeric pk."""
         raw = str(post_url_or_id or "").strip()
         if not raw:
@@ -1316,8 +1418,8 @@ class ThreadsScraper:
 
         for target_url in candidate_urls:
             try:
-                self._rate_limit(delay_seconds)
-                html_text = self._fetch_html(target_url, delay_seconds=0, document=True)
+                self._rate_limit(delay_seconds, fast_mode=fast_mode)
+                html_text = self._fetch_html(target_url, delay_seconds=0, document=True, fast_mode=fast_mode)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("[threads] failed to fetch post page %s: %s", target_url, exc)
                 continue
@@ -1374,6 +1476,7 @@ class ThreadsScraper:
         }
 
         resp = self.session.get(url, headers=headers, cookies=self.cookies, timeout=(10, 45))
+        self._track_response_status(resp.status_code)
         resp.raise_for_status()
         data = resp.json()
 
@@ -1415,6 +1518,7 @@ class ThreadsScraper:
             url = f"{base_url}?paging_token={paging_token}" if paging_token else base_url
             try:
                 resp = self.session.get(url, headers=headers, cookies=self.cookies, timeout=(10, 45))
+                self._track_response_status(resp.status_code)
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as exc:  # noqa: BLE001

@@ -7,7 +7,7 @@ Last updated: March 13, 2026
 ```yaml
 handoff:
   include: true
-  state: recent
+  state: archived
   last_updated: 2026-03-13
   current_phase: "final live verification complete"
   next_action: "Monitor only unless the runtime path or observability contract regresses"
