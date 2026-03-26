@@ -18,7 +18,7 @@ import re
 import time
 import unicodedata
 from collections import Counter
-from collections.abc import AsyncGenerator, Callable, Collection, Mapping
+from collections.abc import AsyncGenerator, Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import UTC, datetime, timedelta
@@ -141,6 +141,11 @@ _EVENT_SUBCATEGORY_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("other_shows", "Other Shows", ("big brother",)),
 )
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    """Extract dict from a possibly-None value, for type narrowing."""
+    return value if isinstance(value, dict) else {}
 
 
 def _looks_like_getty_media_url(value: Any) -> bool:
@@ -947,17 +952,6 @@ def _build_google_reverse_image_search_url(image_url: str | None) -> str | None:
     return f"https://www.google.com/searchbyimage?image_url={quote(cleaned, safe='')}"
 
 
-def _read_positive_int_env(name: str, default: int) -> int:
-    raw = str(os.getenv(name) or "").strip()
-    if not raw:
-        return max(1, default)
-    try:
-        parsed = int(raw)
-    except ValueError:
-        return max(1, default)
-    return max(1, parsed)
-
-
 def _normalize_source_progress_key(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower().replace("-", "_")
     if not normalized:
@@ -993,7 +987,7 @@ def _canonicalize_refresh_sources(values: list[str] | None) -> list[SourceType]:
     return normalized
 
 
-def _allow_nbcumv_only_supplement_for_requested_sources(values: list[str] | None) -> bool:
+def _allow_nbcumv_only_supplement_for_requested_sources(values: Sequence[str] | None) -> bool:
     if not values:
         return True
     normalized_sources = {str(value or "").strip().lower() for value in values if str(value or "").strip()}
@@ -1354,7 +1348,7 @@ def _normalize_operational_refresh_sources(
     sources: list[SourceType],
     request: RefreshImagesRequest,
 ) -> list[SourceType]:
-    normalized = [source for source in sources if source != "getty"]
+    normalized: list[SourceType] = [source for source in sources if source != "getty"]
     requested_sources = {
         str(source or "").strip().lower()
         for source in (request.sources or [])
@@ -1609,7 +1603,7 @@ def _import_bravotv_person_media(
             season_number = row.get("season_number")
             if not isinstance(season_number, int):
                 try:
-                    season_number = int(season_number)
+                    season_number = int(season_number) if season_number is not None else None
                 except (TypeError, ValueError):
                     season_number = None
             show_name_value = str(row.get("gallery_show_name") or "").strip() or str(show_name or "").strip() or None
@@ -3771,19 +3765,13 @@ def _import_nbcumv_person_media(
                     "query_url": str(query_summary.get("query_url") or "").strip() or None,
                     "candidates_found": len(discovered),
                     "site_image_total": (
-                        int(query_summary.get("site_image_total"))
-                        if isinstance(query_summary.get("site_image_total"), int)
-                        else None
+                        _sit if isinstance((_sit := query_summary.get("site_image_total")), int) else None
                     ),
                     "site_event_total": (
-                        int(query_summary.get("site_event_total"))
-                        if isinstance(query_summary.get("site_event_total"), int)
-                        else None
+                        _set if isinstance((_set := query_summary.get("site_event_total")), int) else None
                     ),
                     "site_video_total": (
-                        int(query_summary.get("site_video_total"))
-                        if isinstance(query_summary.get("site_video_total"), int)
-                        else None
+                        _svt if isinstance((_svt := query_summary.get("site_video_total")), int) else None
                     ),
                     "usable_after_dedupe_total": len(deduped_assets),
                     "overlap_count": int(query_summary.get("overlap_with_prior_queries") or 0),
@@ -5923,7 +5911,7 @@ def _resolve_runtime_person_reference_pools(
                 )
                 used_raw = profile.get("used")
                 if isinstance(used_raw, list):
-                    references = [entry for entry in used_raw if isinstance(entry, dict)]
+                    references = cast(list[dict[str, Any]], [entry for entry in used_raw if isinstance(entry, dict)])
                 if references:
                     references = cast(
                         list[dict[str, Any]],
@@ -6895,7 +6883,7 @@ def _fetch_person_media_link_rows(
                 "width": asset.get("width"),
                 "height": asset.get("height"),
                 "caption": asset.get("caption"),
-                "metadata": asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {},
+                "metadata": _safe_dict(asset.get("metadata")),
                 "ingest_status": asset.get("ingest_status"),
                 "ingest_last_error": asset.get("ingest_last_error"),
             }
@@ -7168,7 +7156,7 @@ def _recenter_person_gallery_images(
                 )
                 raw_refs = owner_reference_profile.get("used")
                 if isinstance(raw_refs, list):
-                    resolved_owner_reference_images = [entry for entry in raw_refs if isinstance(entry, dict)]
+                    resolved_owner_reference_images = cast(list[dict[str, object]], [entry for entry in raw_refs if isinstance(entry, dict)])
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Centering owner reference profile unavailable person_id=%s error=%s",
@@ -7753,7 +7741,7 @@ def _auto_count_cast_photos(
             tag_row = tag_rows.get(str(row["id"]))
             if has_manual_tags(tag_row):
                 continue
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            metadata = _safe_dict(row.get("metadata"))
             has_people_count = bool(tag_row and tag_row.get("people_count") is not None)
             if not force_recount and has_people_count and not _has_face_metadata_backfill_needed(metadata):
                 skipped_existing_rows += 1
@@ -7839,7 +7827,7 @@ def _auto_count_cast_photos(
 
             batch_requests: list[dict[str, object]] = []
             for item in prepared_chunk:
-                image_urls = item.get("image_urls") if isinstance(item.get("image_urls"), list) else []
+                image_urls: list[Any] = _iu if isinstance((_iu := item.get("image_urls")), list) else []
                 first_url = str(image_urls[0]).strip() if image_urls else ""
                 if not first_url:
                     batch_requests.append({})
@@ -7883,7 +7871,7 @@ def _auto_count_cast_photos(
                 person_reference_images = item.get("person_reference_images")
                 auto_counts_attempted += 1
                 result = batch_results[local_idx - 1] if local_idx - 1 < len(batch_results) else None
-                image_urls = item.get("image_urls") if isinstance(item.get("image_urls"), list) else []
+                image_urls: list[Any] = _iu if isinstance((_iu := item.get("image_urls")), list) else []
                 selected_image_url: str | None = (
                     str(image_urls[0]).strip() if result is not None and image_urls else None
                 )
@@ -8133,7 +8121,7 @@ def _auto_count_media_links(
             row_id = str(row.get("id") or "").strip()
             if allowed_link_ids and row_id not in allowed_link_ids:
                 continue
-            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            context = _safe_dict(row.get("context"))
             if has_manual_people_tags(context):
                 continue
             if not force_recount and has_people_count(context) and not _has_face_metadata_backfill_needed(context):
@@ -8219,7 +8207,7 @@ def _auto_count_media_links(
 
             batch_requests: list[dict[str, object]] = []
             for item in prepared_chunk:
-                urls = item.get("urls") if isinstance(item.get("urls"), list) else []
+                urls: list[Any] = _u if isinstance((_u := item.get("urls")), list) else []
                 first_url = str(urls[0]).strip() if urls else ""
                 if not first_url:
                     batch_requests.append({})
@@ -8266,7 +8254,7 @@ def _auto_count_media_links(
                 candidate_person_ids = item.get("candidate_person_ids")
                 person_reference_images = item.get("person_reference_images")
                 result = batch_results[local_idx - 1] if local_idx - 1 < len(batch_results) else None
-                urls = item.get("urls") if isinstance(item.get("urls"), list) else []
+                urls: list[Any] = _u if isinstance((_u := item.get("urls")), list) else []
                 selected_image_url: str | None = str(urls[0]).strip() if result is not None and urls else None
                 last_error: ScreenalyticsClientError | None = None
                 service_unavailable_error: ScreenalyticsUnavailableError | None = None
@@ -8478,9 +8466,9 @@ def _resize_person_gallery_images(
             if not isinstance(value, dict):
                 return None
             try:
-                x = float(value.get("x"))
-                y = float(value.get("y"))
-                zoom = float(value.get("zoom"))
+                x = float(value["x"])
+                y = float(value["y"])
+                zoom = float(value["zoom"])
             except (TypeError, ValueError):
                 return None
             mode_raw = str(value.get("mode") or "auto").strip().lower()
@@ -8529,7 +8517,7 @@ def _resize_person_gallery_images(
                 cast_rows = cast_resp.data or []
                 if not cast_rows:
                     return None
-                metadata = cast_rows[0].get("metadata") if isinstance(cast_rows[0].get("metadata"), dict) else {}
+                metadata = _safe_dict(cast_rows[0].get("metadata"))
                 return _select_best_crop([metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None])
 
             link_resp = (
@@ -8558,7 +8546,7 @@ def _resize_person_gallery_images(
             asset_rows = asset_resp.data or []
             if not asset_rows:
                 return None
-            metadata = asset_rows[0].get("metadata") if isinstance(asset_rows[0].get("metadata"), dict) else {}
+            metadata = _safe_dict(asset_rows[0].get("metadata"))
             return _select_best_crop([metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None])
 
         def _resolve_crop_for_job(origin: str, target_id: str, existing: Any) -> dict[str, Any]:
@@ -8568,9 +8556,9 @@ def _resize_person_gallery_images(
             try:
                 target_uuid = UUID(str(target_id))
                 if origin == "cast_photos":
-                    auto_count_cast_photo(target_uuid, force=True, db=db, _=None)
+                    auto_count_cast_photo(target_uuid, force=True, db=db, _=None)  # type: ignore[arg-type]
                 else:
-                    auto_count_media_asset(target_uuid, force=True, db=db, _=None)
+                    auto_count_media_asset(target_uuid, force=True, db=db, _=None)  # type: ignore[arg-type]
             except Exception:
                 pass
             detected_crop = _load_crop_from_db(origin, target_id)
@@ -8585,7 +8573,7 @@ def _resize_person_gallery_images(
             if not photo_id:
                 continue
             base_jobs.append({"origin": "cast_photos", "id": photo_id, "crop": None})
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            metadata = _safe_dict(row.get("metadata"))
             cast_crops_by_photo[photo_id] = _normalize_crop_payload(
                 metadata.get("thumbnail_crop") if isinstance(metadata, dict) else None
             )
@@ -8600,11 +8588,12 @@ def _resize_person_gallery_images(
                 if asset_id not in seen_media_assets:
                     base_jobs.append({"origin": "media_assets", "id": asset_id, "crop": None})
                     seen_media_assets.add(asset_id)
-            context = row.get("context") if isinstance(row.get("context"), dict) else {}
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            context = _safe_dict(row.get("context"))
+            metadata = _safe_dict(row.get("metadata"))
             crop = context.get("thumbnail_crop")
             if not isinstance(crop, dict):
-                crop = metadata.get("thumbnail_crop") if isinstance(metadata.get("thumbnail_crop"), dict) else None
+                _tc = metadata.get("thumbnail_crop")
+                crop = _tc if isinstance(_tc, dict) else None
             normalized_crop = _normalize_crop_payload(crop)
             if normalized_crop:
                 previous = media_crops_by_asset.get(asset_id)
@@ -8649,13 +8638,14 @@ def _resize_person_gallery_images(
             crop_payload: dict[str, Any] | None,
         ) -> None:
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="person-variant")
-            future = executor.submit(
-                generate_cast_photo_variants if origin == "cast_photos" else generate_media_asset_variants,
-                db,
-                **({"photo_id": target_id} if origin == "cast_photos" else {"asset_id": target_id}),
-                crop=crop_payload,
-                force=force,
-            )
+            if origin == "cast_photos":
+                future = executor.submit(
+                    generate_cast_photo_variants, db, photo_id=target_id, crop=crop_payload, force=force,
+                )
+            else:
+                future = executor.submit(
+                    generate_media_asset_variants, db, asset_id=target_id, crop=crop_payload, force=force,
+                )
             timed_out = False
             try:
                 future.result(timeout=resize_variant_job_timeout_seconds)
@@ -9167,7 +9157,7 @@ def _enrich_cast_photos_with_episode_metadata(
                         if isinstance(candidate_title, str) and candidate_title.strip():
                             episode_title = candidate_title.strip()
                             break
-                row_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                row_metadata = _safe_dict(row.get("metadata"))
                 fallback = {
                     "episode_imdb_id": str(imdb_id).strip(),
                     "episode_title": episode_title,
@@ -9707,7 +9697,7 @@ def _extract_imdb_viewer_id_from_row(row: dict[str, Any]) -> str | None:
         return viewer_id
     source_page_url = str(row.get("source_page_url") or "").strip()
     if not source_page_url:
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata = _safe_dict(row.get("metadata"))
         source_page_url = str(metadata.get("source_page_url") or "").strip() if isinstance(metadata, dict) else ""
     if not source_page_url:
         return None
@@ -9845,7 +9835,7 @@ def _evaluate_imdb_request_context_staleness(
     show_lookup_by_alias: dict[str, dict[str, Any]] | None,
     show_lookup_by_id: dict[str, dict[str, Any]] | None,
 ) -> tuple[bool, str | None]:
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata = _safe_dict(row.get("metadata"))
     show_context_source = str(metadata.get("show_context_source") or "").strip().lower()
     if show_context_source not in {"", "request_context", "request_context_inferred", "show_context_request"}:
         return False, None
@@ -9916,7 +9906,7 @@ def _needs_imdb_metadata_refresh_with_show_lookup(
 ) -> bool:
     if str(row.get("source") or "").strip().lower() != "imdb":
         return False
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata = _safe_dict(row.get("metadata"))
     title_ids = row.get("title_imdb_ids") if isinstance(row.get("title_imdb_ids"), list) else []
     people_ids = row.get("people_imdb_ids") if isinstance(row.get("people_imdb_ids"), list) else []
     tags = metadata.get("tags") if isinstance(metadata, dict) else None
@@ -10034,7 +10024,7 @@ def _apply_traitors_filter_metadata_to_existing_row(
 ) -> None:
     if not bool(strict_context.get("strict_mode_enabled")):
         return
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata = _safe_dict(row.get("metadata"))
     image_type = str(metadata.get("imdb_image_type") or "").strip().lower()
     strict_types = {
         str(v or "").strip().lower() for v in (strict_context.get("strict_types") or set()) if str(v or "").strip()
@@ -10197,9 +10187,10 @@ def _repair_existing_imdb_cast_photos(
                     metadata["imdb_title_url"] = details_title_url
 
                 tags: dict[str, Any] = {}
-                if isinstance(row.get("people_imdb_ids"), list):
-                    ids = row.get("people_imdb_ids") or []
-                    names = row.get("people_names") if isinstance(row.get("people_names"), list) else []
+                _pids = row.get("people_imdb_ids")
+                if isinstance(_pids, list):
+                    ids: list[Any] = _pids or []
+                    names: list[Any] = _pn if isinstance((_pn := row.get("people_names")), list) else []
                     tags["people"] = [
                         {
                             "imdb_id": ids[idx],
@@ -10207,9 +10198,10 @@ def _repair_existing_imdb_cast_photos(
                         }
                         for idx in range(len(ids))
                     ]
-                if isinstance(row.get("title_imdb_ids"), list):
-                    ids = row.get("title_imdb_ids") or []
-                    names = row.get("title_names") if isinstance(row.get("title_names"), list) else []
+                _tids = row.get("title_imdb_ids")
+                if isinstance(_tids, list):
+                    ids = _tids or []
+                    names = _tn if isinstance((_tn := row.get("title_names")), list) else []
                     tags["titles"] = [
                         {
                             "imdb_id": ids[idx],
@@ -10259,7 +10251,7 @@ def _repair_existing_imdb_cast_photos(
         logger.warning("Existing IMDb repair show-context failed person_id=%s error=%s", person_id, exc)
 
     for row in repair_rows:
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata = _safe_dict(row.get("metadata"))
         is_stale_request_context, stale_reason = _evaluate_imdb_request_context_staleness(
             row,
             show_lookup_by_imdb_id=show_lookup_by_imdb_id,
@@ -10277,7 +10269,7 @@ def _repair_existing_imdb_cast_photos(
         row["metadata"] = metadata
 
     for row in repair_rows:
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata = _safe_dict(row.get("metadata"))
         title_id, title_url = _resolve_imdb_title_identity(row, metadata)
         if title_id:
             metadata["imdb_title_id"] = title_id
@@ -10661,7 +10653,7 @@ def _detect_text_overlay_cast_photos(
         to_process: list[str] = []
         skipped_existing_rows = 0
         for row in rows:
-            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            meta = _safe_dict(row.get("metadata"))
             if "has_text_overlay" in (meta or {}):
                 skipped_existing_rows += 1
                 continue
@@ -10784,8 +10776,8 @@ def _detect_text_overlay_media_links(
             if allowed_asset_ids and asset_id not in allowed_asset_ids:
                 continue
             seen_asset_ids.add(asset_id)
-            context = row.get("context") if isinstance(row.get("context"), dict) else {}
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            context = _safe_dict(row.get("context"))
+            metadata = _safe_dict(row.get("metadata"))
             if "has_text_overlay" in context or "has_text_overlay" in metadata:
                 skipped_existing_rows += 1
                 continue
@@ -10881,8 +10873,8 @@ def _detect_text_overlay_media_links(
 def refresh_person_images(
     person_id: UUID,
     request: RefreshImagesRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    db: SupabaseAdminClient = None,  # type: ignore[assignment]
+    _: AdminUser = None,  # type: ignore[assignment]
 ) -> RefreshImagesResponse:
     """
     Refresh images for a person from external sources.
@@ -11055,6 +11047,8 @@ def refresh_person_images(
     # 4. Mirror to S3
     cast_photos_mirrored, cast_photos_failed = 0, 0
     media_assets_mirrored, media_assets_failed = 0, 0
+    mirror_parallelism = 12
+    mirror_batch_size = 200
     if not request.skip_mirror:
         mirror_parallelism = _resolve_stage_parallelism(
             request_overrides=request.max_parallelism,
@@ -11247,8 +11241,8 @@ def refresh_person_images(
                     imdb_person_id,
                     photo_ids=forced_getty_row_ids,
                     force=True,
-                    max_parallelism=mirror_parallelism if "mirror_parallelism" in locals() else 12,
-                    batch_size=mirror_batch_size if "mirror_batch_size" in locals() else 200,
+                    max_parallelism=mirror_parallelism,
+                    batch_size=mirror_batch_size,
                 )
                 cast_photos_mirrored += row_mirrored
                 cast_photos_failed += row_failed
@@ -11260,8 +11254,8 @@ def refresh_person_images(
                     person_id_str,
                     asset_ids=forced_getty_media_asset_ids,
                     force=True,
-                    max_parallelism=mirror_parallelism if "mirror_parallelism" in locals() else 12,
-                    batch_size=mirror_batch_size if "mirror_batch_size" in locals() else 200,
+                    max_parallelism=mirror_parallelism,
+                    batch_size=mirror_batch_size,
                 )
                 media_assets_mirrored += asset_mirrored
                 media_assets_failed += asset_failed
@@ -11306,13 +11300,13 @@ def refresh_person_images(
             )
             raw_refs = owner_reference_profile.get("used")
             if isinstance(raw_refs, list):
-                owner_reference_images = [entry for entry in raw_refs if isinstance(entry, dict)]
+                owner_reference_images = cast(list[dict[str, Any]], [entry for entry in raw_refs if isinstance(entry, dict)])
             if owner_reference_images:
-                owner_reference_images = sync_owner_tagging_reference_usage(
+                owner_reference_images = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
                     db,
                     person_id_str,
                     used_references=owner_reference_images,
-                )
+                ))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to build owner tagging references for %s: %s", person_id_str, exc)
             owner_reference_images = []
@@ -11321,11 +11315,11 @@ def refresh_person_images(
             nonlocal owner_reference_images, owner_reference_synced
             if owner_reference_synced:
                 return
-            owner_reference_images = sync_owner_tagging_reference_usage(
+            owner_reference_images = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
                 db,
                 person_id_str,
                 used_references=used_references,
-            )
+            ))
             owner_reference_synced = True
 
         auto_counts_attempted_cast, auto_counts_succeeded_cast, auto_counts_failed_cast = _auto_count_cast_photos(
@@ -11517,9 +11511,7 @@ def refresh_person_images(
         getty_unavailable_reason=str(nbcumv_result.get("getty_unavailable_reason") or "").strip() or None,
         getty_failure_stage=str(nbcumv_result.get("getty_failure_stage") or "").strip() or None,
         getty_http_status=(
-            int(nbcumv_result.get("getty_http_status"))
-            if isinstance(nbcumv_result.get("getty_http_status"), int)
-            else None
+            _ghs if isinstance((_ghs := nbcumv_result.get("getty_http_status")), int) else None
         ),
         getty_page_classification=str(nbcumv_result.get("getty_page_classification") or "").strip() or None,
         matched_via_image_search=int(nbcumv_result.get("matched_via_image_search") or 0),
@@ -11604,8 +11596,8 @@ def refresh_person_images(
 def refresh_person_images_getty_enrichment(
     person_id: UUID,
     request: GettyEnrichmentRequest | None = None,
-    db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    db: SupabaseAdminClient = None,  # type: ignore[assignment]
+    _: AdminUser = None,  # type: ignore[assignment]
 ) -> GettyEnrichmentResponse:
     request = request or GettyEnrichmentRequest()
     person_id_str = str(person_id)
@@ -11725,8 +11717,8 @@ async def refresh_person_images_stream(
     person_id: UUID,
     connection: Request,
     request: RefreshImagesRequest | None = None,
-    db: SupabaseAdminClient = None,
-    admin_user: AdminUser = None,
+    db: SupabaseAdminClient = None,  # type: ignore[assignment]
+    admin_user: AdminUser = None,  # type: ignore[assignment]
 ) -> StreamingResponse:
     """Refresh images with SSE streaming progress."""
     from trr_backend.ingestion.cast_photo_sources import (
@@ -14272,14 +14264,14 @@ async def refresh_person_images_stream(
                             )
                             raw_refs = owner_reference_profile.get("used")
                             if isinstance(raw_refs, list):
-                                owner_reference_images = [entry for entry in raw_refs if isinstance(entry, dict)]
+                                owner_reference_images = cast(list[dict[str, Any]], [entry for entry in raw_refs if isinstance(entry, dict)])
                             if owner_reference_images:
-                                owner_reference_images = await asyncio.to_thread(
+                                owner_reference_images = cast(list[dict[str, Any]], await asyncio.to_thread(
                                     sync_owner_tagging_reference_usage,
                                     db,
                                     person_id_str,
                                     used_references=owner_reference_images,
-                                )
+                                ))
                         except Exception as exc:  # noqa: BLE001
                             logger.warning(
                                 "Failed to build owner tagging references for stream person_id=%s error=%s",
@@ -14304,7 +14296,7 @@ async def refresh_person_images_stream(
                             tag_row = tag_rows.get(str(row["id"]))
                             if has_manual_tags(tag_row):
                                 continue
-                            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                            metadata = _safe_dict(row.get("metadata"))
                             has_existing_count = bool(tag_row and tag_row.get("people_count") is not None)
                             if has_existing_count and not _has_face_metadata_backfill_needed(metadata):
                                 skipped_existing_rows += 1
@@ -14333,7 +14325,7 @@ async def refresh_person_images_stream(
                             )
 
                         for row in media_rows:
-                            context = row.get("context") if isinstance(row.get("context"), dict) else {}
+                            context = _safe_dict(row.get("context"))
                             if has_manual_people_tags(context):
                                 continue
                             if has_people_count(context) and not _has_face_metadata_backfill_needed(context):
@@ -14824,11 +14816,11 @@ async def refresh_person_images_stream(
 
                     cast_rows, media_rows = await asyncio.to_thread(_fetch_text_overlay_candidates)
 
-                    to_process: list[dict[str, str]] = []
+                    to_process = []  # type: ignore[assignment]
                     skipped_existing_rows = 0
                     for row in cast_rows:
-                        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-                        if "has_text_overlay" in (meta or {}):
+                        meta = _safe_dict(row.get("metadata"))
+                        if "has_text_overlay" in meta:
                             skipped_existing_rows += 1
                             continue
                         rid = row.get("id")
@@ -14841,8 +14833,8 @@ async def refresh_person_images_stream(
                         if not asset_id or asset_id in seen_media_assets:
                             continue
                         seen_media_assets.add(asset_id)
-                        context = row.get("context") if isinstance(row.get("context"), dict) else {}
-                        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                        context = _safe_dict(row.get("context"))
+                        metadata = _safe_dict(row.get("metadata"))
                         if "has_text_overlay" in context or "has_text_overlay" in metadata:
                             skipped_existing_rows += 1
                             continue
@@ -15540,8 +15532,8 @@ async def reprocess_person_images_stream(
     person_id: UUID,
     connection: Request,
     request: ReprocessImagesRequest = Body(default_factory=ReprocessImagesRequest),
-    db: SupabaseAdminClient = None,
-    admin_user: AdminUser = None,
+    db: SupabaseAdminClient = None,  # type: ignore[assignment]
+    admin_user: AdminUser = None,  # type: ignore[assignment]
 ) -> StreamingResponse:
     """Re-run metadata repair, counting, text-ID, centering, and resize on existing photos (no sync/mirror)."""
     person_id_str = str(person_id)
@@ -15912,14 +15904,14 @@ async def reprocess_person_images_stream(
                     )
                     raw_refs = owner_reference_profile.get("used")
                     if isinstance(raw_refs, list):
-                        owner_reference_images = [entry for entry in raw_refs if isinstance(entry, dict)]
+                        owner_reference_images = cast(list[dict[str, Any]], [entry for entry in raw_refs if isinstance(entry, dict)])
                     if owner_reference_images:
-                        owner_reference_images = await asyncio.to_thread(
+                        owner_reference_images = cast(list[dict[str, Any]], await asyncio.to_thread(
                             sync_owner_tagging_reference_usage,
                             db,
                             person_id_str,
                             used_references=owner_reference_images,
-                        )
+                        ))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Failed to build owner tagging references for reprocess stream person_id=%s error=%s",
@@ -15933,11 +15925,11 @@ async def reprocess_person_images_stream(
                     if owner_reference_synced:
                         return
                     try:
-                        owner_reference_images = sync_owner_tagging_reference_usage(
+                        owner_reference_images = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
                             db,
                             person_id_str,
                             used_references=used_references,
-                        )
+                        ))
                         owner_reference_synced = True
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
@@ -16295,7 +16287,7 @@ async def reprocess_person_images_stream(
                     row_id = str(row.get("id") or "").strip()
                     if allowed_cast_ids and row_id not in allowed_cast_ids:
                         continue
-                    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    metadata = _safe_dict(row.get("metadata"))
                     if "has_text_overlay" in metadata:
                         text_overlay_skipped_existing_rows += 1
                         continue
@@ -16317,8 +16309,8 @@ async def reprocess_person_images_stream(
                     if not asset_id or asset_id in seen_asset_ids:
                         continue
                     seen_asset_ids.add(asset_id)
-                    context = row.get("context") if isinstance(row.get("context"), dict) else {}
-                    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    context = _safe_dict(row.get("context"))
+                    metadata = _safe_dict(row.get("metadata"))
                     if "has_text_overlay" in context or "has_text_overlay" in metadata:
                         text_overlay_skipped_existing_rows += 1
                         continue
@@ -17092,7 +17084,7 @@ def build_person_refresh_images_operation_producer(
     if not person_id_str:
         raise ValueError("request_payload.person_id is required")
 
-    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload_data = _safe_dict(request_payload.get("payload"))
     payload = RefreshImagesRequest.model_validate(payload_data)
     request_id = str(request_payload.get("request_id") or "").strip() or None
     initiated_by = str(request_payload.get("initiated_by") or "admin")
@@ -17102,7 +17094,7 @@ def build_person_refresh_images_operation_producer(
         stream_response = asyncio.run(
             refresh_person_images_stream(
                 person_id=UUID(person_id_str),
-                connection=_InternalStreamRequest(request_id=request_id, operation_id=operation_id),
+                connection=cast(Any, _InternalStreamRequest(request_id=request_id, operation_id=operation_id)),
                 request=payload,
                 db=local_db,
                 admin_user={"id": initiated_by},
@@ -17128,7 +17120,7 @@ def build_person_reprocess_images_operation_producer(
     if not person_id_str:
         raise ValueError("request_payload.person_id is required")
 
-    payload_data = request_payload.get("payload") if isinstance(request_payload.get("payload"), dict) else {}
+    payload_data = _safe_dict(request_payload.get("payload"))
     payload = ReprocessImagesRequest.model_validate(payload_data)
     request_id = str(request_payload.get("request_id") or "").strip() or None
     initiated_by = str(request_payload.get("initiated_by") or "admin")
@@ -17138,7 +17130,7 @@ def build_person_reprocess_images_operation_producer(
         stream_response = asyncio.run(
             reprocess_person_images_stream(
                 person_id=UUID(person_id_str),
-                connection=_InternalStreamRequest(request_id=request_id, operation_id=operation_id),
+                connection=cast(Any, _InternalStreamRequest(request_id=request_id, operation_id=operation_id)),
                 request=payload,
                 db=local_db,
                 admin_user={"id": initiated_by},
@@ -17157,8 +17149,8 @@ def update_facebank_seed(
     person_id: UUID,
     link_id: UUID,
     payload: FacebankSeedRequest,
-    db: SupabaseAdminClient = None,
-    _: FacebankSeedAdminUser = None,
+    db: SupabaseAdminClient = None,  # type: ignore[assignment]
+    _: FacebankSeedAdminUser = None,  # type: ignore[assignment]
 ) -> FacebankSeedResponse:
     response = (
         db.schema("core")
