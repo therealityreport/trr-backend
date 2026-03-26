@@ -2,6 +2,7 @@
 
 - [core.admin_operation_events](core.admin_operation_events.md) ([diagram](diagrams/core.admin_operation_events.mermaid.md))
 - [core.admin_operations](core.admin_operations.md) ([diagram](diagrams/core.admin_operations.mermaid.md))
+- [core.bravotv_image_runs](core.bravotv_image_runs.md) ([diagram](diagrams/core.bravotv_image_runs.mermaid.md))
 - [core.cast_fandom](core.cast_fandom.md) ([diagram](diagrams/core.cast_fandom.mermaid.md))
 - [core.cast_photos](core.cast_photos.md) ([diagram](diagrams/core.cast_photos.mermaid.md))
 - [core.cast_tmdb](core.cast_tmdb.md) ([diagram](diagrams/core.cast_tmdb.mermaid.md))
@@ -36,6 +37,7 @@
 - [core.season_source_latest](core.season_source_latest.md) ([diagram](diagrams/core.season_source_latest.mermaid.md))
 - [core.seasons](core.seasons.md) ([diagram](diagrams/core.seasons.mermaid.md))
 - [core.show_alternative_names](core.show_alternative_names.md) ([diagram](diagrams/core.show_alternative_names.mermaid.md))
+- [core.show_cast_overrides](core.show_cast_overrides.md) ([diagram](diagrams/core.show_cast_overrides.mermaid.md))
 - [core.show_cast_role_assignments](core.show_cast_role_assignments.md) ([diagram](diagrams/core.show_cast_role_assignments.mermaid.md))
 - [core.show_external_ids](core.show_external_ids.md) ([diagram](diagrams/core.show_external_ids.mermaid.md))
 - [core.show_images](core.show_images.md) ([diagram](diagrams/core.show_images.mermaid.md))
