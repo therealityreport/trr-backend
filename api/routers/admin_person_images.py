@@ -11742,7 +11742,7 @@ async def refresh_person_images_stream(
         default=_profile_default_parallelism(execution_profile, "sync"),
     )
 
-    async def event_generator() -> AsyncGenerator[str, None]:
+    async def event_generator() -> AsyncGenerator[str, None]:  # pyright: ignore[reportGeneralTypeIssues]
         event_seq = 0
         errors: list[str] = []
         upserted_photo_ids: list[str] = []
