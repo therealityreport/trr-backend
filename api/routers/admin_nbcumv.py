@@ -386,6 +386,14 @@ def _merge_dict(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str,
     return merged
 
 
+def _first_getty_url(getty_asset: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = str(getty_asset.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
 def _effective_nbcumv_tags(image: dict[str, Any], existing_tags: list[str] | None = None) -> list[str]:
     status = str(image.get("status") or "").strip() or None
     return nbcumv._hidden_tags_for_status(status, existing_tags)
@@ -494,6 +502,37 @@ def _build_asset_metadata(
         "getty_event_date": str(getty.get("event_date") or "").strip() or None,
         "embedded_file": embedded_metadata or {},
     }
+    getty_original_image_url = _first_getty_url(
+        getty,
+        "original_image_url",
+        "galleryHighResCompUrl",
+        "highResCompUrl",
+        "largeMainImageURL",
+        "defaultMainImageURL",
+        "zoomedImageUrl",
+        "galleryComp1024Url",
+        "downloadableCompUrl",
+        "preview_image_url",
+        "compUrl",
+        "mainImageUrl",
+        "thumbUrl",
+    )
+    getty_preview_image_url = _first_getty_url(
+        getty,
+        "preview_image_url",
+        "galleryComp1024Url",
+        "compUrl",
+        "mainImageUrl",
+        "thumbUrl",
+        "defaultMainImageURL",
+        "zoomedImageUrl",
+    )
+    if getty_original_image_url:
+        payload["getty_original_image_url"] = getty_original_image_url
+    if getty_preview_image_url:
+        payload["getty_preview_image_url"] = getty_preview_image_url
+    if isinstance(getty.get("detail_url"), str) and str(getty.get("detail_url") or "").strip():
+        payload["getty_detail_page_url"] = str(getty.get("detail_url") or "").strip()
 
     # --- Top-level keys the frontend reads directly ---
 
@@ -829,6 +868,7 @@ def _import_single_item(
         "show_ids": final_show_ids,
         "unmatched_people": unmatched_people,
         "already_imported": bool(existing_asset and existing_asset.get("hosted_url")),
+        "metadata_upgraded": bool(existing_asset and getty_asset),
     }
 
 

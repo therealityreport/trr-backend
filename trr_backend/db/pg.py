@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections.abc import Callable, Iterable
@@ -10,10 +11,19 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
+from psycopg2.extensions import (
+    TRANSACTION_STATUS_ACTIVE,
+    TRANSACTION_STATUS_IDLE,
+    TRANSACTION_STATUS_INERROR,
+    TRANSACTION_STATUS_INTRANS,
+    TRANSACTION_STATUS_UNKNOWN,
+)
 from psycopg2.extras import RealDictCursor, execute_values
 from psycopg2.pool import PoolError, ThreadedConnectionPool
 
-from trr_backend.db.connection import resolve_database_url_candidates
+from trr_backend.db.connection import (
+    resolve_database_url_candidate_details,
+)
 
 if TYPE_CHECKING:
     from psycopg2.extensions import connection as connection_type
@@ -21,14 +31,23 @@ if TYPE_CHECKING:
 
 DEFAULT_POOL_MINCONN = 2
 DEFAULT_POOL_MAXCONN = 24
+DEFAULT_SESSION_POOLER_MINCONN = 1
+DEFAULT_SESSION_POOLER_MAXCONN = 2
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
+DEFAULT_QUERY_TRANSIENT_ATTEMPTS = 3
+DEFAULT_IDLE_IN_TX_TIMEOUT_MS = 60000
 
 _pool: ThreadedConnectionPool | None = None
 _active_pool_dsn: str | None = None
 _pool_lock = Lock()
+_pool_creation_count = 0
+_checkout_sequence = 0
+_checkout_lock = Lock()
+_checked_out_connections: dict[int, dict[str, Any]] = {}
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -42,12 +61,23 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return max(minimum, parsed)
 
 
+def _env_has_value(name: str) -> bool:
+    return bool((os.getenv(name) or "").strip())
+
+
 def _sslmode_for_url(url: str) -> str | None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     if host in {"localhost", "127.0.0.1"}:
         return "disable"
     return None
+
+
+def _is_supavisor_session_pooler_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    return host.endswith("pooler.supabase.com") and port == 5432
 
 
 def _error_message(error: Exception) -> str:
@@ -58,6 +88,11 @@ def _is_pool_exhausted_error(error: Exception) -> bool:
     if isinstance(error, PoolError):
         return "pool exhausted" in _error_message(error)
     return "connection pool exhausted" in _error_message(error)
+
+
+def is_database_service_unavailable_error(error: Exception) -> bool:
+    message = _error_message(error)
+    return _is_pool_exhausted_error(error) or "database pool initialization failed" in message
 
 
 def _is_transient_transport_error(error: Exception) -> bool:
@@ -79,22 +114,175 @@ def _is_transient_transport_error(error: Exception) -> bool:
         "connection reset by peer",
         "connection refused",
         "connection timed out",
+        "maxclientsinsessionmode",
+        "max clients reached - in session mode",
+        "connection pool is closed",
+        "pool is closed",
         "terminating connection due to administrator command",
     )
     return any(marker in message for marker in markers)
 
 
-def _build_pool_for_url(url: str) -> ThreadedConnectionPool:
-    minconn = _env_int("TRR_DB_POOL_MINCONN", DEFAULT_POOL_MINCONN)
-    maxconn = _env_int("TRR_DB_POOL_MAXCONN", DEFAULT_POOL_MAXCONN)
+def _resolve_pool_sizing(url: str) -> dict[str, Any]:
+    session_pooler = _is_supavisor_session_pooler_url(url)
+    default_minconn = DEFAULT_SESSION_POOLER_MINCONN if session_pooler else DEFAULT_POOL_MINCONN
+    default_maxconn = DEFAULT_SESSION_POOLER_MAXCONN if session_pooler else DEFAULT_POOL_MAXCONN
+    minconn_overridden = _env_has_value("TRR_DB_POOL_MINCONN")
+    maxconn_overridden = _env_has_value("TRR_DB_POOL_MAXCONN")
+    minconn = _env_int("TRR_DB_POOL_MINCONN", default_minconn)
+    maxconn = _env_int("TRR_DB_POOL_MAXCONN", default_maxconn)
     maxconn = max(minconn, maxconn)
+    return {
+        "session_pooler": session_pooler,
+        "default_minconn": default_minconn,
+        "default_maxconn": default_maxconn,
+        "minconn": minconn,
+        "maxconn": maxconn,
+        "minconn_source": "env:TRR_DB_POOL_MINCONN" if minconn_overridden else "default",
+        "maxconn_source": "env:TRR_DB_POOL_MAXCONN" if maxconn_overridden else "default",
+        "using_tiny_session_defaults": (
+            session_pooler
+            and not minconn_overridden
+            and not maxconn_overridden
+            and minconn <= DEFAULT_SESSION_POOLER_MINCONN
+            and maxconn <= DEFAULT_SESSION_POOLER_MAXCONN
+        ),
+    }
+
+
+def _build_pool_for_url(url: str) -> ThreadedConnectionPool:
+    sizing = _resolve_pool_sizing(url)
+    minconn = int(sizing["minconn"])
+    maxconn = int(sizing["maxconn"])
 
     sslmode = _sslmode_for_url(url)
     connect_kwargs: dict[str, Any] = {"dsn": url}
     if sslmode:
         connect_kwargs["sslmode"] = sslmode
+    idle_in_tx_timeout_ms = _env_int(
+        "TRR_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS",
+        DEFAULT_IDLE_IN_TX_TIMEOUT_MS,
+        minimum=1000,
+    )
+    if idle_in_tx_timeout_ms > 0:
+        connect_kwargs["options"] = (
+            f"-c idle_in_transaction_session_timeout={idle_in_tx_timeout_ms}"
+        )
 
     return ThreadedConnectionPool(minconn=minconn, maxconn=maxconn, **connect_kwargs)
+
+
+def _pool_counts(pool: ThreadedConnectionPool | None) -> tuple[int | None, int | None]:
+    if pool is None:
+        return None, None
+    try:
+        available = len(getattr(pool, "_pool", []))
+    except Exception:
+        available = None
+    try:
+        in_use = len(getattr(pool, "_used", {}))
+    except Exception:
+        in_use = None
+    return in_use, available
+
+
+def _transaction_status_name(conn: connection_type) -> str:
+    try:
+        status = conn.get_transaction_status()
+    except Exception:
+        return "unknown"
+    if status == TRANSACTION_STATUS_IDLE:
+        return "idle"
+    if status == TRANSACTION_STATUS_ACTIVE:
+        return "active"
+    if status == TRANSACTION_STATUS_INTRANS:
+        return "in_transaction"
+    if status == TRANSACTION_STATUS_INERROR:
+        return "in_error"
+    if status == TRANSACTION_STATUS_UNKNOWN:
+        return "driver_unknown"
+    return str(status)
+
+
+def _log_checkout(
+    *,
+    pool: ThreadedConnectionPool,
+    conn: connection_type,
+    label: str,
+    acquire_started_at: float,
+) -> int:
+    global _checkout_sequence
+    with _checkout_lock:
+        _checkout_sequence += 1
+        checkout_id = _checkout_sequence
+        _checked_out_connections[id(conn)] = {
+            "checkout_id": checkout_id,
+            "label": label,
+            "started_at": time.perf_counter(),
+        }
+    in_use, available = _pool_counts(pool)
+    logger.info(
+        "[db-pool] checkout id=%s label=%s acquire_ms=%.1f backend_pid=%s tx_status=%s in_use=%s available=%s",
+        checkout_id,
+        label,
+        (time.perf_counter() - acquire_started_at) * 1000.0,
+        getattr(conn, "get_backend_pid", lambda: None)(),
+        _transaction_status_name(conn),
+        in_use,
+        available,
+    )
+    return checkout_id
+
+
+def _log_return(
+    *,
+    pool: ThreadedConnectionPool,
+    conn: connection_type,
+    checkout_id: int | None,
+    label: str,
+) -> None:
+    started_at: float | None = None
+    with _checkout_lock:
+        metadata = _checked_out_connections.pop(id(conn), None)
+        if metadata:
+            started_at = metadata.get("started_at")
+    held_ms = (time.perf_counter() - started_at) * 1000.0 if started_at is not None else None
+    in_use, available = _pool_counts(pool)
+    logger.info(
+        "[db-pool] return id=%s label=%s held_ms=%s backend_pid=%s tx_status=%s in_use=%s available=%s",
+        checkout_id,
+        label,
+        f"{held_ms:.1f}" if held_ms is not None else "unknown",
+        getattr(conn, "get_backend_pid", lambda: None)(),
+        _transaction_status_name(conn),
+        in_use,
+        available,
+    )
+
+
+def _ensure_connection_idle(conn: connection_type, *, label: str, phase: str) -> bool:
+    tx_status = _transaction_status_name(conn)
+    if tx_status in {"idle", "driver_unknown"}:
+        return True
+    try:
+        conn.rollback()
+        logger.warning(
+            "[db-pool] rollback_dirty_connection label=%s phase=%s backend_pid=%s prior_tx_status=%s",
+            label,
+            phase,
+            getattr(conn, "get_backend_pid", lambda: None)(),
+            tx_status,
+        )
+    except Exception:
+        logger.exception(
+            "[db-pool] rollback_failed label=%s phase=%s backend_pid=%s prior_tx_status=%s",
+            label,
+            phase,
+            getattr(conn, "get_backend_pid", lambda: None)(),
+            tx_status,
+        )
+        return False
+    return _transaction_status_name(conn) == "idle"
 
 
 def _reset_pool_locked() -> None:
@@ -106,7 +294,7 @@ def _reset_pool_locked() -> None:
 
 
 def _get_pool() -> ThreadedConnectionPool:
-    global _pool, _active_pool_dsn
+    global _pool, _active_pool_dsn, _pool_creation_count
     if _pool is not None:
         return _pool
 
@@ -115,21 +303,75 @@ def _get_pool() -> ThreadedConnectionPool:
             return _pool
 
         init_errors: list[Exception] = []
-        candidates = resolve_database_url_candidates()
-        for index, candidate in enumerate(candidates):
+        candidate_details = resolve_database_url_candidate_details()
+        for index, candidate_detail in enumerate(candidate_details):
+            candidate = str(candidate_detail["url"])
+            sizing = _resolve_pool_sizing(candidate)
             try:
+                logger.info(
+                    (
+                        "[db-pool] init_attempt=%s source=%s host_class=%s host=%s port=%s "
+                        "minconn=%s maxconn=%s minconn_source=%s maxconn_source=%s"
+                    ),
+                    index,
+                    candidate_detail["source"],
+                    candidate_detail["host_class"],
+                    candidate_detail["host"],
+                    candidate_detail["port"],
+                    sizing["minconn"],
+                    sizing["maxconn"],
+                    sizing["minconn_source"],
+                    sizing["maxconn_source"],
+                )
                 _pool = _build_pool_for_url(candidate)
+                _pool_creation_count += 1
                 _active_pool_dsn = candidate
+                logger.info(
+                    (
+                        "[db-pool] init_selected source=%s host_class=%s host=%s port=%s "
+                        "minconn=%s maxconn=%s minconn_source=%s maxconn_source=%s pool_creations=%s"
+                    ),
+                    candidate_detail["source"],
+                    candidate_detail["host_class"],
+                    candidate_detail["host"],
+                    candidate_detail["port"],
+                    sizing["minconn"],
+                    sizing["maxconn"],
+                    sizing["minconn_source"],
+                    sizing["maxconn_source"],
+                    _pool_creation_count,
+                )
+                if sizing["using_tiny_session_defaults"]:
+                    logger.warning(
+                        (
+                            "[db-pool] session_pooler_tiny_defaults source=%s host=%s port=%s "
+                            "minconn=%s maxconn=%s; set TRR_DB_POOL_MINCONN/TRR_DB_POOL_MAXCONN "
+                            "for local high-concurrency social admin work"
+                        ),
+                        candidate_detail["source"],
+                        candidate_detail["host"],
+                        candidate_detail["port"],
+                        sizing["minconn"],
+                        sizing["maxconn"],
+                    )
                 return _pool
             except Exception as error:
                 init_errors.append(error)
-                has_more = index < len(candidates) - 1
+                logger.warning(
+                    "[db-pool] init_failed source=%s host_class=%s host=%s port=%s error=%s",
+                    candidate_detail["source"],
+                    candidate_detail["host_class"],
+                    candidate_detail["host"],
+                    candidate_detail["port"],
+                    type(error).__name__,
+                )
+                has_more = index < len(candidate_details) - 1
                 if has_more and _is_transient_transport_error(error):
                     continue
-                raise
+                raise RuntimeError(f"Database pool initialization failed: {error}") from error
 
         if init_errors:
-            raise init_errors[-1]
+            raise RuntimeError(f"Database pool initialization failed: {init_errors[-1]}") from init_errors[-1]
         raise RuntimeError("Database pool initialization failed: no database URL candidates available")
 
 
@@ -150,11 +392,21 @@ def current_pool_dsn() -> str | None:
 
 
 def _should_retry_query(error: Exception, *, attempt: int) -> bool:
-    return attempt == 0 and _is_transient_transport_error(error)
+    max_attempts = _env_int(
+        "TRR_DB_TRANSIENT_QUERY_ATTEMPTS",
+        DEFAULT_QUERY_TRANSIENT_ATTEMPTS,
+        minimum=1,
+    )
+    return attempt < (max_attempts - 1) and _is_transient_transport_error(error)
 
 
 def _run_with_transient_retry(operation: Callable[[], T]) -> T:
-    for attempt in range(2):
+    max_attempts = _env_int(
+        "TRR_DB_TRANSIENT_QUERY_ATTEMPTS",
+        DEFAULT_QUERY_TRANSIENT_ATTEMPTS,
+        minimum=1,
+    )
+    for attempt in range(max_attempts):
         try:
             return operation()
         except Exception as error:
@@ -164,7 +416,7 @@ def _run_with_transient_retry(operation: Callable[[], T]) -> T:
     raise RuntimeError("unreachable")
 
 
-def _get_connection_with_retry() -> tuple[ThreadedConnectionPool, connection_type]:
+def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, connection_type, int]:
     acquire_attempts = _env_int("TRR_DB_POOL_ACQUIRE_ATTEMPTS", DEFAULT_POOL_ACQUIRE_ATTEMPTS, minimum=1)
     acquire_sleep_seconds = _env_int("TRR_DB_POOL_ACQUIRE_SLEEP_MS", DEFAULT_POOL_ACQUIRE_SLEEP_MS, minimum=1) / 1000.0
     last_error: Exception | None = None
@@ -172,11 +424,39 @@ def _get_connection_with_retry() -> tuple[ThreadedConnectionPool, connection_typ
     for attempt in range(2):
         pool = _get_pool()
         for acquire_attempt in range(acquire_attempts):
+            acquire_started_at = time.perf_counter()
+            logger.info(
+                "[db-pool] acquire_start label=%s attempt=%s acquire_attempt=%s in_use=%s available=%s",
+                label,
+                attempt,
+                acquire_attempt,
+                *_pool_counts(pool),
+            )
             try:
                 conn = pool.getconn()
-                return pool, conn
+                if not _ensure_connection_idle(conn, label=label, phase="checkout"):
+                    try:
+                        pool.putconn(conn, close=True)
+                    except Exception:
+                        logger.exception("[db-pool] discard_failed label=%s phase=checkout", label)
+                    raise RuntimeError("discarded dirty pooled connection during checkout")
+                checkout_id = _log_checkout(
+                    pool=pool,
+                    conn=conn,
+                    label=label,
+                    acquire_started_at=acquire_started_at,
+                )
+                return pool, conn, checkout_id
             except Exception as error:
                 last_error = error
+                logger.warning(
+                    "[db-pool] acquire_failed label=%s attempt=%s acquire_attempt=%s error=%s in_use=%s available=%s",
+                    label,
+                    attempt,
+                    acquire_attempt,
+                    type(error).__name__,
+                    *_pool_counts(pool),
+                )
                 if _is_pool_exhausted_error(error) and acquire_attempt < (acquire_attempts - 1):
                     time.sleep(acquire_sleep_seconds)
                     continue
@@ -191,8 +471,8 @@ def _get_connection_with_retry() -> tuple[ThreadedConnectionPool, connection_typ
 
 
 @contextmanager
-def db_connection():
-    pool, conn = _get_connection_with_retry()
+def db_connection(*, label: str = "write"):
+    pool, conn, checkout_id = _get_connection_with_retry(label=label)
     try:
         yield conn
         conn.commit()
@@ -203,22 +483,68 @@ def db_connection():
             pass
         raise
     finally:
-        try:
-            pool.putconn(conn)
-        except PoolError as error:
-            if "pool is closed" not in _error_message(error):
-                raise
+        should_close = not _ensure_connection_idle(conn, label=label, phase="return")
+        if should_close:
+            try:
+                _log_return(pool=pool, conn=conn, checkout_id=checkout_id, label=label)
+                pool.putconn(conn, close=True)
+            except Exception:
+                logger.exception("[db-pool] discard_failed label=%s phase=return", label)
+        else:
+            try:
+                _log_return(pool=pool, conn=conn, checkout_id=checkout_id, label=label)
+                pool.putconn(conn)
+            except PoolError as error:
+                if "pool is closed" not in _error_message(error):
+                    raise
 
 
 @contextmanager
-def db_cursor(*, conn: connection_type | None = None):
+def db_read_connection(*, label: str = "read"):
+    pool, conn, checkout_id = _get_connection_with_retry(label=label)
+    previous_autocommit = getattr(conn, "autocommit", False)
+    try:
+        if not previous_autocommit:
+            conn.autocommit = True
+        yield conn
+    finally:
+        try:
+            if not previous_autocommit and not getattr(conn, "closed", False):
+                conn.autocommit = previous_autocommit
+        except Exception:
+            logger.exception("[db-pool] autocommit_restore_failed label=%s", label)
+        should_close = not _ensure_connection_idle(conn, label=label, phase="read-return")
+        if should_close:
+            try:
+                _log_return(pool=pool, conn=conn, checkout_id=checkout_id, label=label)
+                pool.putconn(conn, close=True)
+            except Exception:
+                logger.exception("[db-pool] discard_failed label=%s phase=read-return", label)
+        else:
+            try:
+                _log_return(pool=pool, conn=conn, checkout_id=checkout_id, label=label)
+                pool.putconn(conn)
+            except PoolError as error:
+                if "pool is closed" not in _error_message(error):
+                    raise
+
+
+@contextmanager
+def db_cursor(*, conn: connection_type | None = None, label: str = "write-cursor"):
     """Yield a RealDict cursor, optionally reusing an existing connection."""
     if conn is not None:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             yield cur
         return
 
-    with db_connection() as managed_conn:
+    with db_connection(label=label) as managed_conn:
+        with managed_conn.cursor(cursor_factory=RealDictCursor) as cur:
+            yield cur
+
+
+@contextmanager
+def db_read_cursor(*, label: str = "read-cursor"):
+    with db_read_connection(label=label) as managed_conn:
         with managed_conn.cursor(cursor_factory=RealDictCursor) as cur:
             yield cur
 
@@ -245,7 +571,7 @@ def fetch_one_with_cursor(
 
 def fetch_all(query: str, params: Iterable[Any] | None = None) -> list[dict[str, Any]]:
     def _run() -> list[dict[str, Any]]:
-        with db_cursor() as cur:
+        with db_read_cursor(label="fetch_all") as cur:
             return fetch_all_with_cursor(cur, query, params)
 
     return _run_with_transient_retry(_run)
@@ -253,7 +579,7 @@ def fetch_all(query: str, params: Iterable[Any] | None = None) -> list[dict[str,
 
 def fetch_one(query: str, params: Iterable[Any] | None = None) -> dict[str, Any] | None:
     def _run() -> dict[str, Any] | None:
-        with db_cursor() as cur:
+        with db_read_cursor(label="fetch_one") as cur:
             return fetch_one_with_cursor(cur, query, params)
 
     return _run_with_transient_retry(_run)

@@ -133,12 +133,12 @@ async def require_admin(user: CurrentUser) -> dict:
 AdminUser = Annotated[dict, Depends(require_admin)]
 
 
-async def require_cast_screentime_admin(request: Request, user: CurrentUser) -> dict:
+async def require_internal_admin(request: Request, user: CurrentUser) -> dict:
     """
     Require an allowlisted/admin user, or a trusted internal service-role caller.
 
-    Cast screentime app proxies intentionally authenticate the human admin in TRR-APP
-    and then call backend routes with a service-role token plus the internal shared secret.
+    App-side admin proxy routes authenticate the human admin in TRR-APP and then
+    call backend routes with a service-role token plus the internal shared secret.
     """
     role = (user.get("role") or "").lower()
     if role == "admin":
@@ -160,6 +160,19 @@ async def require_cast_screentime_admin(request: Request, user: CurrentUser) -> 
         return user
 
     raise HTTPException(status_code=403, detail="Allowlist admin access required")
+
+
+InternalAdminUser = Annotated[dict, Depends(require_internal_admin)]
+
+
+async def require_cast_screentime_admin(request: Request, user: CurrentUser) -> dict:
+    """
+    Require an allowlisted/admin user, or a trusted internal service-role caller.
+
+    Cast screentime app proxies intentionally authenticate the human admin in TRR-APP
+    and then call backend routes with a service-role token plus the internal shared secret.
+    """
+    return await require_internal_admin(request, user)
 
 
 CastScreentimeAdminUser = Annotated[dict, Depends(require_cast_screentime_admin)]

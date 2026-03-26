@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import jwt
 import pytest
+from fastapi import Response
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -194,6 +195,21 @@ def test_resolve_refresh_sources_preserves_bravotv_source() -> None:
     sources, fandom_skipped = admin_person_images._resolve_refresh_sources(MagicMock(), request)
     assert fandom_skipped is False
     assert sources == ["bravotv", "imdb"]
+
+
+def test_normalize_operational_refresh_sources_forces_getty_pipeline_from_requested_alias() -> None:
+    request = admin_person_images.RefreshImagesRequest(sources=["getty"])
+    normalized = admin_person_images._normalize_operational_refresh_sources(["getty"], request)
+    assert normalized == ["nbcumv"]
+
+
+def test_normalize_operational_refresh_sources_forces_getty_pipeline_from_prefetched_payload() -> None:
+    request = admin_person_images.RefreshImagesRequest(
+        sources=["imdb"],
+        getty_prefetched_assets=[{"editorial_id": "123"}],
+    )
+    normalized = admin_person_images._normalize_operational_refresh_sources(["imdb"], request)
+    assert normalized == ["imdb", "nbcumv"]
 
 
 def test_normalize_source_progress_key_maps_getty_alias_to_shared_bucket() -> None:
@@ -564,6 +580,31 @@ def test_resolve_gallery_bucket_metadata_includes_event_subcategories() -> None:
     assert metadata["event_primary_subcategory_key"] == "premieres_red_carpet_screenings"
 
 
+def test_resolve_gallery_bucket_metadata_prefers_explicit_getty_event_over_show_match() -> None:
+    metadata = admin_person_images._resolve_gallery_bucket_metadata(
+        asset={
+            "event_name": 'Bravo\'s "The Real Housewives of Beverly Hills" Season 5 Premiere Party',
+            "event_id": "rhobh-season-5-premiere",
+            "event_url_slug": "rhobh-season-5-premiere",
+            "title": 'Bravo\'s "The Real Housewives of Beverly Hills" Season 5 Premiere Party',
+            "caption": "Brandi Glanville attends the RHOBH season 5 premiere party.",
+            "grouped_image_count": 18,
+        },
+        resolved_asset_show={"id": "show-rhobh", "name": "The Real Housewives of Beverly Hills"},
+        show_lookup_by_alias={
+            "the real housewives of beverly hills": {
+                "id": "show-rhobh",
+                "name": "The Real Housewives of Beverly Hills",
+            }
+        },
+    )
+
+    assert metadata["bucket_type"] == "event"
+    assert metadata["bucket_key"] == "bravo-s-the-real-housewives-of-beverly-hills-season-5-premiere-party"
+    assert metadata["resolved_show_id"] is None
+    assert metadata["resolved_show_name"] is None
+
+
 def test_import_nbcumv_person_media_uses_wwhl_date_range_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
@@ -886,14 +927,494 @@ def test_import_nbcumv_person_media_uses_show_index_crosswalk_when_filename_sear
     assert imported_items[0].gallery_bucket["resolved_show_name"] == "The Real Housewives of Salt Lake City"
 
 
-def test_import_nbcumv_person_media_treats_zero_getty_results_as_clean_completion(
+def test_import_nbcumv_person_media_repairs_existing_shared_getty_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    person_id = str(uuid4())
+    original_url = (
+        "https://media.gettyimages.com/id/1435767826/photo/legends-ball-2022-bravocon.jpg"
+        "?s=2048x2048&w=gi&k=20&c=WvPQ9UDMOcuYz0FjoJhESs1VlsuQd41CmLoHCRVCRDU="
+    )
+    preview_url = (
+        "https://media.gettyimages.com/id/1435767826/photo/legends-ball-2022-bravocon.jpg"
+        "?p=1&s=594x594&w=gi&k=20&c=qm3GOG53fvQgAxq82lriZGbdZ_rzQZWtiq59vsjszbs="
+    )
+    cast_updates: list[dict[str, object]] = []
+    asset_updates: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.action = "select"
+            self.filters: dict[str, object] = {}
+            self.payload: dict[str, object] | None = None
+
+        def select(self, _columns: str):
+            self.action = "select"
+            return self
+
+        def update(self, payload: dict[str, object]):
+            self.action = "update"
+            self.payload = dict(payload)
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            if self.table_name == "media_links" and self.action == "select":
+                if self.filters.get("media_assets.source") == "nbcumv":
+                    return _Response([{"id": "existing-nbcumv-link"}])
+                return _Response([{"media_asset_id": "asset-1"}])
+            if self.table_name == "cast_photos" and self.action == "select":
+                return _Response(
+                    [
+                        {
+                            "id": "cast-row-1",
+                            "source_image_id": "1435767826",
+                            "url": preview_url,
+                            "image_url": None,
+                            "image_url_canonical": None,
+                            "thumb_url": None,
+                            "source_page_url": "https://www.gettyimages.com/detail/news-photo/old/1435767826",
+                            "width": 594,
+                            "height": 594,
+                            "hosted_url": original_url,
+                            "hosted_key": None,
+                        }
+                    ]
+                )
+            if self.table_name == "cast_photos" and self.action == "update":
+                cast_updates.append(dict(self.payload or {}))
+                return _Response([{"id": self.filters.get("id")}])
+            if self.table_name == "media_assets" and self.action == "select":
+                return _Response(
+                    [
+                        {
+                            "id": "asset-1",
+                            "source_url": preview_url,
+                            "width": 594,
+                            "height": 594,
+                            "metadata": {},
+                        }
+                    ]
+                )
+            if self.table_name == "media_assets" and self.action == "update":
+                asset_updates.append(dict(self.payload or {}))
+                return _Response([{"id": self.filters.get("id")}])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_persist_person_getty_snapshot", lambda *args, **kwargs: {})
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(getty_integration, "search_grouped_events", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        getty_integration,
+        "search_editorial_assets",
+        lambda *args, **kwargs: [
+            {
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/1435767826",
+                "editorial_id": "1435767826",
+                "object_name": "NUP_1435767826.JPG",
+                "preview_image_url": preview_url,
+                "original_image_url": original_url,
+                "assetDimensions": {"width": 2048, "height": 2048},
+                "event_name": "Legends Ball 2022 - BravoCon",
+                "caption": "Brandi Glanville attends BravoCon.",
+                "people": [{"text": "Brandi Glanville"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(nbcumv_integration, "resolve_show_by_title", lambda title: None)
+    monkeypatch.setattr(nbcumv_integration, "build_show_image_index", lambda show_id: {})
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "fetch_image_by_identity",
+        lambda **kwargs: {
+            "lbx_id": "70761513",
+            "lbx_filename": "NUP_1435767826.JPG",
+            "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/match.jpg",
+            "showIds": ["show-1"],
+            "lbx_showTitle": "The Real Housewives of Beverly Hills",
+        },
+    )
+    monkeypatch.setattr(
+        admin_nbcumv,
+        "_import_single_item",
+        lambda **kwargs: {
+            "asset_id": "nbcumv-asset-1",
+            "created_person_ids": [],
+            "created_show_ids": [],
+            "already_imported": True,
+            "metadata_upgraded": True,
+        },
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=person_id,
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=10,
+    )
+
+    assert result["shared_nbcumv_total"] == 1
+    assert result["shared_nbcumv_existing"] == 1
+    assert result["upgraded_existing"] == 1
+    assert result["getty_repair_row_ids"] == ["cast-row-1"]
+    assert result["getty_repair_media_asset_ids"] == ["asset-1"]
+    assert cast_updates
+    assert cast_updates[0]["url"] == original_url
+    assert cast_updates[0]["image_url"] == original_url
+    assert cast_updates[0]["image_url_canonical"] == original_url.split("?", 1)[0]
+    assert cast_updates[0]["hosted_url"] is None
+    assert cast_updates[0]["hosted_key"] is None
+    assert asset_updates
+    assert asset_updates[0]["source_url"] == original_url
+    assert asset_updates[0]["hosted_url"] is None
+    assert asset_updates[0]["ingest_status"] == "pending"
+    assert asset_updates[0]["metadata"]["getty_original_image_url"] == original_url
+
+
+def test_import_nbcumv_person_media_resets_stale_hosted_getty_asset_when_mirrored_from_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    person_id = str(uuid4())
+    original_url = (
+        "https://media.gettyimages.com/id/1435767826/photo/legends-ball-2022-bravocon.jpg"
+        "?s=2048x2048&w=gi&k=20&c=WvPQ9UDMOcuYz0FjoJhESs1VlsuQd41CmLoHCRVCRDU="
+    )
+    preview_url = (
+        "https://media.gettyimages.com/id/1435767826/photo/legends-ball-2022-bravocon.jpg"
+        "?p=1&s=594x594&w=gi&k=20&c=qm3GOG53fvQgAxq82lriZGbdZ_rzQZWtiq59vsjszbs="
+    )
+    asset_updates: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.action = "select"
+            self.filters: dict[str, object] = {}
+            self.payload: dict[str, object] | None = None
+
+        def select(self, _columns: str):
+            self.action = "select"
+            return self
+
+        def update(self, payload: dict[str, object]):
+            self.action = "update"
+            self.payload = dict(payload)
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            if self.table_name == "media_links" and self.action == "select":
+                if self.filters.get("media_assets.source") == "nbcumv":
+                    return _Response([{"id": "existing-nbcumv-link"}])
+                return _Response([{"media_asset_id": "asset-1"}])
+            if self.table_name == "cast_photos" and self.action == "select":
+                return _Response(
+                    [
+                        {
+                            "id": "cast-row-1",
+                            "source_image_id": "1435767826",
+                            "url": original_url,
+                            "image_url": original_url,
+                            "image_url_canonical": original_url.split("?", 1)[0],
+                            "thumb_url": None,
+                            "source_page_url": "https://www.gettyimages.com/detail/news-photo/1435767826",
+                            "width": 2048,
+                            "height": 2048,
+                            "hosted_url": "https://cdn.example.com/media/old-preview.jpg",
+                            "hosted_key": "media/old-preview.jpg",
+                            "metadata": {"getty_original_image_url": original_url},
+                        }
+                    ]
+                )
+            if self.table_name == "media_assets" and self.action == "select":
+                return _Response(
+                    [
+                        {
+                            "id": "asset-1",
+                            "source_url": original_url,
+                            "hosted_url": "https://cdn.example.com/media/old-preview.jpg",
+                            "hosted_key": "media/old-preview.jpg",
+                            "width": 2048,
+                            "height": 2048,
+                            "metadata": {"mirrored_from": preview_url},
+                        }
+                    ]
+                )
+            if self.table_name == "media_assets" and self.action == "update":
+                asset_updates.append(dict(self.payload or {}))
+                return _Response([{"id": self.filters.get("id")}])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_persist_person_getty_snapshot", lambda *args, **kwargs: {})
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(getty_integration, "search_grouped_events", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        getty_integration,
+        "search_editorial_assets",
+        lambda *args, **kwargs: [
+            {
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/1435767826",
+                "editorial_id": "1435767826",
+                "object_name": "NUP_1435767826.JPG",
+                "preview_image_url": preview_url,
+                "original_image_url": original_url,
+                "assetDimensions": {"width": 2048, "height": 2048},
+                "event_name": "Legends Ball 2022 - BravoCon",
+                "caption": "Brandi Glanville attends BravoCon.",
+                "people": [{"text": "Brandi Glanville"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(nbcumv_integration, "resolve_show_by_title", lambda title: None)
+    monkeypatch.setattr(nbcumv_integration, "build_show_image_index", lambda show_id: {})
+    monkeypatch.setattr(
+        nbcumv_integration,
+        "fetch_image_by_identity",
+        lambda **kwargs: {
+            "lbx_id": "70761513",
+            "lbx_filename": "NUP_1435767826.JPG",
+            "location": "https://lightbox-thumbnails.s3.us-west-2.amazonaws.com/match.jpg",
+            "showIds": ["show-1"],
+            "lbx_showTitle": "The Real Housewives of Beverly Hills",
+        },
+    )
+    monkeypatch.setattr(
+        admin_nbcumv,
+        "_import_single_item",
+        lambda **kwargs: {
+            "asset_id": "nbcumv-asset-1",
+            "created_person_ids": [],
+            "created_show_ids": [],
+            "already_imported": True,
+            "metadata_upgraded": True,
+        },
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=person_id,
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=10,
+    )
+
+    assert result["shared_nbcumv_total"] == 1
+    assert result["getty_repair_media_asset_ids"] == ["asset-1"]
+    assert asset_updates
+    assert any(update.get("hosted_url") is None for update in asset_updates)
+    assert any(update.get("hosted_key") is None for update in asset_updates)
+    assert any(update.get("ingest_status") == "pending" for update in asset_updates)
+
+
+def test_sync_cast_gallery_rows_to_media_assets_resets_stale_getty_hosted_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_url = "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=2048x2048&w=gi"
+    preview_url = "https://media.gettyimages.com/id/1435767826/photo/example.jpg?p=1&s=594x594&w=gi"
+    asset_updates: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.action = "select"
+            self.payload: dict[str, object] | None = None
+
+        def select(self, _columns: str):
+            self.action = "select"
+            return self
+
+        def update(self, payload: dict[str, object]):
+            self.action = "update"
+            self.payload = dict(payload)
+            return self
+
+        def in_(self, _key: str, _values: list[object]):
+            return self
+
+        def eq(self, _key: str, _value: object):
+            return self
+
+        def execute(self):
+            if self.table_name == "media_assets" and self.action == "select":
+                return _Response(
+                    [
+                        {
+                            "id": "asset-1",
+                            "source": "getty",
+                            "source_url": original_url,
+                            "hosted_url": "https://cdn.example.com/media/old-preview.jpg",
+                            "hosted_key": "media/old-preview.jpg",
+                            "metadata": {"mirrored_from": preview_url},
+                        }
+                    ]
+                )
+            if self.table_name == "media_assets" and self.action == "update":
+                asset_updates.append(dict(self.payload or {}))
+                return _Response([{"id": "asset-1"}])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(
+        "trr_backend.repositories.media_assets.transform_cast_photos_to_media",
+        lambda rows: (
+            [
+                {
+                    "id": "asset-1",
+                    "source": "getty",
+                    "source_url": original_url,
+                    "width": 2048,
+                    "height": 2048,
+                    "metadata": {"getty_original_image_url": original_url},
+                }
+            ],
+            [
+                {
+                    "id": "link-1",
+                    "entity_type": "person",
+                    "entity_id": "person-1",
+                    "media_asset_id": "asset-1",
+                    "kind": "gallery",
+                    "context": {},
+                    "is_primary": False,
+                }
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.media_assets.reconcile_media_asset_id_conflicts",
+        lambda db, assets, links: (assets, links),
+    )
+    monkeypatch.setattr("trr_backend.repositories.media_assets.upsert_media_assets", lambda db, assets: list(assets))
+    monkeypatch.setattr("trr_backend.repositories.media_assets.upsert_media_links", lambda db, links: list(links))
+
+    admin_person_images._sync_cast_gallery_rows_to_media_assets(
+        _Db(),
+        [
+            {
+                "id": "cast-row-1",
+                "person_id": "person-1",
+                "source": "getty",
+                "source_image_id": "1435767826",
+                "image_url": original_url,
+                "image_url_canonical": original_url.split("?", 1)[0],
+                "metadata": {"getty_original_image_url": original_url},
+            }
+        ],
+    )
+
+    assert asset_updates == [
+        {
+            "source_url": original_url,
+            "sha256": None,
+            "hosted_bucket": None,
+            "hosted_key": None,
+            "hosted_url": None,
+            "hosted_sha256": None,
+            "hosted_content_type": None,
+            "hosted_bytes": None,
+            "hosted_etag": None,
+            "hosted_at": None,
+            "ingest_status": "pending",
+            "ingest_last_error": None,
+            "ingest_retry_count": 0,
+            "ingest_failed_at": None,
+            "ingest_completed_at": None,
+            "ingest_next_retry_at": None,
+            "width": 2048,
+            "height": 2048,
+            "metadata": {"getty_original_image_url": original_url},
+        }
+    ]
+
+
+def test_import_nbcumv_person_media_aborts_when_both_direct_getty_searches_return_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.integrations import getty as getty_integration
     from trr_backend.integrations import nbcumv as nbcumv_integration
 
     monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(
+        admin_person_images,
+        "_load_person_credit_show_catalog",
+        lambda db, person_id: [{"networks": ["Bravo"], "streaming_providers": []}],
+    )
     monkeypatch.setattr(getty_integration, "search_editorial_assets", lambda *args, **kwargs: [])
+    grouped_event_calls = {"count": 0}
+
+    def _fake_grouped_events(*args, **kwargs):
+        grouped_event_calls["count"] += 1
+        return []
+
+    monkeypatch.setattr(getty_integration, "search_grouped_events", _fake_grouped_events)
     monkeypatch.setattr(nbcumv_integration, "resolve_show_by_title", lambda title: None)
 
     result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
@@ -910,9 +1431,71 @@ def test_import_nbcumv_person_media_treats_zero_getty_results_as_clean_completio
     assert result["getty_unmatched_total"] == 0
     assert result["getty_only_imported"] == 0
     assert result["getty_search_attempted"] is True
-    assert result["getty_zero_result_reason"] == "no_getty_candidates_after_searches"
+    assert result["getty_initial_search_zero_abort"] is True
+    assert result["getty_initial_search_queries"] == ["Mary Cosby Bravo", "Mary Cosby"]
+    assert result["getty_initial_search_counts"] == {"Mary Cosby Bravo": 0, "Mary Cosby": 0}
+    assert result["getty_zero_result_reason"] is None
     assert result["errors"] == []
-    assert "direct search" in str(result["summary_message"]).lower()
+    assert "stopped refresh early" in str(result["summary_message"]).lower()
+    assert grouped_event_calls["count"] == 0
+
+
+def test_import_nbcumv_person_media_marks_direct_getty_searches_as_warning_when_getty_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations import nbcumv as nbcumv_integration
+
+    progress_events: list[dict[str, object]] = []
+
+    def _fake_search_editorial_assets(*args, diagnostics_out=None, **kwargs):
+        if isinstance(diagnostics_out, dict):
+            diagnostics_out.update(
+                {
+                    "status": "unavailable",
+                    "failure_stage": "search",
+                    "unavailable_reason": "challenge_page",
+                    "http_status": 200,
+                    "page_classification": "challenge_page",
+                }
+            )
+        return []
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(
+        admin_person_images,
+        "_load_person_credit_show_catalog",
+        lambda db, person_id: [{"networks": ["Bravo"], "streaming_providers": []}],
+    )
+    monkeypatch.setattr(getty_integration, "search_editorial_assets", _fake_search_editorial_assets)
+    monkeypatch.setattr(nbcumv_integration, "resolve_show_by_title", lambda title: None)
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        MagicMock(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=25,
+        getty_progress_cb=progress_events.append,
+    )
+
+    primary_progress = next(
+        event for event in reversed(progress_events) if event.get("subtask_id") == "primary_person_search"
+    )
+    fallback_progress = next(
+        event for event in reversed(progress_events) if event.get("subtask_id") == "fallback_person_search"
+    )
+
+    assert result["getty_initial_search_zero_abort"] is True
+    assert result["getty_access_mode"] == "live_modal_unavailable"
+    assert result["getty_unavailable_reason"] == "challenge_page"
+    assert primary_progress["subtask_status"] == "warning"
+    assert fallback_progress["subtask_status"] == "warning"
+    assert "Getty unavailable during direct person search" in str(primary_progress["message"])
+    assert "challenge page" in str(primary_progress["message"])
+    assert "HTTP 200" in str(primary_progress["message"])
+    assert "Getty unavailable during direct person search" in str(result["summary_message"])
 
 
 def test_import_nbcumv_person_media_falls_back_to_direct_nbcumv_caption_search(
@@ -1571,6 +2154,835 @@ def test_import_nbcumv_person_media_auto_replaces_bravocon_getty_asset(
     )
 
 
+def test_import_nbcumv_person_media_skips_public_replacement_for_prefetched_getty_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_getty_rows: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.action = "select"
+            self.filters: dict[str, object] = {}
+
+        def select(self, _columns: str):
+            self.action = "select"
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            if self.table_name == "media_links" and self.action == "select":
+                if self.filters.get("media_assets.source") == "nbcumv":
+                    return _Response([{"id": "existing-nbcumv-link"}])
+                return _Response([])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        "trr_backend.integrations.nbcumv.fetch_image_by_identity",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("identity lookup should be skipped")),
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "resolve_best_public_replacement",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("public replacement should be skipped")),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        lambda db, rows, dedupe_on="source_image_id": (
+            imported_getty_rows.extend(list(rows))
+            or [
+                {
+                    "id": str(uuid4()),
+                    "source": "getty",
+                    "source_image_id": str(row.get("source_image_id") or ""),
+                    "metadata": row.get("metadata") or {},
+                }
+                for row in rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.update_cast_photo_hosted_fields",
+        lambda db, photo_id, patch: {},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda db, *, person_id, payload, status="success", error=None: {
+            "person_id": person_id,
+            "source_id": "getty",
+            "variant": "person_gallery_nbcumv_crosswalk",
+        },
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=10,
+        getty_prefetched_assets=[
+            {
+                "editorial_id": "1435767826",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/1435767826",
+                "object_name": "NUP_1435767826.JPG",
+                "preview_image_url": "https://media.gettyimages.com/brandi-preview.jpg",
+                "original_image_url": "https://media.gettyimages.com/brandi-original.jpg",
+                "thumb_url": "https://media.gettyimages.com/brandi-thumb.jpg",
+                "event_name": "BravoCon",
+                "caption": "Brandi Glanville attends BravoCon.",
+                "source_query_scope": "bravo",
+                "assetDimensions": {"width": 2048, "height": 2048},
+            }
+        ],
+        getty_prefetched_events=[],
+    )
+
+    assert result["getty_prefetched"] is True
+    assert result["getty_only_imported"] == 1
+    assert result["existing_nbcumv_prefetched_enrichment_mode"] is True
+    assert imported_getty_rows
+    metadata = imported_getty_rows[0]["metadata"]
+    assert metadata["source_resolution"] == "getty_watermark_fallback"
+    assert "google_reverse_image_search_url" not in metadata
+
+
+def test_import_nbcumv_person_media_discovery_mode_defers_weak_prefetched_getty_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_getty_rows: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.action = "select"
+            self.filters: dict[str, object] = {}
+
+        def select(self, _columns: str):
+            self.action = "select"
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            if self.table_name == "media_links" and self.action == "select":
+                if self.filters.get("media_assets.source") == "nbcumv":
+                    return _Response([{"id": "existing-nbcumv-link"}])
+                return _Response([])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        lambda db, rows, dedupe_on="source_image_id": (
+            imported_getty_rows.extend(list(rows))
+            or [
+                {
+                    "id": str(uuid4()),
+                    "source": "getty",
+                    "source_image_id": str(row.get("source_image_id") or ""),
+                    "metadata": row.get("metadata") or {},
+                }
+                for row in rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.update_cast_photo_hosted_fields",
+        lambda db, photo_id, patch: {},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda db, *, person_id, payload, status="success", error=None: {
+            "person_id": person_id,
+            "source_id": "getty",
+            "variant": "person_gallery_nbcumv_crosswalk",
+        },
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=10,
+        getty_prefetch_mode="discovery",
+        getty_deferred_enrichment=True,
+        getty_prefetched_assets=[
+            {
+                "editorial_id": "1435767826",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/1435767826",
+                "object_name": "NUP_1435767826.JPG",
+                "preview_image_url": "https://media.gettyimages.com/brandi-preview.jpg?s=1024x1024&w=gi",
+                "original_image_url": "https://media.gettyimages.com/brandi-original.jpg?s=2048x2048&w=gi",
+                "thumb_url": "https://media.gettyimages.com/brandi-thumb.jpg?s=300x300&w=gi",
+                "event_name": "BravoCon",
+                "caption": "Brandi Glanville attends BravoCon.",
+                "source_query_scope": "bravo",
+                "assetDimensions": {"width": 2048, "height": 2048},
+            },
+            {
+                "editorial_id": "1435767827",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/1435767827",
+                "object_name": "NUP_1435767827.JPG",
+                "preview_image_url": "https://media.gettyimages.com/brandi-preview-small.jpg?s=300x300&w=gi",
+                "original_image_url": "https://media.gettyimages.com/brandi-preview-small.jpg?s=300x300&w=gi",
+                "thumb_url": "https://media.gettyimages.com/brandi-thumb-small.jpg?s=300x300&w=gi",
+                "event_name": "BravoCon",
+                "caption": "Brandi Glanville attends BravoCon.",
+                "source_query_scope": "broad",
+                "assetDimensions": {"width": 300, "height": 300},
+            },
+        ],
+        getty_prefetched_events=[],
+    )
+
+    assert result["getty_prefetched"] is True
+    assert result["getty_only_imported"] == 1
+    assert result["getty_enrichment_pending"] == 2
+    assert result["getty_deferred_editorial_ids"] == ["1435767826", "1435767827"]
+    assert [row["source_image_id"] for row in imported_getty_rows] == ["1435767826"]
+
+
+def test_import_nbcumv_person_media_getty_only_prefetch_ignores_requested_show_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_getty_rows: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.filters: dict[str, object] = {}
+            self.not_ = self._NotQuery(self)
+
+        def select(self, _columns: str):
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        class _NotQuery:
+            def __init__(self, parent: _Query):
+                self.parent = parent
+
+            def eq(self, key: str, value: object):
+                self.parent.filters[f"neq:{key}"] = value
+                return self.parent
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            if self.table_name == "media_links" and self.filters.get("media_assets.source") == "nbcumv":
+                return _Response([])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        lambda db, rows, dedupe_on="source_image_id": (
+            imported_getty_rows.extend(list(rows))
+            or [
+                {
+                    "id": str(uuid4()),
+                    "source": "getty",
+                    "source_image_id": str(row.get("source_image_id") or ""),
+                    "metadata": row.get("metadata") or {},
+                }
+                for row in rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.update_cast_photo_hosted_fields",
+        lambda db, photo_id, patch: {},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda db, *, person_id, payload, status="success", error=None: {
+            "person_id": person_id,
+            "source_id": "getty",
+            "variant": "person_gallery_nbcumv_crosswalk",
+        },
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=uuid4(),
+        show_name="The Real Housewives of Beverly Hills",
+        limit=10,
+        getty_prefetched_assets=[
+            {
+                "editorial_id": "9990001",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/9990001",
+                "object_name": "NUP_9990001.JPG",
+                "preview_image_url": "https://media.gettyimages.com/9990001-preview.jpg?s=1024x1024&w=gi",
+                "original_image_url": "https://media.gettyimages.com/9990001-original.jpg?s=2048x2048&w=gi",
+                "thumb_url": "https://media.gettyimages.com/9990001-thumb.jpg?s=300x300&w=gi",
+                "caption": "Brandi Glanville appears on Watch What Happens Live with Andy Cohen.",
+                "source_query_scope": "broad",
+                "assetDimensions": {"width": 2048, "height": 2048},
+            }
+        ],
+        getty_prefetched_events=[],
+        allow_nbcumv_only_supplement=False,
+    )
+
+    assert result["getty_only_direct_import_mode"] is True
+    assert result["getty_candidates_total"] == 1
+    assert result["getty_only_imported"] == 1
+    assert result["getty_to_import_total"] == 1
+    assert [row["source_image_id"] for row in imported_getty_rows] == ["9990001"]
+
+
+def test_import_nbcumv_person_media_getty_only_defers_weak_discovery_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_getty_rows: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.filters: dict[str, object] = {}
+            self.not_ = self._NotQuery(self)
+
+        def select(self, _columns: str):
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        class _NotQuery:
+            def __init__(self, parent: _Query):
+                self.parent = parent
+
+            def eq(self, key: str, value: object):
+                self.parent.filters[f"neq:{key}"] = value
+                return self.parent
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            if self.table_name == "media_links" and self.filters.get("media_assets.source") == "nbcumv":
+                return _Response([])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        lambda db, rows, dedupe_on="source_image_id": (
+            imported_getty_rows.extend(list(rows))
+            or [
+                {
+                    "id": str(uuid4()),
+                    "source": "getty",
+                    "source_image_id": str(row.get("source_image_id") or ""),
+                    "metadata": row.get("metadata") or {},
+                }
+                for row in rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.update_cast_photo_hosted_fields",
+        lambda db, photo_id, patch: {},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda db, *, person_id, payload, status="success", error=None: {
+            "person_id": person_id,
+            "source_id": "getty",
+            "variant": "person_gallery_nbcumv_crosswalk",
+        },
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=uuid4(),
+        show_name="The Real Housewives of Beverly Hills",
+        limit=10,
+        getty_prefetch_mode="discovery",
+        getty_deferred_enrichment=True,
+        getty_prefetched_assets=[
+            {
+                "editorial_id": "1246182583",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/1246182583",
+                "preview_image_url": "https://media.gettyimages.com/id/1246182583/photo/brandi.jpg?s=612x612&w=gi",
+                "original_image_url": "https://media.gettyimages.com/id/1246182583/photo/brandi.jpg?s=612x612&w=gi",
+                "thumb_url": "https://media.gettyimages.com/id/1246182583/photo/brandi.jpg?s=300x300&w=gi",
+                "caption": "Brandi Glanville on Watch What Happens Live.",
+                "source_query_scope": "broad",
+                "assetDimensions": {"width": 612, "height": 612},
+            }
+        ],
+        getty_prefetched_events=[],
+        allow_nbcumv_only_supplement=False,
+    )
+
+    assert result["getty_only_direct_import_mode"] is True
+    assert result["getty_only_imported"] == 0
+    assert result["getty_to_import_total"] == 0
+    assert result["getty_deferred_resolution_total"] == 1
+    assert result["getty_deferred_editorial_ids"] == ["1246182583"]
+    assert imported_getty_rows == []
+    assert result["summary_message"] == (
+        "Deferred 1 Getty assets for full-detail enrichment before import; "
+        "discovery previews are not imported as final Getty rows."
+    )
+
+
+def test_import_nbcumv_person_media_getty_only_skips_existing_shared_counterparts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_getty_rows: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.filters: dict[str, object] = {}
+            self.not_ = self._NotQuery(self)
+
+        def select(self, _columns: str):
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        class _NotQuery:
+            def __init__(self, parent: _Query):
+                self.parent = parent
+
+            def eq(self, key: str, value: object):
+                self.parent.filters[f"neq:{key}"] = value
+                return self.parent
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def update(self, _payload: dict[str, object]):
+            return self
+
+        def execute(self):
+            if self.table_name == "cast_photos" and self.filters.get("neq:source") == "getty":
+                return _Response([{"file_name": "NUP_1435767826.JPG"}])
+            if self.table_name == "media_links" and self.filters.get("media_assets.source") == "nbcumv":
+                return _Response([])
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        lambda db, rows, dedupe_on="source_image_id": (
+            imported_getty_rows.extend(list(rows))
+            or [
+                {
+                    "id": str(uuid4()),
+                    "source": "getty",
+                    "source_image_id": str(row.get("source_image_id") or ""),
+                    "metadata": row.get("metadata") or {},
+                }
+                for row in rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.update_cast_photo_hosted_fields",
+        lambda db, photo_id, patch: {},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda db, *, person_id, payload, status="success", error=None: {
+            "person_id": person_id,
+            "source_id": "getty",
+            "variant": "person_gallery_nbcumv_crosswalk",
+        },
+    )
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=10,
+        getty_prefetched_assets=[
+            {
+                "editorial_id": "1435767826",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/1435767826",
+                "object_name": "NUP_1435767826.JPG",
+                "preview_image_url": "https://media.gettyimages.com/brandi-preview.jpg?s=1024x1024&w=gi",
+                "original_image_url": "https://media.gettyimages.com/brandi-original.jpg?s=2048x2048&w=gi",
+                "thumb_url": "https://media.gettyimages.com/brandi-thumb.jpg?s=300x300&w=gi",
+                "caption": "Brandi Glanville attends BravoCon.",
+                "source_query_scope": "bravo",
+                "assetDimensions": {"width": 2048, "height": 2048},
+            }
+        ],
+        getty_prefetched_events=[],
+        allow_nbcumv_only_supplement=False,
+    )
+
+    assert result["getty_only_direct_import_mode"] is True
+    assert result["getty_existing_shared_total"] == 1
+    assert result["getty_skipped_existing_total"] == 1
+    assert result["getty_to_import_total"] == 0
+    assert result["getty_only_imported"] == 0
+    assert imported_getty_rows == []
+
+
+def test_import_nbcumv_person_media_getty_only_batches_large_upserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_batches: list[list[dict[str, object]]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.filters: dict[str, object] = {}
+            self.not_ = self._NotQuery(self)
+
+        def select(self, _columns: str):
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        class _NotQuery:
+            def __init__(self, parent: _Query):
+                self.parent = parent
+
+            def eq(self, key: str, value: object):
+                self.parent.filters[f"neq:{key}"] = value
+                return self.parent
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setenv("TRR_GETTY_ONLY_UPSERT_BATCH_SIZE", "2")
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        lambda db, rows, dedupe_on="source_image_id": (
+            imported_batches.append(list(rows))
+            or [
+                {
+                    "id": str(uuid4()),
+                    "source": "getty",
+                    "source_image_id": str(row.get("source_image_id") or ""),
+                    "metadata": row.get("metadata") or {},
+                }
+                for row in rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.update_cast_photo_hosted_fields",
+        lambda db, photo_id, patch: {},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda db, *, person_id, payload, status="success", error=None: {
+            "person_id": person_id,
+            "source_id": "getty",
+            "variant": "person_gallery_nbcumv_crosswalk",
+        },
+    )
+
+    assets = [
+        {
+            "editorial_id": f"batch-{index}",
+            "detail_url": f"https://www.gettyimages.com/detail/news-photo/batch-{index}",
+            "preview_image_url": f"https://media.gettyimages.com/id/batch-{index}/photo/brandi.jpg?s=1024x1024&w=gi",
+            "original_image_url": f"https://media.gettyimages.com/id/batch-{index}/photo/brandi.jpg?s=2048x2048&w=gi",
+            "thumb_url": f"https://media.gettyimages.com/id/batch-{index}/photo/brandi.jpg?s=300x300&w=gi",
+            "caption": f"Brandi Glanville asset {index}",
+            "source_query_scope": "broad",
+            "assetDimensions": {"width": 2048, "height": 2048},
+        }
+        for index in range(5)
+    ]
+
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=10,
+        getty_prefetch_mode="discovery",
+        getty_deferred_enrichment=False,
+        getty_prefetched_assets=assets,
+        getty_prefetched_events=[],
+        allow_nbcumv_only_supplement=False,
+    )
+
+    assert [len(batch) for batch in imported_batches] == [2, 2, 1]
+    assert result["getty_to_import_total"] == 5
+    assert result["getty_only_imported"] == 5
+
+
+def test_import_nbcumv_person_media_getty_only_keeps_distinct_editorial_ids_with_shared_object_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported_getty_rows: list[dict[str, object]] = []
+
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+            self.error = None
+
+    class _Query:
+        def __init__(self, table_name: str):
+            self.table_name = table_name
+            self.filters: dict[str, object] = {}
+            self.not_ = self._NotQuery(self)
+
+        def select(self, _columns: str):
+            return self
+
+        def eq(self, key: str, value: object):
+            self.filters[key] = value
+            return self
+
+        class _NotQuery:
+            def __init__(self, parent: _Query):
+                self.parent = parent
+
+            def eq(self, key: str, value: object):
+                self.parent.filters[f"neq:{key}"] = value
+                return self.parent
+
+        def in_(self, key: str, values: list[object]):
+            self.filters[key] = list(values)
+            return self
+
+        def limit(self, _value: int):
+            return self
+
+        def execute(self):
+            return _Response([])
+
+    class _Schema:
+        def table(self, table_name: str):
+            return _Query(table_name)
+
+    class _Db:
+        def schema(self, _schema_name: str):
+            return _Schema()
+
+    monkeypatch.setattr(admin_nbcumv, "_ensure_sources", lambda db: None)
+    monkeypatch.setattr(admin_person_images, "_build_show_lookup_maps", lambda db: ({}, {}, {}))
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.upsert_cast_photos",
+        lambda db, rows, dedupe_on="source_image_id": (
+            imported_getty_rows.extend(list(rows))
+            or [
+                {
+                    "id": str(uuid4()),
+                    "source": "getty",
+                    "source_image_id": str(row.get("source_image_id") or ""),
+                    "metadata": row.get("metadata") or {},
+                }
+                for row in rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.cast_photos.update_cast_photo_hosted_fields",
+        lambda db, photo_id, patch: {},
+    )
+    monkeypatch.setattr(
+        admin_person_images,
+        "_persist_person_getty_snapshot",
+        lambda db, *, person_id, payload, status="success", error=None: {
+            "person_id": person_id,
+            "source_id": "getty",
+            "variant": "person_gallery_nbcumv_crosswalk",
+        },
+    )
+
+    shared_object_name = "BRANDI_REPEAT.JPG"
+    result = _REAL_IMPORT_NBCUMV_PERSON_MEDIA(
+        _Db(),
+        person_id=str(uuid4()),
+        person_name="Brandi Glanville",
+        show_id=None,
+        show_name=None,
+        limit=10,
+        getty_prefetched_assets=[
+            {
+                "editorial_id": "repeat-1",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/repeat-1",
+                "object_name": shared_object_name,
+                "preview_image_url": "https://media.gettyimages.com/id/repeat-1/photo/brandi.jpg?s=1024x1024&w=gi",
+                "original_image_url": "https://media.gettyimages.com/id/repeat-1/photo/brandi.jpg?s=2048x2048&w=gi",
+                "thumb_url": "https://media.gettyimages.com/id/repeat-1/photo/brandi.jpg?s=300x300&w=gi",
+                "caption": "Brandi Glanville asset 1",
+                "source_query_scope": "broad",
+                "assetDimensions": {"width": 2048, "height": 2048},
+            },
+            {
+                "editorial_id": "repeat-2",
+                "detail_url": "https://www.gettyimages.com/detail/news-photo/repeat-2",
+                "object_name": shared_object_name,
+                "preview_image_url": "https://media.gettyimages.com/id/repeat-2/photo/brandi.jpg?s=1024x1024&w=gi",
+                "original_image_url": "https://media.gettyimages.com/id/repeat-2/photo/brandi.jpg?s=2048x2048&w=gi",
+                "thumb_url": "https://media.gettyimages.com/id/repeat-2/photo/brandi.jpg?s=300x300&w=gi",
+                "caption": "Brandi Glanville asset 2",
+                "source_query_scope": "broad",
+                "assetDimensions": {"width": 2048, "height": 2048},
+            },
+        ],
+        getty_prefetched_events=[],
+        allow_nbcumv_only_supplement=False,
+    )
+
+    assert result["getty_only_direct_import_mode"] is True
+    assert result["getty_usable_total"] == 2
+    assert result["getty_to_import_total"] == 2
+    assert result["getty_only_imported"] == 2
+    assert [row["source_image_id"] for row in imported_getty_rows] == ["repeat-1", "repeat-2"]
+
+
 def test_import_nbcumv_person_media_uses_date_scoped_nup_fallback_before_getty_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1746,8 +3158,12 @@ def test_import_nbcumv_person_media_filters_getty_fallback_rows_to_requested_sho
     assert result["getty_only_imported"] == 1
     assert len(imported_getty_rows) == 1
     assert imported_getty_rows[0]["source_image_id"] == "1"
-    assert imported_getty_rows[0]["metadata"]["bucket_type"] == "show"
-    assert imported_getty_rows[0]["metadata"]["resolved_show_name"] == "The Real Housewives of Salt Lake City"
+    assert imported_getty_rows[0]["metadata"]["bucket_type"] == "event"
+    assert (
+        imported_getty_rows[0]["metadata"]["bucket_label"]
+        == 'UT: BRAVO\'S "The Real Housewives of Salt Lake City" - Season 6'
+    )
+    assert imported_getty_rows[0]["metadata"].get("show_name") is None
 
 
 def test_import_nbcumv_person_media_buckets_wwhl_and_bravocon(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1911,7 +3327,8 @@ def test_import_nbcumv_person_media_imports_broad_grouped_events_as_event_bucket
     assert imported_getty_rows[0]["metadata"]["bucket_type"] == "event"
     assert imported_getty_rows[0]["metadata"]["people_count"] == 4
     assert imported_getty_rows[0]["metadata"]["source_resolution"] == "getty_watermark_fallback"
-    assert hosted_updates
+    assert len(result["getty_only_row_ids"]) == 1
+    assert hosted_updates == []
 
 
 def test_import_nbcumv_person_media_requests_broad_events_with_minimum_count(
@@ -4005,6 +5422,101 @@ class TestRefreshPersonImages:
         assert data["photos_fetched"] == 3
         assert data["photos_upserted"] == 2
 
+    def test_refresh_aborts_after_double_zero_getty_direct_searches(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Brandi Glanville",
+            "external_ids": {"imdb": "nm12345678"},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id", return_value=None):
+                with patch("trr_backend.ingestion.cast_photo_sources.fetch_all_cast_photos", return_value=[]):
+                    with patch(
+                        "api.routers.admin_person_images._import_nbcumv_person_media",
+                        return_value={
+                            "fetched": 0,
+                            "imported": 0,
+                            "skipped": 0,
+                            "failed": 0,
+                            "gallery_links_created": 0,
+                            "asset_ids": [],
+                            "errors": [],
+                            "summary_message": (
+                                "Stopped refresh early: both direct Getty person searches returned zero results. "
+                                "Grouped Getty, NBCUMV, and BravoTV stages were not run."
+                            ),
+                            "getty_search_attempted": True,
+                            "getty_primary_candidates_total": 0,
+                            "getty_fallback_candidates_total": 0,
+                            "getty_initial_search_zero_abort": True,
+                            "getty_initial_search_queries": ["Brandi Glanville Bravo", "Brandi Glanville"],
+                            "getty_initial_search_counts": {"Brandi Glanville Bravo": 0, "Brandi Glanville": 0},
+                        },
+                    ):
+                        with patch(
+                            "api.routers.admin_person_images._import_bravotv_person_media",
+                        ) as bravotv_import_mock:
+                            response = client.post(
+                                f"/api/v1/admin/person/{person_id}/refresh-images",
+                                json={
+                                    "sources": ["nbcumv", "bravotv"],
+                                    "skip_mirror": True,
+                                    "skip_auto_count": False,
+                                    "skip_word_detection": False,
+                                    "skip_centering": False,
+                                    "skip_resize": False,
+                                },
+                                headers={"Authorization": f"Bearer {token}"},
+                            )
+
+        assert response.status_code == 200
+        bravotv_import_mock.assert_not_called()
+        data = response.json()
+        assert data["getty_initial_search_zero_abort"] is True
+        assert data["getty_initial_search_queries"] == ["Brandi Glanville Bravo", "Brandi Glanville"]
+        assert data["getty_initial_search_counts"] == {"Brandi Glanville Bravo": 0, "Brandi Glanville": 0}
+        assert data["bravotv_photos_fetched"] == 0
+        assert any(part["part"] == "getty_initial_search_zero_abort" for part in data["failed_parts"])
+
+    def test_refresh_stream_starts_new_operation_without_attach(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [{"id": person_id, "full_name": "Brandi Glanville", "external_ids": {}}]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images.start_operation_for_stream",
+                return_value={"id": str(uuid4())},
+            ) as start_operation:
+                with patch("api.routers.admin_person_images.operation_stream_response", return_value=Response("ok")):
+                    response = client.post(
+                        f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                        json={"sources": ["nbcumv"], "skip_mirror": True},
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+        assert response.status_code == 200
+        assert start_operation.call_args.kwargs["allow_attach"] is False
+
     def test_stream_emits_nbcumv_progress_updates(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         person_id = str(uuid4())
@@ -4202,6 +5714,7 @@ class TestRefreshPersonImages:
             {
                 "status": "completed",
                 "phase": "completed",
+                "auth_mode": "chrome_profile_cookies",
                 "subtasks": {
                     "mirror_imported_assets": {
                         "id": "mirror_imported_assets",
@@ -4216,7 +5729,13 @@ class TestRefreshPersonImages:
                         "label": "Primary Person Search",
                         "status": "completed",
                         "query": "Brandi Glanville Bravo",
+                        "query_url": "https://www.gettyimages.com/search/2/image?family=editorial&phrase=Brandi%20Glanville%20Bravo&sort=newest",
+                        "site_image_total": 877,
+                        "site_event_total": 39,
+                        "site_video_total": 0,
                         "candidates_found": 12,
+                        "usable_after_dedupe_total": 10,
+                        "overlap_count": 2,
                         "current": 12,
                         "total": 12,
                         "message": "Found 12 direct Getty candidates.",
@@ -4233,7 +5752,14 @@ class TestRefreshPersonImages:
         assert snapshot is not None
         assert snapshot["status"] == "completed"
         assert snapshot["phase"] == "completed"
+        assert snapshot["auth_mode"] == "chrome_profile_cookies"
         assert snapshot["subtasks"][0]["id"] == "primary_person_search"
+        assert (
+            snapshot["subtasks"][0]["query_url"]
+            == "https://www.gettyimages.com/search/2/image?family=editorial&phrase=Brandi%20Glanville%20Bravo&sort=newest"
+        )
+        assert snapshot["subtasks"][0]["site_image_total"] == 877
+        assert snapshot["subtasks"][0]["usable_after_dedupe_total"] == 10
         assert snapshot["subtasks"][-1]["id"] == "mirror_imported_assets"
         assert snapshot["breakdown"]["raw_getty_candidates"] == 12
         assert snapshot["breakdown"]["matched_via_nbcumv"] == 2
@@ -5083,6 +6609,78 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
         assert complete_data["hosting_hosted_total"] == 2
         assert complete_data["hosting_failed_total"] == 1
         assert complete_data["source_progress"]["getty_nbcumv"]["status"] == "warning"
+
+    def test_stream_force_mirrors_existing_getty_only_rows_and_linked_media_assets(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        person_id = str(uuid4())
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+        person_data = {
+            "id": person_id,
+            "full_name": "Getty Existing Person",
+            "external_ids": {},
+        }
+
+        mock_db = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [person_data]
+        mock_response.error = None
+        query = mock_db.schema.return_value.table.return_value.select.return_value.eq.return_value.limit.return_value
+        query.execute.return_value = mock_response
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch("trr_backend.repositories.cast_tmdb.get_cast_tmdb_by_person_id", return_value=None):
+                with patch(
+                    "trr_backend.ingestion.cast_photo_sources.fetch_all_cast_photos",
+                    return_value=[],
+                ):
+                    with patch(
+                        "api.routers.admin_person_images._import_nbcumv_person_media",
+                        return_value={
+                            "fetched": 1,
+                            "imported": 0,
+                            "skipped": 1,
+                            "failed": 0,
+                            "covered_existing": 1,
+                            "nbcumv_only_imported": 0,
+                            "getty_only_imported": 0,
+                            "shared_nbcumv_imported": 0,
+                            "asset_ids": [],
+                            "getty_only_row_ids": ["photo-1"],
+                            "getty_only_media_asset_ids": ["asset-1"],
+                            "getty_repair_row_ids": ["photo-2"],
+                            "getty_repair_media_asset_ids": ["asset-2"],
+                            "errors": [],
+                            "summary_message": "Getty-only fallback rows already existed and were normalized.",
+                        },
+                    ):
+                        with patch(
+                            "api.routers.admin_person_images._mirror_person_media_assets",
+                            return_value=(1, 0),
+                        ) as mirror_media_mock:
+                            with patch(
+                                "api.routers.admin_person_images._mirror_person_photos",
+                                return_value=(1, 0),
+                            ) as mirror_photo_mock:
+                                response = client.post(
+                                    f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                                    json={
+                                        "sources": ["nbcumv"],
+                                        "skip_auto_count": True,
+                                        "skip_word_detection": True,
+                                        "skip_centering": True,
+                                        "skip_resize": True,
+                                    },
+                                    headers={"Authorization": f"Bearer {token}"},
+                                )
+
+        assert response.status_code == 200
+        mirror_photo_mock.assert_called_once()
+        assert mirror_photo_mock.call_args.kwargs["photo_ids"] == ["photo-1", "photo-2"]
+        assert mirror_photo_mock.call_args.kwargs["force"] is True
+        mirror_media_mock.assert_called_once()
+        assert mirror_media_mock.call_args.kwargs["asset_ids"] == ["asset-1", "asset-2"]
+        assert mirror_media_mock.call_args.kwargs["force"] is True
 
     def test_stream_skips_imdb_when_source_already_fully_mirrored(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")

@@ -141,12 +141,45 @@ def _iter_unique_http_urls(candidates: list[str | None]) -> list[str]:
     return urls
 
 
+def _getty_preferred_source_url(row: Mapping[str, Any]) -> str | None:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return next(
+        (
+            candidate.strip()
+            for candidate in (
+                metadata.get("getty_original_image_url"),
+                metadata.get("original_source_url"),
+                metadata.get("original_source_file_url"),
+                row.get("image_url_canonical"),
+                row.get("image_url"),
+                row.get("source_url"),
+                row.get("url"),
+                metadata.get("getty_preview_image_url"),
+                row.get("thumb_url"),
+            )
+            if isinstance(candidate, str) and candidate.strip().startswith(("http://", "https://"))
+        ),
+        None,
+    )
+
+
 def _build_cast_photo_download_urls(
     row: Mapping[str, Any],
     *,
     source: str,
     referer: str | None,
 ) -> list[str]:
+    if source == "getty":
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        return _iter_unique_http_urls(
+            [
+                _getty_preferred_source_url(row),
+                row.get("image_url"),
+                row.get("url"),
+                metadata.get("getty_preview_image_url"),
+                row.get("thumb_url"),
+            ]
+        )
     image_url = row.get("image_url")
     url = row.get("url")
     thumb_url = row.get("thumb_url")
@@ -1434,7 +1467,8 @@ def mirror_media_asset_row(
         elif hosted_url:
             return None
 
-    source_url = row.get("source_url")
+    source_name = str(row.get("source") or "").strip().lower() or "web_scrape"
+    source_url = _getty_preferred_source_url(row) if source_name == "getty" else row.get("source_url")
     if not isinstance(source_url, str) or not source_url.strip():
         return None
 
@@ -1446,7 +1480,7 @@ def mirror_media_asset_row(
         if isinstance(metadata.get("source_page_url"), str)
         else None
     )
-    source = str(row.get("source") or "").strip().lower() or "web_scrape"
+    source = source_name
 
     from trr_backend.scraping.url_image_scraper import download_and_hash_image
 

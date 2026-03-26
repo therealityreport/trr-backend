@@ -65,3 +65,22 @@ def test_get_social_account_profile_hashtag_timeline(client: TestClient, monkeyp
     assert response.json()["series"][0]["hashtag"] == "bravo"
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_get_social_account_profile_hashtag_timeline_forwards_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_hashtag_timeline",
+        return_value={"platform": "instagram", "account_handle": "bravotv", "years": [], "series": [], "top_rank_limit": 10, "off_chart_rank": 11},
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags/timeline?window=365d",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["window"] == "365d"

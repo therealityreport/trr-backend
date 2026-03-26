@@ -17,9 +17,11 @@ Usage:
     # Or via the workspace Makefile:
     make getty-server
 """
+
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 import time
@@ -33,15 +35,18 @@ from typing import Any
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+
+from trr_backend.utils.env import load_env  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s  %(message)s",
 )
 logger = logging.getLogger("getty-local-server")
+load_env()
 
 # ---------------------------------------------------------------------------
 # App
@@ -60,16 +65,22 @@ app.add_middleware(
 
 class ScrapeRequest(BaseModel):
     person_name: str = Field(..., min_length=1, description="Full name to search Getty for")
+    show_name: str | None = Field(default=None, description="Optional show name for show-scoped Getty query")
+    mode: str = Field(default="full", description="Getty prefetch mode: discovery or full")
 
 
 class ScrapeResponse(BaseModel):
     person: str
+    show_name: str | None = None
     merged: list[dict[str, Any]]
     merged_total: int
     merged_events: list[dict[str, Any]]
     merged_events_total: int
     image_overlap_count: int
     event_overlap_count: int
+    query_summaries: list[dict[str, Any]] = Field(default_factory=list)
+    auth_mode: str | None = None
+    auth_warning: str | None = None
     elapsed_seconds: float
 
 
@@ -86,89 +97,24 @@ async def scrape_getty(req: ScrapeRequest) -> dict[str, Any]:
     and returns the merged results.  This can take 1-5 minutes for persons
     with large Getty catalogs.
     """
-    from trr_backend.integrations import getty as getty_integration
-
     person_name = req.person_name.strip()
-    bravo_phrase = f"{person_name} Bravo"
-    broad_phrase = person_name
+    from trr_backend.integrations.getty_local_prefetch import fetch_person_getty_prefetch_payload
+
     t0 = time.perf_counter()
-
-    # ------------------------------------------------------------------
-    # Individual images
-    # ------------------------------------------------------------------
-    logger.info("Searching images for '%s' (unlimited)...", bravo_phrase)
-    bravo_assets = getty_integration.search_editorial_assets(bravo_phrase, limit=0)
-    for a in bravo_assets:
-        a["source_query_scope"] = "bravo"
-    logger.info("  → %d Bravo images in %.1fs", len(bravo_assets), time.perf_counter() - t0)
-
-    t1 = time.perf_counter()
-    logger.info("Searching images for '%s' (unlimited)...", broad_phrase)
-    broad_assets = getty_integration.search_editorial_assets(
-        broad_phrase, limit=0, query_params={"sort": "best"},
+    result = await asyncio.to_thread(
+        fetch_person_getty_prefetch_payload,
+        person_name,
+        show_name=req.show_name,
+        mode=req.mode,
     )
-    for a in broad_assets:
-        a.setdefault("source_query_scope", "broad")
-    logger.info("  → %d broad images in %.1fs", len(broad_assets), time.perf_counter() - t1)
-
-    # Cross-dedup images (bravo takes priority)
-    seen_ids: set[str] = set()
-    merged_assets: list[dict[str, Any]] = []
-    for a in bravo_assets + broad_assets:
-        eid = str(a.get("editorial_id") or "").strip()
-        if eid and eid in seen_ids:
-            continue
-        if eid:
-            seen_ids.add(eid)
-        merged_assets.append(a)
-    image_overlap = len(bravo_assets) + len(broad_assets) - len(merged_assets)
-
-    # ------------------------------------------------------------------
-    # Grouped events / albums
-    # ------------------------------------------------------------------
-    t2 = time.perf_counter()
-    logger.info("Searching events for '%s' (unlimited)...", bravo_phrase)
-    bravo_events = getty_integration.search_grouped_events(
-        bravo_phrase, limit=0, person_name=person_name, source_query_scope="bravo",
-    )
-    logger.info("  → %d Bravo events in %.1fs", len(bravo_events), time.perf_counter() - t2)
-
-    t3 = time.perf_counter()
-    logger.info("Searching events for '%s' (unlimited)...", broad_phrase)
-    broad_events = getty_integration.search_grouped_events(
-        broad_phrase, limit=0, person_name=person_name,
-        source_query_scope="broad", query_params={"sort": "best"},
-    )
-    logger.info("  → %d broad events in %.1fs", len(broad_events), time.perf_counter() - t3)
-
-    # Cross-dedup events
-    seen_urls: set[str] = set()
-    merged_events: list[dict[str, Any]] = []
-    for e in bravo_events + broad_events:
-        url = str(e.get("event_url") or "").strip()
-        if url and url in seen_urls:
-            continue
-        if url:
-            seen_urls.add(url)
-        merged_events.append(e)
-    event_overlap = len(bravo_events) + len(broad_events) - len(merged_events)
-
-    elapsed = time.perf_counter() - t0
     logger.info(
-        "DONE — %d images, %d events in %.1fs",
-        len(merged_assets), len(merged_events), elapsed,
+        "DONE — %d images, %d events in %.1fs (auth_mode=%s)",
+        int(result.get("merged_total") or 0),
+        int(result.get("merged_events_total") or 0),
+        time.perf_counter() - t0,
+        result.get("auth_mode") or "unknown",
     )
-
-    return {
-        "person": person_name,
-        "merged": merged_assets,
-        "merged_total": len(merged_assets),
-        "merged_events": merged_events,
-        "merged_events_total": len(merged_events),
-        "image_overlap_count": image_overlap,
-        "event_overlap_count": event_overlap,
-        "elapsed_seconds": round(elapsed, 1),
-    }
+    return result
 
 
 # ---------------------------------------------------------------------------

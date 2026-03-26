@@ -179,10 +179,10 @@ None.
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
-  last_updated: 2026-03-16
-  current_phase: "Unified show refresh backend complete"
-  next_action: "Close out session and monitor for follow-up regressions"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer task status notes if follow-up is needed"
   detail: self
 ```

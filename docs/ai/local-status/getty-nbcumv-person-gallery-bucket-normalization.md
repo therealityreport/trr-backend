@@ -1,15 +1,15 @@
 # Getty/NBCUMV person-gallery bucket normalization
 
-Last updated: 2026-03-20
+Last updated: 2026-03-24
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: active
-  last_updated: 2026-03-20
-  current_phase: "Getty/NBCUMV person refresh classification remains in place, and the latest follow-up now stamps Google reverse-image-search URLs onto Getty fallback rows for manual operator use"
-  next_action: "Run one live person-gallery Get Images pass only if needed to confirm the new Google reverse-search link appears on Getty fallback rows in the lightbox; otherwise archive this item in the next cleanup pass"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer continuity notes if follow-up is needed"
   detail: self
 ```
 

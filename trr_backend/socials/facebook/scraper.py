@@ -47,6 +47,13 @@ _RELATIVE_GROUP_POST_HREF_RE = re.compile(
     r'href=["\'](/groups/[0-9]+/posts/[0-9]+[^"\']*)["\']',
     re.IGNORECASE,
 )
+_PHOTO_FBID_HREF_RE = re.compile(
+    r'href="(/photo/\?fbid=([0-9]+)[^"]*)"',
+    re.IGNORECASE,
+)
+_PERMALINK_URL_JSON_RE = re.compile(
+    r'"permalink_url":"((?:[^"\\]|\\.)*)"',
+)
 _SHARE_URL_RE = re.compile(
     r"https://(?:www\.)?facebook\.com/share/(?:v|p|r)/([A-Za-z0-9_-]+)",
     re.IGNORECASE,
@@ -918,7 +925,13 @@ class FacebookScraper:
         handle: str,
         config: FacebookScrapeConfig,
     ) -> list[tuple[str, str]]:
-        """Scroll feed page with Playwright to discover post URLs beyond initial render."""
+        """Scroll feed page with Playwright to discover post URLs beyond initial render.
+
+        Uses two discovery channels:
+        1. DOM scraping: extracts URLs from rendered HTML after each scroll.
+        2. XHR interception: captures permalink_url values from Facebook's
+           GraphQL responses as the page lazy-loads feed content.
+        """
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
@@ -928,9 +941,28 @@ class FacebookScraper:
         all_post_urls: list[tuple[str, str]] = []
         seen: set[str] = set()
 
+        # Collect permalink URLs from intercepted XHR responses.
+        xhr_permalinks: list[str] = []
+
+        def _on_response(response):
+            try:
+                if "/api/graphql" not in response.url:
+                    return
+                ct = response.headers.get("content-type", "")
+                if "json" not in ct and "text" not in ct:
+                    return
+                body = response.text()
+                for m in _PERMALINK_URL_JSON_RE.finditer(body):
+                    raw = m.group(1).replace("\\/", "/")
+                    if "facebook.com" in raw and raw not in seen:
+                        xhr_permalinks.append(raw)
+            except Exception:  # noqa: BLE001
+                pass
+
         with sync_playwright() as playwright:
             browser, context = self._new_playwright_context(playwright)
             page = context.new_page()
+            page.on("response", _on_response)
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=45_000)
                 if config.delay_seconds > 0:
@@ -945,6 +977,13 @@ class FacebookScraper:
                 for _ in range(config.max_scroll_iterations):
                     html_text = page.content() or ""
                     candidates = self._extract_post_urls(html_text, handle=handle)
+
+                    # Also drain XHR-intercepted permalinks into candidates.
+                    while xhr_permalinks:
+                        purl = xhr_permalinks.pop(0)
+                        kind = "reel" if "/reel/" in purl else "photo" if "/photo" in purl else "feed"
+                        candidates.append((purl, kind))
+
                     new_count = 0
                     for candidate_url, kind in candidates:
                         if candidate_url not in seen:
@@ -1216,6 +1255,25 @@ class FacebookScraper:
                 continue
             seen.add(source)
             pairs.append((source, "feed"))
+        # Photo posts: /photo/?fbid=NNN — Facebook embeds page-timeline photos
+        # as /photo/?fbid=NNN&set=pb.PAGE_ID... links in the scroll DOM.
+        for match in _PHOTO_FBID_HREF_RE.finditer(page_html):
+            fbid = match.group(2)
+            source = f"{self.BASE_URL}/photo/?fbid={fbid}"
+            if source in seen:
+                continue
+            seen.add(source)
+            pairs.append((source, "photo"))
+        # Inline JSON permalink_url: Facebook embeds post permalinks in script
+        # data that are not visible as <a href> but contain real post URLs.
+        for match in _PERMALINK_URL_JSON_RE.finditer(page_html):
+            raw = match.group(1).replace("\\/", "/")
+            if "facebook.com" not in raw:
+                continue
+            post_type = "reel" if "/reel/" in raw else "photo" if "/photo" in raw else "feed"
+            if raw not in seen:
+                seen.add(raw)
+                pairs.append((raw, post_type))
         if not pairs:
             for og_match in _OG_URL_RE.finditer(page_html):
                 candidate = str(og_match.group(1) or "").strip()
@@ -1414,7 +1472,13 @@ class FacebookScraper:
             if pieces and pieces[-1].isdigit():
                 post_id = pieces[-1]
             else:
-                post_id = parsed.path.strip("/") or _deterministic_fallback_post_id(og_url or url)
+                # Handle /photo/?fbid=NNN query-string IDs.
+                qs = parse_qs(parsed.query)
+                fbid_vals = qs.get("fbid", [])
+                if fbid_vals and fbid_vals[0].isdigit():
+                    post_id = fbid_vals[0]
+                else:
+                    post_id = parsed.path.strip("/") or _deterministic_fallback_post_id(og_url or url)
         title = self._first_group(_OG_TITLE_RE, html_text)
         desc = self._first_group(_OG_DESC_RE, html_text)
         image_url = self._first_group(_OG_IMAGE_RE, html_text)

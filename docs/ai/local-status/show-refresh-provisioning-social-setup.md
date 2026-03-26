@@ -1,6 +1,6 @@
 # Show Refresh Provisioning + Social Setup
 
-Last updated: 2026-03-16
+Last updated: 2026-03-24
 
 ## Status
 - Backend phase complete.
@@ -25,10 +25,10 @@ Last updated: 2026-03-16
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
-  last_updated: 2026-03-16
-  current_phase: "backend complete"
-  next_action: "none"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer continuity notes if follow-up is needed"
   detail: self
 ```

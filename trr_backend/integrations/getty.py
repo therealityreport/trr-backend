@@ -16,12 +16,17 @@ from requests.exceptions import RequestException
 logger = logging.getLogger(__name__)
 
 GettyProgressCallback = Callable[[int, int, str], None]
+GettyCandidateProgressCallback = Callable[[dict[str, Any]], None]
+GettyAccessDiagnostics = dict[str, Any]
+GettyQuerySummary = dict[str, Any]
+GettySearchPageFetchResult = tuple[str, str | None, int | None] | dict[str, Any]
+GettySearchPageFetcher = Callable[[str], GettySearchPageFetchResult]
 
 BASE_URL = "https://www.gettyimages.com"
 DEFAULT_TIMEOUT_SECONDS = 20
 MAX_DETAIL_CANDIDATES = 6
 DEFAULT_SEARCH_PAGE_SIZE = 60
-MAX_SEARCH_PAGES = 100
+MAX_SEARCH_PAGES: int | None = None
 DEFAULT_DETAIL_BATCH_SIZE = 25
 DEFAULT_DETAIL_MAX_WORKERS = 8
 DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT = 6
@@ -92,9 +97,129 @@ _DEFAULT_HEADERS = {
     ),
 }
 
+_GETTY_BLOCK_PAGE_MARKERS = (
+    "verify you are human",
+    "verify you are a human",
+    "security check",
+    "access denied",
+    "captcha",
+    "enable javascript and cookies",
+    "please enable javascript",
+    "request unsuccessful",
+    "awswaf",
+)
+_TOTAL_RESULTS_RE = re.compile(r'"totalNumberOfResults":(\d+)')
+_LAST_PAGE_RE = re.compile(r'"lastPage":(\d+)')
+_TOTAL_RESULTS_ENCODED_RE = re.compile(r"%22totalNumberOfResults%22%3A(\d+)")
+_LAST_PAGE_ENCODED_RE = re.compile(r"%22lastPage%22%3A(\d+)")
+_CURRENT_PAGE_RE = re.compile(r'aria-label="Pagination page number input" value="(\d+)"')
+
 
 def _session(session: Session | None = None) -> Session:
     return session or Session()
+
+
+def _init_access_diagnostics(diagnostics_out: GettyAccessDiagnostics | None) -> GettyAccessDiagnostics | None:
+    if diagnostics_out is None:
+        return None
+    diagnostics_out.setdefault("status", "ok")
+    diagnostics_out.setdefault("failure_stage", None)
+    diagnostics_out.setdefault("unavailable_reason", None)
+    diagnostics_out.setdefault("http_status", None)
+    diagnostics_out.setdefault("page_classification", None)
+    diagnostics_out.setdefault("redirect_url", None)
+    diagnostics_out.setdefault("detail_failures", 0)
+    diagnostics_out.setdefault("detail_attempts", 0)
+    return diagnostics_out
+
+
+def _record_access_diagnostics(
+    diagnostics_out: GettyAccessDiagnostics | None,
+    *,
+    status: str,
+    failure_stage: str,
+    unavailable_reason: str | None = None,
+    http_status: int | None = None,
+    page_classification: str | None = None,
+    redirect_url: str | None = None,
+) -> None:
+    diagnostics = _init_access_diagnostics(diagnostics_out)
+    if diagnostics is None:
+        return
+    current_status = str(diagnostics.get("status") or "ok")
+    if current_status == "unavailable":
+        return
+    if current_status == "degraded" and status == "ok":
+        return
+    diagnostics["status"] = status
+    diagnostics["failure_stage"] = failure_stage
+    if unavailable_reason:
+        diagnostics["unavailable_reason"] = unavailable_reason
+    if http_status is not None:
+        diagnostics["http_status"] = http_status
+    if page_classification:
+        diagnostics["page_classification"] = page_classification
+    if redirect_url:
+        diagnostics["redirect_url"] = redirect_url
+
+
+def _normalize_http_status_code(status_code: Any) -> int | None:
+    try:
+        normalized = int(status_code)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized > 0 else None
+
+
+def _normalize_int_value(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_search_page_fetch_result(
+    result: GettySearchPageFetchResult,
+) -> tuple[str, str | None, int | None, int | None, list[str], str | None]:
+    if isinstance(result, tuple):
+        html, response_url, raw_status_code = result
+        return (
+            str(html or ""),
+            str(response_url or "").strip() or None,
+            _normalize_http_status_code(raw_status_code),
+            None,
+            [],
+            None,
+        )
+
+    html = str(result.get("html") or result.get("content") or "")
+    response_url = str(result.get("response_url") or result.get("url") or "").strip() or None
+    status_code = _normalize_http_status_code(result.get("status_code"))
+    current_page = _normalize_int_value(result.get("current_page"))
+    first_editorial_ids = [
+        str(value).strip()
+        for value in list(result.get("first_editorial_ids") or [])
+        if str(value).strip()
+    ]
+    page_signature = str(result.get("page_signature") or "").strip() or None
+    return html, response_url, status_code, current_page, first_editorial_ids, page_signature
+
+
+def _classify_getty_page(html: str, *, status_code: int | None = None) -> str | None:
+    normalized = str(html or "").strip().casefold()
+    if not normalized:
+        return None
+    normalized_status = _normalize_http_status_code(status_code)
+    if normalized_status is not None and normalized_status >= 400:
+        return "http_error"
+    for marker in _GETTY_BLOCK_PAGE_MARKERS:
+        if marker in normalized:
+            return "challenge_page"
+    return None
+
+
+def _is_unlimited_limit(limit: int | None) -> bool:
+    return limit is None or int(limit) <= 0
 
 
 def resolve_asset_by_object_name(object_name: str, *, session: Session | None = None) -> dict[str, Any] | None:
@@ -116,32 +241,64 @@ def resolve_asset_by_object_name(object_name: str, *, session: Session | None = 
 def search_editorial_assets(
     phrase: str,
     *,
-    limit: int = 50,
+    limit: int | None = 50,
     session: Session | None = None,
     progress_cb: GettyProgressCallback | None = None,
     detail_batch_size: int = DEFAULT_DETAIL_BATCH_SIZE,
     detail_max_workers: int = DEFAULT_DETAIL_MAX_WORKERS,
     query_params: dict[str, str] | None = None,
+    max_search_pages: int | None = MAX_SEARCH_PAGES,
+    diagnostics_out: GettyAccessDiagnostics | None = None,
+    query_summary_out: GettyQuerySummary | None = None,
+    search_page_fetcher: GettySearchPageFetcher | None = None,
+    include_details: bool = True,
+    candidate_progress_cb: GettyCandidateProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
     cleaned = str(phrase or "").strip()
     if not cleaned:
         return []
 
-    candidates = _search_asset_candidates_for_phrase(cleaned, limit=limit, session=session, query_params=query_params)
+    diagnostics = _init_access_diagnostics(diagnostics_out)
+    candidates = _search_asset_candidates_for_phrase(
+        cleaned,
+        limit=limit,
+        session=session,
+        query_params=query_params,
+        max_search_pages=max_search_pages,
+        diagnostics_out=diagnostics,
+        query_summary_out=query_summary_out,
+        search_page_fetcher=search_page_fetcher,
+        candidate_progress_cb=candidate_progress_cb,
+    )
+    if not include_details:
+        total = len(candidates) if _is_unlimited_limit(limit) else min(len(candidates), max(0, int(limit or 0)))
+        if progress_cb:
+            progress_cb(0, total, f"Getty search found {total} candidate asset pages.")
+        return candidates[:total]
     candidates = _merge_grouped_event_metadata(
         cleaned,
         candidates,
         session=session,
         query_params=query_params,
         limit=limit,
+        max_search_pages=max_search_pages,
+        diagnostics_out=diagnostics,
+        search_page_fetcher=search_page_fetcher,
     )
-    # limit <= 0 means unlimited — process all candidates
-    total = len(candidates) if limit <= 0 else min(len(candidates), max(0, int(limit)))
+    total = len(candidates) if _is_unlimited_limit(limit) else min(len(candidates), max(0, int(limit or 0)))
     if progress_cb:
         progress_cb(0, total, f"Getty search found {total} candidate asset pages.")
     results: list[dict[str, Any]] = []
     safe_batch_size = max(1, int(detail_batch_size or DEFAULT_DETAIL_BATCH_SIZE))
     safe_max_workers = max(1, int(detail_max_workers or DEFAULT_DETAIL_MAX_WORKERS))
+
+    def _fetch_detail_with_diagnostics(detail_url: str) -> dict[str, Any] | None:
+        return fetch_asset_detail(
+            detail_url,
+            session=session,
+            diagnostics_out=diagnostics,
+            failure_stage="detail",
+        )
 
     for batch_start in range(0, total, safe_batch_size):
         batch_candidates = candidates[batch_start : batch_start + safe_batch_size]
@@ -151,14 +308,18 @@ def search_editorial_assets(
             progress_cb(batch_start, total, f"Fetching Getty assets {batch_start + 1}-{batch_end}/{total}...")
 
         with ThreadPoolExecutor(max_workers=min(safe_max_workers, len(batch_urls))) as executor:
-            batch_details = list(executor.map(fetch_asset_detail, batch_urls))
+            batch_details = list(executor.map(_fetch_detail_with_diagnostics, batch_urls))
 
         for offset, (candidate, detail_url, detail) in enumerate(
             zip(batch_candidates, batch_urls, batch_details, strict=False),
             start=1,
         ):
             index = batch_start + offset
+            if diagnostics is not None:
+                diagnostics["detail_attempts"] = int(diagnostics.get("detail_attempts") or 0) + 1
             if not detail:
+                if diagnostics is not None:
+                    diagnostics["detail_failures"] = int(diagnostics.get("detail_failures") or 0) + 1
                 if progress_cb:
                     progress_cb(index, total, f"Getty asset {index}/{total} did not return detail.")
                 continue
@@ -167,15 +328,22 @@ def search_editorial_assets(
                 object_name = str(detail.get("object_name") or "").strip()
                 label = object_name or str(detail.get("editorial_id") or detail_url)
                 progress_cb(index, total, f"Fetched Getty asset {index}/{total}: {label}")
-            if limit > 0 and len(results) >= limit:
+            if not _is_unlimited_limit(limit) and len(results) >= int(limit or 0):
                 return results
+    if diagnostics is not None and candidates and not results and int(diagnostics.get("detail_failures") or 0) > 0:
+        _record_access_diagnostics(
+            diagnostics,
+            status="degraded",
+            failure_stage="detail",
+            unavailable_reason="detail_fetch_failed",
+        )
     return results
 
 
 def search_grouped_events(
     phrase: str,
     *,
-    limit: int = 50,
+    limit: int | None = 50,
     session: Session | None = None,
     progress_cb: GettyProgressCallback | None = None,
     query_params: dict[str, str] | None = None,
@@ -185,11 +353,15 @@ def search_grouped_events(
     event_detail_sample_limit: int = DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT,
     source_query_scope: str | None = None,
     full_scan_person_assets: bool = False,
+    max_search_pages: int | None = MAX_SEARCH_PAGES,
+    diagnostics_out: GettyAccessDiagnostics | None = None,
+    search_page_fetcher: GettySearchPageFetcher | None = None,
 ) -> list[dict[str, Any]]:
     cleaned = str(phrase or "").strip()
     if not cleaned:
         return []
 
+    diagnostics = _init_access_diagnostics(diagnostics_out)
     grouped_query_params = dict(query_params or {})
     grouped_query_params["groupbyevent"] = "true"
     candidates = _search_asset_candidates_for_phrase(
@@ -197,9 +369,11 @@ def search_grouped_events(
         limit=limit,
         session=session,
         query_params=grouped_query_params,
+        max_search_pages=max_search_pages,
+        diagnostics_out=diagnostics,
+        search_page_fetcher=search_page_fetcher,
     )
-    # limit <= 0 means unlimited — process all candidates
-    total = len(candidates) if limit <= 0 else min(len(candidates), max(0, int(limit)))
+    total = len(candidates) if _is_unlimited_limit(limit) else min(len(candidates), max(0, int(limit or 0)))
     if progress_cb:
         progress_cb(0, total, f"Getty grouped-event search found {total} candidate event pages.")
 
@@ -214,7 +388,12 @@ def search_grouped_events(
         seen_event_urls.add(event_url)
         if progress_cb:
             progress_cb(index - 1, total, f"Fetching Getty event {index}/{total}: {event_url}")
-        detail = fetch_asset_detail(event_url, session=session)
+        detail = fetch_asset_detail(
+            event_url,
+            session=session,
+            diagnostics_out=diagnostics,
+            failure_stage="grouped_event",
+        )
         representative_asset = _merge_search_candidate_with_detail(candidate, detail) if detail else dict(candidate)
         matched_asset = None
         if person_name and _asset_matches_person(representative_asset, person_name):
@@ -257,10 +436,7 @@ def search_grouped_events(
                 )
             continue
         grouped_image_count = merged.get("grouped_image_count")
-        try:
-            parsed_grouped_image_count = int(grouped_image_count)
-        except (TypeError, ValueError):
-            parsed_grouped_image_count = 0
+        parsed_grouped_image_count = _normalize_int_value(grouped_image_count) or 0
         if minimum_image_count and parsed_grouped_image_count < minimum_image_count:
             if progress_cb:
                 progress_cb(
@@ -285,7 +461,10 @@ def _merge_grouped_event_metadata(
     *,
     session: Session | None = None,
     query_params: dict[str, str] | None = None,
-    limit: int,
+    limit: int | None,
+    max_search_pages: int | None = MAX_SEARCH_PAGES,
+    diagnostics_out: GettyAccessDiagnostics | None = None,
+    search_page_fetcher: GettySearchPageFetcher | None = None,
 ) -> list[dict[str, Any]]:
     if not candidates:
         return candidates
@@ -297,6 +476,9 @@ def _merge_grouped_event_metadata(
         limit=limit,
         session=session,
         query_params=grouped_query_params,
+        max_search_pages=max_search_pages,
+        diagnostics_out=diagnostics_out,
+        search_page_fetcher=search_page_fetcher,
     )
     if not grouped_candidates:
         return candidates
@@ -518,13 +700,13 @@ def scan_event_page_for_person(
 
     # Fetch details in parallel for performance
     detail_urls = [str(c.get("detail_url") or "").strip() for c in candidates_to_scan]
-    valid_pairs = [(c, u) for c, u in zip(candidates_to_scan, detail_urls) if u]
+    valid_pairs = [(c, u) for c, u in zip(candidates_to_scan, detail_urls, strict=False) if u]
     if valid_pairs:
-        batch_candidates, batch_urls = zip(*valid_pairs)
+        batch_candidates, batch_urls = zip(*valid_pairs, strict=False)
         workers = min(DEFAULT_DETAIL_MAX_WORKERS, len(batch_urls))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             batch_details = list(executor.map(fetch_asset_detail, batch_urls))
-        for index, (candidate, detail) in enumerate(zip(batch_candidates, batch_details), start=1):
+        for index, (candidate, detail) in enumerate(zip(batch_candidates, batch_details, strict=False), start=1):
             if not detail:
                 continue
             merged = _merge_search_candidate_with_detail(candidate, detail)
@@ -590,26 +772,161 @@ def _search_detail_urls_for_phrase(
 def _search_asset_candidates_for_phrase(
     phrase: str,
     *,
-    limit: int,
+    limit: int | None,
     session: Session | None = None,
     query_params: dict[str, str] | None = None,
+    max_search_pages: int | None = MAX_SEARCH_PAGES,
+    diagnostics_out: GettyAccessDiagnostics | None = None,
+    query_summary_out: GettyQuerySummary | None = None,
+    search_page_fetcher: GettySearchPageFetcher | None = None,
+    candidate_progress_cb: GettyCandidateProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
+    cleaned = str(phrase or "").strip()
     client = _session(session)
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
-
-    for page in range(1, MAX_SEARCH_PAGES + 1):
+    page = 1
+    query_summary = _init_query_summary(query_summary_out, phrase=phrase, query_params=query_params)
+    while True:
+        if max_search_pages is not None and page > max_search_pages:
+            if query_summary is not None:
+                query_summary["termination_reason"] = "max_search_pages"
+            break
         search_url = _build_search_url(phrase, page=page, query_params=query_params)
         try:
-            response = client.get(search_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
-            response.raise_for_status()
+            if search_page_fetcher is not None:
+                (
+                    response_text,
+                    response_url,
+                    status_code,
+                    current_page,
+                    first_editorial_ids,
+                    page_signature,
+                ) = _normalize_search_page_fetch_result(search_page_fetcher(search_url))
+            else:
+                response = client.get(search_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
+                response.raise_for_status()
+                response_text = response.text
+                response_url = str(getattr(response, "url", "") or "").strip() or None
+                status_code = _normalize_http_status_code(getattr(response, "status_code", None))
+                current_page = None
+                first_editorial_ids = []
+                page_signature = None
         except RequestException as exc:
             logger.warning("Getty search failed for %s page=%s: %s", phrase, page, exc)
+            response = getattr(exc, "response", None)
+            redirect_url = None
+            http_status = None
+            if response is not None:
+                redirect_url = str(getattr(response, "url", "") or "").strip() or None
+                http_status = _normalize_http_status_code(getattr(response, "status_code", None))
+            _record_access_diagnostics(
+                diagnostics_out,
+                status="unavailable",
+                failure_stage="search",
+                unavailable_reason="request_exception",
+                http_status=http_status,
+                redirect_url=redirect_url,
+            )
+            if query_summary is not None:
+                query_summary["termination_reason"] = "request_exception"
+            break
+        except Exception as exc:
+            logger.warning("Getty browser search fetch failed for %s page=%s: %s", phrase, page, exc)
+            _record_access_diagnostics(
+                diagnostics_out,
+                status="unavailable",
+                failure_stage="search",
+                unavailable_reason="page_fetcher_exception",
+            )
+            if query_summary is not None:
+                query_summary["termination_reason"] = "page_fetcher_exception"
             break
 
-        page_candidates = _extract_search_asset_candidates(response.text)
+        page_classification = _classify_getty_page(response_text, status_code=status_code)
+        if current_page is None:
+            current_page = _extract_current_page_number(response_text)
+        page_candidates = _extract_search_asset_candidates(response_text)
         if not page_candidates:
-            page_candidates = [{"detail_url": url} for url in _extract_detail_urls_from_html(response.text)]
+            page_candidates = [{"detail_url": url} for url in _extract_detail_urls_from_html(response_text)]
+        if not first_editorial_ids:
+            first_editorial_ids = _collect_page_editorial_ids(page_candidates)
+        if not page_signature:
+            page_signature = _build_page_signature(page_candidates)
+        _record_query_page(
+            query_summary,
+            page=page,
+            response_url=response_url,
+            current_page=current_page,
+            page_classification=page_classification,
+            page_signature=page_signature,
+            first_editorial_ids=first_editorial_ids,
+        )
+        _record_query_header_totals(query_summary, response_text, query_url=search_url)
+        if page_classification == "challenge_page":
+            if candidate_progress_cb:
+                candidate_progress_cb(
+                    {
+                        "type": "page",
+                        "phase": "search",
+                        "phrase": cleaned,
+                        "query_url": search_url,
+                        "requested_page": page,
+                        "expected_page": page,
+                        "current_page": current_page,
+                        "response_url": response_url,
+                        "page_classification": page_classification,
+                        "page_candidate_count": 0,
+                        "new_unique_count": 0,
+                        "fetched_candidates_total": len(deduped),
+                        "termination_reason": "challenge_page",
+                        "page_signature": page_signature,
+                        "first_editorial_ids": first_editorial_ids,
+                        "site_image_total": query_summary.get("site_image_total") if query_summary else None,
+                        "site_event_total": query_summary.get("site_event_total") if query_summary else None,
+                        "site_video_total": query_summary.get("site_video_total") if query_summary else None,
+                    }
+                )
+            _record_access_diagnostics(
+                diagnostics_out,
+                status="unavailable",
+                failure_stage="search",
+                unavailable_reason="challenge_page",
+                http_status=status_code,
+                page_classification=page_classification,
+                redirect_url=response_url,
+            )
+            if query_summary is not None:
+                query_summary["termination_reason"] = "challenge_page"
+            break
+
+        if page > 1 and current_page is not None and current_page != page:
+            if query_summary is not None:
+                query_summary["termination_reason"] = "pagination_rewrite"
+            if candidate_progress_cb:
+                candidate_progress_cb(
+                    {
+                        "type": "complete",
+                        "phase": "search",
+                        "phrase": cleaned,
+                        "query_url": search_url,
+                        "requested_page": page,
+                        "expected_page": page,
+                        "current_page": current_page,
+                        "response_url": response_url,
+                        "page_classification": page_classification,
+                        "page_candidate_count": len(page_candidates),
+                        "new_unique_count": 0,
+                        "fetched_candidates_total": len(deduped),
+                        "termination_reason": "pagination_rewrite",
+                        "page_signature": page_signature,
+                        "first_editorial_ids": first_editorial_ids,
+                        "site_image_total": query_summary.get("site_image_total") if query_summary else None,
+                        "site_event_total": query_summary.get("site_event_total") if query_summary else None,
+                        "site_video_total": query_summary.get("site_video_total") if query_summary else None,
+                    }
+                )
+            break
 
         page_new = 0
         for candidate in page_candidates:
@@ -619,11 +936,233 @@ def _search_asset_candidates_for_phrase(
             seen.add(absolute)
             deduped.append(candidate)
             page_new += 1
-            if limit > 0 and len(deduped) >= limit:
+            if not _is_unlimited_limit(limit) and len(deduped) >= int(limit or 0):
+                if query_summary is not None:
+                    query_summary["fetched_candidates_total"] = len(deduped)
+                    query_summary["termination_reason"] = "limit_reached"
                 return deduped
+        _finalize_query_page(
+            query_summary,
+            page=page,
+            page_candidate_count=len(page_candidates),
+            new_unique_count=page_new,
+            fetched_candidates_total=len(deduped),
+            page_signature=page_signature,
+            first_editorial_ids=first_editorial_ids,
+        )
+        if candidate_progress_cb:
+            candidate_progress_cb(
+                {
+                    "type": "page",
+                    "phase": "search",
+                    "phrase": cleaned,
+                    "query_url": search_url,
+                    "requested_page": page,
+                    "expected_page": page,
+                    "current_page": current_page,
+                    "response_url": response_url,
+                    "page_classification": page_classification,
+                    "page_candidate_count": len(page_candidates),
+                    "new_unique_count": page_new,
+                    "fetched_candidates_total": len(deduped),
+                    "termination_reason": None,
+                    "page_signature": page_signature,
+                    "first_editorial_ids": first_editorial_ids,
+                    "site_image_total": query_summary.get("site_image_total") if query_summary else None,
+                    "site_event_total": query_summary.get("site_event_total") if query_summary else None,
+                    "site_video_total": query_summary.get("site_video_total") if query_summary else None,
+                }
+            )
         if page_new == 0 or len(page_candidates) < DEFAULT_SEARCH_PAGE_SIZE:
+            if query_summary is not None:
+                query_summary["termination_reason"] = (
+                    "duplicate_page"
+                    if page_new == 0 and len(page_candidates) >= DEFAULT_SEARCH_PAGE_SIZE
+                    else "natural_exhaustion"
+                )
+            if candidate_progress_cb:
+                candidate_progress_cb(
+                    {
+                        "type": "complete",
+                        "phase": "search",
+                        "phrase": cleaned,
+                        "query_url": search_url,
+                        "requested_page": page,
+                        "expected_page": page,
+                        "current_page": current_page,
+                        "response_url": response_url,
+                        "page_classification": page_classification,
+                        "page_candidate_count": len(page_candidates),
+                        "new_unique_count": page_new,
+                        "fetched_candidates_total": len(deduped),
+                        "termination_reason": (
+                            "duplicate_page"
+                            if page_new == 0 and len(page_candidates) >= DEFAULT_SEARCH_PAGE_SIZE
+                            else "natural_exhaustion"
+                        ),
+                        "page_signature": page_signature,
+                        "first_editorial_ids": first_editorial_ids,
+                        "site_image_total": query_summary.get("site_image_total") if query_summary else None,
+                        "site_event_total": query_summary.get("site_event_total") if query_summary else None,
+                        "site_video_total": query_summary.get("site_video_total") if query_summary else None,
+                    }
+                )
             break
+        page += 1
+    if query_summary is not None:
+        query_summary["fetched_candidates_total"] = len(deduped)
     return deduped
+
+
+def _init_query_summary(
+    query_summary_out: GettyQuerySummary | None,
+    *,
+    phrase: str,
+    query_params: dict[str, str] | None,
+) -> GettyQuerySummary | None:
+    if query_summary_out is None:
+        return None
+    query_summary_out.clear()
+    query_summary_out["phrase"] = str(phrase or "").strip()
+    query_summary_out["query_params"] = dict(query_params or {})
+    query_summary_out["query_url"] = _build_search_url(phrase, query_params=query_params)
+    query_summary_out["site_image_total"] = None
+    query_summary_out["site_event_total"] = None
+    query_summary_out["site_video_total"] = None
+    query_summary_out["last_page"] = None
+    query_summary_out["expected_page"] = None
+    query_summary_out["current_page"] = None
+    query_summary_out["response_url"] = None
+    query_summary_out["page_signature"] = None
+    query_summary_out["first_editorial_ids"] = []
+    query_summary_out["fetched_candidates_total"] = 0
+    query_summary_out["page_debug"] = []
+    query_summary_out["pagination_rewrite_detected"] = False
+    query_summary_out["termination_reason"] = None
+    return query_summary_out
+
+
+def _extract_count_from_label(text: str, pattern: str) -> int | None:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return _normalize_int_value(str(match.group(1)).replace(",", ""))
+
+
+def _extract_search_header_totals(html: str) -> dict[str, int | None]:
+    text = " ".join(BeautifulSoup(html, "html.parser").stripped_strings)
+    total_results_match = _TOTAL_RESULTS_RE.search(html)
+    if total_results_match is None:
+        total_results_match = _TOTAL_RESULTS_ENCODED_RE.search(html)
+    last_page_match = _LAST_PAGE_RE.search(html)
+    if last_page_match is None:
+        last_page_match = _LAST_PAGE_ENCODED_RE.search(html)
+    return {
+        "site_image_total": (_normalize_int_value(total_results_match.group(1)) if total_results_match else None),
+        "site_event_total": _extract_count_from_label(text, r"([\d,]+)\s+Events\b"),
+        "site_video_total": _extract_count_from_label(text, r"View\s+([\d,]+)\s+videos\b"),
+        "last_page": _normalize_int_value(last_page_match.group(1)) if last_page_match else None,
+    }
+
+
+def _extract_current_page_number(html: str) -> int | None:
+    match = _CURRENT_PAGE_RE.search(html)
+    return _normalize_int_value(match.group(1)) if match else None
+
+
+def _record_query_header_totals(
+    query_summary: GettyQuerySummary | None,
+    html: str,
+    *,
+    query_url: str,
+) -> None:
+    if query_summary is None:
+        return
+    if not query_summary.get("query_url"):
+        query_summary["query_url"] = query_url
+    if query_summary.get("site_image_total") is not None:
+        return
+    totals = _extract_search_header_totals(html)
+    query_summary["site_image_total"] = totals["site_image_total"]
+    query_summary["site_event_total"] = totals["site_event_total"]
+    query_summary["site_video_total"] = totals["site_video_total"]
+    query_summary["last_page"] = totals["last_page"]
+
+
+def _record_query_page(
+    query_summary: GettyQuerySummary | None,
+    *,
+    page: int,
+    response_url: str | None,
+    current_page: int | None,
+    page_classification: str | None,
+    page_signature: str | None = None,
+    first_editorial_ids: list[str] | None = None,
+) -> None:
+    if query_summary is None:
+        return
+    query_summary["expected_page"] = page
+    query_summary["current_page"] = current_page
+    query_summary["response_url"] = response_url
+    query_summary["page_signature"] = page_signature
+    query_summary["first_editorial_ids"] = list(first_editorial_ids or [])
+    page_debug = query_summary.setdefault("page_debug", [])
+    if isinstance(page_debug, list) and len(page_debug) < 12:
+        page_debug.append(
+            {
+                "requested_page": page,
+                "expected_page": page,
+                "response_url": response_url,
+                "current_page": current_page,
+                "page_classification": page_classification,
+                "page_signature": page_signature,
+                "first_editorial_ids": list(first_editorial_ids or []),
+            }
+        )
+    if page > 1 and current_page is not None and current_page != page:
+        query_summary["pagination_rewrite_detected"] = True
+
+
+def _finalize_query_page(
+    query_summary: GettyQuerySummary | None,
+    *,
+    page: int,
+    page_candidate_count: int,
+    new_unique_count: int,
+    fetched_candidates_total: int,
+    page_signature: str | None = None,
+    first_editorial_ids: list[str] | None = None,
+) -> None:
+    if query_summary is None:
+        return
+    page_debug = query_summary.setdefault("page_debug", [])
+    if isinstance(page_debug, list) and page_debug:
+        page_debug[-1]["page_candidate_count"] = page_candidate_count
+        page_debug[-1]["new_unique_count"] = new_unique_count
+        page_debug[-1]["fetched_candidates_total"] = fetched_candidates_total
+        page_debug[-1]["page_signature"] = page_signature
+        page_debug[-1]["first_editorial_ids"] = list(first_editorial_ids or [])
+
+
+def _collect_page_editorial_ids(page_candidates: list[dict[str, Any]], *, limit: int = 3) -> list[str]:
+    editorial_ids: list[str] = []
+    for candidate in page_candidates:
+        editorial_id = str(candidate.get("editorial_id") or "").strip()
+        if not editorial_id:
+            editorial_id = str(candidate.get("detail_url") or "").strip()
+        if not editorial_id:
+            continue
+        editorial_ids.append(editorial_id)
+        if len(editorial_ids) >= limit:
+            break
+    return editorial_ids
+
+
+def _build_page_signature(page_candidates: list[dict[str, Any]]) -> str | None:
+    editorial_ids = _collect_page_editorial_ids(page_candidates, limit=8)
+    if not editorial_ids:
+        return None
+    return "|".join(editorial_ids)
 
 
 def _extract_detail_urls_from_html(html: str) -> list[str]:
@@ -729,12 +1268,37 @@ def _extract_search_asset_candidates_from_payload(payload: dict[str, Any]) -> li
             "search_caption": str(asset.get("caption") or "").strip() or None,
             "grouped_image_count": asset.get("collapsedImageCount"),
         }
+        image_urls = _extract_best_image_urls(asset)
+        preview_image_url = _select_best_preview_image_url(image_urls)
+        original_image_url = _select_best_original_image_url(
+            image_urls,
+            max_file_size=str(asset.get("maxFileSize") or asset.get("max_file_size") or "").strip() or None,
+        )
         editorial_id = str(asset.get("id") or asset.get("editorialId") or asset.get("assetId") or "").strip()
         if editorial_id:
             candidate["editorial_id"] = editorial_id
         object_name = str(asset.get("objectName") or "").strip()
         if object_name:
             candidate["object_name"] = object_name
+        if preview_image_url:
+            candidate["preview_image_url"] = preview_image_url
+            candidate["thumb_url"] = str(image_urls.get("thumbUrl") or preview_image_url).strip() or preview_image_url
+        if str(image_urls.get("compUrl") or "").strip():
+            candidate["comp_url"] = str(image_urls.get("compUrl") or "").strip()
+        if original_image_url:
+            candidate["original_image_url"] = original_image_url
+        asset_dimensions = asset.get("assetDimensions")
+        if isinstance(asset_dimensions, dict):
+            width = asset_dimensions.get("width")
+            height = asset_dimensions.get("height")
+            if isinstance(width, int) and width > 0:
+                candidate["width"] = width
+            if isinstance(height, int) and height > 0:
+                candidate["height"] = height
+        elif isinstance(asset.get("width"), int) and int(asset.get("width") or 0) > 0:
+            candidate["width"] = int(asset.get("width") or 0)
+        if isinstance(asset.get("height"), int) and int(asset.get("height") or 0) > 0:
+            candidate["height"] = int(asset.get("height") or 0)
         overlay_people = _extract_people_overlay_names(asset)
         if overlay_people:
             candidate["search_people_overlay_names"] = overlay_people
@@ -742,16 +1306,49 @@ def _extract_search_asset_candidates_from_payload(payload: dict[str, Any]) -> li
     return candidates
 
 
-def fetch_asset_detail(detail_url: str, *, session: Session | None = None) -> dict[str, Any] | None:
+def fetch_asset_detail(
+    detail_url: str,
+    *,
+    session: Session | None = None,
+    diagnostics_out: GettyAccessDiagnostics | None = None,
+    failure_stage: str = "detail",
+) -> dict[str, Any] | None:
     client = _session(session)
     try:
         response = client.get(detail_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
         response.raise_for_status()
     except RequestException as exc:
         logger.warning("Getty detail fetch failed for %s: %s", detail_url, exc)
+        response = getattr(exc, "response", None)
+        http_status = None
+        redirect_url = None
+        if response is not None:
+            http_status = _normalize_http_status_code(getattr(response, "status_code", None))
+            redirect_url = str(getattr(response, "url", "") or "").strip() or None
+        _record_access_diagnostics(
+            diagnostics_out,
+            status="degraded",
+            failure_stage=failure_stage,
+            unavailable_reason="request_exception",
+            http_status=http_status,
+            redirect_url=redirect_url,
+        )
         return None
 
     html = response.text
+    status_code = _normalize_http_status_code(getattr(response, "status_code", None))
+    page_classification = _classify_getty_page(html, status_code=status_code)
+    if page_classification == "challenge_page":
+        _record_access_diagnostics(
+            diagnostics_out,
+            status="degraded",
+            failure_stage=failure_stage,
+            unavailable_reason="challenge_page",
+            http_status=status_code,
+            page_classification=page_classification,
+            redirect_url=str(getattr(response, "url", "") or "").strip() or None,
+        )
+        return None
     soup = BeautifulSoup(html, "html.parser")
     asset_json = _extract_asset_detail_json(soup)
     object_name = _extract_object_name(html, asset_json)
@@ -839,6 +1436,9 @@ def _extract_best_image_urls(asset_json: dict[str, Any]) -> dict[str, str]:
         "downloadableCompUrl",
         "galleryHighResCompUrl",
         "highResCompUrl",
+        "largeMainImageURL",
+        "defaultMainImageURL",
+        "zoomedImageUrl",
         "galleryComp1024Url",
         "compUrl",
         "mainImageUrl",
@@ -847,6 +1447,20 @@ def _extract_best_image_urls(asset_json: dict[str, Any]) -> dict[str, str]:
         value = str(asset_json.get(key) or "").strip()
         if value:
             urls[key] = value
+
+    delivery_urls = asset_json.get("deliveryUrls")
+    if isinstance(delivery_urls, dict):
+        delivery_key_map = {
+            "HighResComp": "highResCompUrl",
+            "Comp1024": "galleryComp1024Url",
+            "Comp": "compUrl",
+            "Thumb": "thumbUrl",
+            "DownloadableComp": "downloadableCompUrl",
+        }
+        for raw_key, normalized_key in delivery_key_map.items():
+            value = str(delivery_urls.get(raw_key) or "").strip()
+            if value and normalized_key not in urls:
+                urls[normalized_key] = value
 
     display_sizes = asset_json.get("displaySizes")
     if isinstance(display_sizes, list):
@@ -920,12 +1534,15 @@ def _score_original_image_url_candidate(
     expected_dimensions: tuple[int | None, int | None],
 ) -> tuple[int, int, int]:
     tier = {
-        "downloadableCompUrl": 80,
-        "galleryHighResCompUrl": 75,
-        "highResCompUrl": 70,
-        "galleryComp1024Url": 60,
+        "galleryHighResCompUrl": 95,
+        "highResCompUrl": 90,
+        "largeMainImageURL": 85,
+        "defaultMainImageURL": 80,
+        "zoomedImageUrl": 75,
+        "galleryComp1024Url": 70,
+        "compUrl": 55,
         "mainImageUrl": 50,
-        "compUrl": 45,
+        "downloadableCompUrl": 40,
         "previewUrl": 35,
         "thumbUrl": 10,
     }.get(key, 0)
@@ -947,10 +1564,13 @@ def _select_best_original_image_url(image_urls: dict[str, str], *, max_file_size
     candidates = [
         (key, url)
         for key in (
-            "downloadableCompUrl",
             "galleryHighResCompUrl",
             "highResCompUrl",
+            "largeMainImageURL",
+            "defaultMainImageURL",
+            "zoomedImageUrl",
             "galleryComp1024Url",
+            "downloadableCompUrl",
             "mainImageUrl",
             "compUrl",
             "previewUrl",
@@ -987,11 +1607,14 @@ def _select_best_preview_image_url(image_urls: dict[str, str]) -> str | None:
         "galleryComp1024Url",
         "compUrl",
         "previewUrl",
+        "zoomedImageUrl",
+        "defaultMainImageURL",
         "mainImageUrl",
         "thumbUrl",
         "downloadableCompUrl",
         "galleryHighResCompUrl",
         "highResCompUrl",
+        "largeMainImageURL",
     ):
         value = str(image_urls.get(key) or "").strip()
         if value:
@@ -1322,7 +1945,9 @@ def describe_asset_person_match(asset: dict[str, Any], person_name: str) -> dict
                     "name_source": "pictured_list_typo",
                 }
 
-    for keyword in _extract_keyword_texts(asset.get("asset") if isinstance(asset.get("asset"), dict) else {}):
+    asset_payload = asset.get("asset")
+    asset_json = asset_payload if isinstance(asset_payload, dict) else {}
+    for keyword in _extract_keyword_texts(asset_json):
         normalized_keyword = _normalize_name(keyword)
         if normalized_keyword == normalized_person or normalized_person in normalized_keyword:
             return {

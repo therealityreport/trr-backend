@@ -247,7 +247,14 @@ def _build_name_aliases(person_name: str) -> list[str]:
 
 
 def _show_name_and_aliases(show_id: str) -> tuple[str, list[str]]:
-    row = pg.fetch_one("SELECT * FROM core.shows WHERE id = %s", [show_id])
+    row = pg.fetch_one(
+        """
+        SELECT name, title, alternative_names
+        FROM core.shows
+        WHERE id = %s
+        """,
+        [show_id],
+    )
     if not row:
         return ("", [])
 

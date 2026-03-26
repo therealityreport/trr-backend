@@ -64,6 +64,96 @@ def test_get_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     assert response.json()["using_defaults"] is True
 
 
+def test_get_queue_status_endpoint_returns_503_on_pool_init_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_queue_status",
+        side_effect=RuntimeError("Database pool initialization failed: no database URL candidates available"),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/ingest/queue-status",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    assert "Database pool initialization failed" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("path_template", "repo_target"),
+    [
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/targets",
+            "trr_backend.repositories.social_season_analytics.get_targets",
+        ),
+        (
+            "/api/v1/admin/socials/shared/sources?source_scope=bravo&include_inactive=true",
+            "trr_backend.repositories.social_season_analytics.get_shared_account_sources",
+        ),
+        (
+            "/api/v1/admin/socials/shared/review-queue?source_scope=bravo&review_status=open&limit=100",
+            "trr_backend.repositories.social_season_analytics.list_shared_review_queue",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/shared-status?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.get_season_shared_status",
+        ),
+        (
+            "/api/v1/admin/socials/ingest/worker-health",
+            "trr_backend.repositories.social_season_analytics.get_worker_health",
+        ),
+        (
+            "/api/v1/admin/socials/ingest/queue-status",
+            "trr_backend.repositories.social_season_analytics.get_queue_status",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/ingest/jobs",
+            "trr_backend.repositories.social_season_analytics.list_jobs",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/ingest/runs?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.list_runs",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/ingest/runs/summary?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.list_run_summaries",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/analytics?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.get_analytics",
+        ),
+        (
+            "/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo",
+            "trr_backend.repositories.social_season_analytics.get_week_detail",
+        ),
+    ],
+)
+def test_social_read_endpoints_return_503_on_pool_exhaustion(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path_template: str,
+    repo_target: str,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    path = path_template.format(season_id=season_id)
+
+    with patch(repo_target, side_effect=RuntimeError("connection pool exhausted")):
+        response = client.get(
+            path,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "connection pool exhausted"
+
+
 def test_put_season_targets(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -663,13 +753,12 @@ def test_post_social_account_catalog_review_queue_resolve(client: TestClient, mo
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     item_id = str(uuid4())
     show_id = str(uuid4())
-    season_id = str(uuid4())
     expected = {
         "item_id": item_id,
         "review_status": "resolved_show_hashtag",
-        "resolution_action": "assign_season",
+        "resolution_action": "assign_show",
         "resolved_show_id": show_id,
-        "resolved_season_id": season_id,
+        "resolved_season_id": None,
     }
 
     with patch(
@@ -680,9 +769,8 @@ def test_post_social_account_catalog_review_queue_resolve(client: TestClient, mo
             f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/review-queue/{item_id}/resolve",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "resolution_action": "assign_season",
+                "resolution_action": "assign_show",
                 "show_id": show_id,
-                "season_id": season_id,
             },
         )
 
@@ -690,23 +778,20 @@ def test_post_social_account_catalog_review_queue_resolve(client: TestClient, mo
     assert response.json()["item_id"] == item_id
     assert response.json()["resolved_show_id"] == show_id
     assert mocked.call_args.kwargs["item_id"] == item_id
-    assert mocked.call_args.kwargs["resolution_action"] == "assign_season"
+    assert mocked.call_args.kwargs["resolution_action"] == "assign_show"
     assert mocked.call_args.kwargs["show_id"] == show_id
-    assert mocked.call_args.kwargs["season_id"] == season_id
 
 
 def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     show_id = str(uuid4())
-    season_id = str(uuid4())
     payload = {
         "hashtags": [
             {
                 "hashtag": "rhoslc",
                 "assignments": [
                     {"show_id": show_id},
-                    {"show_id": show_id, "season_id": season_id},
                 ],
             }
         ]
@@ -717,7 +802,6 @@ def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: py
                 "hashtag": "rhoslc",
                 "assignments": [
                     {"show_id": show_id, "season_id": None},
-                    {"show_id": show_id, "season_id": season_id},
                 ],
             }
         ]
@@ -736,6 +820,54 @@ def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: py
     assert response.status_code == 200
     assert response.json()["items"][0]["hashtag"] == "rhoslc"
     assert mocked.call_args.kwargs["updated_by"] is None
+
+
+def test_get_social_account_profile_hashtags_forwards_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_hashtags",
+        return_value={"items": []},
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags?window=30d",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["window"] == "30d"
+
+
+def test_post_social_account_catalog_freshness(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "eligible": True,
+        "checked_at": "2026-03-24T17:00:00Z",
+        "stored_total_posts": 100,
+        "live_total_posts_current": 103,
+        "delta_posts": 3,
+        "needs_recent_sync": True,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/freshness",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["delta_posts"] == 3
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
 
 
 def test_get_social_account_profile_collaborators_tags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -66,6 +66,77 @@ def test_extract_channel_header_avatar_from_data_prefers_yt3_and_upscales() -> N
     assert avatar == "https://yt3.googleusercontent.com/abc=s1024-c-k-c0x00ffffff-no-rj"
 
 
+def test_resolve_channel_about_snapshot_extracts_live_counts() -> None:
+    scraper = YouTubeScraper()
+    data = {
+        "metadata": {
+            "channelMetadataRenderer": {
+                "title": "Bravo",
+                "externalId": "channel-bravo",
+                "vanityChannelUrl": "https://www.youtube.com/@bravo",
+            }
+        },
+        "header": {
+            "pageHeaderViewModel": {
+                "heroImage": {
+                    "sources": [
+                        {"url": "https://yt3.googleusercontent.com/bravo=s160-c-k"},
+                    ]
+                }
+            }
+        },
+        "onResponseReceivedEndpoints": [
+            {
+                "showEngagementPanelEndpoint": {
+                    "engagementPanel": {
+                        "engagementPanelSectionListRenderer": {
+                            "content": {
+                                "sectionListRenderer": {
+                                    "contents": [
+                                        {
+                                            "itemSectionRenderer": {
+                                                "contents": [
+                                                    {
+                                                        "aboutChannelRenderer": {
+                                                            "metadata": {
+                                                                "aboutChannelViewModel": {
+                                                                    "title": "Bravo",
+                                                                    "description": "Official Bravo channel",
+                                                                    "subscriberCountText": "3.43M subscribers",
+                                                                    "videoCountText": "12,562 videos",
+                                                                    "viewCountText": "2,590,941,563 views",
+                                                                    "canonicalChannelUrl": "https://www.youtube.com/@bravo",
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        ],
+    }
+
+    snapshot = scraper._extract_channel_about_snapshot_from_data(data, "bravo")  # noqa: SLF001
+
+    assert snapshot == {
+        "username": "bravo",
+        "display_name": "Bravo",
+        "bio": "Official Bravo channel",
+        "avatar_url": "https://yt3.googleusercontent.com/bravo=s1024-c-k",
+        "profile_url": "https://www.youtube.com/@bravo",
+        "follower_count": 3430000,
+        "total_posts": 12562,
+        "channel_id": "channel-bravo",
+    }
+
+
 def test_parse_video_renderer_uses_header_avatar_fallback_when_renderer_avatar_missing() -> None:
     scraper = YouTubeScraper()
     config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[])

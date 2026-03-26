@@ -141,6 +141,53 @@ _EVENT_SUBCATEGORY_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("other_shows", "Other Shows", ("big brother",)),
 )
+
+
+def _looks_like_getty_media_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    cleaned = value.strip()
+    if not cleaned:
+        return False
+    try:
+        hostname = (urlparse(cleaned).hostname or "").strip().lower()
+    except Exception:
+        return False
+    return hostname == "media.gettyimages.com" or hostname.endswith(".gettyimages.com")
+
+
+def _get_mirrored_from_url(metadata: Any) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    value = metadata.get("mirrored_from")
+    return str(value or "").strip()
+
+
+def _should_reset_getty_hosted_state(
+    *,
+    desired_original_url: str | None,
+    current_source_url: Any,
+    hosted_url: Any,
+    hosted_key: Any,
+    metadata: Any,
+) -> bool:
+    desired = str(desired_original_url or "").strip()
+    current_source = str(current_source_url or "").strip()
+    current_hosted_url = str(hosted_url or "").strip()
+    current_hosted_key = str(hosted_key or "").strip()
+    mirrored_from = _get_mirrored_from_url(metadata)
+
+    if current_hosted_url and _looks_like_getty_media_url(current_hosted_url):
+        return True
+    if desired and current_source and current_source != desired:
+        return True
+    if desired and mirrored_from and mirrored_from != desired:
+        return True
+    if desired and current_hosted_url and not current_hosted_key:
+        return True
+    return False
+
+
 _EVENT_SUBCATEGORY_LABEL_BY_KEY = {key: label for key, label, _keywords in _EVENT_SUBCATEGORY_DEFINITIONS}
 _EVENT_UNSORTED_KEY = "unsorted"
 _EVENT_UNSORTED_LABEL = "UNSORTED"
@@ -163,6 +210,8 @@ SOURCE_PROGRESS_KEY_ORDER = ("imdb", "tmdb", "fandom", "fandom_gallery", "getty_
 GETTY_PROGRESS_SUBTASK_ORDER = (
     "primary_person_search",
     "fallback_person_search",
+    "search_query_3",
+    "search_query_4",
     "bravo_grouped_events",
     "broad_grouped_events",
     "wwhl_date_range_fallback",
@@ -176,6 +225,8 @@ GETTY_PROGRESS_SUBTASK_ORDER = (
 GETTY_PROGRESS_SUBTASK_LABELS: dict[str, str] = {
     "primary_person_search": "Primary Person Search",
     "fallback_person_search": "Fallback Person Search",
+    "search_query_3": "Show Search",
+    "search_query_4": "Additional Search",
     "bravo_grouped_events": "Bravo Grouped Events",
     "broad_grouped_events": "Broad Grouped Events",
     "wwhl_date_range_fallback": "WWHL Date-Range Fallback",
@@ -392,6 +443,42 @@ class RefreshImagesRequest(BaseModel):
             "source_query_scope, representative_asset, matched_asset, etc."
         ),
     )
+    getty_prefetch_attempted: bool = Field(
+        default=False,
+        description="Whether the caller attempted local Getty prefetch before the backend run.",
+    )
+    getty_prefetch_succeeded: bool = Field(
+        default=False,
+        description="Whether caller-side Getty prefetch succeeded and produced a usable payload.",
+    )
+    getty_prefetch_error_code: str | None = Field(
+        default=None,
+        description="Optional caller-side Getty prefetch failure code for diagnostics.",
+    )
+    getty_prefetched_queries: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Optional per-query Getty summaries from local prefetch.",
+    )
+    getty_prefetch_mode: str | None = Field(
+        default=None,
+        description="Optional Getty prefetch mode. 'discovery' skips eager Getty detail and event enrichment.",
+    )
+    getty_deferred_enrichment: bool = Field(
+        default=False,
+        description="Whether Getty detail and event enrichment should continue after the fast import handoff.",
+    )
+    getty_deferred_editorial_ids: list[str] | None = Field(
+        default=None,
+        description="Optional editorial ids shortlisted for deferred Getty enrichment.",
+    )
+    getty_prefetch_auth_mode: str | None = Field(
+        default=None,
+        description="Optional auth/session source for local Getty prefetch diagnostics.",
+    )
+    getty_prefetch_auth_warning: str | None = Field(
+        default=None,
+        description="Optional auth/session warning from local Getty prefetch.",
+    )
 
 
 class RefreshImagesResponse(BaseModel):
@@ -433,8 +520,21 @@ class RefreshImagesResponse(BaseModel):
     getty_broad_grouped_total: int = 0
     getty_wwhl_grouped_total: int = 0
     getty_zero_result_reason: str | None = None
+    getty_initial_search_zero_abort: bool = False
+    getty_initial_search_queries: list[str] = Field(default_factory=list)
+    getty_initial_search_counts: dict[str, int] = Field(default_factory=dict)
+    getty_access_mode: str | None = None
+    getty_search_degraded: bool = False
+    getty_unavailable_reason: str | None = None
+    getty_failure_stage: str | None = None
+    getty_http_status: int | None = None
+    getty_page_classification: str | None = None
     matched_via_image_search: int = 0
     getty_snapshot_saved: bool = False
+    getty_enrichment_pending: int = 0
+    getty_enrichment_completed: int = 0
+    getty_enrichment_failed: int = 0
+    getty_deferred_editorial_ids: list[str] = Field(default_factory=list)
     bravotv_photos_fetched: int = 0
     bravotv_assets_imported: int = 0
     bravotv_assets_skipped: int = 0
@@ -575,6 +675,34 @@ class ReprocessImagesRequest(BaseModel):
             "Current stream endpoint keeps in-request orchestration and ignores this flag."
         ),
     )
+
+
+class GettyEnrichmentRequest(BaseModel):
+    show_id: UUID | None = Field(default=None)
+    show_name: str | None = Field(default=None)
+    getty_prefetch_mode: str | None = Field(default="full")
+    getty_deferred_enrichment: bool = Field(default=True)
+    getty_deferred_editorial_ids: list[str] | None = Field(default=None)
+    getty_prefetched_assets: list[dict[str, Any]] | None = Field(default=None)
+    getty_prefetched_events: list[dict[str, Any]] | None = Field(default=None)
+    getty_prefetched_queries: list[dict[str, Any]] | None = Field(default=None)
+    getty_prefetch_auth_mode: str | None = Field(default=None)
+    getty_prefetch_auth_warning: str | None = Field(default=None)
+
+
+class GettyEnrichmentResponse(BaseModel):
+    person_id: str
+    getty_enrichment_completed: int = 0
+    getty_enrichment_failed: int = 0
+    getty_deferred_editorial_ids: list[str] = Field(default_factory=list)
+    getty_only_imported: int = 0
+    covered_existing: int = 0
+    upgraded_existing: int = 0
+    cast_photos_mirrored: int = 0
+    media_assets_mirrored: int = 0
+    cast_photos_failed: int = 0
+    media_assets_failed: int = 0
+    errors: list[str] = Field(default_factory=list)
 
 
 class FacebankSeedRequest(BaseModel):
@@ -865,6 +993,13 @@ def _canonicalize_refresh_sources(values: list[str] | None) -> list[SourceType]:
     return normalized
 
 
+def _allow_nbcumv_only_supplement_for_requested_sources(values: list[str] | None) -> bool:
+    if not values:
+        return True
+    normalized_sources = {str(value or "").strip().lower() for value in values if str(value or "").strip()}
+    return "nbcumv" in normalized_sources
+
+
 def _resolve_requested_source_labels(
     request: RefreshImagesRequest,
     *,
@@ -956,7 +1091,13 @@ def _empty_getty_progress_subtask(task_id: str) -> dict[str, Any]:
         "label": GETTY_PROGRESS_SUBTASK_LABELS.get(task_id, task_id.replace("_", " ")),
         "status": "pending",
         "query": None,
+        "query_url": None,
         "candidates_found": 0,
+        "site_image_total": None,
+        "site_event_total": None,
+        "site_video_total": None,
+        "usable_after_dedupe_total": 0,
+        "overlap_count": 0,
         "current": 0,
         "total": 0,
         "message": None,
@@ -967,10 +1108,23 @@ def _empty_getty_progress() -> dict[str, Any]:
     return {
         "status": "pending",
         "phase": "searching",
+        "auth_mode": None,
         "subtasks": {task_id: _empty_getty_progress_subtask(task_id) for task_id in GETTY_PROGRESS_SUBTASK_ORDER},
         "breakdown": {
             "raw_getty_candidates": 0,
             "unique_discovered": 0,
+            "getty_query_image_total": 0,
+            "getty_query_event_total": 0,
+            "getty_query_page_total": 0,
+            "getty_pages_completed": 0,
+            "getty_pages_total": 0,
+            "getty_discovered_total": 0,
+            "getty_usable_total": 0,
+            "getty_existing_shared_total": 0,
+            "getty_existing_getty_total": 0,
+            "getty_to_import_total": 0,
+            "getty_skipped_existing_total": 0,
+            "getty_deferred_resolution_total": 0,
             "matched_via_nbcumv": 0,
             "matched_via_bravotv_json": 0,
             "matched_via_image_search": 0,
@@ -1000,6 +1154,7 @@ def _ordered_getty_progress_snapshot(getty_progress: dict[str, Any] | None) -> d
     return {
         "status": str(getty_progress.get("status") or "pending").strip().lower() or "pending",
         "phase": str(getty_progress.get("phase") or "searching").strip().lower() or "searching",
+        "auth_mode": (str(getty_progress.get("auth_mode") or "").strip() or None),
         "subtasks": ordered_subtasks,
         "breakdown": dict(getty_progress.get("breakdown") or {}),
     }
@@ -1090,6 +1245,10 @@ def _resolve_resize_variant_job_timeout_seconds() -> float:
 
 def _resolve_nbcumv_import_item_timeout_seconds() -> float:
     return _read_positive_float_env("TRR_NBCUMV_IMPORT_ITEM_TIMEOUT_S", 120.0)
+
+
+def _resolve_getty_only_upsert_batch_size() -> int:
+    return _read_positive_int_env("TRR_GETTY_ONLY_UPSERT_BATCH_SIZE", 10)
 
 
 def _chunked(items: list[TChunk], size: int) -> list[list[TChunk]]:
@@ -1189,6 +1348,28 @@ def _resolve_refresh_sources(
     if not request.enforce_show_source_policy:
         return requested_sources, False
     return _apply_show_source_policy(db, request.show_id, requested_sources)
+
+
+def _normalize_operational_refresh_sources(
+    sources: list[SourceType],
+    request: RefreshImagesRequest,
+) -> list[SourceType]:
+    normalized = [source for source in sources if source != "getty"]
+    requested_sources = {
+        str(source or "").strip().lower()
+        for source in (request.sources or [])
+        if str(source or "").strip()
+    }
+    wants_getty_pipeline = (
+        "nbcumv" in requested_sources
+        or "getty" in requested_sources
+        or bool(request.getty_prefetched_assets)
+        or bool(request.getty_prefetched_events)
+        or bool(request.getty_prefetched_queries)
+    )
+    if wants_getty_pipeline and "nbcumv" not in normalized:
+        normalized.append("nbcumv")
+    return normalized
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
@@ -1681,6 +1862,9 @@ def _resolve_gallery_bucket_metadata(
     show_lookup_by_alias: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     event_group_title = str(asset.get("getty_event_group_title") or asset.get("event_name") or "").strip() or None
+    event_group_id = str(asset.get("event_id") or "").strip() or None
+    event_group_slug = str(asset.get("event_url_slug") or "").strip() or None
+    event_url = str(asset.get("event_url") or "").strip() or None
     title = str(asset.get("search_title") or asset.get("title") or "").strip() or None
     caption = str(asset.get("caption") or asset.get("search_caption") or "").strip() or None
     event_subcategories = _resolve_event_subcategories(
@@ -1702,6 +1886,19 @@ def _resolve_gallery_bucket_metadata(
 
     event_text = " ".join(value for value in (event_group_title, title) if value).strip()
     normalized_event_text = _normalize_show_lookup_key(event_text)
+    grouped_image_count = asset.get("grouped_image_count")
+    grouped_image_count_value = None
+    if isinstance(grouped_image_count, int):
+        grouped_image_count_value = grouped_image_count
+    elif isinstance(grouped_image_count, str) and grouped_image_count.strip().isdigit():
+        grouped_image_count_value = int(grouped_image_count.strip())
+    has_explicit_event_context = bool(
+        event_group_title
+        or event_group_id
+        or event_group_slug
+        or event_url
+        or (isinstance(grouped_image_count_value, int) and grouped_image_count_value > 1)
+    )
     if "bravocon" in normalized_event_text:
         return {
             "bucket_type": "bravocon",
@@ -1710,8 +1907,8 @@ def _resolve_gallery_bucket_metadata(
             "resolved_show_id": None,
             "resolved_show_name": None,
             "getty_event_group_title": event_group_title,
-            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
-            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            "getty_event_group_id": event_group_id,
+            "getty_event_group_slug": event_group_slug,
             **event_subcategories,
         }
     if "watch what happens live" in normalized_event_text or re.search(r"\bwwhl\b", normalized_event_text):
@@ -1722,8 +1919,21 @@ def _resolve_gallery_bucket_metadata(
             "resolved_show_id": None,
             "resolved_show_name": "Watch What Happens Live with Andy Cohen",
             "getty_event_group_title": event_group_title,
-            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
-            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            "getty_event_group_id": event_group_id,
+            "getty_event_group_slug": event_group_slug,
+            **event_subcategories,
+        }
+    event_label = event_group_title or title
+    if has_explicit_event_context and event_label:
+        return {
+            "bucket_type": "event",
+            "bucket_key": _slugify_gallery_bucket_key(event_label),
+            "bucket_label": event_label,
+            "resolved_show_id": None,
+            "resolved_show_name": None,
+            "getty_event_group_title": event_group_title,
+            "getty_event_group_id": event_group_id,
+            "getty_event_group_slug": event_group_slug,
             **event_subcategories,
         }
     if isinstance(resolved_show_row, dict):
@@ -1736,12 +1946,11 @@ def _resolve_gallery_bucket_metadata(
             "resolved_show_id": resolved_show_id,
             "resolved_show_name": resolved_show_name,
             "getty_event_group_title": event_group_title,
-            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
-            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            "getty_event_group_id": event_group_id,
+            "getty_event_group_slug": event_group_slug,
             **event_subcategories,
         }
 
-    event_label = event_group_title or title
     if event_label:
         return {
             "bucket_type": "event",
@@ -1750,8 +1959,8 @@ def _resolve_gallery_bucket_metadata(
             "resolved_show_id": None,
             "resolved_show_name": None,
             "getty_event_group_title": event_group_title,
-            "getty_event_group_id": str(asset.get("event_id") or "").strip() or None,
-            "getty_event_group_slug": str(asset.get("event_url_slug") or "").strip() or None,
+            "getty_event_group_id": event_group_id,
+            "getty_event_group_slug": event_group_slug,
             **event_subcategories,
         }
 
@@ -1784,6 +1993,13 @@ def _import_nbcumv_person_media(
     cancel_requested_cb: Callable[[], bool] | None = None,
     getty_prefetched_assets: list[dict[str, Any]] | None = None,
     getty_prefetched_events: list[dict[str, Any]] | None = None,
+    getty_prefetched_queries: list[dict[str, Any]] | None = None,
+    getty_prefetch_mode: str | None = None,
+    getty_deferred_enrichment: bool = False,
+    getty_deferred_editorial_ids: list[str] | None = None,
+    getty_prefetch_auth_mode: str | None = None,
+    getty_prefetch_auth_warning: str | None = None,
+    allow_nbcumv_only_supplement: bool = True,
 ) -> dict[str, Any]:
     from api.routers.admin_nbcumv import (
         NbcumvImportItem,
@@ -1830,6 +2046,33 @@ def _import_nbcumv_person_media(
             summary["google_image_search_url"] = _build_google_reverse_image_search_url(preview_url)
         return {key: value for key, value in summary.items() if value not in (None, "", [])}
 
+    def _count_existing_person_gallery_assets_for_source(source: str) -> int:
+        normalized_source = str(source or "").strip().lower()
+        if not normalized_source:
+            return 0
+        try:
+            response = (
+                db.schema("core")
+                .table("media_links")
+                .select("id, media_assets!inner(source)")
+                .eq("entity_type", "person")
+                .eq("entity_id", person_id)
+                .eq("kind", "gallery")
+                .eq("media_assets.source", normalized_source)
+                .limit(1000)
+                .execute()
+            )
+            rows = response.data or []
+            return len(rows) if isinstance(rows, list) else 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to count existing person gallery assets for source=%s person_id=%s: %s",
+                normalized_source,
+                person_id,
+                exc,
+            )
+            return 0
+
     result: dict[str, Any] = {
         "fetched": 0,
         "imported": 0,
@@ -1838,6 +2081,9 @@ def _import_nbcumv_person_media(
         "gallery_links_created": 0,
         "asset_ids": [],
         "getty_only_row_ids": [],
+        "getty_only_media_asset_ids": [],
+        "getty_repair_row_ids": [],
+        "getty_repair_media_asset_ids": [],
         "errors": [],
         "show_title": str(show_name or "").strip() or None,
         "nbcumv_show_id": None,
@@ -1853,6 +2099,18 @@ def _import_nbcumv_person_media(
         "nbcumv_only_existing": 0,
         "getty_only_imported": 0,
         "getty_only_existing": 0,
+        "getty_existing_shared_total": 0,
+        "getty_existing_getty_total": 0,
+        "getty_to_import_total": 0,
+        "getty_skipped_existing_total": 0,
+        "getty_deferred_resolution_total": 0,
+        "getty_query_image_total": 0,
+        "getty_query_event_total": 0,
+        "getty_query_page_total": 0,
+        "getty_pages_completed": 0,
+        "getty_pages_total": 0,
+        "getty_discovered_total": 0,
+        "getty_usable_total": 0,
         "covered_existing": 0,
         "upgraded_existing": 0,
         "getty_search_attempted": False,
@@ -1863,19 +2121,85 @@ def _import_nbcumv_person_media(
         "getty_broad_grouped_total": 0,
         "getty_wwhl_grouped_total": 0,
         "getty_zero_result_reason": None,
+        "getty_initial_search_zero_abort": False,
+        "getty_initial_search_queries": [],
+        "getty_initial_search_counts": {},
+        "getty_access_mode": None,
+        "getty_search_degraded": False,
+        "getty_unavailable_reason": None,
+        "getty_failure_stage": None,
+        "getty_http_status": None,
+        "getty_page_classification": None,
         "matched_via_image_search": 0,
         "cancelled": False,
         "getty_snapshot_saved": False,
+        "getty_enrichment_pending": 0,
+        "getty_enrichment_completed": 0,
+        "getty_enrichment_failed": 0,
+        "getty_deferred_editorial_ids": [],
         "getty_bravo_events": [],
         "getty_broad_events": [],
         "getty_wwhl_events": [],
         "summary_message": None,
     }
+    normalized_getty_prefetch_mode = str(getty_prefetch_mode or "").strip().lower() or None
+    requested_deferred_editorial_ids = sorted(
+        {str(value or "").strip() for value in (getty_deferred_editorial_ids or []) if str(value or "").strip()}
+    )
+    enrichment_only_mode = bool(
+        normalized_getty_prefetch_mode == "full"
+        and getty_deferred_enrichment
+        and requested_deferred_editorial_ids
+        and getty_prefetched_assets is not None
+    )
+    discovery_prefetch_mode = normalized_getty_prefetch_mode == "discovery"
+    existing_nbcumv_gallery_count = _count_existing_person_gallery_assets_for_source("nbcumv")
+    existing_nbcumv_prefetched_enrichment_mode = bool(
+        existing_nbcumv_gallery_count > 0 and bool(getty_prefetched_assets)
+    )
+    getty_only_direct_import_mode = bool(getty_prefetched_assets) and not allow_nbcumv_only_supplement
+    result["existing_nbcumv_gallery_count"] = existing_nbcumv_gallery_count
+    result["existing_nbcumv_prefetched_enrichment_mode"] = existing_nbcumv_prefetched_enrichment_mode
+    result["getty_only_direct_import_mode"] = getty_only_direct_import_mode
+    result["getty_deferred_editorial_ids"] = list(requested_deferred_editorial_ids)
     nbcumv_import_item_timeout_seconds = _resolve_nbcumv_import_item_timeout_seconds()
     normalized_person_name = str(person_name or "").strip()
     if not normalized_person_name:
         return result
     nbcumv_access_error: str | None = None
+    getty_search_limit: int | None = None
+    direct_getty_query_counts: dict[str, int] = {}
+    getty_access_diagnostics: dict[str, Any] = {
+        "status": "ok",
+        "failure_stage": None,
+        "unavailable_reason": None,
+        "http_status": None,
+        "page_classification": None,
+        "redirect_url": None,
+    }
+
+    def _sync_getty_access_fields() -> None:
+        status = str(getty_access_diagnostics.get("status") or "ok")
+        result["getty_search_degraded"] = status in {"degraded", "unavailable"}
+        result["getty_unavailable_reason"] = (
+            str(getty_access_diagnostics.get("unavailable_reason") or "").strip() or None
+        )
+        result["getty_failure_stage"] = str(getty_access_diagnostics.get("failure_stage") or "").strip() or None
+        http_status = getty_access_diagnostics.get("http_status")
+        result["getty_http_status"] = int(http_status) if isinstance(http_status, int) else None
+        result["getty_page_classification"] = (
+            str(getty_access_diagnostics.get("page_classification") or "").strip() or None
+        )
+        if bool(result.get("getty_prefetched")):
+            result["getty_access_mode"] = "prefetched_local"
+        elif status == "unavailable":
+            result["getty_access_mode"] = "live_modal_unavailable"
+        elif status == "degraded":
+            result["getty_access_mode"] = "live_modal_degraded"
+        elif bool(result.get("getty_search_attempted")):
+            result["getty_access_mode"] = "live_modal"
+        else:
+            result["getty_access_mode"] = None
 
     def _run_nbcumv_item_import_with_timeout(*, item: NbcumvImportItem) -> dict[str, Any]:
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="person-nbcumv-import")
@@ -1936,6 +2260,11 @@ def _import_nbcumv_person_media(
     def _getty_preview_url(asset: dict[str, Any]) -> str | None:
         for key in (
             "preview_image_url",
+            "galleryHighResCompUrl",
+            "highResCompUrl",
+            "largeMainImageURL",
+            "defaultMainImageURL",
+            "zoomedImageUrl",
             "galleryComp1024Url",
             "compUrl",
             "mainImageUrl",
@@ -1943,8 +2272,6 @@ def _import_nbcumv_person_media(
             "thumb_url",
             "original_image_url",
             "downloadableCompUrl",
-            "galleryHighResCompUrl",
-            "highResCompUrl",
         ):
             value = str(asset.get(key) or "").strip()
             if value:
@@ -1963,10 +2290,13 @@ def _import_nbcumv_person_media(
         image_urls = {
             key: str(asset.get(key) or "").strip()
             for key in (
-                "downloadableCompUrl",
                 "galleryHighResCompUrl",
                 "highResCompUrl",
+                "largeMainImageURL",
+                "defaultMainImageURL",
+                "zoomedImageUrl",
                 "galleryComp1024Url",
+                "downloadableCompUrl",
                 "compUrl",
                 "mainImageUrl",
                 "thumbUrl",
@@ -1980,10 +2310,13 @@ def _import_nbcumv_person_media(
         if selected:
             return selected
         for key in (
-            "downloadableCompUrl",
             "galleryHighResCompUrl",
             "highResCompUrl",
+            "largeMainImageURL",
+            "defaultMainImageURL",
+            "zoomedImageUrl",
             "galleryComp1024Url",
+            "downloadableCompUrl",
             "compUrl",
             "mainImageUrl",
             "thumbUrl",
@@ -2020,6 +2353,34 @@ def _import_nbcumv_person_media(
         if isinstance(raw_value, str) and raw_value.strip().isdigit():
             return int(raw_value.strip())
         return None
+
+    def _getty_has_strong_original_url(asset: dict[str, Any]) -> bool:
+        original_url = _getty_original_url(asset)
+        if not original_url:
+            return False
+        preview_url = _getty_preview_url(asset)
+        width, height = _getty_dimensions(asset)
+        if any(
+            str(asset.get(key) or "").strip()
+            for key in (
+                "galleryHighResCompUrl",
+                "highResCompUrl",
+                "largeMainImageURL",
+                "defaultMainImageURL",
+                "zoomedImageUrl",
+            )
+        ):
+            return True
+        if isinstance(width, int) and width >= 1200:
+            return True
+        if isinstance(height, int) and height >= 1200:
+            return True
+        parsed_width, parsed_height = getty_integration._parse_image_url_dimensions(original_url)
+        if (isinstance(parsed_width, int) and parsed_width >= 1200) or (
+            isinstance(parsed_height, int) and parsed_height >= 1200
+        ):
+            return True
+        return bool(preview_url and original_url != preview_url)
 
     def _filename_nup_set_prefix(filename: str | None) -> str | None:
         cleaned = re.sub(r"\.[A-Z0-9]+$", "", str(filename or "").strip().upper())
@@ -2321,6 +2682,7 @@ def _import_nbcumv_person_media(
         asset_show_name: str | None,
         crosswalk_reason: str,
         public_replacement: ResolvedPublicReplacement | None = None,
+        include_reverse_image_search_url: bool = True,
     ) -> dict[str, Any] | None:
         editorial_id = str(asset.get("editorial_id") or "").strip()
         preview_url = _getty_preview_url(asset)
@@ -2360,7 +2722,6 @@ def _import_nbcumv_person_media(
             "original_source_file_url": original_url,
             "original_source_page_url": detail_url,
             "original_source_label": "Getty",
-            "google_reverse_image_search_url": _build_google_reverse_image_search_url(preview_url or original_url),
             "crosswalk_reason": crosswalk_reason,
             "source_resolution": (public_replacement.mode if public_replacement else "getty_watermark_fallback"),
             "getty_original_image_url": original_url,
@@ -2380,6 +2741,10 @@ def _import_nbcumv_person_media(
             "person_image_count": asset.get("person_image_count"),
             "source_query_scope": str(asset.get("source_query_scope") or "").strip() or None,
         }
+        if include_reverse_image_search_url:
+            metadata["google_reverse_image_search_url"] = _build_google_reverse_image_search_url(
+                preview_url or original_url
+            )
         if str(match_details.get("reason") or "").strip():
             metadata["getty_person_match_reason"] = str(match_details["reason"]).strip()
         if str(match_details.get("deny_reason") or "").strip():
@@ -2461,6 +2826,19 @@ def _import_nbcumv_person_media(
             "metadata": metadata,
         }
 
+    def _select_getty_row_show_name(
+        *,
+        bucket_metadata: dict[str, Any],
+        resolved_asset_show_title: str | None,
+    ) -> str | None:
+        bucket_type = str(bucket_metadata.get("bucket_type") or "").strip().lower()
+        explicit_bucket_show_name = str(bucket_metadata.get("resolved_show_name") or "").strip() or None
+        if explicit_bucket_show_name:
+            return explicit_bucket_show_name
+        if bucket_type == "show":
+            return str(resolved_asset_show_title or "").strip() or None
+        return None
+
     def _fetch_existing_getty_source_ids(editorial_ids: list[str]) -> set[str]:
         existing: set[str] = set()
         if not editorial_ids:
@@ -2481,6 +2859,360 @@ def _import_nbcumv_person_media(
                     if value:
                         existing.add(value)
         return existing
+
+    def _fetch_existing_person_non_getty_filenames() -> set[str]:
+        existing: set[str] = set()
+        try:
+            response = (
+                db.schema("core")
+                .table("cast_photos")
+                .select("file_name")
+                .eq("person_id", person_id)
+                .not_.eq("source", _GETTY_SOURCE_ID)
+                .limit(5000)
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to load existing non-Getty filenames for person_id=%s: %s",
+                person_id,
+                exc,
+            )
+            return existing
+        for row in response.data or []:
+            if not isinstance(row, dict):
+                continue
+            value = str(row.get("file_name") or "").strip().casefold()
+            if value:
+                existing.add(value)
+        return existing
+
+    def _normalize_image_url_canonical(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return cleaned.split("?", 1)[0].strip() or None
+
+    def _fetch_person_getty_cast_rows(source_image_ids: list[str]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        normalized_ids = sorted({str(value or "").strip() for value in source_image_ids if str(value or "").strip()})
+        if not normalized_ids:
+            return rows
+        select_columns = (
+            "id, source_image_id, url, url_path, image_url, image_url_canonical, thumb_url, "
+            "source_page_url, width, height, hosted_url, hosted_key, hosted_bucket, hosted_sha256, "
+            "hosted_content_type, hosted_bytes, hosted_etag, hosted_at, metadata"
+        )
+        for chunk in _chunked(normalized_ids, 200):
+            response = (
+                db.schema("core")
+                .table("cast_photos")
+                .select(select_columns)
+                .eq("person_id", person_id)
+                .eq("source", _GETTY_SOURCE_ID)
+                .in_("source_image_id", chunk)
+                .execute()
+            )
+            for row in response.data or []:
+                if isinstance(row, dict):
+                    rows.append(dict(row))
+        return rows
+
+    def _fetch_person_getty_media_asset_ids(source_image_ids: list[str]) -> list[str]:
+        asset_ids: set[str] = set()
+        normalized_ids = sorted({str(value or "").strip() for value in source_image_ids if str(value or "").strip()})
+        if not normalized_ids:
+            return []
+        for chunk in _chunked(normalized_ids, 200):
+            response = (
+                db.schema("core")
+                .table("media_links")
+                .select("media_asset_id, media_assets!inner(source, source_asset_id)")
+                .eq("entity_type", "person")
+                .eq("entity_id", person_id)
+                .eq("kind", "gallery")
+                .eq("media_assets.source", _GETTY_SOURCE_ID)
+                .in_("media_assets.source_asset_id", chunk)
+                .execute()
+            )
+            for row in response.data or []:
+                if not isinstance(row, dict):
+                    continue
+                asset_id = str(row.get("media_asset_id") or "").strip()
+                if asset_id:
+                    asset_ids.add(asset_id)
+        return sorted(asset_ids)
+
+    def _repair_getty_only_gallery_records(
+        upserted_rows: list[dict[str, Any]],
+        *,
+        source_rows_by_image_id: dict[str, dict[str, Any]],
+    ) -> dict[str, list[str]]:
+        repaired_row_ids: list[str] = []
+        linked_media_asset_ids: list[str] = []
+
+        for upserted_row in upserted_rows:
+            row_id = str(upserted_row.get("id") or "").strip()
+            source_image_id = str(upserted_row.get("source_image_id") or "").strip()
+            if not row_id or not source_image_id:
+                continue
+            source_row = source_rows_by_image_id.get(source_image_id)
+            if not source_row:
+                continue
+
+            desired_original_url = str(
+                source_row.get("original_url") or source_row.get("image_url") or source_row.get("url") or ""
+            ).strip()
+            desired_preview_url = str(source_row.get("thumb_url") or "").strip() or None
+            desired_source_page_url = str(source_row.get("source_page_url") or "").strip() or None
+            desired_width = source_row.get("width") if isinstance(source_row.get("width"), int) else None
+            desired_height = source_row.get("height") if isinstance(source_row.get("height"), int) else None
+            desired_image_url_canonical = _normalize_image_url_canonical(desired_original_url)
+            existing_hosted_url = str(upserted_row.get("hosted_url") or "").strip()
+            existing_hosted_key = str(upserted_row.get("hosted_key") or "").strip()
+            existing_metadata = upserted_row.get("metadata")
+            existing_metadata_dict = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+            merged_cast_metadata = dict(existing_metadata_dict)
+
+            cast_patch: dict[str, Any] = {}
+            source_url_changed = bool(
+                desired_original_url and str(upserted_row.get("url") or "").strip() != desired_original_url
+            )
+            if source_url_changed:
+                cast_patch["url"] = desired_original_url
+                cast_patch["url_path"] = urlparse(desired_original_url).path or None
+            if desired_original_url and str(upserted_row.get("image_url") or "").strip() != desired_original_url:
+                cast_patch["image_url"] = desired_original_url
+            if desired_image_url_canonical and (
+                str(upserted_row.get("image_url_canonical") or "").strip() != desired_image_url_canonical
+            ):
+                cast_patch["image_url_canonical"] = desired_image_url_canonical
+            if desired_preview_url and str(upserted_row.get("thumb_url") or "").strip() != desired_preview_url:
+                cast_patch["thumb_url"] = desired_preview_url
+            if desired_source_page_url and (
+                str(upserted_row.get("source_page_url") or "").strip() != desired_source_page_url
+            ):
+                cast_patch["source_page_url"] = desired_source_page_url
+            if isinstance(desired_width, int) and desired_width > 0 and upserted_row.get("width") != desired_width:
+                cast_patch["width"] = desired_width
+            if isinstance(desired_height, int) and desired_height > 0 and upserted_row.get("height") != desired_height:
+                cast_patch["height"] = desired_height
+            if desired_original_url:
+                merged_cast_metadata["getty_original_image_url"] = desired_original_url
+                merged_cast_metadata["source_url"] = desired_original_url
+                merged_cast_metadata["original_source_url"] = desired_original_url
+                merged_cast_metadata["original_source_file_url"] = desired_original_url
+            if desired_preview_url:
+                merged_cast_metadata["getty_preview_image_url"] = desired_preview_url
+            if desired_source_page_url:
+                merged_cast_metadata["source_page_url"] = desired_source_page_url
+                merged_cast_metadata["original_source_page_url"] = desired_source_page_url
+                merged_cast_metadata["getty_detail_page_url"] = desired_source_page_url
+            if merged_cast_metadata != existing_metadata_dict:
+                cast_patch["metadata"] = merged_cast_metadata
+            should_reset_cast_hosted = bool(
+                (existing_hosted_url or existing_hosted_key)
+                and _should_reset_getty_hosted_state(
+                    desired_original_url=desired_original_url,
+                    current_source_url=upserted_row.get("url") or upserted_row.get("image_url"),
+                    hosted_url=existing_hosted_url,
+                    hosted_key=existing_hosted_key,
+                    metadata=existing_metadata_dict,
+                )
+            )
+            if should_reset_cast_hosted:
+                cast_patch.update(
+                    {
+                        "hosted_bucket": None,
+                        "hosted_key": None,
+                        "hosted_url": None,
+                        "hosted_sha256": None,
+                        "hosted_content_type": None,
+                        "hosted_bytes": None,
+                        "hosted_etag": None,
+                        "hosted_at": None,
+                    }
+                )
+            if cast_patch:
+                try:
+                    db.schema("core").table("cast_photos").update(cast_patch).eq("id", row_id).execute()
+                    repaired_row_ids.append(row_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to normalize Getty cast photo %s: %s", row_id, exc)
+
+            try:
+                assets_response = (
+                    db.schema("core")
+                    .table("media_assets")
+                    .select("id, source_url, hosted_url, hosted_key, width, height, metadata")
+                    .eq("source", _GETTY_SOURCE_ID)
+                    .eq("source_asset_id", source_image_id)
+                    .limit(50)
+                    .execute()
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to load Getty media assets for person_id=%s source_image_id=%s: %s",
+                    person_id,
+                    source_image_id,
+                    exc,
+                )
+                continue
+
+            asset_rows = assets_response.data or []
+            if not isinstance(asset_rows, list) or not asset_rows:
+                continue
+            candidate_asset_ids = [
+                str(row.get("id") or "").strip() for row in asset_rows if str(row.get("id") or "").strip()
+            ]
+            if not candidate_asset_ids:
+                continue
+            try:
+                links_response = (
+                    db.schema("core")
+                    .table("media_links")
+                    .select("media_asset_id")
+                    .eq("entity_type", "person")
+                    .eq("entity_id", person_id)
+                    .eq("kind", "gallery")
+                    .in_("media_asset_id", candidate_asset_ids)
+                    .execute()
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to load Getty media links for person_id=%s source_image_id=%s: %s",
+                    person_id,
+                    source_image_id,
+                    exc,
+                )
+                continue
+
+            linked_asset_ids = {
+                str(row.get("media_asset_id") or "").strip()
+                for row in (links_response.data or [])
+                if str(row.get("media_asset_id") or "").strip()
+            }
+            for asset_row in asset_rows:
+                asset_id = str(asset_row.get("id") or "").strip()
+                if not asset_id or asset_id not in linked_asset_ids:
+                    continue
+                linked_media_asset_ids.append(asset_id)
+                asset_patch: dict[str, Any] = {}
+                source_url_changed = bool(
+                    desired_original_url and str(asset_row.get("source_url") or "").strip() != desired_original_url
+                )
+                if source_url_changed:
+                    asset_patch["source_url"] = desired_original_url
+                    asset_patch.update(
+                        {
+                            "sha256": None,
+                            "hosted_bucket": None,
+                            "hosted_key": None,
+                            "hosted_url": None,
+                            "hosted_sha256": None,
+                            "hosted_content_type": None,
+                            "hosted_bytes": None,
+                            "hosted_etag": None,
+                            "hosted_at": None,
+                            "ingest_status": "pending",
+                            "ingest_last_error": None,
+                            "ingest_retry_count": 0,
+                            "ingest_failed_at": None,
+                            "ingest_completed_at": None,
+                            "ingest_next_retry_at": None,
+                        }
+                    )
+                if isinstance(desired_width, int) and desired_width > 0 and asset_row.get("width") != desired_width:
+                    asset_patch["width"] = desired_width
+                if isinstance(desired_height, int) and desired_height > 0 and asset_row.get("height") != desired_height:
+                    asset_patch["height"] = desired_height
+                existing_metadata = asset_row.get("metadata")
+                metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+                merged_metadata = dict(metadata)
+                if desired_original_url:
+                    merged_metadata["getty_original_image_url"] = desired_original_url
+                    merged_metadata["source_url"] = desired_original_url
+                    merged_metadata["original_source_url"] = desired_original_url
+                    merged_metadata["original_source_file_url"] = desired_original_url
+                if desired_preview_url:
+                    merged_metadata["getty_preview_image_url"] = desired_preview_url
+                if desired_source_page_url:
+                    merged_metadata["source_page_url"] = desired_source_page_url
+                    merged_metadata["original_source_page_url"] = desired_source_page_url
+                    merged_metadata["getty_detail_page_url"] = desired_source_page_url
+                if _should_reset_getty_hosted_state(
+                    desired_original_url=desired_original_url,
+                    current_source_url=asset_row.get("source_url"),
+                    hosted_url=asset_row.get("hosted_url"),
+                    hosted_key=asset_row.get("hosted_key"),
+                    metadata=metadata,
+                ):
+                    asset_patch.update(
+                        {
+                            "hosted_bucket": None,
+                            "hosted_key": None,
+                            "hosted_url": None,
+                            "hosted_sha256": None,
+                            "hosted_content_type": None,
+                            "hosted_bytes": None,
+                            "hosted_etag": None,
+                            "hosted_at": None,
+                            "ingest_status": "pending",
+                            "ingest_last_error": None,
+                            "ingest_retry_count": 0,
+                            "ingest_failed_at": None,
+                            "ingest_completed_at": None,
+                            "ingest_next_retry_at": None,
+                        }
+                    )
+                if merged_metadata != metadata:
+                    asset_patch["metadata"] = merged_metadata
+                if not asset_patch:
+                    continue
+                try:
+                    db.schema("core").table("media_assets").update(asset_patch).eq("id", asset_id).execute()
+                    linked_media_asset_ids.append(asset_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to normalize Getty media asset %s: %s", asset_id, exc)
+
+        return {
+            "row_ids": sorted({row_id for row_id in repaired_row_ids if row_id}),
+            "media_asset_ids": sorted({asset_id for asset_id in linked_media_asset_ids if asset_id}),
+        }
+
+    def _repair_existing_getty_gallery_records(
+        asset_tuples: list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]],
+    ) -> dict[str, list[str]]:
+        source_rows_by_image_id: dict[str, dict[str, Any]] = {}
+        editorial_ids: list[str] = []
+        for asset, _resolved_asset_show, resolved_asset_show_title, bucket_metadata in asset_tuples:
+            editorial_id = str(asset.get("editorial_id") or "").strip()
+            if not editorial_id:
+                continue
+            source_row = _build_getty_cast_photo_row(
+                asset,
+                asset_show_name=_select_getty_row_show_name(
+                    bucket_metadata=bucket_metadata,
+                    resolved_asset_show_title=resolved_asset_show_title,
+                ),
+                crosswalk_reason="getty_existing_repair",
+                public_replacement=None,
+            )
+            if source_row is None:
+                continue
+            editorial_ids.append(editorial_id)
+            source_rows_by_image_id[editorial_id] = source_row
+        if not editorial_ids:
+            return {"row_ids": [], "media_asset_ids": []}
+        existing_rows = _fetch_person_getty_cast_rows(editorial_ids)
+        if not existing_rows:
+            return {"row_ids": [], "media_asset_ids": []}
+        return _repair_getty_only_gallery_records(
+            existing_rows,
+            source_rows_by_image_id=source_rows_by_image_id,
+        )
 
     def _emit_progress(current: int, total: int, message: str) -> None:
         if progress_cb is None:
@@ -2630,7 +3362,96 @@ def _import_nbcumv_person_media(
                 _append_query(f"{normalized_person_name} {term}", query_params={"collections": "nbc"})
         return plan
 
-    def _dedupe_getty_assets(assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _getty_is_unavailable() -> bool:
+        return str(getty_access_diagnostics.get("status") or "ok") == "unavailable"
+
+    def _describe_getty_access_issue() -> str:
+        unavailable_reason = str(getty_access_diagnostics.get("unavailable_reason") or "").strip()
+        page_classification = str(getty_access_diagnostics.get("page_classification") or "").strip()
+        http_status = getty_access_diagnostics.get("http_status")
+        details: list[str] = []
+        for raw_value in (unavailable_reason, page_classification):
+            cleaned = raw_value.replace("_", " ").strip()
+            if cleaned and cleaned not in details:
+                details.append(cleaned)
+        if isinstance(http_status, int) and http_status > 0:
+            details.append(f"HTTP {http_status}")
+        return ", ".join(details)
+
+    def _build_getty_unavailable_message(*, context: str, phrase: str | None = None) -> str:
+        detail = _describe_getty_access_issue()
+        target = f" for '{phrase}'" if phrase else ""
+        base = f"Getty unavailable during {context}{target}"
+        return f"{base} ({detail})." if detail else f"{base}."
+
+    def _mark_getty_initial_zero_abort() -> None:
+        result["getty_initial_search_zero_abort"] = True
+        if _getty_is_unavailable():
+            result["summary_message"] = (
+                "Stopped refresh early: both direct Getty person searches returned zero results because "
+                + _build_getty_unavailable_message(context="direct person search").removesuffix(".")
+                + " Grouped Getty, NBCUMV, and BravoTV stages were not run."
+            )
+        else:
+            result["summary_message"] = (
+                "Stopped refresh early: both direct Getty person searches returned zero results. "
+                "Grouped Getty, NBCUMV, and BravoTV stages were not run."
+            )
+        _emit_getty_progress(
+            {
+                "status": "failed",
+                "phase": "searching",
+            }
+        )
+        for subtask_id, message in (
+            (
+                "bravo_grouped_events",
+                "Skipped because both direct Getty person searches returned zero results.",
+            ),
+            (
+                "broad_grouped_events",
+                "Skipped because both direct Getty person searches returned zero results.",
+            ),
+            (
+                "wwhl_date_range_fallback",
+                "Skipped because both direct Getty person searches returned zero results.",
+            ),
+            ("pair_nbcumv", "Skipped because refresh stopped after both direct Getty searches returned zero."),
+            (
+                "pair_bravotv_json",
+                "Skipped because refresh stopped after both direct Getty searches returned zero.",
+            ),
+            (
+                "import_getty_only",
+                "Skipped because refresh stopped after both direct Getty searches returned zero.",
+            ),
+            (
+                "supplement_nbcumv_only",
+                "Skipped because refresh stopped after both direct Getty searches returned zero.",
+            ),
+            (
+                "supplement_bravotv_only",
+                "Skipped because refresh stopped after both direct Getty searches returned zero.",
+            ),
+            (
+                "mirror_imported_assets",
+                "Skipped because refresh stopped after both direct Getty searches returned zero.",
+            ),
+        ):
+            _emit_getty_progress(
+                {
+                    "subtask_id": subtask_id,
+                    "subtask_status": "skipped",
+                    "message": message,
+                }
+            )
+        _emit_progress(0, 0, result["summary_message"])
+
+    def _dedupe_getty_assets(
+        assets: list[dict[str, Any]],
+        *,
+        dedupe_on_object_name: bool = True,
+    ) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
         seen_editorial_ids: set[str] = set()
         seen_detail_urls: set[str] = set()
@@ -2643,19 +3464,21 @@ def _import_nbcumv_person_media(
                 continue
             if detail_url and detail_url in seen_detail_urls:
                 continue
-            if object_name and object_name in seen_object_names:
+            if dedupe_on_object_name and object_name and object_name in seen_object_names:
                 continue
             if editorial_id:
                 seen_editorial_ids.add(editorial_id)
             if detail_url:
                 seen_detail_urls.add(detail_url)
-            if object_name:
+            if dedupe_on_object_name and object_name:
                 seen_object_names.add(object_name)
             deduped.append(asset)
         return deduped
 
     def _dedupe_scoped_getty_assets(
         items: list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]],
+        *,
+        dedupe_on_object_name: bool = True,
     ) -> list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]]:
         deduped: list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]] = []
         seen_editorial_ids: set[str] = set()
@@ -2670,57 +3493,151 @@ def _import_nbcumv_person_media(
                 continue
             if detail_url and detail_url in seen_detail_urls:
                 continue
-            if object_name and object_name in seen_object_names:
+            if dedupe_on_object_name and object_name and object_name in seen_object_names:
                 continue
             if editorial_id:
                 seen_editorial_ids.add(editorial_id)
             if detail_url:
                 seen_detail_urls.add(detail_url)
-            if object_name:
+            if dedupe_on_object_name and object_name:
                 seen_object_names.add(object_name)
             deduped.append(item)
         return deduped
 
+    def _estimate_getty_page_total(site_image_total: Any) -> int:
+        total = int(site_image_total) if isinstance(site_image_total, int) and int(site_image_total) > 0 else 0
+        if total <= 0:
+            return 0
+        return max(1, (total + 59) // 60)
+
+    allow_public_replacement_lookup = getty_prefetched_assets is None
+
     # ── Hybrid mode: use pre-fetched Getty assets when provided ──────────
     if getty_prefetched_assets is not None:
-        getty_assets: list[dict[str, Any]] = _dedupe_getty_assets(list(getty_prefetched_assets))
+        getty_assets: list[dict[str, Any]] = _dedupe_getty_assets(
+            list(getty_prefetched_assets),
+            dedupe_on_object_name=not getty_only_direct_import_mode,
+        )
+        prefetched_queries: list[dict[str, Any]] = [
+            dict(item) for item in (getty_prefetched_queries or []) if isinstance(item, dict)
+        ]
         bravo_count = sum(1 for a in getty_assets if a.get("source_query_scope") == "bravo")
         broad_count = len(getty_assets) - bravo_count
         result["getty_prefetched"] = True
         result["getty_search_attempted"] = True
+        result["getty_access_mode"] = "prefetched_local"
+        result["getty_auth_mode"] = str(getty_prefetch_auth_mode or "").strip() or None
+        result["getty_prefetch_auth_warning"] = str(getty_prefetch_auth_warning or "").strip() or None
         result["unique_discovered_total"] = len(getty_assets)
         result["getty_candidates_total"] = len(getty_assets)
         result["getty_primary_candidates_total"] = bravo_count
         result["getty_fallback_candidates_total"] = broad_count
+        result["getty_discovered_total"] = len(getty_assets)
+        result["getty_usable_total"] = len(getty_assets)
+        if not requested_deferred_editorial_ids and getty_deferred_enrichment:
+            result["getty_deferred_editorial_ids"] = sorted(
+                {
+                    str(asset.get("editorial_id") or "").strip()
+                    for asset in getty_assets
+                    if str(asset.get("editorial_id") or "").strip()
+                }
+            )
+        if discovery_prefetch_mode and getty_deferred_enrichment:
+            result["getty_enrichment_pending"] = len(result["getty_deferred_editorial_ids"])
+        _sync_getty_access_fields()
         _emit_getty_progress(
             {
                 "status": "running",
                 "phase": "searching",
+                "auth_mode": result.get("getty_auth_mode"),
                 "breakdown": {
                     "prefetched": True,
                     "bravo_search_total": bravo_count,
                     "broad_search_total": broad_count,
                     "raw_getty_candidates": bravo_count + broad_count,
                     "unique_discovered": len(getty_assets),
+                    "getty_discovered_total": len(getty_assets),
+                    "getty_usable_total": len(getty_assets),
                 },
             }
         )
-        _emit_getty_progress(
-            {
-                "subtask_id": "primary_person_search",
-                "subtask_status": "completed",
-                "message": f"Used {bravo_count} pre-fetched Bravo assets.",
-                "candidates_found": bravo_count,
-            }
-        )
-        _emit_getty_progress(
-            {
-                "subtask_id": "fallback_person_search",
-                "subtask_status": "completed",
-                "message": f"Used {broad_count} pre-fetched broad assets.",
-                "candidates_found": broad_count,
-            }
-        )
+        if prefetched_queries:
+            query_image_total = 0
+            query_event_total = 0
+            query_page_total = 0
+            for query_index, query_summary in enumerate(prefetched_queries):
+                subtask_id = _getty_query_task_id(query_index)
+                phrase = str(query_summary.get("phrase") or "").strip() or None
+                fetched_asset_total = int(query_summary.get("fetched_asset_total") or 0)
+                usable_after_dedupe_total = int(query_summary.get("usable_after_dedupe_total") or 0)
+                overlap_count = int(query_summary.get("overlap_with_prior_queries") or 0)
+                site_image_total = query_summary.get("site_image_total")
+                site_event_total = query_summary.get("site_event_total")
+                site_video_total = query_summary.get("site_video_total")
+                if isinstance(site_image_total, int) and site_image_total > 0:
+                    query_image_total += int(site_image_total)
+                    query_page_total += _estimate_getty_page_total(site_image_total)
+                if isinstance(site_event_total, int) and site_event_total > 0:
+                    query_event_total += int(site_event_total)
+                message_parts = []
+                if isinstance(site_image_total, int) and site_image_total > 0:
+                    message_parts.append(f"Getty reports {site_image_total:,} images")
+                if fetched_asset_total > 0:
+                    message_parts.append(f"fetched {fetched_asset_total:,}")
+                message_parts.append(f"{usable_after_dedupe_total:,} usable after dedupe")
+                if overlap_count > 0:
+                    message_parts.append(f"{overlap_count:,} overlapped earlier queries")
+                _emit_getty_progress(
+                    {
+                        "subtask_id": subtask_id,
+                        "label": str(query_summary.get("label") or _getty_query_task_label(query_index, phrase or "")),
+                        "query": phrase,
+                        "query_url": str(query_summary.get("query_url") or "").strip() or None,
+                        "site_image_total": site_image_total if isinstance(site_image_total, int) else None,
+                        "site_event_total": site_event_total if isinstance(site_event_total, int) else None,
+                        "site_video_total": site_video_total if isinstance(site_video_total, int) else None,
+                        "candidates_found": fetched_asset_total,
+                        "usable_after_dedupe_total": usable_after_dedupe_total,
+                        "overlap_count": overlap_count,
+                        "current": usable_after_dedupe_total,
+                        "total": usable_after_dedupe_total,
+                        "subtask_status": "completed",
+                        "message": ". ".join(message_parts) + "." if message_parts else None,
+                    }
+                )
+            result["getty_query_image_total"] = query_image_total
+            result["getty_query_event_total"] = query_event_total
+            result["getty_query_page_total"] = query_page_total
+            result["getty_pages_total"] = query_page_total
+            result["getty_pages_completed"] = query_page_total
+            _emit_getty_progress(
+                {
+                    "breakdown": {
+                        "getty_query_image_total": query_image_total,
+                        "getty_query_event_total": query_event_total,
+                        "getty_query_page_total": query_page_total,
+                        "getty_pages_total": query_page_total,
+                        "getty_pages_completed": query_page_total,
+                    }
+                }
+            )
+        else:
+            _emit_getty_progress(
+                {
+                    "subtask_id": "primary_person_search",
+                    "subtask_status": "completed",
+                    "message": f"Used {bravo_count} pre-fetched Bravo assets.",
+                    "candidates_found": bravo_count,
+                }
+            )
+            _emit_getty_progress(
+                {
+                    "subtask_id": "fallback_person_search",
+                    "subtask_status": "completed",
+                    "message": f"Used {broad_count} pre-fetched broad assets.",
+                    "candidates_found": broad_count,
+                }
+            )
         # Use prefetched events if provided, split by source_query_scope
         if getty_prefetched_events is not None:
             bravo_grouped_events: list[dict[str, Any]] = [
@@ -2772,10 +3689,11 @@ def _import_nbcumv_person_media(
         getty_query_plan = _build_getty_query_plan()
         search_phrase = str(getty_query_plan[0]["phrase"]).strip() if getty_query_plan else normalized_person_name
         result["getty_search_attempted"] = True
+        _sync_getty_access_fields()
         getty_assets: list[dict[str, Any]] = []
-        query_page_cap = max(
-            1,
-            int(result.get("getty_query_page_cap") or getattr(getty_integration, "MAX_SEARCH_PAGES", 1)),
+        raw_query_page_cap = result.get("getty_query_page_cap")
+        query_page_cap = (
+            int(raw_query_page_cap) if isinstance(raw_query_page_cap, int) and raw_query_page_cap > 0 else None
         )
         _emit_getty_progress(
             {
@@ -2790,6 +3708,7 @@ def _import_nbcumv_person_media(
         for query_index, query_entry in enumerate(getty_query_plan):
             phrase = str(query_entry.get("phrase") or "").strip()
             query_params = dict(query_entry.get("query_params") or {})
+            query_summary: dict[str, Any] = {}
             subtask_id = _getty_query_task_id(query_index)
             label = _getty_query_task_label(query_index, phrase)
             _emit_getty_progress(
@@ -2798,20 +3717,33 @@ def _import_nbcumv_person_media(
                     "label": label,
                     "subtask_status": "running",
                     "query": phrase,
-                    "message": f"Searching Getty for '{phrase}' (page cap {query_page_cap})...",
+                    "query_url": getty_integration._build_search_url(phrase, query_params=query_params or None),
+                    "message": (
+                        f"Searching Getty for '{phrase}'..."
+                        if query_page_cap is None
+                        else f"Searching Getty for '{phrase}' (page cap {query_page_cap})..."
+                    ),
                 }
             )
             _emit_progress(0, 0, f"Searching Getty for '{phrase}'...")
             discovered = getty_integration.search_editorial_assets(
                 phrase,
-                limit=max(1, int(limit)),
+                limit=getty_search_limit,
                 progress_cb=_emit_progress,
                 query_params=query_params or None,
+                max_search_pages=query_page_cap,
+                diagnostics_out=getty_access_diagnostics,
+                query_summary_out=query_summary,
             )
+            _sync_getty_access_fields()
             if query_index == 0:
                 result["getty_primary_candidates_total"] = len(discovered)
             elif query_index == 1:
                 result["getty_fallback_candidates_total"] = len(discovered)
+            if query_index < 2:
+                direct_getty_query_counts[phrase] = len(discovered)
+                result["getty_initial_search_queries"] = list(direct_getty_query_counts.keys())
+                result["getty_initial_search_counts"] = dict(direct_getty_query_counts)
             for asset in discovered:
                 enriched_asset = dict(asset)
                 enriched_asset["source_query_scope"] = phrase
@@ -2820,24 +3752,57 @@ def _import_nbcumv_person_media(
                 getty_assets.append(enriched_asset)
             deduped_assets = _dedupe_getty_assets(getty_assets)
             getty_assets = deduped_assets
+            subtask_status = "completed"
+            subtask_message = (
+                f"Found {len(discovered)} Getty candidates; {len(deduped_assets)} unique discovered so far."
+            )
+            if not discovered and _getty_is_unavailable():
+                subtask_status = "warning"
+                subtask_message = _build_getty_unavailable_message(
+                    context="direct person search",
+                    phrase=phrase,
+                )
             _emit_getty_progress(
                 {
                     "subtask_id": subtask_id,
                     "label": label,
-                    "subtask_status": "completed",
+                    "subtask_status": subtask_status,
                     "query": phrase,
+                    "query_url": str(query_summary.get("query_url") or "").strip() or None,
                     "candidates_found": len(discovered),
+                    "site_image_total": (
+                        int(query_summary.get("site_image_total"))
+                        if isinstance(query_summary.get("site_image_total"), int)
+                        else None
+                    ),
+                    "site_event_total": (
+                        int(query_summary.get("site_event_total"))
+                        if isinstance(query_summary.get("site_event_total"), int)
+                        else None
+                    ),
+                    "site_video_total": (
+                        int(query_summary.get("site_video_total"))
+                        if isinstance(query_summary.get("site_video_total"), int)
+                        else None
+                    ),
+                    "usable_after_dedupe_total": len(deduped_assets),
+                    "overlap_count": int(query_summary.get("overlap_with_prior_queries") or 0),
                     "current": len(deduped_assets),
                     "total": len(deduped_assets),
-                    "message": (
-                        f"Found {len(discovered)} Getty candidates; {len(deduped_assets)} unique discovered so far."
-                    ),
+                    "message": subtask_message,
                     "breakdown": {
                         "raw_getty_candidates": len(getty_assets),
                         "unique_discovered": len(deduped_assets),
                     },
                 }
             )
+            if (
+                query_index >= 1
+                and int(result.get("getty_primary_candidates_total") or 0) == 0
+                and int(result.get("getty_fallback_candidates_total") or 0) == 0
+            ):
+                _mark_getty_initial_zero_abort()
+                return result
         if len(getty_query_plan) < 2:
             _emit_getty_progress(
                 {
@@ -2848,7 +3813,7 @@ def _import_nbcumv_person_media(
             )
         result["unique_discovered_total"] = len(getty_assets)
         result["getty_candidates_total"] = len(getty_assets)
-    
+
         bravo_grouped_phrase = f"{normalized_person_name} Bravo".strip()
         _emit_getty_progress(
             {
@@ -2861,19 +3826,30 @@ def _import_nbcumv_person_media(
         _emit_progress(0, 0, f"Collecting Getty grouped events for '{bravo_grouped_phrase}'...")
         bravo_grouped_events = getty_integration.search_grouped_events(
             bravo_grouped_phrase,
-            limit=max(1, int(limit)),
+            limit=getty_search_limit,
             person_name=normalized_person_name,
             source_query_scope="bravo",
             full_scan_person_assets=True,
+            max_search_pages=query_page_cap,
+            diagnostics_out=getty_access_diagnostics,
         )
+        _sync_getty_access_fields()
         result["getty_bravo_grouped_total"] = len(bravo_grouped_events)
+        bravo_grouped_status = "completed"
+        bravo_grouped_message = f"Found {len(bravo_grouped_events)} Bravo-grouped Getty events."
+        if not bravo_grouped_events and _getty_is_unavailable():
+            bravo_grouped_status = "warning"
+            bravo_grouped_message = _build_getty_unavailable_message(
+                context="Bravo grouped event search",
+                phrase=bravo_grouped_phrase,
+            )
         _emit_getty_progress(
             {
                 "subtask_id": "bravo_grouped_events",
-                "subtask_status": "completed",
+                "subtask_status": bravo_grouped_status,
                 "query": bravo_grouped_phrase,
                 "candidates_found": len(bravo_grouped_events),
-                "message": f"Found {len(bravo_grouped_events)} Bravo-grouped Getty events.",
+                "message": bravo_grouped_message,
             }
         )
         _emit_getty_progress(
@@ -2887,21 +3863,32 @@ def _import_nbcumv_person_media(
         _emit_progress(0, 0, f"Collecting Getty grouped events for '{normalized_person_name}'...")
         broad_grouped_events = getty_integration.search_grouped_events(
             normalized_person_name,
-            limit=max(1, int(limit)),
+            limit=getty_search_limit,
             person_name=normalized_person_name,
             person_match_required=True,
             minimum_grouped_image_count=2,
             query_params={"sort": "best", "numberofpeople": "one,two"},
             source_query_scope="broad",
+            max_search_pages=query_page_cap,
+            diagnostics_out=getty_access_diagnostics,
         )
+        _sync_getty_access_fields()
         result["getty_broad_grouped_total"] = len(broad_grouped_events)
+        broad_grouped_status = "completed"
+        broad_grouped_message = f"Found {len(broad_grouped_events)} broad Getty grouped events."
+        if not broad_grouped_events and _getty_is_unavailable():
+            broad_grouped_status = "warning"
+            broad_grouped_message = _build_getty_unavailable_message(
+                context="broad grouped event search",
+                phrase=normalized_person_name,
+            )
         _emit_getty_progress(
             {
                 "subtask_id": "broad_grouped_events",
-                "subtask_status": "completed",
+                "subtask_status": broad_grouped_status,
                 "query": normalized_person_name,
                 "candidates_found": len(broad_grouped_events),
-                "message": f"Found {len(broad_grouped_events)} broad Getty grouped events.",
+                "message": broad_grouped_message,
             }
         )
         wwhl_grouped_events: list[dict[str, Any]] = []
@@ -2932,7 +3919,7 @@ def _import_nbcumv_person_media(
                     "message": "WWHL date-range fallback was not needed.",
                 }
             )
-    
+
     _ensure_sources(db)
     matched_assets: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]] = []
     matched_summaries: list[dict[str, Any]] = []
@@ -3227,7 +4214,8 @@ def _import_nbcumv_person_media(
         return matched_direct_images
 
     scoped_assets: list[tuple[dict[str, Any], dict[str, Any] | None, str | None, dict[str, Any]]] = []
-    if normalized_show:
+    apply_requested_show_filter = bool(normalized_show) and not getty_only_direct_import_mode
+    if apply_requested_show_filter:
         _emit_progress(0, len(getty_assets), f"Filtering {len(getty_assets)} Getty assets to '{resolved_show_name}'...")
     for asset in getty_assets:
         person_match = _describe_person_match(asset)
@@ -3245,7 +4233,7 @@ def _import_nbcumv_person_media(
         resolved_asset_show_title = (
             str(resolved_asset_show.get("title") or "").strip() if isinstance(resolved_asset_show, dict) else ""
         )
-        if normalized_show:
+        if apply_requested_show_filter:
             show_candidates = _candidate_show_titles_from_getty(asset)
             candidate_match = any(
                 (
@@ -3342,9 +4330,27 @@ def _import_nbcumv_person_media(
     result["getty_broad_events"] = _capture_grouped_event_inventory(broad_grouped_events)
     result["getty_wwhl_events"] = _capture_grouped_event_inventory(wwhl_grouped_events)
 
-    combined_assets = _dedupe_scoped_getty_assets(scoped_assets + broad_event_assets)
+    combined_assets = _dedupe_scoped_getty_assets(
+        scoped_assets + broad_event_assets,
+        dedupe_on_object_name=not (
+            getty_only_direct_import_mode or existing_nbcumv_prefetched_enrichment_mode
+        ),
+    )
+    repair_asset_tuples = list(combined_assets)
+    result["getty_discovered_total"] = len(getty_assets)
+    result["getty_usable_total"] = len(combined_assets)
+    if enrichment_only_mode:
+        requested_editorial_id_set = set(requested_deferred_editorial_ids)
+        combined_assets = [
+            asset_tuple
+            for asset_tuple in combined_assets
+            if str(asset_tuple[0].get("editorial_id") or "").strip() in requested_editorial_id_set
+        ]
+        repair_asset_tuples = list(combined_assets)
+    result["getty_usable_total"] = len(combined_assets)
     result["unique_discovered_total"] = len(combined_assets)
     result["getty_candidates_total"] = len(combined_assets)
+    _sync_getty_access_fields()
     _emit_getty_progress(
         {
             "status": "running",
@@ -3352,6 +4358,8 @@ def _import_nbcumv_person_media(
             "breakdown": {
                 "raw_getty_candidates": len(combined_assets),
                 "unique_discovered": len(combined_assets),
+                "getty_discovered_total": len(getty_assets),
+                "getty_usable_total": len(combined_assets),
                 "matched_via_nbcumv": 0,
                 "matched_via_bravotv_json": 0,
                 "matched_via_image_search": 0,
@@ -3369,7 +4377,15 @@ def _import_nbcumv_person_media(
         }
     )
     if not combined_assets:
-        result["getty_zero_result_reason"] = "no_getty_candidates_after_searches"
+        if _getty_is_unavailable():
+            unavailable_reason = str(result.get("getty_unavailable_reason") or "search_unavailable").strip()
+            result["summary_message"] = (
+                f"Getty search unavailable for '{normalized_person_name}'"
+                + (f" ({unavailable_reason}). " if unavailable_reason else ". ")
+                + "Continuing with NBCUMV/BravoTV fallback."
+            )
+        else:
+            result["getty_zero_result_reason"] = "no_getty_candidates_after_searches"
         _emit_getty_progress(
             {
                 "subtask_id": "pair_nbcumv",
@@ -3412,9 +4428,144 @@ def _import_nbcumv_person_media(
             }
         )
         if direct_matches:
+            prefix = "Getty unavailable; " if _getty_is_unavailable() else ""
             result["summary_message"] = (
-                f"NBCUMV direct caption search queued {len(matched_assets)} match"
+                prefix + f"NBCUMV direct caption search queued {len(matched_assets)} match"
                 f"{'es' if len(matched_assets) != 1 else ''}."
+            )
+    if (existing_nbcumv_prefetched_enrichment_mode or getty_only_direct_import_mode) and combined_assets:
+        _emit_getty_progress(
+            {
+                "phase": "pairing",
+                "subtask_id": "pair_nbcumv",
+                "subtask_status": "skipped",
+                "current": 0,
+                "total": len(combined_assets),
+                "message": (
+                    "Getty-only run detected; importing Getty directly from prefetched assets "
+                    "and skipping NBCUMV re-crosswalk."
+                    if getty_only_direct_import_mode
+                    else "Existing NBCUMV gallery coverage detected; skipping live NBCUMV re-crosswalk "
+                    "and importing Getty directly from prefetched assets."
+                ),
+                "breakdown": {
+                    "existing_nbcumv_gallery_count": existing_nbcumv_gallery_count,
+                    "getty_discovered_total": len(getty_assets),
+                    "getty_usable_total": len(combined_assets),
+                },
+            }
+        )
+        _emit_getty_progress(
+            {
+                "subtask_id": "pair_bravotv_json",
+                "subtask_status": "skipped",
+                "current": 0,
+                "total": len(combined_assets),
+                "message": "Public replacement pairing is deferred for prefetched Getty direct-import mode.",
+            }
+        )
+        prefetched_direct_rows: list[dict[str, Any]] = []
+        deferred_prefetched_editorial_ids: set[str] = {
+            str(value).strip() for value in result.get("getty_deferred_editorial_ids") or [] if str(value).strip()
+        }
+        for asset, _resolved_asset_show, resolved_asset_show_title, bucket_metadata in combined_assets:
+            editorial_id = str(asset.get("editorial_id") or "").strip()
+            needs_detail_enrichment = discovery_prefetch_mode and not _getty_has_strong_original_url(asset)
+            if needs_detail_enrichment and editorial_id:
+                deferred_prefetched_editorial_ids.add(editorial_id)
+                result["getty_deferred_resolution_total"] = int(result.get("getty_deferred_resolution_total") or 0) + 1
+                _mark_event_inventory_resolution(
+                    event_inventory_by_editorial_id,
+                    asset,
+                    resolution="deferred_detail_enrichment",
+                )
+                continue
+            getty_row = _build_getty_cast_photo_row(
+                asset,
+                asset_show_name=_select_getty_row_show_name(
+                    bucket_metadata=bucket_metadata,
+                    resolved_asset_show_title=resolved_asset_show_title,
+                ),
+                crosswalk_reason="prefetched_getty_direct_import",
+                public_replacement=None,
+                include_reverse_image_search_url=False,
+            )
+            if getty_row is None:
+                if discovery_prefetch_mode and editorial_id:
+                    deferred_prefetched_editorial_ids.add(editorial_id)
+                    result["getty_deferred_resolution_total"] = int(
+                        result.get("getty_deferred_resolution_total") or 0
+                    ) + 1
+                    _mark_event_inventory_resolution(
+                        event_inventory_by_editorial_id,
+                        asset,
+                        resolution="deferred_detail_enrichment",
+                    )
+                continue
+            metadata = getty_row.get("metadata")
+            if isinstance(metadata, dict):
+                metadata["gallery_bucket"] = dict(bucket_metadata)
+                metadata.update(dict(bucket_metadata))
+                if needs_detail_enrichment:
+                    metadata["getty_detail_enrichment_pending"] = True
+                    metadata["source_resolution"] = "getty_discovery_preview"
+            if bucket_metadata.get("bucket_type") == "show" and bucket_metadata.get("resolved_show_name"):
+                getty_row["title_names"] = [str(bucket_metadata["resolved_show_name"])]
+            prefetched_direct_rows.append(getty_row)
+            _mark_event_inventory_resolution(
+                event_inventory_by_editorial_id,
+                asset,
+                resolution="prefetched_getty_direct_import_pending_detail_enrichment"
+                if needs_detail_enrichment
+                else "prefetched_getty_direct_import",
+            )
+        getty_only_rows.extend(prefetched_direct_rows)
+        combined_assets = []
+        result["getty_deferred_editorial_ids"] = sorted(deferred_prefetched_editorial_ids)
+        if discovery_prefetch_mode and getty_deferred_enrichment:
+            result["getty_enrichment_pending"] = len(result["getty_deferred_editorial_ids"])
+        elif enrichment_only_mode:
+            result["getty_enrichment_pending"] = 0
+            result["getty_enrichment_completed"] = len(result["getty_deferred_editorial_ids"])
+        result["getty_to_import_total"] = len(prefetched_direct_rows)
+        deferred_count = len(result["getty_deferred_editorial_ids"])
+        if getty_only_direct_import_mode and deferred_count > 0 and not prefetched_direct_rows:
+            result["summary_message"] = (
+                f"Deferred {deferred_count} Getty assets for full-detail enrichment before import; "
+                "discovery previews are not imported as final Getty rows."
+            )
+            _emit_getty_progress(
+                {
+                    "phase": "importing",
+                    "subtask_id": "import_getty_only",
+                    "subtask_status": "skipped",
+                    "current": 0,
+                    "total": deferred_count,
+                    "message": (
+                        f"Deferred {deferred_count} Getty assets for full-detail enrichment before import; "
+                        "discovery previews are not imported as final Getty rows."
+                    ),
+                    "breakdown": {
+                        "getty_deferred_resolution_total": deferred_count,
+                        "getty_enrichment_pending": int(result.get("getty_enrichment_pending") or 0),
+                    },
+                }
+            )
+            _emit_progress(
+                0,
+                deferred_count,
+                (
+                    f"Deferred {deferred_count} Getty assets for full-detail enrichment before import; "
+                    "discovery previews are not imported as final Getty rows."
+                ),
+            )
+        else:
+            result["summary_message"] = (
+                f"Getty-only run queued {len(prefetched_direct_rows)} Getty assets directly from "
+                "the prefetched Getty payload."
+                if getty_only_direct_import_mode
+                else f"Existing NBCUMV gallery coverage detected; queued {len(prefetched_direct_rows)} Getty assets "
+                "directly from the prefetched Getty payload."
             )
     match_total = len(combined_assets)
     if match_total > 0:
@@ -3476,7 +4627,7 @@ def _import_nbcumv_person_media(
             public_replacement = None
             preview_url = _getty_preview_url(asset)
             replacement_width, replacement_height = _getty_dimensions(asset)
-            if preview_url and _is_bravo_auto_replace_eligible(bucket_metadata):
+            if allow_public_replacement_lookup and preview_url and _is_bravo_auto_replace_eligible(bucket_metadata):
                 try:
                     public_replacement = resolve_best_public_replacement(
                         preview_url,
@@ -3493,14 +4644,13 @@ def _import_nbcumv_person_media(
                     )
             getty_row = _build_getty_cast_photo_row(
                 asset,
-                asset_show_name=(
-                    str(bucket_metadata.get("resolved_show_name") or "").strip()
-                    or resolved_asset_show_title
-                    or resolved_show_name
-                    or None
+                asset_show_name=_select_getty_row_show_name(
+                    bucket_metadata=bucket_metadata,
+                    resolved_asset_show_title=resolved_asset_show_title,
                 ),
                 crosswalk_reason="nbcumv_unavailable" if nbcumv_access_error else "no_nbcumv_match",
                 public_replacement=public_replacement,
+                include_reverse_image_search_url=allow_public_replacement_lookup,
             )
             if getty_row is not None:
                 metadata = getty_row.get("metadata")
@@ -3629,33 +4779,55 @@ def _import_nbcumv_person_media(
         )
 
     if combined_assets:
-        _emit_getty_progress(
-            {
-                "phase": "supplementing",
-                "subtask_id": "supplement_nbcumv_only",
-                "subtask_status": "running",
-                "message": "Searching NBCUMV for supplemental caption matches not covered by Getty...",
-            }
-        )
-        direct_nbcumv_matches = _run_direct_nbcumv_caption_search(
-            _resolve_direct_nbcumv_shows(),
-            getty_candidates_present=True,
-        )
-        if direct_nbcumv_matches:
-            matched_assets.extend(direct_nbcumv_matches)
-        _emit_getty_progress(
-            {
-                "subtask_id": "supplement_nbcumv_only",
-                "subtask_status": "completed" if direct_nbcumv_matches else "skipped",
-                "current": len(direct_nbcumv_matches),
-                "total": len(direct_nbcumv_matches),
-                "message": (
-                    f"Queued {len(direct_nbcumv_matches)} NBCUMV-only supplemental matches."
-                    if direct_nbcumv_matches
-                    else "No NBCUMV-only supplemental matches were needed."
-                ),
-            }
-        )
+        if existing_nbcumv_prefetched_enrichment_mode or enrichment_only_mode or not allow_nbcumv_only_supplement:
+            _emit_getty_progress(
+                {
+                    "phase": "supplementing",
+                    "subtask_id": "supplement_nbcumv_only",
+                    "subtask_status": "skipped",
+                    "current": 0,
+                    "total": 0,
+                    "message": (
+                        "Skipped NBCUMV-only supplement because this run is operating in prefetched "
+                        "Getty enrichment mode."
+                        if existing_nbcumv_prefetched_enrichment_mode or enrichment_only_mode
+                        else "Skipped NBCUMV-only supplement because this run is Getty-only."
+                    ),
+                    "breakdown": {
+                        "existing_nbcumv_gallery_count": existing_nbcumv_gallery_count,
+                        "enrichment_only_mode": enrichment_only_mode,
+                        "allow_nbcumv_only_supplement": allow_nbcumv_only_supplement,
+                    },
+                }
+            )
+        else:
+            _emit_getty_progress(
+                {
+                    "phase": "supplementing",
+                    "subtask_id": "supplement_nbcumv_only",
+                    "subtask_status": "running",
+                    "message": "Searching NBCUMV for supplemental caption matches not covered by Getty...",
+                }
+            )
+            direct_nbcumv_matches = _run_direct_nbcumv_caption_search(
+                _resolve_direct_nbcumv_shows(),
+                getty_candidates_present=True,
+            )
+            if direct_nbcumv_matches:
+                matched_assets.extend(direct_nbcumv_matches)
+            _emit_getty_progress(
+                {
+                    "subtask_id": "supplement_nbcumv_only",
+                    "subtask_status": "completed" if direct_nbcumv_matches else "skipped",
+                    "current": len(direct_nbcumv_matches),
+                    "total": len(direct_nbcumv_matches),
+                    "message": (
+                        f"Queued {len(direct_nbcumv_matches)} NBCUMV-only supplemental matches."
+                        if direct_nbcumv_matches
+                        else "No NBCUMV-only supplemental matches were needed."
+                    ),
+                }
+            )
 
     shared_nbcumv_total = sum(1 for *_rest, resolution in matched_assets if resolution == "nbcumv_preferred_shared")
     nbcumv_only_total = sum(1 for *_rest, resolution in matched_assets if resolution == "nbcumv_only")
@@ -3673,7 +4845,7 @@ def _import_nbcumv_person_media(
             "show_id": str(show_id) if show_id else None,
             "show_name": resolved_show_name or None,
         },
-        "candidate_count": len(combined_assets),
+        "candidate_count": len(repair_asset_tuples),
         "raw_candidate_count": len(getty_assets),
         "matched_count": shared_nbcumv_total,
         "shared_nbcumv_total": shared_nbcumv_total,
@@ -3700,12 +4872,44 @@ def _import_nbcumv_person_media(
             logger.warning("Failed to persist Getty person snapshot for %s: %s", person_id, exc)
             result["errors"].append(f"Getty snapshot persistence failed: {exc}")
 
-    if getty_only_rows:
-        from trr_backend.repositories import cast_photos as cast_photos_repo
+    if repair_asset_tuples:
+        repaired_existing_getty = _repair_existing_getty_gallery_records(repair_asset_tuples)
+        existing_repair_row_ids = list(repaired_existing_getty.get("row_ids") or [])
+        existing_repair_media_asset_ids = list(repaired_existing_getty.get("media_asset_ids") or [])
+        existing_editorial_ids = sorted(
+            {
+                str(asset.get("editorial_id") or "").strip()
+                for asset, _resolved_asset_show, _resolved_asset_show_title, _bucket_metadata in repair_asset_tuples
+                if str(asset.get("editorial_id") or "").strip()
+            }
+        )
+        if existing_editorial_ids:
+            _sync_cast_gallery_rows_to_media_assets(db, _fetch_person_getty_cast_rows(existing_editorial_ids))
+            existing_repair_media_asset_ids = sorted(
+                {
+                    *existing_repair_media_asset_ids,
+                    *_fetch_person_getty_media_asset_ids(existing_editorial_ids),
+                }
+            )
+        result["getty_repair_row_ids"] = existing_repair_row_ids
+        result["getty_repair_media_asset_ids"] = existing_repair_media_asset_ids
 
+    if getty_only_rows:
+        existing_non_getty_filenames = _fetch_existing_person_non_getty_filenames()
+        getty_only_rows_to_upsert: list[dict[str, Any]] = []
+        existing_shared_count = 0
+        for row in getty_only_rows:
+            file_name = str(row.get("file_name") or "").strip().casefold()
+            if file_name and file_name in existing_non_getty_filenames:
+                existing_shared_count += 1
+                continue
+            getty_only_rows_to_upsert.append(row)
+        result["getty_existing_shared_total"] = existing_shared_count
+        result["getty_to_import_total"] = len(getty_only_rows_to_upsert)
+        result["getty_skipped_existing_total"] = existing_shared_count
         editorial_ids = [
             str(row.get("source_image_id") or "").strip()
-            for row in getty_only_rows
+            for row in getty_only_rows_to_upsert
             if str(row.get("source_image_id") or "").strip()
         ]
         existing_getty_ids = _fetch_existing_getty_source_ids(editorial_ids)
@@ -3715,65 +4919,133 @@ def _import_nbcumv_person_media(
                 "subtask_id": "import_getty_only",
                 "subtask_status": "running",
                 "current": 0,
-                "total": len(getty_only_rows),
-                "message": f"Importing {len(getty_only_rows)} Getty-only fallback photos...",
+                "total": len(getty_only_rows_to_upsert),
+                "message": (
+                    f"Importing {len(getty_only_rows_to_upsert)} Getty-only photos after "
+                    f"skipping {existing_shared_count} existing shared/NBCUMV counterparts..."
+                    if existing_shared_count > 0
+                    else f"Importing {len(getty_only_rows_to_upsert)} Getty-only fallback photos..."
+                ),
+                "breakdown": {
+                    "getty_existing_shared_total": existing_shared_count,
+                    "getty_to_import_total": len(getty_only_rows_to_upsert),
+                    "getty_skipped_existing_total": existing_shared_count,
+                },
             }
         )
-        _emit_progress(0, len(getty_only_rows), f"Importing {len(getty_only_rows)} Getty-only fallback photos...")
-        upserted_rows = upsert_cast_photos(db, getty_only_rows, dedupe_on="source_image_id")
+        _emit_progress(
+            0,
+            len(getty_only_rows_to_upsert),
+            (
+                f"Importing {len(getty_only_rows_to_upsert)} Getty-only photos after "
+                f"skipping {existing_shared_count} existing shared/NBCUMV counterparts..."
+                if existing_shared_count > 0
+                else f"Importing {len(getty_only_rows_to_upsert)} Getty-only fallback photos..."
+            ),
+        )
+        upserted_rows: list[dict[str, Any]] = []
+        if getty_only_rows_to_upsert:
+            batch_size = _resolve_getty_only_upsert_batch_size()
+            upserted_so_far = 0
+            for batch in _chunked(getty_only_rows_to_upsert, batch_size):
+                batch_upserted_rows = upsert_cast_photos(db, batch, dedupe_on="source_image_id")
+                upserted_rows.extend(batch_upserted_rows)
+                upserted_so_far += len(batch)
+                _emit_getty_progress(
+                    {
+                        "subtask_id": "import_getty_only",
+                        "subtask_status": "running",
+                        "current": upserted_so_far,
+                        "total": len(getty_only_rows_to_upsert),
+                        "message": (
+                            f"Upserted {upserted_so_far}/{len(getty_only_rows_to_upsert)} Getty-only photos..."
+                        ),
+                        "breakdown": {
+                            "getty_to_import_total": len(getty_only_rows_to_upsert),
+                            "getty_existing_shared_total": existing_shared_count,
+                            "getty_skipped_existing_total": existing_shared_count,
+                        },
+                    }
+                )
+                _emit_progress(
+                    upserted_so_far,
+                    len(getty_only_rows_to_upsert),
+                    f"Upserted {upserted_so_far}/{len(getty_only_rows_to_upsert)} Getty-only photos...",
+                )
         source_rows_by_image_id = {
             str(row.get("source_image_id") or "").strip(): row
-            for row in getty_only_rows
+            for row in getty_only_rows_to_upsert
             if str(row.get("source_image_id") or "").strip()
         }
         for upserted_row in upserted_rows:
             row_id = str(upserted_row.get("id") or "").strip()
-            source_image_id = str(upserted_row.get("source_image_id") or "").strip()
-            source_row = source_rows_by_image_id.get(source_image_id)
-            preview_url = str((source_row or {}).get("url") or "").strip()
             if row_id:
                 result["getty_only_row_ids"].append(row_id)
-            if not row_id or not preview_url:
-                continue
-            try:
-                cast_photos_repo.update_cast_photo_hosted_fields(
-                    db,
-                    row_id,
-                    {"hosted_url": preview_url, "hosted_content_type": "image/jpeg"},
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to set Getty fallback hosted fields for %s: %s", row_id, exc)
+        repaired_getty_only = _repair_getty_only_gallery_records(
+            upserted_rows,
+            source_rows_by_image_id=source_rows_by_image_id,
+        )
+        repaired_getty_only_row_ids = list(repaired_getty_only.get("row_ids") or [])
+        _sync_cast_gallery_rows_to_media_assets(db, _fetch_person_getty_cast_rows(editorial_ids))
+        result["getty_only_row_ids"] = sorted(
+            {
+                *result["getty_only_row_ids"],
+                *repaired_getty_only_row_ids,
+            }
+        )
+        result["getty_only_media_asset_ids"] = sorted(
+            {
+                *(repaired_getty_only.get("media_asset_ids") or []),
+                *_fetch_person_getty_media_asset_ids(editorial_ids),
+            }
+        )
         result["getty_only_imported"] = sum(
             1 for row in upserted_rows if str(row.get("source_image_id") or "").strip() not in existing_getty_ids
         )
-        result["skipped"] += max(0, len(upserted_rows) - int(result["getty_only_imported"]))
+        result["skipped"] += max(0, len(upserted_rows) - int(result["getty_only_imported"])) + existing_shared_count
         result["getty_only_existing"] = max(0, len(upserted_rows) - int(result["getty_only_imported"]))
+        result["getty_existing_getty_total"] = int(result.get("getty_only_existing") or 0)
+        result["getty_skipped_existing_total"] = existing_shared_count + int(result["getty_only_existing"] or 0)
         result["covered_existing"] = int(result.get("covered_existing") or 0) + int(
             result.get("getty_only_existing") or 0
-        )
+        ) + existing_shared_count
         imported_getty_count = int(result["getty_only_imported"])
         existing_getty_count = int(result.get("getty_only_existing") or 0)
         _emit_getty_progress(
             {
                 "subtask_id": "import_getty_only",
                 "subtask_status": "completed",
-                "current": len(getty_only_rows),
-                "total": len(getty_only_rows),
+                "current": len(getty_only_rows_to_upsert),
+                "total": len(getty_only_rows_to_upsert),
                 "message": (
-                    f"Imported Getty-only fallbacks ({imported_getty_count} new, {existing_getty_count} existing)."
+                    f"Imported Getty-only photos ({imported_getty_count} new, "
+                    f"{existing_getty_count} existing Getty, {existing_shared_count} "
+                    "existing shared/NBCUMV)."
                 ),
                 "breakdown": {
                     "getty_only_imported": imported_getty_count,
                     "covered_existing": int(result.get("covered_existing") or 0),
-                    "skipped": max(0, existing_getty_count),
+                    "getty_existing_shared_total": existing_shared_count,
+                    "getty_existing_getty_total": existing_getty_count,
+                    "getty_to_import_total": len(getty_only_rows_to_upsert),
+                    "getty_skipped_existing_total": int(result.get("getty_skipped_existing_total") or 0)
+                    + existing_getty_count,
+                    "skipped": max(0, existing_getty_count + existing_shared_count),
                 },
             }
         )
         _emit_progress(
-            len(getty_only_rows),
-            len(getty_only_rows),
-            (f"Imported Getty-only fallback photos ({imported_getty_count} new, {existing_getty_count} existing)."),
+            len(getty_only_rows_to_upsert),
+            len(getty_only_rows_to_upsert),
+            (
+                f"Imported Getty-only photos ({imported_getty_count} new, "
+                f"{existing_getty_count} existing Getty, {existing_shared_count} "
+                "existing shared/NBCUMV)."
+            ),
         )
+        if enrichment_only_mode:
+            result["getty_enrichment_completed"] = len(sorted({*editorial_ids, *requested_deferred_editorial_ids}))
+            result["getty_enrichment_pending"] = 0
     else:
         _emit_getty_progress(
             {
@@ -3782,6 +5054,9 @@ def _import_nbcumv_person_media(
                 "message": "No Getty-only fallback imports were needed.",
             }
         )
+        if enrichment_only_mode:
+            result["getty_enrichment_completed"] = len(requested_deferred_editorial_ids)
+            result["getty_enrichment_pending"] = 0
 
     if not matched_assets and not getty_only_rows:
         if result["summary_message"] is None and nbcumv_access_error:
@@ -3861,9 +5136,13 @@ def _import_nbcumv_person_media(
         created_links = len(import_result.get("created_person_ids") or []) + len(
             import_result.get("created_show_ids") or []
         )
+        metadata_upgraded = bool(import_result.get("metadata_upgraded"))
         result["gallery_links_created"] += created_links
         if import_result.get("already_imported") and created_links == 0:
-            result["skipped"] += 1
+            if metadata_upgraded and source_resolution == "nbcumv_preferred_shared":
+                result["upgraded_existing"] = int(result.get("upgraded_existing") or 0) + 1
+            else:
+                result["skipped"] += 1
             result["covered_existing"] = int(result.get("covered_existing") or 0) + 1
             if source_resolution == "nbcumv_preferred_shared":
                 result["shared_nbcumv_existing"] = int(result.get("shared_nbcumv_existing") or 0) + 1
@@ -3875,7 +5154,21 @@ def _import_nbcumv_person_media(
                 result["shared_nbcumv_imported"] += 1
             elif source_resolution == "nbcumv_only":
                 result["nbcumv_only_imported"] += 1
-        _emit_progress(index, total, f"Imported NBCUMV {index}/{total}: {filename or lbx_id}")
+        if import_result.get("already_imported") and created_links == 0:
+            if metadata_upgraded and source_resolution == "nbcumv_preferred_shared":
+                _emit_progress(
+                    index,
+                    total,
+                    f"Enriched existing NBCUMV {index}/{total} with Getty metadata: {filename or lbx_id}",
+                )
+            else:
+                _emit_progress(
+                    index,
+                    total,
+                    f"Verified existing NBCUMV {index}/{total}: {filename or lbx_id}",
+                )
+        else:
+            _emit_progress(index, total, f"Imported NBCUMV {index}/{total}: {filename or lbx_id}")
     _emit_getty_progress(
         {
             "phase": "supplementing",
@@ -3892,14 +5185,23 @@ def _import_nbcumv_person_media(
         }
     )
     result["fetched"] = len(matched_assets) + len(getty_only_rows)
+    if discovery_prefetch_mode and getty_deferred_enrichment and not result["getty_enrichment_pending"]:
+        result["getty_enrichment_pending"] = len(result.get("getty_deferred_editorial_ids") or [])
+    if enrichment_only_mode and not result["getty_enrichment_completed"]:
+        result["getty_enrichment_completed"] = len(requested_deferred_editorial_ids)
+        result["getty_enrichment_pending"] = 0
     if result["summary_message"] is None:
-        summary_prefix = (
-            "Getty complete with NBCUMV unavailable: " if nbcumv_access_error else "Getty/NBCUMV complete: "
-        )
+        if _getty_is_unavailable():
+            summary_prefix = "Getty unavailable; NBCUMV/BravoTV fallback complete: "
+        else:
+            summary_prefix = (
+                "Getty complete with NBCUMV unavailable: " if nbcumv_access_error else "Getty/NBCUMV complete: "
+            )
         result["summary_message"] = (
             summary_prefix + f"{int(result.get('shared_nbcumv_imported') or 0)} shared via NBCUMV, "
             f"{int(result.get('nbcumv_only_imported') or 0)} NBCUMV-only, "
             f"{int(result.get('getty_only_imported') or 0)} Getty-only, "
+            f"{int(result.get('upgraded_existing') or 0)} upgraded existing, "
             f"{int(result.get('covered_existing') or 0)} covered existing, "
             f"{int(result.get('skipped') or 0)} skipped, {int(result.get('failed') or 0)} failed."
         )
@@ -5626,6 +6928,96 @@ def _apply_auto_crop_payload(
         "strategy": fallback_strategy,
         "generated_at": datetime.now(UTC).isoformat(),
     }
+
+
+def _sync_cast_gallery_rows_to_media_assets(
+    db: SupabaseAdminClient,
+    rows: list[dict[str, Any]],
+) -> None:
+    from trr_backend.repositories.media_assets import (
+        reconcile_media_asset_id_conflicts,
+        transform_cast_photos_to_media,
+        upsert_media_assets,
+        upsert_media_links,
+    )
+
+    if not rows:
+        return
+
+    assets, links = transform_cast_photos_to_media(rows)
+    if not assets:
+        return
+    assets, links = reconcile_media_asset_id_conflicts(db, assets, links)
+
+    asset_ids = [str(asset.get("id") or "").strip() for asset in assets if str(asset.get("id") or "").strip()]
+    existing_assets_by_id: dict[str, dict[str, Any]] = {}
+    for chunk in _chunked(asset_ids, 200):
+        response = (
+            db.schema("core")
+            .table("media_assets")
+            .select("id, source, source_url, hosted_url, hosted_key, metadata")
+            .in_("id", chunk)
+            .execute()
+        )
+        for row in response.data or []:
+            if isinstance(row, dict) and row.get("id"):
+                existing_assets_by_id[str(row["id"])] = row
+
+    upsert_media_assets(db, assets)
+    upsert_media_links(db, links)
+
+    for asset in assets:
+        asset_id = str(asset.get("id") or "").strip()
+        source_url = str(asset.get("source_url") or "").strip()
+        source = str(asset.get("source") or "").strip()
+        if not asset_id or not source_url:
+            continue
+        existing_asset = existing_assets_by_id.get(asset_id)
+        existing_source_url = str((existing_asset or {}).get("source_url") or "").strip()
+        should_reset_getty_hosted = bool(
+            source == _GETTY_SOURCE_ID
+            and existing_asset
+            and _should_reset_getty_hosted_state(
+                desired_original_url=source_url,
+                current_source_url=existing_asset.get("source_url"),
+                hosted_url=existing_asset.get("hosted_url"),
+                hosted_key=existing_asset.get("hosted_key"),
+                metadata=existing_asset.get("metadata"),
+            )
+        )
+        if (
+            not existing_asset
+            or not existing_source_url
+            or (existing_source_url == source_url and not should_reset_getty_hosted)
+        ):
+            continue
+        clear_patch: dict[str, Any] = {
+            "source_url": source_url,
+            "sha256": None,
+            "hosted_bucket": None,
+            "hosted_key": None,
+            "hosted_url": None,
+            "hosted_sha256": None,
+            "hosted_content_type": None,
+            "hosted_bytes": None,
+            "hosted_etag": None,
+            "hosted_at": None,
+            "ingest_status": "pending",
+            "ingest_last_error": None,
+            "ingest_retry_count": 0,
+            "ingest_failed_at": None,
+            "ingest_completed_at": None,
+            "ingest_next_retry_at": None,
+        }
+        if asset.get("width") is not None:
+            clear_patch["width"] = asset.get("width")
+        if asset.get("height") is not None:
+            clear_patch["height"] = asset.get("height")
+        if asset.get("caption") is not None:
+            clear_patch["caption"] = asset.get("caption")
+        if isinstance(asset.get("metadata"), dict):
+            clear_patch["metadata"] = asset.get("metadata")
+        db.schema("core").table("media_assets").update(clear_patch).eq("id", asset_id).execute()
 
 
 def _owner_face_crop_payload(
@@ -9517,9 +10909,10 @@ def refresh_person_images(
     show_name = request.show_name or _get_show_name(db, request.show_id)
     wwhl_credit_episode_imdb_ids = _load_person_wwhl_episode_imdb_ids_from_credits(db, person_id_str)
     sources, fandom_skipped = _resolve_refresh_sources(db, request)
+    sources = _normalize_operational_refresh_sources(sources, request)
     metadata_repair_enabled = _should_run_imdb_metadata_repair_for_sources(sources)
-    shared_bravotv_supplement_enabled = "nbcumv" in sources or "bravotv" in sources
-    cast_photo_sources = [source for source in sources if source not in {"nbcumv", "bravotv"}]
+    shared_bravotv_supplement_enabled = "bravotv" in sources
+    cast_photo_sources = [source for source in sources if source not in {"nbcumv", "getty", "bravotv"}]
     errors: list[str] = []
     tmdb_profile_status: Literal["ok", "skipped", "failed"] | None = None
     tmdb_profile_error_code: str | None = None
@@ -9708,7 +11101,14 @@ def refresh_person_images(
     nbcumv_only_total = 0
     nbcumv_only_imported = 0
     getty_only_imported = 0
+    getty_only_row_ids: list[str] = []
+    getty_only_media_asset_ids: list[str] = []
+    getty_repair_row_ids: list[str] = []
+    getty_repair_media_asset_ids: list[str] = []
     getty_snapshot_saved = False
+    getty_initial_search_zero_abort = False
+    getty_initial_search_queries: list[str] = []
+    getty_initial_search_counts: dict[str, int] = {}
     nbcumv_result: dict[str, Any] = {}
     bravotv_result: dict[str, Any] = {}
     bravotv_photos_fetched = 0
@@ -9730,6 +11130,13 @@ def refresh_person_images(
                 limit=request.limit_per_source,
                 getty_prefetched_assets=request.getty_prefetched_assets,
                 getty_prefetched_events=request.getty_prefetched_events,
+                getty_prefetched_queries=request.getty_prefetched_queries,
+                getty_prefetch_mode=request.getty_prefetch_mode,
+                getty_deferred_enrichment=request.getty_deferred_enrichment,
+                getty_deferred_editorial_ids=request.getty_deferred_editorial_ids,
+                getty_prefetch_auth_mode=request.getty_prefetch_auth_mode,
+                getty_prefetch_auth_warning=request.getty_prefetch_auth_warning,
+                allow_nbcumv_only_supplement=_allow_nbcumv_only_supplement_for_requested_sources(request.sources),
             )
             nbcumv_photos_fetched = int(nbcumv_result.get("fetched") or 0)
             nbcumv_assets_imported = int(nbcumv_result.get("imported") or 0)
@@ -9744,7 +11151,36 @@ def refresh_person_images(
             nbcumv_only_total = int(nbcumv_result.get("nbcumv_only_total") or 0)
             nbcumv_only_imported = int(nbcumv_result.get("nbcumv_only_imported") or 0)
             getty_only_imported = int(nbcumv_result.get("getty_only_imported") or 0)
+            getty_only_row_ids = [
+                str(row_id).strip() for row_id in (nbcumv_result.get("getty_only_row_ids") or []) if str(row_id).strip()
+            ]
+            getty_only_media_asset_ids = [
+                str(asset_id).strip()
+                for asset_id in (nbcumv_result.get("getty_only_media_asset_ids") or [])
+                if str(asset_id).strip()
+            ]
+            getty_repair_row_ids = [
+                str(row_id).strip()
+                for row_id in (nbcumv_result.get("getty_repair_row_ids") or [])
+                if str(row_id).strip()
+            ]
+            getty_repair_media_asset_ids = [
+                str(asset_id).strip()
+                for asset_id in (nbcumv_result.get("getty_repair_media_asset_ids") or [])
+                if str(asset_id).strip()
+            ]
             getty_snapshot_saved = bool(nbcumv_result.get("getty_snapshot_saved"))
+            getty_initial_search_zero_abort = bool(nbcumv_result.get("getty_initial_search_zero_abort"))
+            getty_initial_search_queries = [
+                str(value).strip()
+                for value in (nbcumv_result.get("getty_initial_search_queries") or [])
+                if str(value).strip()
+            ]
+            getty_initial_search_counts = {
+                str(key).strip(): int(value)
+                for key, value in dict(nbcumv_result.get("getty_initial_search_counts") or {}).items()
+                if str(key).strip() and isinstance(value, int)
+            }
             errors.extend(
                 [
                     str(error)
@@ -9752,12 +11188,21 @@ def refresh_person_images(
                     if isinstance(error, str) and error.strip()
                 ]
             )
+            if getty_initial_search_zero_abort:
+                logger.warning(
+                    "Early-aborting refresh for person_id=%s after Getty direct searches returned zero",
+                    person_id_str,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.exception("NBCUMV import stage failed for person_id=%s", person_id_str)
             nbcumv_failed += 1
             errors.append(f"NBCUMV: {exc}")
 
-    if shared_bravotv_supplement_enabled:
+    if (
+        shared_bravotv_supplement_enabled
+        and not getty_initial_search_zero_abort
+        and not bool(nbcumv_result.get("existing_nbcumv_prefetched_enrichment_mode"))
+    ):
         try:
             bravotv_result = _import_bravotv_person_media(
                 db,
@@ -9787,24 +11232,45 @@ def refresh_person_images(
             bravotv_failed += 1
             errors.append(f"BravoTV: {exc}")
 
-    if not request.skip_mirror and getty_only_imported > 0:
+    forced_getty_row_ids = sorted({*getty_only_row_ids, *getty_repair_row_ids})
+    forced_getty_media_asset_ids = sorted({*getty_only_media_asset_ids, *getty_repair_media_asset_ids})
+    if (
+        not request.skip_mirror
+        and not getty_initial_search_zero_abort
+        and (forced_getty_row_ids or forced_getty_media_asset_ids)
+    ):
         try:
-            getty_mirrored, getty_failed = _mirror_person_photos(
-                db,
-                person_id_str,
-                imdb_person_id,
-                force=request.force_mirror,
-                max_parallelism=mirror_parallelism if "mirror_parallelism" in locals() else 12,
-                batch_size=mirror_batch_size if "mirror_batch_size" in locals() else 200,
-            )
-            cast_photos_mirrored += getty_mirrored
-            cast_photos_failed += getty_failed
-            photos_mirrored += getty_mirrored
-            photos_failed += getty_failed
+            if forced_getty_row_ids:
+                row_mirrored, row_failed = _mirror_person_photos(
+                    db,
+                    person_id_str,
+                    imdb_person_id,
+                    photo_ids=forced_getty_row_ids,
+                    force=True,
+                    max_parallelism=mirror_parallelism if "mirror_parallelism" in locals() else 12,
+                    batch_size=mirror_batch_size if "mirror_batch_size" in locals() else 200,
+                )
+                cast_photos_mirrored += row_mirrored
+                cast_photos_failed += row_failed
+                photos_mirrored += row_mirrored
+                photos_failed += row_failed
+            if forced_getty_media_asset_ids:
+                asset_mirrored, asset_failed = _mirror_person_media_assets(
+                    db,
+                    person_id_str,
+                    asset_ids=forced_getty_media_asset_ids,
+                    force=True,
+                    max_parallelism=mirror_parallelism if "mirror_parallelism" in locals() else 12,
+                    batch_size=mirror_batch_size if "mirror_batch_size" in locals() else 200,
+                )
+                media_assets_mirrored += asset_mirrored
+                media_assets_failed += asset_failed
+                photos_mirrored += asset_mirrored
+                photos_failed += asset_failed
         except Exception as exc:  # noqa: BLE001
             logger.exception("Getty fallback mirror failed for person_id=%s", person_id_str)
             errors.append(f"Getty mirror: {exc}")
-            photos_failed += getty_only_imported
+            photos_failed += len(forced_getty_row_ids) + len(forced_getty_media_asset_ids)
 
     photos_mirrored += nbcumv_assets_imported
     media_assets_mirrored += nbcumv_assets_imported
@@ -9821,7 +11287,7 @@ def refresh_person_images(
     auto_counts_failed = 0
     auto_count_diagnostics = _empty_auto_count_diagnostics()
     auto_count_stage_stats = _empty_stage_row_stats()
-    if not request.skip_auto_count:
+    if not request.skip_auto_count and not getty_initial_search_zero_abort:
         tagging_batch_size = _resolve_stage_batch_size(
             request_overrides=request.batch_size,
             stage="tagging",
@@ -9902,7 +11368,7 @@ def refresh_person_images(
     text_overlay_failed = 0
     text_overlay_reason_counts: dict[str, int] = {}
     text_overlay_stage_stats = _empty_stage_row_stats()
-    if not request.skip_word_detection:
+    if not request.skip_word_detection and not getty_initial_search_zero_abort:
         (
             text_overlay_attempted_cast,
             text_overlay_succeeded_cast,
@@ -9940,7 +11406,7 @@ def refresh_person_images(
     centering_succeeded = 0
     centering_failed = 0
     centering_skipped_manual = 0
-    if not request.skip_centering:
+    if not request.skip_centering and not getty_initial_search_zero_abort:
         crop_parallelism = _resolve_stage_parallelism(
             request_overrides=request.max_parallelism,
             stage="crop",
@@ -9965,7 +11431,7 @@ def refresh_person_images(
     resize_crop_attempted = 0
     resize_crop_succeeded = 0
     resize_crop_failed = 0
-    if not request.skip_resize:
+    if not request.skip_resize and not getty_initial_search_zero_abort:
         (
             resize_attempted,
             resize_succeeded,
@@ -9982,7 +11448,7 @@ def refresh_person_images(
 
     # 5. Prune orphaned S3 objects
     photos_pruned = 0
-    if not request.skip_mirror and not request.skip_prune:
+    if not request.skip_mirror and not request.skip_prune and not getty_initial_search_zero_abort:
         person_identifier = imdb_person_id or person_id_str
         photos_pruned = _prune_person_s3_objects(db, person_identifier)
 
@@ -9997,6 +11463,14 @@ def refresh_person_images(
         resize_failed=resize_failed,
         resize_crop_failed=resize_crop_failed,
     )
+    if getty_initial_search_zero_abort:
+        failed_parts.append(
+            {
+                "part": "getty_initial_search_zero_abort",
+                "failed": 1,
+                "reason": "both_direct_getty_person_searches_returned_zero",
+            }
+        )
 
     return RefreshImagesResponse(
         person_id=person_id_str,
@@ -10035,8 +11509,29 @@ def refresh_person_images(
         getty_broad_grouped_total=int(nbcumv_result.get("getty_broad_grouped_total") or 0),
         getty_wwhl_grouped_total=int(nbcumv_result.get("getty_wwhl_grouped_total") or 0),
         getty_zero_result_reason=str(nbcumv_result.get("getty_zero_result_reason") or "").strip() or None,
+        getty_initial_search_zero_abort=getty_initial_search_zero_abort,
+        getty_initial_search_queries=getty_initial_search_queries,
+        getty_initial_search_counts=getty_initial_search_counts,
+        getty_access_mode=str(nbcumv_result.get("getty_access_mode") or "").strip() or None,
+        getty_search_degraded=bool(nbcumv_result.get("getty_search_degraded")),
+        getty_unavailable_reason=str(nbcumv_result.get("getty_unavailable_reason") or "").strip() or None,
+        getty_failure_stage=str(nbcumv_result.get("getty_failure_stage") or "").strip() or None,
+        getty_http_status=(
+            int(nbcumv_result.get("getty_http_status"))
+            if isinstance(nbcumv_result.get("getty_http_status"), int)
+            else None
+        ),
+        getty_page_classification=str(nbcumv_result.get("getty_page_classification") or "").strip() or None,
         matched_via_image_search=int(nbcumv_result.get("matched_via_image_search") or 0),
         getty_snapshot_saved=getty_snapshot_saved,
+        getty_enrichment_pending=int(nbcumv_result.get("getty_enrichment_pending") or 0),
+        getty_enrichment_completed=int(nbcumv_result.get("getty_enrichment_completed") or 0),
+        getty_enrichment_failed=int(nbcumv_result.get("getty_enrichment_failed") or 0),
+        getty_deferred_editorial_ids=[
+            str(value).strip()
+            for value in (nbcumv_result.get("getty_deferred_editorial_ids") or [])
+            if str(value).strip()
+        ],
         bravotv_photos_fetched=bravotv_photos_fetched,
         bravotv_assets_imported=bravotv_assets_imported,
         bravotv_assets_skipped=bravotv_assets_skipped,
@@ -10105,6 +11600,126 @@ def refresh_person_images(
     )
 
 
+@router.post("/{person_id}/refresh-images/getty-enrichment", response_model=GettyEnrichmentResponse)
+def refresh_person_images_getty_enrichment(
+    person_id: UUID,
+    request: GettyEnrichmentRequest | None = None,
+    db: SupabaseAdminClient = None,
+    _: AdminUser = None,
+) -> GettyEnrichmentResponse:
+    request = request or GettyEnrichmentRequest()
+    person_id_str = str(person_id)
+
+    person = _get_person_details(db, person_id_str)
+    if not person:
+        raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
+
+    external_ids = person.get("external_ids") or {}
+    imdb_person_id = _extract_imdb_id(external_ids)
+    person_name = person.get("full_name")
+    show_name = request.show_name or _get_show_name(db, request.show_id)
+
+    enrichment_result = _import_nbcumv_person_media(
+        db,
+        person_id=person_id_str,
+        person_name=person_name,
+        show_id=request.show_id,
+        show_name=show_name,
+        limit=10_000,
+        getty_prefetched_assets=request.getty_prefetched_assets,
+        getty_prefetched_events=request.getty_prefetched_events,
+        getty_prefetched_queries=request.getty_prefetched_queries,
+        getty_prefetch_mode=request.getty_prefetch_mode,
+        getty_deferred_enrichment=request.getty_deferred_enrichment,
+        getty_deferred_editorial_ids=request.getty_deferred_editorial_ids,
+        getty_prefetch_auth_mode=request.getty_prefetch_auth_mode,
+        getty_prefetch_auth_warning=request.getty_prefetch_auth_warning,
+        allow_nbcumv_only_supplement=_allow_nbcumv_only_supplement_for_requested_sources(["getty"]),
+    )
+
+    forced_getty_row_ids = sorted(
+        {
+            *[
+                str(row_id).strip()
+                for row_id in (enrichment_result.get("getty_only_row_ids") or [])
+                if str(row_id).strip()
+            ],
+            *[
+                str(row_id).strip()
+                for row_id in (enrichment_result.get("getty_repair_row_ids") or [])
+                if str(row_id).strip()
+            ],
+        }
+    )
+    forced_getty_media_asset_ids = sorted(
+        {
+            *[
+                str(asset_id).strip()
+                for asset_id in (enrichment_result.get("getty_only_media_asset_ids") or [])
+                if str(asset_id).strip()
+            ],
+            *[
+                str(asset_id).strip()
+                for asset_id in (enrichment_result.get("getty_repair_media_asset_ids") or [])
+                if str(asset_id).strip()
+            ],
+        }
+    )
+
+    cast_photos_mirrored = 0
+    cast_photos_failed = 0
+    media_assets_mirrored = 0
+    media_assets_failed = 0
+    errors: list[str] = [
+        str(error) for error in (enrichment_result.get("errors") or []) if isinstance(error, str) and error.strip()
+    ]
+
+    try:
+        if forced_getty_row_ids:
+            cast_photos_mirrored, cast_photos_failed = _mirror_person_photos(
+                db,
+                person_id_str,
+                imdb_person_id,
+                photo_ids=forced_getty_row_ids,
+                force=True,
+                max_parallelism=12,
+                batch_size=200,
+            )
+        if forced_getty_media_asset_ids:
+            media_assets_mirrored, media_assets_failed = _mirror_person_media_assets(
+                db,
+                person_id_str,
+                asset_ids=forced_getty_media_asset_ids,
+                force=True,
+                max_parallelism=12,
+                batch_size=200,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Getty enrichment mirror failed for person_id=%s", person_id_str)
+        errors.append(f"Getty enrichment mirror: {exc}")
+
+    return GettyEnrichmentResponse(
+        person_id=person_id_str,
+        getty_enrichment_completed=int(enrichment_result.get("getty_enrichment_completed") or 0),
+        getty_enrichment_failed=int(enrichment_result.get("getty_enrichment_failed") or 0)
+        + cast_photos_failed
+        + media_assets_failed,
+        getty_deferred_editorial_ids=[
+            str(value).strip()
+            for value in (enrichment_result.get("getty_deferred_editorial_ids") or [])
+            if str(value).strip()
+        ],
+        getty_only_imported=int(enrichment_result.get("getty_only_imported") or 0),
+        covered_existing=int(enrichment_result.get("covered_existing") or 0),
+        upgraded_existing=int(enrichment_result.get("upgraded_existing") or 0),
+        cast_photos_mirrored=cast_photos_mirrored,
+        media_assets_mirrored=media_assets_mirrored,
+        cast_photos_failed=cast_photos_failed,
+        media_assets_failed=media_assets_failed,
+        errors=errors,
+    )
+
+
 @router.post("/{person_id}/refresh-images/stream")
 async def refresh_person_images_stream(
     person_id: UUID,
@@ -10164,7 +11779,16 @@ async def refresh_person_images_stream(
         nbcumv_only_total = 0
         nbcumv_only_imported = 0
         getty_only_imported = 0
+        covered_existing = 0
+        upgraded_existing = 0
+        getty_only_row_ids: list[str] = []
+        getty_only_media_asset_ids: list[str] = []
+        getty_repair_row_ids: list[str] = []
+        getty_repair_media_asset_ids: list[str] = []
         getty_snapshot_saved = False
+        getty_initial_search_zero_abort = False
+        getty_initial_search_queries: list[str] = []
+        getty_initial_search_counts: dict[str, int] = {}
         nbcumv_result: dict[str, Any] = {}
         bravotv_result: dict[str, Any] = {}
         getty_mirror_hosted = 0
@@ -10181,12 +11805,29 @@ async def refresh_person_images_stream(
         bravotv_episode_routed = 0
         bravotv_skip_gallery_count = 0
         auto_counts_succeeded = 0
+        auto_counts_attempted = 0
+        auto_counts_failed = 0
         auto_count_diagnostics = _empty_auto_count_diagnostics()
         auto_count_stage_stats = _empty_stage_row_stats()
+        text_overlay_attempted = 0
         text_overlay_succeeded = 0
+        text_overlay_unknown = 0
+        text_overlay_failed = 0
+        text_overlay_configured = False
+        text_overlay_candidates = 0
+        text_overlay_skipped_reason: str | None = None
         text_overlay_stage_stats = _empty_stage_row_stats()
+        centering_attempted = 0
         centering_succeeded = 0
+        centering_failed = 0
+        centering_skipped_manual = 0
+        resize_attempted = 0
         resize_succeeded = 0
+        resize_failed = 0
+        resize_crop_attempted = 0
+        resize_crop_succeeded = 0
+        resize_crop_failed = 0
+        photos_pruned = 0
         tmdb_profile_status: Literal["ok", "skipped", "failed"] | None = None
         tmdb_profile_error_code: str | None = None
         tmdb_profile_error_detail: str | None = None
@@ -10255,10 +11896,17 @@ async def refresh_person_images_stream(
             *,
             status: str | object = getty_progress_unset,
             phase: str | object = getty_progress_unset,
+            auth_mode: str | None | object = getty_progress_unset,
             subtask_id: str | None = None,
             label: str | None | object = getty_progress_unset,
             query: str | None | object = getty_progress_unset,
+            query_url: str | None | object = getty_progress_unset,
             candidates_found: int | None | object = getty_progress_unset,
+            site_image_total: int | None | object = getty_progress_unset,
+            site_event_total: int | None | object = getty_progress_unset,
+            site_video_total: int | None | object = getty_progress_unset,
+            usable_after_dedupe_total: int | None | object = getty_progress_unset,
+            overlap_count: int | None | object = getty_progress_unset,
             current: int | None | object = getty_progress_unset,
             total: int | None | object = getty_progress_unset,
             message: str | None | object = getty_progress_unset,
@@ -10272,6 +11920,10 @@ async def refresh_person_images_stream(
                     getty_progress_state["status"] = str(status or "pending").strip().lower() or "pending"
                 if phase is not getty_progress_unset:
                     getty_progress_state["phase"] = str(phase or "searching").strip().lower() or "searching"
+                if auth_mode is not getty_progress_unset:
+                    getty_progress_state["auth_mode"] = (
+                        str(auth_mode).strip() if isinstance(auth_mode, str) and str(auth_mode).strip() else None
+                    )
                 if subtask_id:
                     subtasks = cast(dict[str, dict[str, Any]], getty_progress_state.setdefault("subtasks", {}))
                     subtask = subtasks.setdefault(subtask_id, _empty_getty_progress_subtask(subtask_id))
@@ -10281,8 +11933,28 @@ async def refresh_person_images_stream(
                         )
                     if query is not getty_progress_unset:
                         subtask["query"] = str(query).strip() if isinstance(query, str) and query.strip() else None
+                    if query_url is not getty_progress_unset:
+                        subtask["query_url"] = (
+                            str(query_url).strip() if isinstance(query_url, str) and query_url.strip() else None
+                        )
                     if candidates_found is not getty_progress_unset:
                         subtask["candidates_found"] = max(0, int(candidates_found or 0))
+                    if site_image_total is not getty_progress_unset:
+                        subtask["site_image_total"] = (
+                            max(0, int(site_image_total or 0)) if isinstance(site_image_total, int) else None
+                        )
+                    if site_event_total is not getty_progress_unset:
+                        subtask["site_event_total"] = (
+                            max(0, int(site_event_total or 0)) if isinstance(site_event_total, int) else None
+                        )
+                    if site_video_total is not getty_progress_unset:
+                        subtask["site_video_total"] = (
+                            max(0, int(site_video_total or 0)) if isinstance(site_video_total, int) else None
+                        )
+                    if usable_after_dedupe_total is not getty_progress_unset:
+                        subtask["usable_after_dedupe_total"] = max(0, int(usable_after_dedupe_total or 0))
+                    if overlap_count is not getty_progress_unset:
+                        subtask["overlap_count"] = max(0, int(overlap_count or 0))
                     if current is not getty_progress_unset:
                         subtask["current"] = max(0, int(current or 0))
                     if total is not getty_progress_unset:
@@ -10305,6 +11977,7 @@ async def refresh_person_images_stream(
                 snapshot = {
                     "status": getty_progress_state.get("status"),
                     "phase": getty_progress_state.get("phase"),
+                    "auth_mode": getty_progress_state.get("auth_mode"),
                     "subtasks": {
                         key: dict(value)
                         for key, value in cast(
@@ -10320,10 +11993,17 @@ async def refresh_person_images_stream(
             update_getty_progress(
                 status=payload.get("status", getty_progress_unset),
                 phase=payload.get("phase", getty_progress_unset),
+                auth_mode=payload.get("auth_mode", getty_progress_unset),
                 subtask_id=str(payload.get("subtask_id") or "").strip() or None,
                 label=payload.get("label", getty_progress_unset),
                 query=payload.get("query", getty_progress_unset),
+                query_url=payload.get("query_url", getty_progress_unset),
                 candidates_found=payload.get("candidates_found", getty_progress_unset),
+                site_image_total=payload.get("site_image_total", getty_progress_unset),
+                site_event_total=payload.get("site_event_total", getty_progress_unset),
+                site_video_total=payload.get("site_video_total", getty_progress_unset),
+                usable_after_dedupe_total=payload.get("usable_after_dedupe_total", getty_progress_unset),
+                overlap_count=payload.get("overlap_count", getty_progress_unset),
                 current=payload.get("current", getty_progress_unset),
                 total=payload.get("total", getty_progress_unset),
                 message=payload.get("message", getty_progress_unset),
@@ -10461,6 +12141,7 @@ async def refresh_person_images_stream(
             )
             requested_sources = list(request.sources or ALL_SOURCES)
             sources, fandom_skipped = await asyncio.to_thread(_resolve_refresh_sources, db, request)
+            sources = _normalize_operational_refresh_sources(sources, request)
             getty_progress_enabled = "nbcumv" in sources or any(
                 str(source or "").strip().lower() in {"getty", "nbcumv"} for source in requested_sources
             )
@@ -10472,7 +12153,7 @@ async def refresh_person_images_stream(
                 and not request.force_mirror
             )
             metadata_repair_enabled = _should_run_imdb_metadata_repair_for_sources(sources)
-            shared_bravotv_supplement_enabled = getty_progress_enabled or "bravotv" in sources
+            shared_bravotv_supplement_enabled = "bravotv" in sources
             if getty_progress_enabled and not shared_bravotv_supplement_enabled:
                 update_getty_progress(
                     phase="supplementing",
@@ -10510,9 +12191,6 @@ async def refresh_person_images_stream(
             )
             from trr_backend.integrations import getty as getty_integration
             from trr_backend.integrations import nbcumv as nbcumv_integration
-            from trr_backend.repositories.cast_photos import (
-                update_cast_photo_hosted_fields,
-            )
             from trr_backend.repositories.cast_photos import (
                 upsert_cast_photos as _upsert_cast_photos,
             )
@@ -10788,26 +12466,11 @@ async def refresh_person_images_stream(
                         getty_only_rows,
                         dedupe_on="source_image_id",
                     )
-                    for upserted_row in upserted:
-                        row_id = str(upserted_row.get("id") or "").strip()
-                        source_image_id = str(upserted_row.get("source_image_id") or "").strip()
-                        source_row_map = {str(r.get("source_image_id") or "").strip(): r for r in getty_only_rows}
-                        source_row = source_row_map.get(source_image_id)
-                        row_preview_url = str((source_row or {}).get("url") or "").strip()
-                        if row_id and row_preview_url:
-                            try:
-                                await asyncio.to_thread(
-                                    update_cast_photo_hosted_fields,
-                                    db,
-                                    row_id,
-                                    {"hosted_url": row_preview_url, "hosted_content_type": "image/jpeg"},
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "expand_event: failed to set hosted fields for %s: %s",
-                                    row_id,
-                                    exc,
-                                )
+                    await asyncio.to_thread(
+                        _sync_cast_gallery_rows_to_media_assets,
+                        db,
+                        [row for row in upserted if isinstance(row, dict)],
+                    )
                     expand_getty_only = len(upserted)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
@@ -11677,6 +13340,15 @@ async def refresh_person_images_stream(
                         getty_progress_cb=apply_getty_progress_payload,
                         getty_prefetched_assets=request.getty_prefetched_assets,
                         getty_prefetched_events=request.getty_prefetched_events,
+                        getty_prefetched_queries=request.getty_prefetched_queries,
+                        getty_prefetch_mode=request.getty_prefetch_mode,
+                        getty_deferred_enrichment=request.getty_deferred_enrichment,
+                        getty_deferred_editorial_ids=request.getty_deferred_editorial_ids,
+                        getty_prefetch_auth_mode=request.getty_prefetch_auth_mode,
+                        getty_prefetch_auth_warning=request.getty_prefetch_auth_warning,
+                        allow_nbcumv_only_supplement=_allow_nbcumv_only_supplement_for_requested_sources(
+                            request.sources
+                        ),
                         cancel_requested_cb=(
                             (
                                 lambda operation_id=operation_cancel_id: admin_operations.is_cancel_requested(
@@ -11758,12 +13430,44 @@ async def refresh_person_images_stream(
                 nbcumv_only_total = int(nbcumv_result.get("nbcumv_only_total") or 0)
                 nbcumv_only_imported = int(nbcumv_result.get("nbcumv_only_imported") or 0)
                 getty_only_imported = int(nbcumv_result.get("getty_only_imported") or 0)
+                getty_only_row_ids = [
+                    str(row_id).strip()
+                    for row_id in (nbcumv_result.get("getty_only_row_ids") or [])
+                    if str(row_id).strip()
+                ]
+                getty_only_media_asset_ids = [
+                    str(asset_id).strip()
+                    for asset_id in (nbcumv_result.get("getty_only_media_asset_ids") or [])
+                    if str(asset_id).strip()
+                ]
+                getty_repair_row_ids = [
+                    str(row_id).strip()
+                    for row_id in (nbcumv_result.get("getty_repair_row_ids") or [])
+                    if str(row_id).strip()
+                ]
+                getty_repair_media_asset_ids = [
+                    str(asset_id).strip()
+                    for asset_id in (nbcumv_result.get("getty_repair_media_asset_ids") or [])
+                    if str(asset_id).strip()
+                ]
                 covered_existing = int(nbcumv_result.get("covered_existing") or 0)
                 upgraded_existing = int(nbcumv_result.get("upgraded_existing") or 0)
                 unique_discovered_total = int(
                     nbcumv_result.get("unique_discovered_total") or nbcumv_result.get("getty_candidates_total") or 0
                 )
                 getty_snapshot_saved = bool(nbcumv_result.get("getty_snapshot_saved"))
+                getty_search_degraded = bool(nbcumv_result.get("getty_search_degraded"))
+                getty_initial_search_zero_abort = bool(nbcumv_result.get("getty_initial_search_zero_abort"))
+                getty_initial_search_queries = [
+                    str(value).strip()
+                    for value in (nbcumv_result.get("getty_initial_search_queries") or [])
+                    if str(value).strip()
+                ]
+                getty_initial_search_counts = {
+                    str(key).strip(): int(value)
+                    for key, value in dict(nbcumv_result.get("getty_initial_search_counts") or {}).items()
+                    if str(key).strip() and isinstance(value, int)
+                }
                 nbcumv_summary_message = str(nbcumv_result.get("summary_message") or "").strip()
                 errors.extend(
                     [
@@ -11796,6 +13500,8 @@ async def refresh_person_images_stream(
                         if str(asset_id).strip()
                     }
                 )
+                imported_media_asset_ids_to_host.update(getty_only_media_asset_ids)
+                imported_media_asset_ids_to_host.update(getty_repair_media_asset_ids)
                 upserted_photo_ids.extend(
                     [
                         str(row_id).strip()
@@ -11803,60 +13509,90 @@ async def refresh_person_images_stream(
                         if str(row_id).strip()
                     ]
                 )
-                if not request.skip_mirror and not imports_only_hosting and getty_only_imported > 0:
+                upserted_photo_ids.extend(getty_repair_row_ids)
+                forced_getty_row_ids = sorted({*getty_only_row_ids, *getty_repair_row_ids})
+                forced_getty_media_asset_ids = sorted({*getty_only_media_asset_ids, *getty_repair_media_asset_ids})
+                if (
+                    not request.skip_mirror
+                    and not imports_only_hosting
+                    and (forced_getty_row_ids or forced_getty_media_asset_ids)
+                ):
+                    getty_mirror_target_total = len(forced_getty_row_ids) + len(forced_getty_media_asset_ids)
                     update_getty_progress(
                         phase="mirroring",
                         subtask_id="mirror_imported_assets",
                         subtask_status="running",
                         current=0,
-                        total=getty_only_imported,
-                        message=f"Hosting {getty_only_imported} Getty-only fallback assets...",
+                        total=getty_mirror_target_total,
+                        message=f"Hosting {getty_mirror_target_total} Getty assets with corrected sources...",
                     )
                     yield progress(
                         {
                             "stage": "nbcumv_import",
-                            "message": f"Hosting {getty_only_imported} Getty-only fallback photos...",
+                            "message": f"Hosting {getty_mirror_target_total} Getty photos with corrected sources...",
                             "current": int(nbcumv_snapshot.get("current") or 0),
                             "total": int(nbcumv_snapshot.get("total") or 0),
                         }
                     )
                     try:
-                        getty_mirrored, getty_failed = await asyncio.to_thread(
-                            _mirror_person_photos,
-                            db,
-                            person_id_str,
-                            imdb_person_id,
-                            force=request.force_mirror,
-                            max_parallelism=mirror_parallelism,
-                            batch_size=mirror_batch_size,
-                        )
-                        cast_photos_mirrored += getty_mirrored
-                        cast_photos_failed += getty_failed
-                        photos_mirrored += getty_mirrored
-                        photos_failed += getty_failed
-                        getty_mirror_hosted = getty_mirrored
-                        getty_mirror_failed = getty_failed
+                        getty_row_mirrored = 0
+                        getty_row_failed = 0
+                        getty_asset_mirrored = 0
+                        getty_asset_failed = 0
+                        if forced_getty_row_ids:
+                            getty_row_mirrored, getty_row_failed = await asyncio.to_thread(
+                                _mirror_person_photos,
+                                db,
+                                person_id_str,
+                                imdb_person_id,
+                                photo_ids=forced_getty_row_ids,
+                                force=True,
+                                max_parallelism=mirror_parallelism,
+                                batch_size=mirror_batch_size,
+                            )
+                            cast_photos_mirrored += getty_row_mirrored
+                            cast_photos_failed += getty_row_failed
+                            photos_mirrored += getty_row_mirrored
+                            photos_failed += getty_row_failed
+                        if forced_getty_media_asset_ids:
+                            getty_asset_mirrored, getty_asset_failed = await asyncio.to_thread(
+                                _mirror_person_media_assets,
+                                db,
+                                person_id_str,
+                                asset_ids=forced_getty_media_asset_ids,
+                                force=True,
+                                max_parallelism=mirror_parallelism,
+                                batch_size=mirror_batch_size,
+                            )
+                            media_assets_mirrored += getty_asset_mirrored
+                            media_assets_failed += getty_asset_failed
+                            photos_mirrored += getty_asset_mirrored
+                            photos_failed += getty_asset_failed
+                        getty_mirror_hosted = getty_row_mirrored + getty_asset_mirrored
+                        getty_mirror_failed = getty_row_failed + getty_asset_failed
                         update_getty_progress(
                             subtask_id="mirror_imported_assets",
                             subtask_status="completed",
-                            current=getty_mirrored,
-                            total=getty_only_imported,
+                            current=getty_mirror_hosted,
+                            total=getty_mirror_target_total,
                             message=(
-                                f"Hosted Getty-only fallback assets ({getty_mirrored}"
-                                + (f", {getty_failed} failed" if getty_failed > 0 else "")
+                                f"Hosted Getty assets with corrected sources ({getty_mirror_hosted}"
+                                + (f", {getty_mirror_failed} failed" if getty_mirror_failed > 0 else "")
                                 + ")."
                             ),
                             breakdown={
-                                "mirrored_hosted": shared_nbcumv_imported + nbcumv_only_imported + getty_mirrored,
-                                "mirrored_failed": getty_failed,
+                                "mirrored_hosted": (
+                                    shared_nbcumv_imported + nbcumv_only_imported + getty_mirror_hosted
+                                ),
+                                "mirrored_failed": getty_mirror_failed,
                             },
                         )
                         yield progress(
                             {
                                 "stage": "nbcumv_import",
                                 "message": (
-                                    f"Hosted Getty-only fallback photos ({getty_mirrored}"
-                                    + (f", {getty_failed} failed" if getty_failed > 0 else "")
+                                    f"Hosted Getty photos with corrected sources ({getty_mirror_hosted}"
+                                    + (f", {getty_mirror_failed} failed" if getty_mirror_failed > 0 else "")
                                     + ")."
                                 ),
                                 "current": int(nbcumv_snapshot.get("current") or 0),
@@ -11865,16 +13601,16 @@ async def refresh_person_images_stream(
                         )
                     except Exception as exc:  # noqa: BLE001
                         errors.append(f"Getty mirror: {exc}")
-                        getty_mirror_failed = getty_only_imported
+                        getty_mirror_failed = getty_mirror_target_total
                         update_getty_progress(
                             subtask_id="mirror_imported_assets",
                             subtask_status="failed",
                             current=0,
-                            total=getty_only_imported,
-                            message=f"Getty fallback hosting failed: {exc}",
+                            total=getty_mirror_target_total,
+                            message=f"Getty hosting with corrected sources failed: {exc}",
                             breakdown={
                                 "mirrored_hosted": shared_nbcumv_imported + nbcumv_only_imported,
-                                "mirrored_failed": getty_only_imported,
+                                "mirrored_failed": getty_mirror_target_total,
                             },
                         )
                         yield progress(
@@ -11924,11 +13660,17 @@ async def refresh_person_images_stream(
                 )
                 update_source_progress(
                     "nbcumv",
-                    status=_status_with_warning(
-                        imported=nbcumv_assets_imported + getty_only_imported,
-                        covered_existing=covered_existing,
-                        failed=nbcumv_failed,
-                        skipped=nbcumv_assets_skipped,
+                    status=(
+                        "failed"
+                        if getty_initial_search_zero_abort
+                        else "warning"
+                        if getty_search_degraded
+                        else _status_with_warning(
+                            imported=nbcumv_assets_imported + getty_only_imported,
+                            covered_existing=covered_existing,
+                            failed=nbcumv_failed,
+                            skipped=nbcumv_assets_skipped,
+                        )
                     ),
                     discovered_total=max(
                         int(nbcumv_snapshot.get("total") or 0),
@@ -11976,8 +13718,80 @@ async def refresh_person_images_stream(
                     }
                 )
 
+        if getty_initial_search_zero_abort:
+            abort_message = (
+                str(nbcumv_result.get("summary_message") or "").strip()
+                or "Stopped refresh early after both direct Getty person searches returned zero results."
+            )
+            if "bravotv" in requested_sources:
+                update_source_progress(
+                    "bravotv",
+                    status="skipped",
+                    remaining=0,
+                    message="Skipped because refresh stopped after both direct Getty searches returned zero.",
+                )
+                yield progress(
+                    {
+                        "stage": "bravotv_import",
+                        "message": (
+                            "Skipping BravoTV import because refresh stopped after both "
+                            "direct Getty searches returned zero."
+                        ),
+                        "current": 0,
+                        "total": 0,
+                    }
+                )
+            yield progress(
+                {
+                    "stage": "auto_count",
+                    "message": (
+                        "Skipping auto-count because refresh stopped after both direct Getty searches returned zero."
+                    ),
+                    "current": 0,
+                    "total": 0,
+                }
+            )
+            yield progress(
+                {
+                    "stage": "word_id",
+                    "message": (
+                        "Skipping word detection because refresh stopped after both "
+                        "direct Getty searches returned zero."
+                    ),
+                    "current": 0,
+                    "total": 0,
+                }
+            )
+            yield progress(
+                {
+                    "stage": "centering_cropping",
+                    "message": (
+                        "Skipping centering/cropping because refresh stopped after both "
+                        "direct Getty searches returned zero."
+                    ),
+                    "current": 0,
+                    "total": 0,
+                }
+            )
+            yield progress(
+                {
+                    "stage": "resizing",
+                    "message": (
+                        "Skipping resize/variant generation because refresh stopped after both "
+                        "direct Getty searches returned zero."
+                    ),
+                    "current": 0,
+                    "total": 0,
+                }
+            )
+            errors.append(abort_message)
+
         explicit_bravotv_requested = "bravotv" in sources
-        if shared_bravotv_supplement_enabled:
+        if (
+            shared_bravotv_supplement_enabled
+            and not getty_initial_search_zero_abort
+            and not bool(nbcumv_result.get("existing_nbcumv_prefetched_enrichment_mode"))
+        ):
             if await _client_disconnected("bravotv_import"):
                 return
             if getty_progress_enabled:
@@ -12267,7 +14081,7 @@ async def refresh_person_images_stream(
                 },
             )
 
-        if not request.skip_mirror and imports_only_hosting:
+        if not request.skip_mirror and imports_only_hosting and not getty_initial_search_zero_abort:
             scoped_cast_photo_ids = sorted({row_id for row_id in upserted_photo_ids if str(row_id).strip()})
             scoped_media_asset_ids = sorted({asset_id for asset_id in imported_media_asset_ids_to_host if asset_id})
             already_hosted_import_assets = nbcumv_assets_imported + bravotv_assets_imported
@@ -12363,7 +14177,7 @@ async def refresh_person_images_stream(
 
         # 5. Prune
         photos_pruned = 0
-        if not request.skip_mirror and not request.skip_prune:
+        if not request.skip_mirror and not request.skip_prune and not getty_initial_search_zero_abort:
             yield progress({"stage": "pruning", "message": "Pruning orphaned S3 objects..."})
             photos_pruned = await asyncio.to_thread(_prune_person_s3_objects, db, imdb_person_id or person_id_str)
             yield progress(
@@ -12379,7 +14193,9 @@ async def refresh_person_images_stream(
         auto_counts_attempted = 0
         auto_counts_succeeded = 0
         auto_counts_failed = 0
-        if request.skip_auto_count:
+        if getty_initial_search_zero_abort:
+            pass
+        elif request.skip_auto_count:
             yield progress(
                 {
                     "stage": "auto_count",
@@ -12963,7 +14779,9 @@ async def refresh_person_images_stream(
         text_overlay_configured = False
         text_overlay_candidates = 0
         text_overlay_skipped_reason: str | None = None
-        if request.skip_word_detection:
+        if getty_initial_search_zero_abort:
+            pass
+        elif request.skip_word_detection:
             text_overlay_skipped_reason = "request_skip"
             yield progress(
                 {
@@ -13136,7 +14954,9 @@ async def refresh_person_images_stream(
         centering_succeeded = 0
         centering_failed = 0
         centering_skipped_manual = 0
-        if request.skip_centering:
+        if getty_initial_search_zero_abort:
+            pass
+        elif request.skip_centering:
             yield progress(
                 {
                     "stage": "centering_cropping",
@@ -13395,7 +15215,9 @@ async def refresh_person_images_stream(
         resize_crop_attempted = 0
         resize_crop_succeeded = 0
         resize_crop_failed = 0
-        if request.skip_resize:
+        if getty_initial_search_zero_abort:
+            pass
+        elif request.skip_resize:
             yield progress(
                 {
                     "stage": "resizing",
@@ -13513,6 +15335,14 @@ async def refresh_person_images_stream(
             resize_failed=resize_failed,
             resize_crop_failed=resize_crop_failed,
         )
+        if getty_initial_search_zero_abort:
+            failed_parts.append(
+                {
+                    "part": "getty_initial_search_zero_abort",
+                    "failed": 1,
+                    "reason": "both_direct_getty_person_searches_returned_zero",
+                }
+            )
         complete_data = {
             "run_id": run_id,
             "person_id": person_id_str,
@@ -13550,8 +15380,29 @@ async def refresh_person_images_stream(
             "getty_broad_grouped_total": int(nbcumv_result.get("getty_broad_grouped_total") or 0),
             "getty_wwhl_grouped_total": int(nbcumv_result.get("getty_wwhl_grouped_total") or 0),
             "getty_zero_result_reason": str(nbcumv_result.get("getty_zero_result_reason") or "").strip() or None,
+            "getty_initial_search_zero_abort": getty_initial_search_zero_abort,
+            "getty_initial_search_queries": getty_initial_search_queries,
+            "getty_initial_search_counts": getty_initial_search_counts,
+            "getty_access_mode": str(nbcumv_result.get("getty_access_mode") or "").strip() or None,
+            "getty_search_degraded": bool(nbcumv_result.get("getty_search_degraded")),
+            "getty_unavailable_reason": str(nbcumv_result.get("getty_unavailable_reason") or "").strip() or None,
+            "getty_failure_stage": str(nbcumv_result.get("getty_failure_stage") or "").strip() or None,
+            "getty_http_status": (
+                int(nbcumv_result.get("getty_http_status"))
+                if isinstance(nbcumv_result.get("getty_http_status"), int)
+                else None
+            ),
+            "getty_page_classification": str(nbcumv_result.get("getty_page_classification") or "").strip() or None,
             "matched_via_image_search": int(nbcumv_result.get("matched_via_image_search") or 0),
             "getty_snapshot_saved": getty_snapshot_saved,
+            "getty_enrichment_pending": int(nbcumv_result.get("getty_enrichment_pending") or 0),
+            "getty_enrichment_completed": int(nbcumv_result.get("getty_enrichment_completed") or 0),
+            "getty_enrichment_failed": int(nbcumv_result.get("getty_enrichment_failed") or 0),
+            "getty_deferred_editorial_ids": [
+                str(value).strip()
+                for value in (nbcumv_result.get("getty_deferred_editorial_ids") or [])
+                if str(value).strip()
+            ],
             "bravotv_photos_fetched": bravotv_photos_fetched,
             "bravotv_assets_imported": bravotv_assets_imported,
             "bravotv_assets_skipped": bravotv_assets_skipped,
@@ -13679,6 +15530,7 @@ async def refresh_person_images_stream(
         request_payload=request_payload,
         initiated_by=actor,
         request=connection,
+        allow_attach=False,
     )
     return operation_stream_response(str(operation.get("id")), request=connection)
 
@@ -15211,6 +17063,7 @@ async def reprocess_person_images_stream(
         request_payload=request_payload,
         initiated_by=actor,
         request=connection,
+        allow_attach=False,
     )
     return operation_stream_response(str(operation.get("id")), request=connection)
 

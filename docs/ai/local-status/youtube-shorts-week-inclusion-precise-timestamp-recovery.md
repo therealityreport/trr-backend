@@ -1,15 +1,15 @@
 # YouTube Shorts week inclusion precise timestamp recovery
 
-Last updated: 2026-03-16
+Last updated: 2026-03-24
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
-  last_updated: 2026-03-16
-  current_phase: "backend Shorts caption/transcript hardening complete"
-  next_action: "Monitor future YouTube sync runs for shorts_undated_skipped and transcript availability drift, then expand the repair script beyond RHOSLC only if new epoch-dated Shorts reappear"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer continuity notes if follow-up is needed"
   detail: self
 ```
 

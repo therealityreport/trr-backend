@@ -4,6 +4,7 @@ import json
 from collections.abc import Iterable, Mapping
 from datetime import UTC
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 from uuid import UUID, uuid5
 
 from trr_backend.media.s3_mirror import build_hosted_url
@@ -79,11 +80,33 @@ def _first_str(*values: Any) -> str | None:
     return None
 
 
+def _chunked(values: list[str], size: int) -> Iterable[list[str]]:
+    step = max(1, int(size))
+    for index in range(0, len(values), step):
+        yield values[index : index + step]
+
+
+def _looks_like_getty_media_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    cleaned = value.strip()
+    if not cleaned:
+        return False
+    try:
+        hostname = (urlparse(cleaned).hostname or "").strip().lower()
+    except Exception:
+        return False
+    return hostname == "media.gettyimages.com" or hostname.endswith(".gettyimages.com")
+
+
 def _hosted_url_from_row(row: Mapping[str, Any]) -> str | None:
     hosted_key = _as_str(row.get("hosted_key"))
     if hosted_key:
         return build_hosted_url(hosted_key)
-    return _as_str(row.get("hosted_url"))
+    hosted_url = _as_str(row.get("hosted_url"))
+    if _as_str(row.get("source")) == "getty" and _looks_like_getty_media_url(hosted_url):
+        return None
+    return hosted_url
 
 
 def _asset_id_for(source: str, source_asset_id: str | None, source_url: str | None) -> UUID | None:
@@ -447,13 +470,27 @@ def transform_cast_photos_to_media(
     for row in rows:
         person_id = _as_str(row.get("person_id"))
         source = _as_str(row.get("source"))
-        source_url = _first_str(
-            row.get("image_url_canonical"),
-            row.get("image_url"),
-            row.get("url"),
-            row.get("thumb_url"),
-            row.get("source_url"),
-        )
+        metadata = dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {}
+        if source == "getty":
+            source_url = _first_str(
+                row.get("image_url_canonical"),
+                row.get("image_url"),
+                metadata.get("getty_original_image_url"),
+                metadata.get("original_source_url"),
+                metadata.get("original_source_file_url"),
+                metadata.get("source_url"),
+                row.get("url"),
+                row.get("thumb_url"),
+                row.get("source_url"),
+            )
+        else:
+            source_url = _first_str(
+                row.get("image_url_canonical"),
+                row.get("image_url"),
+                row.get("url"),
+                row.get("thumb_url"),
+                row.get("source_url"),
+            )
         if not person_id or not source or not source_url:
             continue
 
@@ -482,7 +519,7 @@ def transform_cast_photos_to_media(
                 "hosted_etag": _as_str(row.get("hosted_etag")),
                 "hosted_at": row.get("hosted_at"),
                 "fetched_at": row.get("fetched_at"),
-                "metadata": dict(row.get("metadata")) if isinstance(row.get("metadata"), dict) else {},
+                "metadata": metadata,
             }
             assets_by_id[asset_id_str] = _compact_dict(asset)
 
@@ -525,6 +562,124 @@ def transform_cast_photos_to_media(
     return list(assets_by_id.values()), links
 
 
+def reconcile_media_asset_id_conflicts(
+    db: DbSession,
+    assets: Iterable[Mapping[str, Any]],
+    links: Iterable[Mapping[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    asset_rows = [dict(asset) for asset in assets]
+    link_rows = [dict(link) for link in links] if links is not None else []
+    if not asset_rows:
+        return asset_rows, link_rows
+
+    source_asset_ids_by_source: dict[str, set[str]] = {}
+    source_urls_by_source: dict[str, set[str]] = {}
+    for asset in asset_rows:
+        source = _as_str(asset.get("source"))
+        source_asset_id = _as_str(asset.get("source_asset_id"))
+        source_url = _as_str(asset.get("source_url"))
+        if not source:
+            continue
+        if source_asset_id:
+            source_asset_ids_by_source.setdefault(source, set()).add(source_asset_id)
+        elif source_url:
+            source_urls_by_source.setdefault(source, set()).add(source_url)
+
+    existing_by_source_asset_id: dict[tuple[str, str], str] = {}
+    for source, source_asset_ids in source_asset_ids_by_source.items():
+        for chunk in _chunked(sorted(source_asset_ids), 200):
+            response = (
+                db.schema("core")
+                .table("media_assets")
+                .select("id, source, source_asset_id")
+                .eq("source", source)
+                .in_("source_asset_id", chunk)
+                .execute()
+            )
+            for row in response.data or []:
+                row_source = _as_str(row.get("source"))
+                row_source_asset_id = _as_str(row.get("source_asset_id"))
+                row_id = _as_str(row.get("id"))
+                if row_source and row_source_asset_id and row_id:
+                    existing_by_source_asset_id[(row_source, row_source_asset_id)] = row_id
+
+    existing_by_source_url: dict[tuple[str, str], str] = {}
+    for source, source_urls in source_urls_by_source.items():
+        for chunk in _chunked(sorted(source_urls), 100):
+            response = (
+                db.schema("core")
+                .table("media_assets")
+                .select("id, source, source_url")
+                .eq("source", source)
+                .in_("source_url", chunk)
+                .execute()
+            )
+            for row in response.data or []:
+                row_source = _as_str(row.get("source"))
+                row_source_url = _as_str(row.get("source_url"))
+                row_id = _as_str(row.get("id"))
+                if row_source and row_source_url and row_id:
+                    existing_by_source_url[(row_source, row_source_url)] = row_id
+
+    replacements: dict[str, str] = {}
+    for asset in asset_rows:
+        asset_id = _as_str(asset.get("id"))
+        source = _as_str(asset.get("source"))
+        source_asset_id = _as_str(asset.get("source_asset_id"))
+        source_url = _as_str(asset.get("source_url"))
+        if not asset_id or not source:
+            continue
+        existing_id = (
+            existing_by_source_asset_id.get((source, source_asset_id))
+            if source_asset_id
+            else existing_by_source_url.get((source, source_url or ""))
+        )
+        if existing_id and existing_id != asset_id:
+            replacements[asset_id] = existing_id
+            asset["id"] = existing_id
+
+    if replacements:
+        for link in link_rows:
+            media_asset_id = _as_str(link.get("media_asset_id"))
+            replacement_id = replacements.get(media_asset_id or "")
+            if not replacement_id:
+                continue
+            link["media_asset_id"] = replacement_id
+            entity_type = _as_str(link.get("entity_type"))
+            entity_id = _as_str(link.get("entity_id"))
+            kind = _as_str(link.get("kind"))
+            if not entity_type or not entity_id or not kind:
+                continue
+            position = _as_int(link.get("position"))
+            is_primary = bool(_as_bool(link.get("is_primary")) or False)
+            context = dict(link.get("context")) if isinstance(link.get("context"), dict) else {}
+            link["id"] = str(
+                _link_id_for(
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    asset_id=replacement_id,
+                    kind=kind,
+                    position=position,
+                    is_primary=is_primary,
+                    context=context,
+                )
+            )
+
+    deduped_assets_by_id: dict[str, dict[str, Any]] = {}
+    for asset in asset_rows:
+        asset_id = _as_str(asset.get("id"))
+        if asset_id:
+            deduped_assets_by_id[asset_id] = asset
+
+    deduped_links_by_id: dict[str, dict[str, Any]] = {}
+    for link in link_rows:
+        link_id = _as_str(link.get("id"))
+        if link_id:
+            deduped_links_by_id[link_id] = link
+
+    return list(deduped_assets_by_id.values()), list(deduped_links_by_id.values())
+
+
 def upsert_media_assets(db: DbSession, assets: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     payload = [dict(asset) for asset in assets]
     if not payload:
@@ -544,7 +699,12 @@ def upsert_media_links(db: DbSession, links: Iterable[Mapping[str, Any]]) -> lis
     if not payload:
         return []
 
-    response = db.schema("core").table("media_links").upsert(payload, on_conflict="id", default_to_null=False).execute()
+    response = (
+        db.schema("core")
+        .table("media_links")
+        .upsert(payload, on_conflict="entity_type,entity_id,kind,media_asset_id", default_to_null=False)
+        .execute()
+    )
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Supabase error upserting media_links: {response.error}")
     data = response.data or []
@@ -570,6 +730,7 @@ def upsert_media_with_links(
     else:
         raise ValueError(f"Unsupported entity_type for media upsert: {entity_type}")
 
+    assets, links = reconcile_media_asset_id_conflicts(db, assets, links)
     upserted_assets = upsert_media_assets(db, assets)
     upserted_links = upsert_media_links(db, links)
     return upserted_assets, upserted_links

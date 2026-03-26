@@ -78,93 +78,22 @@ def _dedup_events(events: list[dict], seen: set[str] | None = None) -> list[dict
 
 
 def _fetch_all_getty(person_name: str) -> dict:
-    """Run dual Getty search (Bravo + broad) for both images and events.
+    """Run Getty search locally for images and events.
 
-    Uses limit=0 (unlimited) to fetch everything Getty has.
-    Cross-deduplicates between the two search terms.
+    Uses limit=0 (unlimited) to fetch everything Getty has and returns
+    merged image/event payloads plus per-query summaries.
     """
-    from trr_backend.integrations import getty as getty_integration
+    from trr_backend.integrations.getty_local_prefetch import fetch_person_getty_prefetch_payload
 
-    bravo_phrase = f"{person_name} Bravo".strip()
-    broad_phrase = person_name
-
-    # --- Individual images ---
-    print(f"\n[getty-prefetch] ═══ IMAGES ═══")
-
-    print(f"[getty-prefetch] Searching images for '{bravo_phrase}' (unlimited)...")
-    t0 = time.perf_counter()
-    bravo_assets = getty_integration.search_editorial_assets(bravo_phrase, limit=0)
-    for a in bravo_assets:
-        a["source_query_scope"] = "bravo"
-    print(f"[getty-prefetch]   → {len(bravo_assets)} Bravo images in {time.perf_counter() - t0:.1f}s")
-
-    print(f"[getty-prefetch] Searching images for '{broad_phrase}' (unlimited)...")
-    t1 = time.perf_counter()
-    broad_assets = getty_integration.search_editorial_assets(
-        broad_phrase, limit=0, query_params={"sort": "best"},
-    )
-    for a in broad_assets:
-        a.setdefault("source_query_scope", "broad")
-    print(f"[getty-prefetch]   → {len(broad_assets)} broad images in {time.perf_counter() - t1:.1f}s")
-
-    # Cross-dedup images (bravo takes priority)
-    seen_assets: set[str] = set()
-    merged_assets = _dedup_assets(bravo_assets, seen_assets)
-    merged_assets += _dedup_assets(broad_assets, seen_assets)
-    image_overlap = len(bravo_assets) + len(broad_assets) - len(merged_assets)
-    print(f"[getty-prefetch] Images merged: {len(merged_assets)} unique ({image_overlap} overlap)")
-
-    # --- Grouped events/albums ---
-    print(f"\n[getty-prefetch] ═══ EVENTS/ALBUMS ═══")
-
-    print(f"[getty-prefetch] Searching events for '{bravo_phrase}' (unlimited)...")
-    t2 = time.perf_counter()
-    bravo_events = getty_integration.search_grouped_events(
-        bravo_phrase,
-        limit=0,
-        person_name=person_name,
-        source_query_scope="bravo",
-    )
-    print(f"[getty-prefetch]   → {len(bravo_events)} Bravo events in {time.perf_counter() - t2:.1f}s")
-
-    print(f"[getty-prefetch] Searching events for '{broad_phrase}' (unlimited)...")
-    t3 = time.perf_counter()
-    broad_events = getty_integration.search_grouped_events(
-        broad_phrase,
-        limit=0,
-        person_name=person_name,
-        source_query_scope="broad",
-        query_params={"sort": "best"},
-    )
-    print(f"[getty-prefetch]   → {len(broad_events)} broad events in {time.perf_counter() - t3:.1f}s")
-
-    # Cross-dedup events
-    seen_events: set[str] = set()
-    merged_events = _dedup_events(bravo_events, seen_events)
-    merged_events += _dedup_events(broad_events, seen_events)
-    event_overlap = len(bravo_events) + len(broad_events) - len(merged_events)
-    print(f"[getty-prefetch] Events merged: {len(merged_events)} unique ({event_overlap} overlap)")
-
-    total_time = time.perf_counter() - t0
+    result = fetch_person_getty_prefetch_payload(person_name)
     print(f"\n[getty-prefetch] ═══ SUMMARY ═══")
-    print(f"  Images: {len(merged_assets)} unique ({len(bravo_assets)} bravo + {len(broad_assets)} broad)")
-    print(f"  Events: {len(merged_events)} unique ({len(bravo_events)} bravo + {len(broad_events)} broad)")
-    print(f"  Total time: {total_time:.1f}s")
-
-    return {
-        "person": person_name,
-        "bravo_assets": bravo_assets,
-        "broad_assets": broad_assets,
-        "merged": merged_assets,
-        "merged_total": len(merged_assets),
-        "image_overlap_count": image_overlap,
-        "bravo_events": bravo_events,
-        "broad_events": broad_events,
-        "merged_events": merged_events,
-        "merged_events_total": len(merged_events),
-        "event_overlap_count": event_overlap,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
+    print(
+        f"  Images: {int(result.get('merged_total') or 0)} unique"
+        f" | Events: {int(result.get('merged_events_total') or 0)} unique"
+        f" | Auth: {result.get('auth_mode') or 'unknown'}"
+    )
+    result["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    return result
 
 
 def _load_from_file(path: str) -> dict:
