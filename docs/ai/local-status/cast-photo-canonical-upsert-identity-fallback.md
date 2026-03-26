@@ -1,15 +1,15 @@
 # Cast photo canonical upsert identity fallback
 
-Last updated: 2026-03-16
+Last updated: 2026-03-24
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
-  last_updated: 2026-03-16
-  current_phase: "migration applied and validated"
-  next_action: "Rerun the affected person cast-photo refresh if stale failed source cards still need to be cleared in the UI"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer continuity notes if follow-up is needed"
   detail: self
 ```
 

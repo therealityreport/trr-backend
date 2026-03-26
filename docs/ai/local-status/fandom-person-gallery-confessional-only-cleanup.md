@@ -1,15 +1,18 @@
 # Fandom person gallery confessional-only cleanup
 
-Last updated: 2026-03-17
+Last updated: 2026-03-25
+
+## Status
+- Archived continuity note; implementation and cleanup were completed on 2026-03-17.
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
-  last_updated: 2026-03-17
-  current_phase: "real-housewives Fandom person media now only admits confessional/intro inventory, and legacy promo/reunion/theme rows were removed"
-  next_action: "Monitor the next person-image refresh and confirm only confessional/intro Fandom rows can re-enter when NBCUMV lacks coverage"
+  include: false
+  state: archived
+  last_updated: 2026-03-25
+  current_phase: "archived continuity note"
+  next_action: "Refer to newer continuity notes if follow-up work is needed"
   detail: self
 ```
 

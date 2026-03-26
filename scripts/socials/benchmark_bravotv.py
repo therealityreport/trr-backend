@@ -60,16 +60,14 @@ def benchmark_facebook():
     from trr_backend.socials.facebook import FacebookScraper, FacebookScrapeConfig
 
     cookies = _load_cookies("facebook")
-    if not cookies:
-        return {"status": "skip", "reason": "no cookies"}
 
-    scraper = FacebookScraper(cookies=cookies)
+    scraper = FacebookScraper(cookies=cookies or {})
     config = FacebookScrapeConfig(
         page_handle=BRAVO_HANDLES["facebook"],
         date_start=DATE_START,
         date_end=DATE_END,
-        max_pages=1,
-        include_feed=False,
+        max_pages=2,
+        include_feed=True,
         include_reels=True,
         include_photos=False,
         fast_mode=True,

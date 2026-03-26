@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from api.auth import AdminUser
+from trr_backend.db.pg import is_database_service_unavailable_error
 from trr_backend.job_plane import (
     canonical_execution_mode,
     execution_backend_canonical,
@@ -647,6 +648,14 @@ def _lookup_error_to_not_found(exc: LookupError) -> HTTPException:
     return HTTPException(status_code=404, detail=str(exc) or "Not found")
 
 
+def _to_social_read_http_exception(error: Exception) -> HTTPException:
+    if isinstance(error, ValueError):
+        return _value_error_to_bad_request(error)
+    if is_database_service_unavailable_error(error):
+        return HTTPException(status_code=503, detail=str(error))
+    return HTTPException(status_code=500, detail=str(error) or "Internal server error")
+
+
 def _account_profile_cache_key(
     *,
     surface: str,
@@ -655,6 +664,7 @@ def _account_profile_cache_key(
     page: int | None = None,
     page_size: int | None = None,
     search: str | None = None,
+    window: str | None = None,
 ) -> tuple[Any, ...]:
     return (
         surface,
@@ -663,6 +673,7 @@ def _account_profile_cache_key(
         page,
         page_size,
         str(search or "").strip().lower() or None,
+        str(window or "").strip().lower() or None,
     )
 
 
@@ -2407,7 +2418,6 @@ class SharedReviewResolveRequest(BaseModel):
 
 class SocialAccountProfileHashtagAssignmentInput(BaseModel):
     show_id: UUID
-    season_id: UUID | None = None
 
 
 class SocialAccountProfileHashtagInput(BaseModel):
@@ -2434,18 +2444,13 @@ class CatalogSyncRecentRequest(BaseModel):
 
 
 class CatalogReviewResolveRequest(BaseModel):
-    resolution_action: Literal["assign_show", "assign_season", "mark_non_show"]
+    resolution_action: Literal["assign_show", "mark_non_show"]
     show_id: UUID | None = None
-    season_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_resolution(self) -> CatalogReviewResolveRequest:
-        if self.resolution_action in {"assign_show", "assign_season"} and self.show_id is None:
+        if self.resolution_action == "assign_show" and self.show_id is None:
             raise ValueError("show_id is required when assigning a show hashtag")
-        if self.resolution_action == "assign_show":
-            self.season_id = None
-        if self.resolution_action == "assign_season" and self.season_id is None:
-            raise ValueError("season_id is required when assigning a season hashtag")
         return self
 
 
@@ -2704,7 +2709,7 @@ async def get_season_targets(
             source_scope,
             duration_ms,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.put("/seasons/{season_id}/targets")
@@ -3482,6 +3487,9 @@ def get_shared_account_sources_route(
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read shared account sources: source_scope=%s", source_scope)
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.put("/shared/sources")
@@ -3612,6 +3620,7 @@ def get_social_account_catalog_posts_route(
 def get_social_account_profile_hashtags_route(
     platform: str,
     account_handle: str,
+    window: Literal["all", "30d", "365d"] | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_hashtags
@@ -3620,6 +3629,7 @@ def get_social_account_profile_hashtags_route(
         surface="hashtags",
         platform=platform,
         account_handle=account_handle,
+        window=window,
     )
     cached_payload = _get_ttl_cached_payload(
         _ACCOUNT_PROFILE_HASHTAGS_CACHE,
@@ -3629,7 +3639,7 @@ def get_social_account_profile_hashtags_route(
     if cached_payload is not None:
         return cached_payload
     try:
-        payload = get_social_account_profile_hashtags(platform=platform, account_handle=account_handle)
+        payload = get_social_account_profile_hashtags(platform=platform, account_handle=account_handle, window=window)
         _set_ttl_cached_payload(
             _ACCOUNT_PROFILE_HASHTAGS_CACHE,
             _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK,
@@ -3649,6 +3659,7 @@ def get_social_account_profile_hashtags_route(
 def get_social_account_profile_hashtag_timeline_route(
     platform: str,
     account_handle: str,
+    window: Literal["all", "30d", "365d"] | None = Query(default=None),
     _: AdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_hashtag_timeline
@@ -3657,6 +3668,7 @@ def get_social_account_profile_hashtag_timeline_route(
         surface="hashtags_timeline",
         platform=platform,
         account_handle=account_handle,
+        window=window,
     )
     cached_payload = _get_ttl_cached_payload(
         _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
@@ -3666,7 +3678,11 @@ def get_social_account_profile_hashtag_timeline_route(
     if cached_payload is not None:
         return cached_payload
     try:
-        payload = get_social_account_profile_hashtag_timeline(platform=platform, account_handle=account_handle)
+        payload = get_social_account_profile_hashtag_timeline(
+            platform=platform,
+            account_handle=account_handle,
+            window=window,
+        )
         _set_ttl_cached_payload(
             _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE,
             _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK,
@@ -4117,7 +4133,6 @@ def post_social_account_catalog_review_queue_resolve_route(
             item_id=str(item_id),
             resolution_action=payload.resolution_action,
             show_id=str(payload.show_id) if payload.show_id else None,
-            season_id=str(payload.season_id) if payload.season_id else None,
             updated_by=(user or {}).get("email"),
         )
         _clear_account_profile_caches()
@@ -4126,6 +4141,29 @@ def post_social_account_catalog_review_queue_resolve_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/freshness")
+def post_social_account_catalog_freshness_route(
+    platform: str,
+    account_handle: str,
+    _: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_freshness
+
+    try:
+        return get_social_account_catalog_freshness(platform=platform, account_handle=account_handle)
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog freshness: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/collaborators-tags")
@@ -4307,7 +4345,16 @@ def get_shared_review_queue(
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import list_shared_review_queue
 
-    return list_shared_review_queue(source_scope=source_scope, review_status=review_status, limit=limit)
+    try:
+        return list_shared_review_queue(source_scope=source_scope, review_status=review_status, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to read shared review queue: source_scope=%s review_status=%s limit=%s",
+            source_scope,
+            review_status,
+            limit,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.post("/shared/review-queue/{item_id}/resolve")
@@ -4341,6 +4388,9 @@ def get_season_shared_status_route(
         return get_season_shared_status(str(season_id), source_scope=source_scope)
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read season shared status: season=%s source_scope=%s", season_id, source_scope)
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/ingest/worker-health")
@@ -4352,7 +4402,7 @@ def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
         return {"queue_enabled": is_queue_enabled(), **health}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest worker health")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/ingest/workers/{worker_id}/detail")
@@ -4397,7 +4447,7 @@ def get_social_ingest_queue_status(
         return get_queue_status(fresh=fresh)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest queue status")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.post("/ingest/stuck-jobs/cancel")
@@ -5109,7 +5159,7 @@ async def get_season_ingest_jobs(
         }
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to list social jobs: season=%s", season_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/seasons/{season_id}/ingest/runs")
@@ -5181,7 +5231,7 @@ async def get_season_ingest_runs(
             limit,
             duration_ms,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/seasons/{season_id}/ingest/runs/summary")
@@ -5244,7 +5294,7 @@ async def get_season_ingest_runs_summary(
             limit,
             duration_ms,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/seasons/{season_id}/ingest/runs/{run_id}/progress")
@@ -5380,7 +5430,7 @@ async def get_season_analytics_week_live_health(
             ",".join(parsed_platforms) if parsed_platforms else "all",
             duration_ms,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics")
@@ -5470,7 +5520,7 @@ async def get_season_analytics(
             ",".join(parsed_platforms) if parsed_platforms else "all",
             duration_ms,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/week/{week_index}/summary")
@@ -5563,7 +5613,7 @@ async def get_season_analytics_week_summary(
             duration_ms,
             trace_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/week/{week_index}")
@@ -5729,7 +5779,7 @@ async def get_season_analytics_week_detail(
             duration_ms,
             trace_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/seasons/{season_id}/analytics/comments-coverage")

@@ -1,15 +1,15 @@
 # Cross-platform social sync-session final follow-through
 
-Last updated: 2026-03-20
+Last updated: 2026-03-24
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: active
-  last_updated: 2026-03-20
-  current_phase: "Threads sync-session kickoff remains repaired, with the remaining follow-through narrowed to monitoring for residual comments/media completeness drift"
-  next_action: "Use targeted session reruns only if a live sync-session or week-detail view still exposes a concrete completeness gap; otherwise archive this entry once the monitoring window closes"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer continuity notes if follow-up is needed"
   detail: self
 ```
 

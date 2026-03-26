@@ -10,11 +10,11 @@ Use this skill to design and document Postgres/Supabase schema changes, write re
 ## Repo-aware context (read first)
 
 Open these references before proposing changes:
-- `skills/database-designer/references/repo-context.md` for the current TRR schema, Supabase layout, and access patterns.
-- `skills/database-designer/references/templates.sql` for migration, RLS, triggers, and index templates.
-- `skills/database-designer/references/examples.md` for concrete TRR-style examples (new table, S3 metadata, multi-tenant RLS).
-- `skills/database-designer/references/tooling.md` for schema docs, EXPLAIN, and index verification commands.
-- `skills/database-designer/references/playbooks.md` for scalability and architecture decision frameworks.
+- `references/repo-context.md` for the current TRR schema, Supabase layout, and access patterns.
+- `references/templates.sql` for migration, RLS, triggers, and index templates.
+- `references/examples.md` for concrete TRR-style examples (new table, S3 metadata, multi-tenant RLS).
+- `references/tooling.md` for schema docs, EXPLAIN, and index verification commands.
+- `references/playbooks.md` for scalability and architecture decision frameworks.
 
 ## Inputs expected
 

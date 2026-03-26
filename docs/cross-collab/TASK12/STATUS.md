@@ -1,16 +1,16 @@
 # Status — Task 12 (Cast Screen-Time Analytics)
 
 Repo: TRR-Backend
-Last updated: 2026-03-20
+Last updated: 2026-03-24
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: active
-  last_updated: 2026-03-20
-  current_phase: "backend control-plane work is complete; remaining closure is limited to fresh-session operator validation and longer-runtime proof capture"
-  next_action: "Use the restarted local workspace to validate the mirrored social-week import path and collect any remaining fresh-session evidence; archive this task once that operator proof is captured or intentionally deferred"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer task status notes if follow-up is needed"
   detail: self
 ```
 

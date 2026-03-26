@@ -188,6 +188,7 @@ class YouTubeScraper:
     CHANNEL_SEARCH_URL = "https://www.youtube.com/results"
     CHANNEL_VIDEOS_URL = "https://www.youtube.com/@{handle}/videos"
     CHANNEL_SHORTS_URL = "https://www.youtube.com/@{handle}/shorts"
+    CHANNEL_ABOUT_URL = "https://www.youtube.com/@{handle}/about"
     VIDEO_WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
     PLAYER_RESPONSE_MARKERS = (
         "ytInitialPlayerResponse =",
@@ -697,6 +698,103 @@ class YouTubeScraper:
 
         return canonical_handle, channel_id
 
+    @staticmethod
+    def _extract_text(payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload.strip()
+        if not isinstance(payload, dict):
+            return ""
+        simple_text = str(payload.get("simpleText") or payload.get("content") or payload.get("text") or "").strip()
+        if simple_text:
+            return simple_text
+        runs = payload.get("runs")
+        if isinstance(runs, list):
+            joined = "".join(str(item.get("text") or "") for item in runs if isinstance(item, dict)).strip()
+            if joined:
+                return joined
+        return ""
+
+    @staticmethod
+    def _parse_compact_count_text(payload: Any) -> int | None:
+        text = YouTubeScraper._extract_text(payload).lower().replace(",", "")
+        if not text:
+            return None
+        match = re.search(r"(\d+(?:\.\d+)?)\s*([kmb]?)", text)
+        if not match:
+            return None
+        value = float(match.group(1))
+        suffix = match.group(2)
+        multiplier = 1
+        if suffix == "k":
+            multiplier = 1000
+        elif suffix == "m":
+            multiplier = 1000000
+        elif suffix == "b":
+            multiplier = 1000000000
+        return int(value * multiplier)
+
+    def _normalize_youtube_url(self, value: Any) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("/"):
+            return f"https://www.youtube.com{raw}"
+        return raw
+
+    def _find_about_channel_view_model(self, data: Any) -> dict[str, Any] | None:
+        stack: list[Any] = [data]
+        visited = 0
+        while stack and visited < 2000:
+            node = stack.pop()
+            visited += 1
+            if isinstance(node, dict):
+                candidate = node.get("aboutChannelViewModel")
+                if isinstance(candidate, dict):
+                    return candidate
+                for nested in node.values():
+                    if isinstance(nested, (dict, list)):
+                        stack.append(nested)
+            elif isinstance(node, list):
+                stack.extend(node)
+        return None
+
+    def _extract_channel_about_snapshot_from_data(
+        self,
+        data: dict[str, Any] | None,
+        fallback_handle: str,
+    ) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+
+        canonical_handle, channel_id = self._extract_channel_identity_from_data(data, fallback_handle)
+        about = self._find_about_channel_view_model(data) or {}
+        metadata = (
+            data.get("metadata", {}).get("channelMetadataRenderer", {})
+            if isinstance(data.get("metadata"), dict)
+            else {}
+        )
+
+        profile_url = (
+            self._normalize_youtube_url(about.get("canonicalChannelUrl"))
+            or self._normalize_youtube_url(about.get("channelUrl"))
+            or self._normalize_youtube_url(metadata.get("vanityChannelUrl"))
+            or self._normalize_youtube_url(metadata.get("channelUrl"))
+        )
+        if not profile_url and canonical_handle:
+            profile_url = f"https://www.youtube.com/@{canonical_handle}"
+
+        snapshot = {
+            "username": canonical_handle or self._normalize_handle(fallback_handle) or None,
+            "display_name": self._extract_text(about.get("title")) or self._extract_channel_title_from_data(data),
+            "bio": self._extract_text(about.get("description")) or None,
+            "avatar_url": self._extract_channel_avatar_from_data(data),
+            "profile_url": profile_url,
+            "follower_count": self._parse_compact_count_text(about.get("subscriberCountText")),
+            "total_posts": self._parse_compact_count_text(about.get("videoCountText")),
+            "channel_id": channel_id or None,
+        }
+        return {key: value for key, value in snapshot.items() if value is not None}
+
     def resolve_channel_identity(self, handle: str, delay: float = 0.5) -> dict[str, str | None]:
         normalized_handle = self._normalize_handle(handle)
         data = self.fetch_channel_videos(normalized_handle, delay, surface="videos")
@@ -709,6 +807,11 @@ class YouTubeScraper:
             "canonical_handle": canonical_handle or normalized_handle,
             "channel_id": channel_id or None,
         }
+
+    def resolve_channel_about_snapshot(self, handle: str, delay: float = 0.5) -> dict[str, Any]:
+        normalized_handle = self._normalize_handle(handle)
+        data = self.fetch_channel_about(normalized_handle, delay)
+        return self._extract_channel_about_snapshot_from_data(data, normalized_handle)
 
     @staticmethod
     def _shorts_lockup_to_renderer(model: dict) -> dict:
@@ -1304,6 +1407,9 @@ class YouTubeScraper:
             return self.CHANNEL_SHORTS_URL.format(handle=handle)
         return self.CHANNEL_VIDEOS_URL.format(handle=handle)
 
+    def _channel_about_url(self, handle: str) -> str:
+        return self.CHANNEL_ABOUT_URL.format(handle=handle)
+
     def fetch_channel_videos(
         self,
         handle: str,
@@ -1328,6 +1434,24 @@ class YouTubeScraper:
             if status_code:
                 self._track_response_status(status_code)
             logger.error("Failed to fetch channel %s surface=%s: %s", f"@{handle}", surface, e)
+            return None
+
+    def fetch_channel_about(self, handle: str, delay: float = 2.0, *, fast_mode: bool = False) -> dict | None:
+        self._rate_limit(delay, fast_mode=fast_mode)
+
+        url = self._channel_about_url(handle)
+        headers = self._get_headers()
+
+        try:
+            response = self.session.get(url, headers=headers, timeout=self.REQUEST_TIMEOUT_SECONDS)
+            self._track_response_status(response.status_code)
+            response.raise_for_status()
+            return self._extract_ytinital_data(response.text)
+        except requests.exceptions.RequestException as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code:
+                self._track_response_status(status_code)
+            logger.error("Failed to fetch channel about for %s: %s", f"@{handle}", e)
             return None
 
     def _fetch_continuation(

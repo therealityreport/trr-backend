@@ -35,7 +35,7 @@ _GETTY_SOURCE = "getty"
 
 class ShowGetImagesRequest(BaseModel):
     limit: int | None = Field(default=None, ge=1, le=2000)
-    getty_limit: int = Field(default=100, ge=1, le=500)
+    getty_limit: int | None = Field(default=None, ge=1)
     skip_s3: bool = False
 
 
@@ -81,7 +81,7 @@ def _import_show_images(
     show_name: str,
     show_is_bravo: bool,
     limit: int | None,
-    getty_limit: int,
+    getty_limit: int | None,
     progress_cb: Any | None = None,
 ) -> dict[str, Any]:
     """Fetch NBCUMV + Getty images for a show, create media links."""

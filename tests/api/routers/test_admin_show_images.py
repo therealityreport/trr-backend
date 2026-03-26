@@ -49,6 +49,11 @@ def test_show_is_bravo_family_checks_networks() -> None:
     assert admin_show_images._show_is_bravo_family({"networks": None}) is False
 
 
+def test_show_get_images_request_defaults_getty_limit_to_none() -> None:
+    request = admin_show_images.ShowGetImagesRequest()
+    assert request.getty_limit is None
+
+
 @pytest.mark.parametrize(
     ("show_is_bravo", "expected_resolution"),
     [(True, "auto_picdetective_bravo"), (False, "getty_watermark_fallback")],

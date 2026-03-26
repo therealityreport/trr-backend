@@ -1,15 +1,15 @@
 # Cross-platform social sync closeout
 
-Last updated: 2026-03-20
+Last updated: 2026-03-24
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: active
-  last_updated: 2026-03-20
-  current_phase: "schema fixed, API readiness verified, and the remaining social sync closeout work is limited to targeted follow-up validation rather than platform-wide repair"
-  next_action: "Only rerun focused season or media/comment follow-up slices if a live admin summary shows residual completeness gaps; otherwise archive this handoff during the next cleanup pass"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer continuity notes if follow-up is needed"
   detail: self
 ```
 

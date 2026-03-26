@@ -5,8 +5,226 @@ import json
 from trr_backend.integrations import getty
 
 
-def test_getty_search_page_cap_is_100() -> None:
-    assert getty.MAX_SEARCH_PAGES == 100
+def test_getty_search_page_cap_defaults_to_none() -> None:
+    assert getty.MAX_SEARCH_PAGES is None
+
+
+def test_search_asset_candidates_for_phrase_runs_until_natural_exhaustion_when_uncapped(monkeypatch) -> None:
+    page_one_assets = [
+        {"landingUrl": f"/detail/news-photo/example-{idx}/{idx}", "assetId": str(idx)}
+        for idx in range(1, getty.DEFAULT_SEARCH_PAGE_SIZE + 1)
+    ]
+    responses = {
+        1: (
+            "<html><body>"
+            '<script type="application/json" data-component="Search">'
+            f"{json.dumps({'searchItems': page_one_assets})}"
+            "</script>"
+            "</body></html>"
+        ),
+        2: (
+            "<html><body>"
+            '<script type="application/json" data-component="Search">'
+            '{"searchItems":[{"landingUrl":"/detail/news-photo/example-61/61","assetId":"61"}]}'
+            "</script>"
+            "</body></html>"
+        ),
+    }
+
+    class _Response:
+        def __init__(self, page: int) -> None:
+            self.status_code = 200
+            self.url = f"https://www.gettyimages.com/search/2/image?page={page}"
+            self.text = responses.get(page, "<html><body></body></html>")
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _Session:
+        def get(self, url: str, **kwargs):
+            if "page=3" in url:
+                return _Response(3)
+            if "page=2" in url:
+                return _Response(2)
+            return _Response(1)
+
+    monkeypatch.setattr(getty, "_session", lambda session=None: _Session())
+
+    candidates = getty._search_asset_candidates_for_phrase(
+        "Lisa Barlow",
+        limit=None,
+        max_search_pages=None,
+    )
+
+    assert len(candidates) == getty.DEFAULT_SEARCH_PAGE_SIZE + 1
+    assert candidates[0]["editorial_id"] == "1"
+    assert candidates[-1]["editorial_id"] == "61"
+
+
+def test_search_asset_candidates_records_query_summary_and_detects_page_rewrite(monkeypatch) -> None:
+    def _page_html(page: int) -> str:
+        payload = {
+            "searchItems": [
+                {"landingUrl": f"/detail/news-photo/example-{page}-{idx}/{page}{idx}", "assetId": f"{page}{idx}"}
+                for idx in range(1, getty.DEFAULT_SEARCH_PAGE_SIZE + 1)
+            ]
+        }
+        current_page = 1 if page >= 4 else page
+        return (
+            "<html><body>"
+            '<input aria-label="Pagination page number input" value="'
+            f"{current_page}"
+            '"/>'
+            '<script id="Search_535122" type="text/javascript">'
+            f'window.remotes["search"]["search"].state="%7B%22queries%22%3A%5B%7B%22state%22%3A%7B%22data%22%3A%7B%22pageSize%22%3A60%2C%22lastPage%22%3A81%2C%22totalNumberOfResults%22%3A4823%7D%7D%7D%5D%7D";'
+            "</script>"
+            "<div>View 62 videos</div><div>340 Events</div><div>4,823 Images</div>"
+            f'<script type="application/json" data-component="Search">{json.dumps(payload)}</script>'
+            "</body></html>"
+        )
+
+    class _Response:
+        def __init__(self, page: int) -> None:
+            self.status_code = 200
+            self.url = (
+                "https://www.gettyimages.com/search/2/image?family=editorial&page=1"
+                if page >= 4
+                else f"https://www.gettyimages.com/search/2/image?family=editorial&page={page}"
+            )
+            self.text = _page_html(page if page < 4 else 1)
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _Session:
+        def get(self, url: str, **kwargs):
+            if "page=4" in url:
+                return _Response(4)
+            if "page=3" in url:
+                return _Response(3)
+            if "page=2" in url:
+                return _Response(2)
+            return _Response(1)
+
+    summary: dict[str, object] = {}
+    monkeypatch.setattr(getty, "_session", lambda session=None: _Session())
+
+    candidates = getty._search_asset_candidates_for_phrase(
+        "Brandi Glanville",
+        limit=None,
+        query_params={"sort": "newest"},
+        query_summary_out=summary,
+    )
+
+    assert len(candidates) == getty.DEFAULT_SEARCH_PAGE_SIZE * 3
+    assert summary["query_url"] == getty._build_search_url("Brandi Glanville", query_params={"sort": "newest"})
+    assert summary["site_image_total"] == 4823
+    assert summary["site_event_total"] == 340
+    assert summary["site_video_total"] == 62
+    assert summary["pagination_rewrite_detected"] is True
+    assert summary["termination_reason"] == "pagination_rewrite"
+    assert summary["expected_page"] == 4
+    assert summary["current_page"] == 1
+    assert summary["response_url"] == "https://www.gettyimages.com/search/2/image?family=editorial&page=1"
+    assert summary["first_editorial_ids"][:3] == ["11", "12", "13"]
+
+
+def test_search_asset_candidates_supports_browser_backed_page_fetcher() -> None:
+    def _page_html(page: int) -> str:
+        payload = {
+            "searchItems": [
+                {"landingUrl": f"/detail/news-photo/example-{page}-{idx}/{page}{idx}", "assetId": f"{page}{idx}"}
+                for idx in range(1, getty.DEFAULT_SEARCH_PAGE_SIZE + 1)
+            ]
+        }
+        return (
+            "<html><body>"
+            '<input aria-label="Pagination page number input" value="'
+            f"{page}"
+            '"/>'
+            '<script id="Search_535122" type="text/javascript">'
+            f'window.remotes["search"]["search"].state="%7B%22queries%22%3A%5B%7B%22state%22%3A%7B%22data%22%3A%7B%22pageSize%22%3A60%2C%22lastPage%22%3A81%2C%22totalNumberOfResults%22%3A4823%7D%7D%7D%5D%7D";'
+            "</script>"
+            "<div>View 62 videos</div><div>340 Events</div><div>4,823 Images</div>"
+            f'<script type="application/json" data-component="Search">{json.dumps(payload)}</script>'
+            "</body></html>"
+        )
+
+    visited_urls: list[str] = []
+
+    def _fetch(url: str) -> tuple[str, str | None, int | None]:
+        visited_urls.append(url)
+        if "page=4" in url:
+            return "<html><body></body></html>", url, 200
+        if "page=3" in url:
+            return _page_html(3), url, 200
+        if "page=2" in url:
+            return _page_html(2), url, 200
+        return _page_html(1), url, 200
+
+    summary: dict[str, object] = {}
+    candidates = getty._search_asset_candidates_for_phrase(
+        "Brandi Glanville",
+        limit=None,
+        query_params={"sort": "newest"},
+        query_summary_out=summary,
+        search_page_fetcher=_fetch,
+    )
+
+    assert len(candidates) == getty.DEFAULT_SEARCH_PAGE_SIZE * 3
+    assert any("page=3" in url for url in visited_urls)
+    assert any("page=4" in url for url in visited_urls)
+    assert summary["pagination_rewrite_detected"] is False
+    assert summary["termination_reason"] == "natural_exhaustion"
+
+
+def test_search_asset_candidates_supports_dict_page_fetcher_results() -> None:
+    def _page_html(page: int) -> str:
+        payload = {
+            "searchItems": [
+                {"landingUrl": f"/detail/news-photo/example-{page}-{idx}/{page}{idx}", "assetId": f"{page}{idx}"}
+                for idx in range(1, getty.DEFAULT_SEARCH_PAGE_SIZE + 1)
+            ]
+        }
+        return (
+            "<html><body>"
+            '<input aria-label="Pagination page number input" value="'
+            f"{page}"
+            '"/>'
+            f'<script type="application/json" data-component="Search">{json.dumps(payload)}</script>'
+            "</body></html>"
+        )
+
+    def _fetch(url: str):
+        if "page=2" in url:
+            return {
+                "html": _page_html(2),
+                "response_url": url,
+                "status_code": 200,
+                "current_page": 2,
+                "first_editorial_ids": ["21", "22", "23"],
+                "page_signature": "21|22|23",
+            }
+        return {
+            "html": _page_html(1),
+            "response_url": url,
+            "status_code": 200,
+            "current_page": 1,
+            "first_editorial_ids": ["11", "12", "13"],
+            "page_signature": "11|12|13",
+        }
+
+    summary: dict[str, object] = {}
+    candidates = getty._search_asset_candidates_for_phrase(
+        "Brandi Glanville",
+        limit=120,
+        query_params={"sort": "newest"},
+        query_summary_out=summary,
+        search_page_fetcher=_fetch,
+    )
+
+    assert len(candidates) == 120
+    assert summary["termination_reason"] == "limit_reached"
 
 
 def test_search_editorial_assets_reports_progress(monkeypatch) -> None:
@@ -40,6 +258,42 @@ def test_search_editorial_assets_reports_progress(monkeypatch) -> None:
     assert progress_events[1] == (0, 2, "Fetching Getty assets 1-2/2...")
     assert progress_events[2] == (1, 2, "Fetched Getty asset 1/2: 1")
     assert progress_events[3] == (2, 2, "Fetched Getty asset 2/2: 2")
+
+
+def test_search_editorial_assets_discovery_mode_skips_detail_and_grouped_event_enrichment(monkeypatch) -> None:
+    raw_candidates = [
+        {
+            "detail_url": "https://www.gettyimages.com/detail/news-photo/example-one/1",
+            "editorial_id": "1",
+            "object_name": "example-one",
+        },
+        {
+            "detail_url": "https://www.gettyimages.com/detail/news-photo/example-two/2",
+            "editorial_id": "2",
+            "object_name": "example-two",
+        },
+    ]
+    monkeypatch.setattr(
+        getty,
+        "_search_asset_candidates_for_phrase",
+        lambda phrase, **kwargs: list(raw_candidates),
+    )
+
+    def _unexpected_detail_fetch(*args, **kwargs):
+        raise AssertionError("fetch_asset_detail should not run in discovery mode")
+
+    def _unexpected_grouped_merge(*args, **kwargs):
+        raise AssertionError("_merge_grouped_event_metadata should not run in discovery mode")
+
+    monkeypatch.setattr(getty, "fetch_asset_detail", _unexpected_detail_fetch)
+    monkeypatch.setattr(getty, "_merge_grouped_event_metadata", _unexpected_grouped_merge)
+
+    results = getty.search_editorial_assets(
+        "Brandi Glanville",
+        include_details=False,
+    )
+
+    assert results == raw_candidates
 
 
 def test_search_editorial_assets_fetches_detail_urls_in_batches(monkeypatch) -> None:
@@ -97,6 +351,53 @@ def test_search_editorial_assets_forwards_custom_query_params(monkeypatch) -> No
 
     assert results == []
     assert captured == [{"phrase": "Mary Cosby", "query_params": {"artistexact": "bravo"}}]
+
+
+def test_search_editorial_assets_marks_challenge_pages_unavailable(monkeypatch) -> None:
+    class _Response:
+        status_code = 200
+        url = "https://www.gettyimages.com/search/2/image"
+        text = "<html><body>Verify you are human</body></html>"
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    class _Session:
+        @staticmethod
+        def get(*args, **kwargs):
+            return _Response()
+
+    diagnostics: dict[str, object] = {}
+    monkeypatch.setattr(getty, "_session", lambda session=None: _Session())
+
+    results = getty.search_editorial_assets("Brandi Glanville", diagnostics_out=diagnostics)
+
+    assert results == []
+    assert diagnostics["status"] == "unavailable"
+    assert diagnostics["failure_stage"] == "search"
+    assert diagnostics["unavailable_reason"] == "challenge_page"
+    assert diagnostics["page_classification"] == "challenge_page"
+
+
+def test_search_editorial_assets_marks_detail_failures_degraded(monkeypatch) -> None:
+    monkeypatch.setattr(
+        getty,
+        "_search_asset_candidates_for_phrase",
+        lambda phrase, **kwargs: [
+            {"detail_url": "https://www.gettyimages.com/detail/news-photo/example-one/1"},
+        ],
+    )
+    monkeypatch.setattr(getty, "fetch_asset_detail", lambda detail_url, **kwargs: None)
+
+    diagnostics: dict[str, object] = {}
+
+    results = getty.search_editorial_assets("Brandi Glanville", diagnostics_out=diagnostics)
+
+    assert results == []
+    assert diagnostics["status"] == "degraded"
+    assert diagnostics["failure_stage"] == "detail"
+    assert diagnostics["unavailable_reason"] == "detail_fetch_failed"
 
 
 def test_extract_search_asset_candidates_reads_grouped_event_metadata() -> None:
@@ -533,8 +834,7 @@ def test_search_grouped_events_full_scan_returns_multiple_matched_assets(monkeyp
             "total_scanned": 50,
             "person_image_count": 5,
             "matched_assets": [
-                {"editorial_id": str(i), "object_name": f"OBJ_{i}", "caption": "Brandi Glanville"}
-                for i in range(1, 6)
+                {"editorial_id": str(i), "object_name": f"OBJ_{i}", "caption": "Brandi Glanville"} for i in range(1, 6)
             ],
             "representative_asset": {"editorial_id": "1", "object_name": "OBJ_1"},
         },
@@ -669,11 +969,69 @@ def test_fetch_asset_detail_prefers_high_res_url_over_tiny_getty_comp(monkeypatc
     assert detail["preview_image_url"] == detail_payload["asset"]["compUrl"]
 
 
+def test_fetch_asset_detail_prefers_large_main_image_over_downloadable_preview(monkeypatch) -> None:
+    detail_payload = {
+        "asset": {
+            "objectName": "BRAVOCON_1435767826.JPG",
+            "editorialId": "1435767826",
+            "caption": "Legends Ball - 2022 BravoCon",
+            "downloadableCompUrl": (
+                "https://media.gettyimages.com/id/1435767826/photo/"
+                "legends-ball-2022-bravocon.jpg?p=1&s=594x594&w=gi&k=preview"
+            ),
+            "largeMainImageURL": (
+                "https://media.gettyimages.com/id/1435767826/photo/"
+                "legends-ball-2022-bravocon.jpg?s=2048x2048&w=gi&k=20&c=full"
+            ),
+            "deliveryUrls": {
+                "HighResComp": (
+                    "https://media.gettyimages.com/id/1435767826/photo/"
+                    "legends-ball-2022-bravocon.jpg?s=2048x2048&w=gi&k=20&c=delivery"
+                )
+            },
+            "galleryComp1024Url": (
+                "https://media.gettyimages.com/id/1435767826/photo/"
+                "legends-ball-2022-bravocon.jpg?s=1024x1024&w=gi&k=20&c=mid"
+            ),
+            "compUrl": (
+                "https://media.gettyimages.com/id/1435767826/photo/"
+                "legends-ball-2022-bravocon.jpg?s=594x594&w=0&k=20&c=small"
+            ),
+        }
+    }
+    html = (
+        "<html><body>"
+        f'<script type="application/json" data-component="AssetDetail">{json.dumps(detail_payload)}</script>'
+        "<span>Max file size:</span><span>2000 x 3000 px (6.67 x 10.00 in) - 300 dpi - 4 MB</span>"
+        "</body></html>"
+    )
+
+    class _Response:
+        text = html
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    class _Session:
+        @staticmethod
+        def get(*args, **kwargs):
+            return _Response()
+
+    monkeypatch.setattr(getty, "_session", lambda session=None: _Session())
+
+    detail = getty.fetch_asset_detail("https://www.gettyimages.com/detail/news-photo/example/1435767826")
+
+    assert detail is not None
+    assert detail["original_image_url"] == detail_payload["asset"]["deliveryUrls"]["HighResComp"]
+    assert detail["preview_image_url"] == detail_payload["asset"]["galleryComp1024Url"]
+
+
 def test_search_grouped_events_passes_numberofpeople_query_param(monkeypatch) -> None:
     """query_params like numberofpeople should flow through to the search URL."""
     captured_urls: list[str] = []
 
-    def fake_search_candidates(phrase, *, limit, session=None, query_params=None):
+    def fake_search_candidates(phrase, *, limit, session=None, query_params=None, **kwargs):
         url = getty._build_search_url(phrase, query_params=query_params)
         captured_urls.append(url)
         return []

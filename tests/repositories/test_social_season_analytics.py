@@ -55,6 +55,15 @@ def _clear_scraper_cache():
 
 
 @pytest.fixture(autouse=True)
+def _clear_context_target_caches() -> None:
+    social_repo._invalidate_context_and_target_caches()
+    social_repo._clear_social_hot_path_caches()
+    yield
+    social_repo._invalidate_context_and_target_caches()
+    social_repo._clear_social_hot_path_caches()
+
+
+@pytest.fixture(autouse=True)
 def _clear_instagram_cookie_state(monkeypatch: pytest.MonkeyPatch) -> None:
     social_repo._instagram_cookie_validation_cache = None
     social_repo._instagram_cookie_runtime_override = None
@@ -124,13 +133,8 @@ def test_get_social_account_profile_posts_filters_all_captions(monkeypatch: pyte
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         social_repo,
-        "_social_account_profile_total_posts",
-        lambda *_args, **kwargs: 1 if kwargs.get("search") == "#BravoCon" else 0,
-    )
-    monkeypatch.setattr(
-        social_repo,
-        "_fetch_social_account_profile_rows",
-        lambda *_args, **kwargs: [
+        "_instagram_social_account_profile_dataset_rows",
+        lambda account_handle, *, search=None: [
             {
                 "id": "post-1",
                 "source_id": "source-1",
@@ -141,15 +145,17 @@ def test_get_social_account_profile_posts_filters_all_captions(monkeypatch: pyte
                 "hashtags": ["BravoCon"],
                 "mentions": ["andycohen"],
                 "source_account": "bravotv",
+                "_profile_match_mode": "owner",
+                "_profile_source_surface": "materialized",
             }
         ]
-        if kwargs.get("search") == "#BravoCon"
+        if account_handle == "bravotv" and search == "#BravoCon"
         else [],
     )
     monkeypatch.setattr(
         social_repo,
         "_social_account_profile_analysis_rows",
-        lambda *_args, **_kwargs: pytest.fail("post search should stay on the normal posts dataset"),
+        lambda *_args, **_kwargs: pytest.fail("instagram search should stay on the touching-posts dataset"),
     )
 
     payload = social_repo.get_social_account_profile_posts(
@@ -334,6 +340,84 @@ def test_social_account_profile_total_posts_applies_same_sql_search_clause(monke
     assert "p.search_handle_identities" in sql
     assert "jsonb_array_elements_text" not in sql
     assert captured["params"] == ["bravotv", "peacock", "peacock"]
+
+
+def test_fetch_social_account_profile_rows_uses_owner_handle_filter_for_twitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo, "_platform_posts_has_column", lambda *_args, **_kwargs: False)
+
+    rows = social_repo._fetch_social_account_profile_rows("twitter", "bravotv", limit=10, offset=0)
+
+    assert rows == []
+    sql = " ".join(captured["sql"].lower().split())
+    assert "from social.twitter_tweets p" in sql
+    assert "coalesce(nullif(p.username, ''), nullif(p.source_account, ''))" in sql
+    assert "where lower(p.source_account) = %s" not in sql
+    assert captured["params"] == ["bravotv", 10, 0]
+
+
+def test_fetch_social_account_profile_rows_summary_projection_uses_reduced_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo, "_platform_posts_has_column", lambda *_args, **_kwargs: False)
+
+    rows = social_repo._fetch_social_account_profile_rows(
+        "twitter",
+        "bravotv",
+        limit=10,
+        offset=0,
+        projection="summary",
+    )
+
+    assert rows == []
+    sql = " ".join(captured["sql"].lower().split())
+    assert "from social.twitter_tweets p" in sql
+    assert "p.*" not in sql
+    assert "jsonb_build_object" in sql
+    assert "as raw_data" in sql
+    assert "to_jsonb(p) ->> 'likes' as likes" in captured["sql"]
+    assert captured["params"] == ["bravotv", 10, 0]
+
+
+def test_twitter_profile_snapshot_from_analysis_rows_skips_non_owner_rows() -> None:
+    snapshot = social_repo._twitter_profile_snapshot_from_analysis_rows(
+        [
+            {
+                "username": "rebecca1976",
+                "display_name": "Rebecca Moore",
+                "user_profile_url": "https://x.com/rebecca1976",
+                "source_account": "bravotv",
+            },
+            {
+                "username": "BravoTV",
+                "display_name": "Bravo",
+                "user_profile_url": "https://x.com/BravoTV",
+                "source_account": "bravotv",
+            },
+        ],
+        "bravotv",
+    )
+
+    assert snapshot["username"] == "bravotv"
+    assert snapshot["display_name"] == "Bravo"
+    assert snapshot["profile_url"] == "https://x.com/BravoTV"
 
 
 def test_get_social_account_profile_collaborators_tags_separates_mentions_and_tags(
@@ -533,6 +617,35 @@ def test_get_season_context_rejects_blank_season_id_before_query(monkeypatch: py
         social_repo.get_season_context("")
 
     assert fetch_calls == []
+
+
+def test_get_season_context_caches_stable_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, list[object] | None]] = []
+
+    def _fake_fetch_one(sql: str, params: list[object] | None = None) -> dict[str, object] | None:
+        calls.append((sql, params))
+        normalized = " ".join(sql.split()).lower()
+        if "from core.seasons s" in normalized:
+            return {
+                "season_id": "season-1",
+                "show_id": "show-1",
+                "season_number": 6,
+                "air_date": date(2026, 1, 8),
+                "show_name": "Test Show",
+                "show_slug": "test-show",
+            }
+        if "from core.episodes e" in normalized:
+            return {"air_date": date(2026, 1, 15)}
+        raise AssertionError(f"Unexpected query: {sql}")
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    first = social_repo.get_season_context("season-1")
+    second = social_repo.get_season_context("season-1")
+
+    assert first.season_id == "season-1"
+    assert second.season_id == "season-1"
+    assert len(calls) == 2
 
 
 def test_build_platform_posts_shards_collapses_youtube_week_window_to_single_shard() -> None:
@@ -3040,6 +3153,64 @@ def test_get_targets_enforces_rhoslc_hashtag_floor_on_existing_rows_for_non_inst
     assert payload["targets"][0]["hashtags"] == ["RHOSLC", "RealHousewivesofSaltLakeCity"]
 
 
+def test_list_matchable_seasons_caches_built_target_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    season_rows = [
+        {
+            "season_id": "season-1",
+            "show_id": "show-1",
+            "season_number": 1,
+            "air_date": date(2025, 1, 1),
+            "show_name": "Test Show",
+            "show_slug": "test-show",
+        }
+    ]
+    fetch_all_calls: list[tuple[str, list[object] | None]] = []
+    season_context_calls: list[str] = []
+    target_calls: list[tuple[str, str]] = []
+
+    def _fake_fetch_all(sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
+        fetch_all_calls.append((sql, params))
+        return season_rows
+
+    def _fake_get_season_context(season_id: str) -> SeasonContext:
+        season_context_calls.append(season_id)
+        return SeasonContext(
+            season_id=season_id,
+            show_id="show-1",
+            show_name="Test Show",
+            show_slug="test-show",
+            season_number=1,
+            anchor_date=date(2025, 1, 1),
+        )
+
+    def _fake_get_targets(season_id: str, *, source_scope: str = "bravo") -> dict[str, object]:
+        target_calls.append((season_id, source_scope))
+        return {
+            "targets": [
+                {
+                    "platform": "twitter",
+                    "accounts": ["BravoTV"],
+                    "hashtags": ["testshow"],
+                    "keywords": ["test show"],
+                    "is_active": True,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo, "get_season_context", _fake_get_season_context)
+    monkeypatch.setattr(social_repo, "get_targets", _fake_get_targets)
+
+    first = social_repo._list_matchable_seasons(source_scope="bravo", platform="twitter")
+    second = social_repo._list_matchable_seasons(source_scope="bravo", platform="twitter")
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert len(fetch_all_calls) == 1
+    assert season_context_calls == ["season-1"]
+    assert target_calls == [("season-1", "bravo")]
+
+
 def test_get_shared_account_sources_falls_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
@@ -4564,6 +4735,256 @@ def test_get_social_account_profile_summary_includes_twitter_identity_from_sourc
     assert payload["total_posts"] == 12
 
 
+def test_get_social_account_profile_summary_uses_loaded_rows_for_catalog_groupings_and_hashtags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "id": "post-1",
+            "source_id": "tweet-1",
+            "source_account": "bravotv",
+            "tweet_id": "tweet-1",
+            "posted_at": datetime(2026, 3, 1, tzinfo=UTC),
+            "show_id": "show-1",
+            "show_name": "The Real Housewives of Beverly Hills",
+            "show_slug": "rhobh",
+            "season_id": "season-1",
+            "season_number": 14,
+            "likes": 12,
+            "retweets": 3,
+            "replies_count": 2,
+            "quotes": 1,
+            "views": 100,
+            "hashtags": ["RHOBH"],
+            "mentions": [],
+            "text": "RHOBH returns tonight",
+            "raw_data": {},
+        }
+    ]
+
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_social_account_profile_analysis_rows", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_summary_totals",
+        lambda *_args, **_kwargs: {
+            "total_posts": 1,
+            "total_engagement": 18,
+            "total_views": 100,
+            "first_post_at": datetime(2026, 3, 1, tzinfo=UTC),
+            "last_post_at": datetime(2026, 3, 1, tzinfo=UTC),
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_catalog_summary_totals",
+        lambda *_args, **_kwargs: {
+            "catalog_total_posts": 1,
+            "catalog_assigned_posts": 1,
+            "catalog_pending_review_posts": 0,
+            "catalog_unassigned_posts": 0,
+            "catalog_total_engagement": 18,
+            "catalog_total_views": 100,
+            "catalog_first_post_at": datetime(2026, 3, 1, tzinfo=UTC),
+            "catalog_last_post_at": datetime(2026, 3, 1, tzinfo=UTC),
+            "caption_rows": 1,
+            "stored_hashtag_instances": 1,
+        },
+    )
+    monkeypatch.setattr(social_repo, "_catalog_recent_runs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_build_social_account_profile_entity_aggregates",
+        lambda *_args, **_kwargs: {"collaborators": [], "tags": []},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_grouped_counts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("db grouped counts should not run")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_hashtag_items",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("db hashtag aggregation should not run")),
+    )
+    monkeypatch.setattr(social_repo, "_avatar_registry_lookup_any", lambda **_kwargs: {})
+
+    payload = social_repo.get_social_account_profile_summary("twitter", "bravotv")
+
+    assert payload["per_show_counts"] == [
+        {
+            "show_id": "show-1",
+            "show_name": "The Real Housewives of Beverly Hills",
+            "show_slug": "rhobh",
+            "post_count": 1,
+            "engagement": 18,
+        }
+    ]
+    assert payload["per_season_counts"] == [
+        {
+            "season_id": "season-1",
+            "season_number": 14,
+            "show_id": "show-1",
+            "show_name": "The Real Housewives of Beverly Hills",
+            "show_slug": "rhobh",
+            "post_count": 1,
+            "engagement": 18,
+        }
+    ]
+    assert len(payload["top_hashtags"]) == 1
+    hashtag = payload["top_hashtags"][0]
+    assert hashtag["hashtag"] == "rhobh"
+    assert hashtag["display_hashtag"] == "#rhobh"
+    assert hashtag["usage_count"] == 1
+    assert hashtag["latest_source_id"] == "tweet-1"
+    assert hashtag["assignments"] == []
+    assert hashtag["assigned_shows"] == []
+    assert hashtag["assigned_seasons"] == []
+    assert hashtag["platform"] == "twitter"
+    assert hashtag["account_handle"] == "bravotv"
+    assert hashtag["observed_shows"] == [
+        {
+            "show_id": "show-1",
+            "show_name": "The Real Housewives of Beverly Hills",
+            "show_slug": "rhobh",
+            "post_count": 1,
+        }
+    ]
+    assert hashtag["observed_seasons"] == [
+        {
+            "season_id": "season-1",
+            "season_number": 14,
+            "show_id": "show-1",
+            "show_name": "The Real Housewives of Beverly Hills",
+            "show_slug": "rhobh",
+            "post_count": 1,
+        }
+    ]
+
+
+def test_get_social_account_profile_summary_tolerates_recent_run_query_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_social_account_profile_analysis_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_summary_totals",
+        lambda *_args, **_kwargs: {
+            "total_posts": 0,
+            "total_engagement": 0,
+            "total_views": 0,
+            "first_post_at": None,
+            "last_post_at": None,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_catalog_summary_totals",
+        lambda *_args, **_kwargs: {
+            "catalog_total_posts": 0,
+            "catalog_assigned_posts": 0,
+            "catalog_pending_review_posts": 0,
+            "catalog_unassigned_posts": 0,
+            "catalog_total_engagement": 0,
+            "catalog_total_views": 0,
+            "catalog_first_post_at": None,
+            "catalog_last_post_at": None,
+            "caption_rows": 0,
+            "stored_hashtag_instances": 0,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_catalog_recent_runs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("catalog recent runs timeout")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_build_social_account_profile_entity_aggregates",
+        lambda *_args, **_kwargs: {"collaborators": [], "tags": []},
+    )
+    monkeypatch.setattr(social_repo, "_avatar_registry_lookup_any", lambda **_kwargs: {})
+
+    payload = social_repo.get_social_account_profile_summary("twitter", "bravotv")
+
+    assert payload["catalog_recent_runs"] == []
+    assert payload["last_catalog_run_status"] is None
+
+
+def test_get_social_account_profile_summary_tolerates_assignment_query_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_social_account_profile_analysis_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_social_account_profile_assignment_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("assignment timeout")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_summary_totals",
+        lambda *_args, **_kwargs: {
+            "total_posts": 0,
+            "total_engagement": 0,
+            "total_views": 0,
+            "first_post_at": None,
+            "last_post_at": None,
+        },
+    )
+    monkeypatch.setattr(social_repo, "_shared_catalog_summary_totals", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(social_repo, "_catalog_recent_runs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_build_social_account_profile_entity_aggregates",
+        lambda *_args, **_kwargs: {"collaborators": [], "tags": []},
+    )
+    monkeypatch.setattr(social_repo, "_avatar_registry_lookup_any", lambda **_kwargs: {})
+
+    payload = social_repo.get_social_account_profile_summary("twitter", "bravotv")
+
+    assert payload["top_hashtags"] == []
+
+
+def test_get_social_account_profile_summary_tolerates_catalog_totals_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_social_account_profile_analysis_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_summary_totals",
+        lambda *_args, **_kwargs: {
+            "total_posts": 7,
+            "total_engagement": 70,
+            "total_views": 700,
+            "first_post_at": None,
+            "last_post_at": None,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_catalog_summary_totals",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("catalog totals timeout")),
+    )
+    monkeypatch.setattr(social_repo, "_catalog_recent_runs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_build_social_account_profile_entity_aggregates",
+        lambda *_args, **_kwargs: {"collaborators": [], "tags": []},
+    )
+    monkeypatch.setattr(social_repo, "_avatar_registry_lookup_any", lambda **_kwargs: {})
+
+    payload = social_repo.get_social_account_profile_summary("twitter", "bravotv")
+
+    assert payload["total_posts"] == 7
+    assert payload["catalog_total_posts"] == 0
+
+
 def test_get_social_account_profile_summary_includes_youtube_live_identity_and_total(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4628,9 +5049,51 @@ def test_get_social_account_profile_summary_includes_youtube_live_identity_and_t
     assert payload["display_name"] == "Bravo"
     assert payload["bio"] == "Official Bravo channel"
     assert payload["follower_count"] == 1200000
+    assert payload["live_total_posts"] == 2450
     assert payload["total_posts"] == 2450
     assert payload["avatar_url"] == "https://images.test/youtube-avatar.jpg"
     assert payload["profile_url"] == "https://www.youtube.com/@bravo"
+
+
+def test_cached_live_profile_snapshot_uses_youtube_about_fallback_for_total_posts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    social_repo._SOCIAL_PROFILE_SNAPSHOT_CACHE.clear()
+
+    class _DisabledYouTubeApiClient:
+        def enabled(self) -> bool:
+            return False
+
+    class _FakeYouTubeScraper:
+        def resolve_channel_identity(self, handle: str, delay: float = 0.0) -> dict[str, str | None]:
+            assert handle == "bravo"
+            return {"canonical_handle": "bravo", "channel_id": "channel-bravo"}
+
+        def resolve_channel_about_snapshot(self, handle: str, delay: float = 0.0) -> dict[str, Any]:
+            assert handle == "bravo"
+            return {
+                "username": "bravo",
+                "display_name": "Bravo",
+                "bio": "Official Bravo channel",
+                "profile_url": "https://www.youtube.com/@bravo",
+                "avatar_url": "https://images.test/youtube-avatar.jpg",
+                "follower_count": 3430000,
+                "total_posts": 12562,
+                "channel_id": "channel-bravo",
+            }
+
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeDataApiClient", _DisabledYouTubeApiClient)
+    monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
+
+    snapshot = social_repo._cached_live_profile_snapshot("youtube", "bravo")
+
+    assert snapshot["display_name"] == "Bravo"
+    assert snapshot["follower_count"] == 3430000
+    assert snapshot["total_posts"] == 12562
+    assert snapshot["profile_url"] == "https://www.youtube.com/@bravo"
+    assert snapshot["channel_id"] == "channel-bravo"
+
+    social_repo._SOCIAL_PROFILE_SNAPSHOT_CACHE.clear()
 
 
 def test_get_social_account_profile_summary_includes_facebook_identity_from_source_snapshot(
@@ -4723,6 +5186,53 @@ def test_get_social_account_profile_hashtags_uses_canonical_catalog_aggregate_he
         {"hashtag": "bravo", "usage_count": 120},
         {"hashtag": "housewives", "usage_count": 45},
     ]
+
+
+def test_get_social_account_profile_hashtags_forwards_window_to_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+    captured: dict[str, Any] = {}
+
+    def _fake_hashtag_items(
+        platform: str,
+        account_handle: str,
+        *,
+        assignment_rows: list[dict[str, Any]] | None = None,
+        lookback_days: int | None = None,
+    ) -> list[dict[str, Any]]:
+        captured["call"] = (platform, account_handle, assignment_rows, lookback_days)
+        return [{"hashtag": "bravo", "usage_count": 12, "first_seen_at": "2026-03-01T00:00:00Z"}]
+
+    monkeypatch.setattr(social_repo, "_social_account_profile_hashtag_items", _fake_hashtag_items)
+
+    payload = social_repo.get_social_account_profile_hashtags("instagram", "bravotv", window="30d")
+
+    assert payload["items"][0]["hashtag"] == "bravo"
+    assert captured["call"] == ("instagram", "bravotv", [], 30)
+
+
+def test_get_social_account_catalog_freshness_reports_when_recent_sync_is_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_catalog_recent_runs",
+        lambda *_args, **_kwargs: [{"run_id": "run-1", "status": "completed"}],
+    )
+    monkeypatch.setattr(social_repo, "get_active_social_account_catalog_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 100)
+    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 103)
+
+    payload = social_repo.get_social_account_catalog_freshness("instagram", "bravotv")
+
+    assert payload["eligible"] is True
+    assert payload["needs_recent_sync"] is True
+    assert payload["delta_posts"] == 3
+    assert payload["stored_total_posts"] == 100
+    assert payload["live_total_posts_current"] == 103
 
 
 def test_catalog_recent_runs_queries_all_account_stages(monkeypatch: pytest.MonkeyPatch) -> None:

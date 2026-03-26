@@ -23,6 +23,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.realtime.broker import init_broker, shutdown_broker
+from trr_backend.db import pg
+from trr_backend.db.connection import log_database_resolution_summary
 from trr_backend.observability import (
     CONTENT_TYPE_LATEST,
     bind_trace_id,
@@ -85,6 +87,7 @@ def _validate_startup_config() -> None:
     screenalytics_api_url = (os.getenv("SCREENALYTICS_API_URL") or "").strip()
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     service_token = (os.getenv("SCREENALYTICS_SERVICE_TOKEN") or "").strip()
+    log_database_resolution_summary()
 
     if screenalytics_api_url:
         parsed = urlparse(screenalytics_api_url)
@@ -109,6 +112,17 @@ def _validate_startup_config() -> None:
         )
 
 
+def _prewarm_database_pool() -> None:
+    try:
+        with pg.db_read_connection(label="startup-prewarm") as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        logger.info("[startup-config] database pool prewarmed")
+    except Exception:
+        logger.exception("[startup-config] database pool prewarm failed")
+
+
 def get_cors_origins() -> list[str]:
     """
     Get CORS allowed origins from environment.
@@ -127,6 +141,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up TRR Backend API...")
     _validate_startup_config()
+    await asyncio.to_thread(_prewarm_database_pool)
     await init_broker()
     stale_sweeper_stop: asyncio.Event | None = None
     stale_sweeper_task: asyncio.Task[None] | None = None
@@ -207,21 +222,28 @@ from api.routers import (  # noqa: E402
     admin_cast,
     admin_cast_photos,
     admin_cast_screentime,
+    admin_covered_shows,
     admin_fandom_sync,
     admin_image_counts,
     admin_media_assets,
     admin_nbcumv,
+    admin_networks_streaming_reads,
     admin_operations,
+    admin_people_reads,
     admin_person_images,
     admin_person_profile,
+    admin_recent_people,
+    admin_reddit_reads,
     admin_scrape,
     admin_show_bravo,
     admin_show_icons,
     admin_show_images,
     admin_show_links,
     admin_show_news,
+    admin_show_reads,
     admin_show_roles,
     admin_show_sync,
+    admin_social_posts,
     admin_socialblade,
     discussions,
     dms,
@@ -247,10 +269,16 @@ app.include_router(admin_cast.router, prefix="/api/v1")
 app.include_router(admin_cast_screentime.router, prefix="/api/v1")
 app.include_router(admin_cast_photos.router, prefix="/api/v1")
 app.include_router(admin_brands.router, prefix="/api/v1")
+app.include_router(admin_covered_shows.router, prefix="/api/v1")
 app.include_router(admin_fandom_sync.router, prefix="/api/v1")
 app.include_router(admin_image_counts.router, prefix="/api/v1")
 app.include_router(admin_media_assets.router, prefix="/api/v1")
+app.include_router(admin_networks_streaming_reads.router, prefix="/api/v1")
 app.include_router(admin_operations.router, prefix="/api/v1")
+app.include_router(admin_people_reads.router, prefix="/api/v1")
+app.include_router(admin_recent_people.router, prefix="/api/v1")
+app.include_router(admin_reddit_reads.router, prefix="/api/v1")
+app.include_router(admin_show_reads.router, prefix="/api/v1")
 app.include_router(admin_show_icons.router, prefix="/api/v1")
 app.include_router(admin_show_links.router, prefix="/api/v1")
 app.include_router(admin_show_links.fandom_router, prefix="/api/v1")
@@ -262,6 +290,7 @@ app.include_router(admin_show_bravo.router, prefix="/api/v1")
 app.include_router(admin_show_images.router, prefix="/api/v1")
 app.include_router(admin_show_news.router, prefix="/api/v1")
 app.include_router(admin_scrape.router, prefix="/api/v1")
+app.include_router(admin_social_posts.router, prefix="/api/v1")
 app.include_router(admin_socialblade.router, prefix="/api/v1")
 app.include_router(admin_show_sync.router, prefix="/api/v1")
 app.include_router(socials.router, prefix="/api/v1")

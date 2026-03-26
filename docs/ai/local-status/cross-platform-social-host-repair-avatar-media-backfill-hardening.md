@@ -1,15 +1,15 @@
 # Cross-platform social host repair + avatar/media backfill hardening
 
-Last updated: 2026-03-20
+Last updated: 2026-03-24
 
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: active
-  last_updated: 2026-03-20
-  current_phase: "monitor only; residual repair narrowed to optional targeted reruns"
-  next_action: "Only rerun the remaining targeted twitter and youtube residual mirror slices if those specific missing mirrored assets become relevant again; otherwise archive this status item during the next cleanup pass"
+  include: false
+  state: archived
+  last_updated: 2026-03-24
+  current_phase: "archived continuity note"
+  next_action: "See newer continuity notes if follow-up is needed"
   detail: self
 ```
 

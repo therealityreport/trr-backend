@@ -117,6 +117,8 @@ def test_import_single_item_uses_passed_getty_asset_for_metadata(monkeypatch: py
         "event_date": "October 30, 2019",
         "date_created": "October 30, 2019",
         "keyword_texts": ["Brandi Glanville", "Kelly Dodd", "Andy Cohen", "Season 16", "Talkshow"],
+        "preview_image_url": "https://media.gettyimages.com/example-preview.jpg",
+        "original_image_url": "https://media.gettyimages.com/example-original.jpg",
         "details": {
             "credit_display": "Bravo / Contributor",
             "collection_display": "NBCUniversal",
@@ -186,6 +188,9 @@ def test_import_single_item_uses_passed_getty_asset_for_metadata(monkeypatch: py
     assert metadata["getty_tags"] == ["Brandi Glanville", "Kelly Dodd", "Andy Cohen", "Season 16", "Talkshow"]
     assert metadata["getty_event_title"] == "Watch What Happens Live With Andy Cohen - Season 16"
     assert metadata["source_page_url"] == "https://www.gettyimages.com/detail/news-photo/example/1246182942"
+    assert metadata["getty_detail_page_url"] == "https://www.gettyimages.com/detail/news-photo/example/1246182942"
+    assert metadata["getty_original_image_url"] == "https://media.gettyimages.com/example-original.jpg"
+    assert metadata["getty_preview_image_url"] == "https://media.gettyimages.com/example-preview.jpg"
     assert metadata["people_names"] == ["Andy Cohen", "Brandi Glanville", "Kelly Dodd"]
     assert metadata["episode_number"] == 16173
     fetch_getty.assert_not_called()

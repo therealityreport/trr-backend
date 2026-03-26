@@ -582,6 +582,83 @@ def test_mirror_cast_photo_fallbacks_to_thumb_when_primary_fails(monkeypatch: py
     assert result["image_url"] == row["thumb_url"]
 
 
+def test_mirror_cast_photo_prefers_getty_original_url_from_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    fake_s3 = MagicMock()
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *args, **kwargs: None)
+
+    seen_urls: list[str] = []
+
+    def fake_download(url, source=None, referer=None, headers=None):  # noqa: ANN001
+        del source, referer, headers
+        seen_urls.append(url)
+        return b"\x89PNG\r\n\x1a\nrest", "image/png"
+
+    monkeypatch.setattr(s3_mirror, "download_image", fake_download)
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", lambda *args, **kwargs: ("etag", 10))
+
+    original_url = "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=2048x2048&w=gi&k=20&c=full"
+    row = {
+        "id": "photo-1",
+        "person_id": "person-1",
+        "imdb_person_id": "nm123",
+        "source": "getty",
+        "url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?p=1&s=594x594&w=gi&k=20&c=preview",
+        "metadata": {
+            "getty_original_image_url": original_url,
+            "getty_preview_image_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=1024x1024&w=gi&k=20&c=mid",
+        },
+    }
+
+    result = s3_mirror.mirror_cast_photo_row(row, force=True, s3_client=fake_s3)
+
+    assert result is not None
+    assert seen_urls == [original_url]
+    assert result["hosted_url"].startswith("https://cdn.example.com/")
+
+
+def test_mirror_media_asset_prefers_getty_original_url_from_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    fake_s3 = MagicMock()
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *args, **kwargs: None)
+
+    seen_urls: list[str] = []
+
+    def fake_download_and_hash(url, referer=None):  # noqa: ANN001
+        del referer
+        seen_urls.append(url)
+        return b"\x89PNG\r\n\x1a\nrest", "sha256-test", "image/png"
+
+    monkeypatch.setattr(
+        "trr_backend.scraping.url_image_scraper.download_and_hash_image",
+        fake_download_and_hash,
+    )
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", lambda *args, **kwargs: ("etag", 10))
+
+    original_url = "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=2048x2048&w=gi&k=20&c=full"
+    row = {
+        "media_asset_id": "asset-1",
+        "source": "getty",
+        "source_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?p=1&s=594x594&w=gi&k=20&c=preview",
+        "metadata": {
+            "getty_original_image_url": original_url,
+            "source_page_url": "https://www.gettyimages.com/detail/news-photo/example/1435767826",
+        },
+    }
+
+    result = s3_mirror.mirror_media_asset_row(row, force=True, s3_client=fake_s3)
+
+    assert result is not None
+    assert seen_urls == [original_url]
+    assert result["metadata"]["mirrored_from"] == original_url
+
+
 def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
     monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")

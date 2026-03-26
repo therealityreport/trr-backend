@@ -7,6 +7,7 @@ with support for local Supabase development and remote production environments.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -14,11 +15,20 @@ import sys
 from functools import lru_cache
 from urllib.parse import quote, urlsplit, urlunsplit
 
+logger = logging.getLogger(__name__)
+
 
 class DatabaseConnectionError(RuntimeError):
     """Raised when database connection cannot be established."""
 
     pass
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _parse_supabase_status_env(output: str) -> dict[str, str]:
@@ -57,29 +67,60 @@ def _get_local_supabase_db_url() -> str | None:
         return None
 
 
+def classify_database_url(url: str) -> str:
+    """Return a coarse, non-secret class for the database target."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return "unknown"
+    if host in {"localhost", "127.0.0.1"}:
+        return "local"
+    if host.endswith("pooler.supabase.com"):
+        return "pooler"
+    if host.endswith(".supabase.co"):
+        return "direct"
+    return "other"
+
+
+def describe_database_url_target(url: str, *, source: str) -> dict[str, str | int | None]:
+    parsed = urlsplit(url)
+    return {
+        "source": source,
+        "host_class": classify_database_url(url),
+        "host": (parsed.hostname or "").strip().lower() or None,
+        "port": parsed.port,
+        "database": parsed.path.lstrip("/") or None,
+    }
+
+
 @lru_cache(maxsize=1)
-def resolve_database_url_candidates(*, allow_local_fallback: bool = True) -> tuple[str, ...]:
+def resolve_database_url_candidate_details(
+    *,
+    allow_local_fallback: bool = True,
+) -> tuple[dict[str, str | int | None], ...]:
     """
     Resolve candidate database URLs in priority order.
 
     Priority order:
     1. SUPABASE_DB_URL
     2. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
-    3. Auto-derived Supabase direct host fallback when SUPABASE_DB_URL is a pooler URL
-    4. DATABASE_URL
-    5. TRR_DB_URL
+    3. DATABASE_URL
+    4. TRR_DB_URL
+    5. (Optional) Auto-derived Supabase direct host fallback when explicitly enabled
     6. (Local only) `supabase status --output env` DB_URL
     """
 
     def _append_candidate(
-        ordered: list[str],
+        ordered: list[dict[str, str | int | None]],
         seen: set[str],
         value: str | None,
+        *,
+        source: str,
     ) -> None:
         url = (value or "").strip()
         if not url or url in seen:
             return
-        ordered.append(url)
+        ordered.append({"url": url, **describe_database_url_target(url, source=source)})
         seen.add(url)
 
     def _derive_supabase_direct_url(pooler_url: str) -> str | None:
@@ -103,21 +144,75 @@ def resolve_database_url_candidates(*, allow_local_fallback: bool = True) -> tup
             netloc = f"{userinfo}@{netloc}"
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
-    candidates: list[str] = []
+    candidates: list[dict[str, str | int | None]] = []
     seen: set[str] = set()
+    direct_fallbacks: list[tuple[str, str]] = []
+
+    def _append_candidate_with_optional_direct_fallback(value: str | None, *, source: str) -> None:
+        url = (value or "").strip()
+        if not url:
+            return
+        _append_candidate(candidates, seen, url, source=source)
+        direct_fallback = _derive_supabase_direct_url(url)
+        if direct_fallback:
+            direct_fallbacks.append((source, direct_fallback))
 
     primary_url = (os.getenv("SUPABASE_DB_URL") or "").strip()
-    _append_candidate(candidates, seen, primary_url)
-    _append_candidate(candidates, seen, os.getenv("TRR_DB_FALLBACK_URL"))
-    if primary_url:
-        _append_candidate(candidates, seen, _derive_supabase_direct_url(primary_url))
-    _append_candidate(candidates, seen, os.getenv("DATABASE_URL"))
-    _append_candidate(candidates, seen, os.getenv("TRR_DB_URL"))
+    _append_candidate_with_optional_direct_fallback(primary_url, source="SUPABASE_DB_URL")
+    _append_candidate_with_optional_direct_fallback(os.getenv("TRR_DB_FALLBACK_URL"), source="TRR_DB_FALLBACK_URL")
+    _append_candidate_with_optional_direct_fallback(os.getenv("DATABASE_URL"), source="DATABASE_URL")
+    _append_candidate_with_optional_direct_fallback(os.getenv("TRR_DB_URL"), source="TRR_DB_URL")
+
+    if _env_flag("TRR_DB_ENABLE_DIRECT_FALLBACK", False):
+        for source, direct_fallback in direct_fallbacks:
+            _append_candidate(
+                candidates,
+                seen,
+                direct_fallback,
+                source=f"{source}:derived_direct",
+            )
 
     if allow_local_fallback:
-        _append_candidate(candidates, seen, _get_local_supabase_db_url())
+        _append_candidate(candidates, seen, _get_local_supabase_db_url(), source="supabase status (local)")
 
     return tuple(candidates)
+
+
+@lru_cache(maxsize=1)
+def resolve_database_url_candidates(*, allow_local_fallback: bool = True) -> tuple[str, ...]:
+    """Resolve candidate database URLs in priority order."""
+    return tuple(
+        str(candidate["url"])
+        for candidate in resolve_database_url_candidate_details(allow_local_fallback=allow_local_fallback)
+    )
+
+
+def log_database_resolution_summary(*, allow_local_fallback: bool = True) -> None:
+    """Log the configured database target order without exposing credentials."""
+    candidates = resolve_database_url_candidate_details(allow_local_fallback=allow_local_fallback)
+    if not candidates:
+        logger.warning("[db-resolution] no database URL candidates available")
+        return
+    winner = candidates[0]
+    logger.info(
+        "[db-resolution] winner_source=%s host_class=%s host=%s port=%s database=%s direct_fallback_enabled=%s",
+        winner["source"],
+        winner["host_class"],
+        winner["host"],
+        winner["port"],
+        winner["database"],
+        _env_flag("TRR_DB_ENABLE_DIRECT_FALLBACK", False),
+    )
+    for index, candidate in enumerate(candidates):
+        logger.info(
+            "[db-resolution] candidate_index=%s source=%s host_class=%s host=%s port=%s database=%s",
+            index,
+            candidate["source"],
+            candidate["host_class"],
+            candidate["host"],
+            candidate["port"],
+            candidate["database"],
+        )
 
 
 @lru_cache(maxsize=1)
@@ -126,10 +221,12 @@ def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
     Resolve the database URL using a prioritized lookup.
 
     Priority order:
-    1. SUPABASE_DB_URL - Explicit Supabase database URL (recommended for remote)
-    2. DATABASE_URL - Standard Postgres connection string
-    3. TRR_DB_URL - Legacy alias
-    4. (Local only) `supabase status --output env` DB_URL - Local Supabase instance
+    1. SUPABASE_DB_URL - Explicit runtime database URL
+    2. TRR_DB_FALLBACK_URL - Optional operator-provided fallback
+    3. DATABASE_URL - Standard Postgres connection string
+    4. TRR_DB_URL - Legacy alias
+    5. (Optional) derived direct-host fallback when TRR_DB_ENABLE_DIRECT_FALLBACK=1
+    6. (Local only) `supabase status --output env` DB_URL - Local Supabase instance
 
     Args:
         allow_local_fallback: If True, try to resolve from local Supabase instance
@@ -193,18 +290,18 @@ def print_connection_info(database_url: str | None = None) -> None:
             masked = f"{user_pass[0]}:****@{'@'.join(parts[1:])}"
 
     source = "unknown"
-    if os.getenv("SUPABASE_DB_URL"):
-        source = "SUPABASE_DB_URL"
-    elif os.getenv("TRR_DB_FALLBACK_URL"):
-        source = "TRR_DB_FALLBACK_URL"
-    elif os.getenv("DATABASE_URL"):
-        source = "DATABASE_URL"
-    elif os.getenv("TRR_DB_URL"):
-        source = "TRR_DB_URL"
-    else:
-        source = "supabase status (local)"
+    details = resolve_database_url_candidate_details()
+    source = str(details[0]["source"]) if details else "unknown"
+    target = describe_database_url_target(url, source=source)
 
     print(f"Database URL resolved from: {source}")
+    print(
+        "Target: "
+        f"host_class={target['host_class']} "
+        f"host={target['host']} "
+        f"port={target['port']} "
+        f"database={target['database']}"
+    )
     print(f"Connection: {masked}")
 
 
