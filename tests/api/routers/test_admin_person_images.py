@@ -923,8 +923,8 @@ def test_import_nbcumv_person_media_uses_show_index_crosswalk_when_filename_sear
     assert result["getty_unmatched_total"] == 0
     assert len(imported_items) == 1
     assert imported_items[0].lbx_id == "70075355"
-    assert imported_items[0].gallery_bucket["bucket_type"] == "show"
-    assert imported_items[0].gallery_bucket["resolved_show_name"] == "The Real Housewives of Salt Lake City"
+    assert imported_items[0].gallery_bucket["bucket_type"] == "event"
+    assert imported_items[0].gallery_bucket["resolved_show_name"] is None
 
 
 def test_import_nbcumv_person_media_repairs_existing_shared_getty_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1562,8 +1562,8 @@ def test_import_nbcumv_person_media_falls_back_to_direct_nbcumv_caption_search(
     assert result["imported"] == 1
     assert len(imported_items) == 1
     assert imported_items[0].lbx_filename == "DIRECT_MATCH.JPG"
-    assert imported_items[0].gallery_bucket["bucket_type"] == "show"
-    assert imported_items[0].gallery_bucket["resolved_show_name"] == "The Real Housewives of Salt Lake City"
+    assert imported_items[0].gallery_bucket["bucket_type"] == "event"
+    assert imported_items[0].gallery_bucket["resolved_show_name"] is None
     assert imported_items[0].gallery_bucket["source_resolution"] == "nbcumv_only"
     assert "direct caption search" in str(result["summary_message"]).lower()
 
@@ -1812,8 +1812,8 @@ def test_import_nbcumv_person_media_uses_credited_shows_for_direct_nbcumv_search
     assert result["imported"] == 1
     assert len(imported_items) == 1
     assert imported_items[0].lbx_filename == "DIRECT_MATCH.JPG"
-    assert imported_items[0].gallery_bucket["bucket_type"] == "show"
-    assert imported_items[0].gallery_bucket["resolved_show_name"] == "The Real Housewives of Salt Lake City"
+    assert imported_items[0].gallery_bucket["bucket_type"] == "event"
+    assert imported_items[0].gallery_bucket["resolved_show_name"] is None
     assert imported_items[0].gallery_bucket["source_resolution"] == "nbcumv_only"
     assert "direct caption search" in str(result["summary_message"]).lower()
 
@@ -4657,6 +4657,7 @@ def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, m
             ):
                 response = client.post(
                     f"/api/v1/admin/person/{person_id}/reprocess-images/stream",
+                    json={"prefer_fast_pass": False},
                     headers={"Authorization": f"Bearer {token}"},
                 )
 
@@ -4699,6 +4700,7 @@ def test_reprocess_stream_force_tagging_recount_true_passes_force_recount(client
                         "run_id_text": False,
                         "run_crop": False,
                         "run_resize": False,
+                        "prefer_fast_pass": False,
                     },
                     headers={"Authorization": f"Bearer {token}"},
                 )
@@ -4742,6 +4744,7 @@ def test_reprocess_stream_tagging_is_always_full_fix_even_when_flag_false(client
                         "run_id_text": False,
                         "run_crop": False,
                         "run_resize": False,
+                        "prefer_fast_pass": False,
                     },
                     headers={"Authorization": f"Bearer {token}"},
                 )
@@ -4802,6 +4805,7 @@ def test_reprocess_stream_passes_owner_reference_pool_to_tagging_calls(client, m
                                 "run_crop": False,
                                 "run_resize": False,
                                 "show_name": "The Traitors",
+                                "prefer_fast_pass": False,
                             },
                             headers={"Authorization": f"Bearer {token}"},
                         )
@@ -4857,6 +4861,7 @@ def test_reprocess_stream_forwards_scoped_targets_to_stage_helpers(client, monke
                                 "run_resize": True,
                                 "target_cast_photo_ids": target_cast_photo_ids,
                                 "target_media_link_ids": target_media_link_ids,
+                                "prefer_fast_pass": False,
                             },
                             headers={"Authorization": f"Bearer {token}"},
                         )
@@ -5134,7 +5139,7 @@ def test_refresh_stream_metadata_repair_uses_fixing_imdb_details_label(client, m
     with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
         with patch("api.routers.admin_person_images._refresh_tmdb_profile", return_value=None):
             with patch("api.routers.admin_person_images._refresh_fandom_profile", return_value=None):
-                with patch("api.routers.admin_person_images._resolve_refresh_sources", return_value=([], False)):
+                with patch("api.routers.admin_person_images._resolve_refresh_sources", return_value=(["imdb"], False)):
                     with patch(
                         "api.routers.admin_person_images._repair_existing_imdb_cast_photos",
                         return_value=(0, 0),
@@ -5578,7 +5583,7 @@ class TestRefreshPersonImages:
         payload = response.text.replace("\r\n", "\n")
         assert "Searching Getty for 'Lisa Barlow' on Getty (Bravo)..." in payload
         assert "Matching Getty asset 2/4: NUP_123.JPG" in payload
-        assert "Summary: 2 shared via NBCUMV, 0 NBCUMV-only, 1 Getty-only, 0 skipped, 0 failed." in payload
+        assert "Summary: 2 shared via NBCUMV, 0 NBCUMV-only, 1 Getty-only, 0 covered existing, 0 skipped, 0 failed." in payload
 
     def test_stream_uses_nbcumv_stage_totals_when_getty_candidates_are_zero(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
@@ -7080,6 +7085,7 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
                                     "run_resize": True,
                                     "target_cast_photo_ids": target_cast_photo_ids,
                                     "target_media_link_ids": target_media_link_ids,
+                                    "prefer_fast_pass": False,
                                 },
                                 headers={"Authorization": f"Bearer {token}"},
                             )
