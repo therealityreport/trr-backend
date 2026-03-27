@@ -548,9 +548,6 @@ class RefreshImagesResponse(BaseModel):
     bravotv_attribution_skipped: int = 0
     bravotv_episode_routed: int = 0
     bravotv_skip_gallery_count: int = 0
-    bravotv_attribution_skipped: int = 0
-    bravotv_episode_routed: int = 0
-    bravotv_skip_gallery_count: int = 0
     photos_pruned: int
     imdb_pages_scanned: int = 0
     imdb_candidates_seen: int = 0
@@ -2195,26 +2192,24 @@ def _import_nbcumv_person_media(
         else:
             result["getty_access_mode"] = None
 
+    # Shared executor for NBCUMV item imports — avoids creating one per item.
+    _nbcumv_import_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="person-nbcumv-import")
+
     def _run_nbcumv_item_import_with_timeout(*, item: NbcumvImportItem) -> dict[str, Any]:
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="person-nbcumv-import")
-        future = executor.submit(
+        future = _nbcumv_import_executor.submit(
             _import_single_item,
             db=db,
             item=item,
             assign_people=True,
             people_index={},
         )
-        timed_out = False
         try:
             return future.result(timeout=nbcumv_import_item_timeout_seconds)
         except FuturesTimeoutError as exc:
-            timed_out = True
             future.cancel()
             raise TimeoutError(
                 f"NBCUMV asset import timed out after {nbcumv_import_item_timeout_seconds:.2f}s"
             ) from exc
-        finally:
-            executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
     def _normalize_show_title_key(value: str | None) -> str:
         text = str(value or "").strip().lower()
@@ -3259,27 +3254,10 @@ def _import_nbcumv_person_media(
         )
 
     def _normalize_getty_query_term(value: str | None) -> str:
-        cleaned = re.sub(r"\s+", " ", str(value or "").strip())
-        return cleaned
+        return getty_integration.normalize_query_term(value)
 
     def _is_nbc_family_term(value: str | None) -> bool:
-        normalized = _normalize_getty_query_term(value).casefold()
-        return normalized in {
-            "nbc",
-            "nbcu",
-            "nbc universal",
-            "nbcuniversal",
-            "nbcuniversal media",
-            "nbcumv",
-            "nbc universal media village",
-            "bravo",
-            "peacock",
-            "e!",
-            "e",
-            "usa network",
-            "syfy",
-            "oxygen",
-        }
+        return getty_integration.is_nbc_family_term(value)
 
     def _getty_query_task_id(index: int) -> str:
         if index == 0:
@@ -3297,64 +3275,10 @@ def _import_nbcumv_person_media(
 
     def _build_getty_query_plan() -> list[dict[str, Any]]:
         credit_catalog = _load_person_credit_show_catalog(db, person_id)
-        credit_terms: list[str] = []
-        seen_terms: set[str] = set()
-
-        def _push_term(term: str | None) -> None:
-            cleaned = _normalize_getty_query_term(term)
-            if not cleaned:
-                return
-            normalized = cleaned.casefold()
-            if normalized in seen_terms:
-                return
-            seen_terms.add(normalized)
-            credit_terms.append(cleaned)
-
-        for show_row in credit_catalog:
-            for collection_name in ("networks", "streaming_providers"):
-                raw_values = show_row.get(collection_name)
-                for raw_value in raw_values if isinstance(raw_values, list) else []:
-                    _push_term(str(raw_value or "").strip())
-
-        prioritized_terms = sorted(
-            credit_terms,
-            key=lambda term: (
-                0 if term.casefold() == "bravo" else 1,
-                0 if _is_nbc_family_term(term) else 1,
-                term.casefold(),
-            ),
+        return getty_integration.build_query_plan(
+            normalized_person_name,
+            credit_show_rows=credit_catalog,
         )
-
-        plan: list[dict[str, Any]] = []
-        seen_signatures: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
-
-        def _append_query(phrase: str, *, query_params: dict[str, str] | None = None) -> None:
-            cleaned_phrase = _normalize_getty_query_term(phrase)
-            if not cleaned_phrase:
-                return
-            cleaned_params = {
-                str(key).strip(): str(value).strip()
-                for key, value in (query_params or {}).items()
-                if str(key).strip() and str(value).strip()
-            }
-            signature = (
-                cleaned_phrase.casefold(),
-                tuple(sorted((key.casefold(), value.casefold()) for key, value in cleaned_params.items())),
-            )
-            if signature in seen_signatures:
-                return
-            seen_signatures.add(signature)
-            plan.append({"phrase": cleaned_phrase, "query_params": cleaned_params})
-
-        has_bravo_term = any(term.casefold() == "bravo" for term in prioritized_terms)
-        if has_bravo_term:
-            _append_query(f"{normalized_person_name} Bravo")
-        _append_query(normalized_person_name)
-        for term in prioritized_terms:
-            _append_query(f"{normalized_person_name} {term}")
-            if _is_nbc_family_term(term):
-                _append_query(f"{normalized_person_name} {term}", query_params={"collections": "nbc"})
-        return plan
 
     def _getty_is_unavailable() -> bool:
         return str(getty_access_diagnostics.get("status") or "ok") == "unavailable"
@@ -3728,6 +3652,7 @@ def _import_nbcumv_person_media(
                 max_search_pages=query_page_cap,
                 diagnostics_out=getty_access_diagnostics,
                 query_summary_out=query_summary,
+                skip_grouped_merge=True,
             )
             _sync_getty_access_fields()
             if query_index == 0:
@@ -3790,6 +3715,7 @@ def _import_nbcumv_person_media(
                 and int(result.get("getty_fallback_candidates_total") or 0) == 0
             ):
                 _mark_getty_initial_zero_abort()
+                _nbcumv_import_executor.shutdown(wait=False)
                 return result
         if len(getty_query_plan) < 2:
             _emit_getty_progress(
@@ -5051,6 +4977,7 @@ def _import_nbcumv_person_media(
             result["summary_message"] = (
                 f"NBCUMV unavailable for '{normalized_person_name}' and no Getty fallback rows were importable."
             )
+        _nbcumv_import_executor.shutdown(wait=False)
         return result
 
     total = len(matched_assets)
@@ -5080,6 +5007,7 @@ def _import_nbcumv_person_media(
                             "message": "Cancellation requested. Stopping NBCUMV supplemental import...",
                         }
                     )
+                    _nbcumv_import_executor.shutdown(wait=False)
                     return result
             except Exception:  # noqa: BLE001
                 logger.debug("NBCUMV cancel_requested_cb failed", exc_info=True)
@@ -5212,6 +5140,7 @@ def _import_nbcumv_person_media(
             },
         }
     )
+    _nbcumv_import_executor.shutdown(wait=False)
     return result
 
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -35,8 +36,9 @@ from typing import Any
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from trr_backend.utils.env import load_env  # noqa: E402
@@ -61,6 +63,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Shared-secret auth — when TRR_GETTY_SCRAPER_SECRET is set, all requests
+# must include a matching X-Scraper-Secret header.  This prevents the
+# Cloudflare Tunnel endpoint from being an open scraper on the internet.
+# When the env var is unset (local dev), auth is skipped.
+# ---------------------------------------------------------------------------
+_SCRAPER_SECRET = os.getenv("TRR_GETTY_SCRAPER_SECRET", "").strip()
+
+
+@app.middleware("http")
+async def _check_scraper_secret(request: Request, call_next):  # noqa: ANN001
+    if _SCRAPER_SECRET and request.url.path != "/health":
+        provided = (request.headers.get("x-scraper-secret") or "").strip()
+        if provided != _SCRAPER_SECRET:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Invalid or missing X-Scraper-Secret header"},
+            )
+    return await call_next(request)
 
 
 class ScrapeRequest(BaseModel):

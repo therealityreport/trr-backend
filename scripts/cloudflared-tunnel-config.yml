@@ -1,0 +1,27 @@
+# Cloudflare Tunnel config for the Getty Local Scraper
+#
+# This file is used by `cloudflared tunnel run` to route traffic from
+# scraper.thereality.report → localhost:3456 (getty_local_server.py).
+#
+# Setup (one-time):
+#   brew install cloudflared
+#   cloudflared tunnel login
+#   cloudflared tunnel create getty-scraper
+#   cloudflared tunnel route dns getty-scraper scraper.thereality.report
+#
+# Run:
+#   cloudflared tunnel --config scripts/cloudflared-tunnel-config.yml run getty-scraper
+#
+# Or use the Makefile target:
+#   make getty-tunnel
+
+tunnel: cfb047db-eec2-4597-ba66-f110628fe0ca
+credentials-file: /Users/thomashulihan/.cloudflared/cfb047db-eec2-4597-ba66-f110628fe0ca.json
+
+ingress:
+  - hostname: scraper.thereality.report
+    service: http://127.0.0.1:3456
+    originRequest:
+      connectTimeout: 30s
+      noTLSVerify: false
+  - service: http_status:404

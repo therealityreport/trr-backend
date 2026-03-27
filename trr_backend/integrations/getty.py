@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -88,13 +89,14 @@ _GETTY_PERSON_MATCH_DENYLIST = (
     },
 )
 
+_FALLBACK_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "accept-language": "en-US,en;q=0.9",
-    "user-agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
+    "user-agent": os.getenv("TRR_GETTY_USER_AGENT", "").strip() or _FALLBACK_USER_AGENT,
 }
 
 _GETTY_BLOCK_PAGE_MARKERS = (
@@ -197,9 +199,7 @@ def _normalize_search_page_fetch_result(
     status_code = _normalize_http_status_code(result.get("status_code"))
     current_page = _normalize_int_value(result.get("current_page"))
     first_editorial_ids = [
-        str(value).strip()
-        for value in list(result.get("first_editorial_ids") or [])
-        if str(value).strip()
+        str(value).strip() for value in list(result.get("first_editorial_ids") or []) if str(value).strip()
     ]
     page_signature = str(result.get("page_signature") or "").strip() or None
     return html, response_url, status_code, current_page, first_editorial_ids, page_signature
@@ -253,6 +253,7 @@ def search_editorial_assets(
     search_page_fetcher: GettySearchPageFetcher | None = None,
     include_details: bool = True,
     candidate_progress_cb: GettyCandidateProgressCallback | None = None,
+    skip_grouped_merge: bool = False,
 ) -> list[dict[str, Any]]:
     cleaned = str(phrase or "").strip()
     if not cleaned:
@@ -275,16 +276,17 @@ def search_editorial_assets(
         if progress_cb:
             progress_cb(0, total, f"Getty search found {total} candidate asset pages.")
         return candidates[:total]
-    candidates = _merge_grouped_event_metadata(
-        cleaned,
-        candidates,
-        session=session,
-        query_params=query_params,
-        limit=limit,
-        max_search_pages=max_search_pages,
-        diagnostics_out=diagnostics,
-        search_page_fetcher=search_page_fetcher,
-    )
+    if not skip_grouped_merge:
+        candidates = _merge_grouped_event_metadata(
+            cleaned,
+            candidates,
+            session=session,
+            query_params=query_params,
+            limit=limit,
+            max_search_pages=max_search_pages,
+            diagnostics_out=diagnostics,
+            search_page_fetcher=search_page_fetcher,
+        )
     total = len(candidates) if _is_unlimited_limit(limit) else min(len(candidates), max(0, int(limit or 0)))
     if progress_cb:
         progress_cb(0, total, f"Getty search found {total} candidate asset pages.")
@@ -508,7 +510,10 @@ def _merge_grouped_event_metadata(
             by_detail_url.get(detail_url) or by_editorial_id.get(editorial_id) or by_object_name.get(object_name)
         )
         if grouped_candidate:
-            merged_candidates.append(_merge_search_candidate_with_detail(grouped_candidate, candidate))
+            # candidate is the base (flat search result); grouped_candidate enriches it.
+            # Using candidate as first arg preserves its keys as the base, and
+            # grouped metadata (grouped_image_count, event_name, etc.) fills in gaps.
+            merged_candidates.append(_merge_search_candidate_with_detail(candidate, grouped_candidate))
         else:
             merged_candidates.append(candidate)
     return merged_candidates
@@ -592,43 +597,48 @@ def fetch_grouped_event_page(
     cleaned_url = str(event_url or "").strip()
     if not cleaned_url:
         return None
+    owns_session = session is None
     client = _session(session)
     try:
-        response = client.get(cleaned_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
-        response.raise_for_status()
-    except RequestException as exc:
-        logger.warning("Getty grouped event fetch failed for %s: %s", cleaned_url, exc)
-        return None
+        try:
+            response = client.get(cleaned_url, headers=_DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT_SECONDS)
+            response.raise_for_status()
+        except RequestException as exc:
+            logger.warning("Getty grouped event fetch failed for %s: %s", cleaned_url, exc)
+            return None
 
-    event_candidates = _extract_search_asset_candidates(response.text)
-    representative_asset: dict[str, Any] | None = None
-    matched_asset: dict[str, Any] | None = None
-    scanned_assets: list[dict[str, Any]] = []
-    safe_limit = max(1, int(detail_limit or DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT))
+        event_candidates = _extract_search_asset_candidates(response.text)
+        representative_asset: dict[str, Any] | None = None
+        matched_asset: dict[str, Any] | None = None
+        scanned_assets: list[dict[str, Any]] = []
+        safe_limit = max(1, int(detail_limit or DEFAULT_EVENT_DETAIL_SAMPLE_LIMIT))
 
-    for candidate in event_candidates[:safe_limit]:
-        detail_url = str(candidate.get("detail_url") or "").strip()
-        if not detail_url:
-            continue
-        detail = fetch_asset_detail(detail_url, session=client)
-        if not detail:
-            continue
-        merged_asset = _merge_search_candidate_with_detail(candidate, detail)
-        scanned_assets.append(_summarize_grouped_event_asset(merged_asset))
-        if representative_asset is None:
-            representative_asset = merged_asset
-        if person_name and matched_asset is None:
-            match_details = describe_asset_person_match(merged_asset, person_name)
-            if match_details.get("matched"):
-                matched_asset = {**merged_asset, "person_match": match_details}
+        for candidate in event_candidates[:safe_limit]:
+            detail_url = str(candidate.get("detail_url") or "").strip()
+            if not detail_url:
+                continue
+            detail = fetch_asset_detail(detail_url, session=client)
+            if not detail:
+                continue
+            merged_asset = _merge_search_candidate_with_detail(candidate, detail)
+            scanned_assets.append(_summarize_grouped_event_asset(merged_asset))
+            if representative_asset is None:
+                representative_asset = merged_asset
+            if person_name and matched_asset is None:
+                match_details = describe_asset_person_match(merged_asset, person_name)
+                if match_details.get("matched"):
+                    matched_asset = {**merged_asset, "person_match": match_details}
 
-    return {
-        "event_url": cleaned_url,
-        "event_asset_count_scanned": len(scanned_assets),
-        "representative_asset": matched_asset or representative_asset,
-        "matched_asset": matched_asset,
-        "asset_samples": scanned_assets,
-    }
+        return {
+            "event_url": cleaned_url,
+            "event_asset_count_scanned": len(scanned_assets),
+            "representative_asset": matched_asset or representative_asset,
+            "matched_asset": matched_asset,
+            "asset_samples": scanned_assets,
+        }
+    finally:
+        if owns_session:
+            client.close()
 
 
 DEFAULT_EVENT_SCAN_LIMIT = 200
@@ -785,6 +795,7 @@ def _search_asset_candidates_for_phrase(
     client = _session(session)
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
+    seen_editorial_ids: set[str] = set()
     page = 1
     query_summary = _init_query_summary(query_summary_out, phrase=phrase, query_params=query_params)
     while True:
@@ -933,7 +944,14 @@ def _search_asset_candidates_for_phrase(
             absolute = str(candidate.get("detail_url") or "").strip()
             if not absolute or absolute in seen:
                 continue
+            # Also deduplicate by editorial_id — different detail URLs can point
+            # to the same asset (e.g., with/without query params, locale variants).
+            eid = str(candidate.get("editorial_id") or candidate.get("editorialId") or "").strip()
+            if eid and eid in seen_editorial_ids:
+                continue
             seen.add(absolute)
+            if eid:
+                seen_editorial_ids.add(eid)
             deduped.append(candidate)
             page_new += 1
             if not _is_unlimited_limit(limit) and len(deduped) >= int(limit or 0):
@@ -1987,3 +2005,126 @@ def _first_present(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload and payload[key] not in (None, ""):
             return payload[key]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Shared query-plan builder
+# ---------------------------------------------------------------------------
+
+_NBC_FAMILY_TERMS: set[str] = {
+    "nbc",
+    "nbcu",
+    "nbc universal",
+    "nbcuniversal",
+    "nbcuniversal media",
+    "nbcumv",
+    "nbc universal media village",
+    "bravo",
+    "peacock",
+    "e!",
+    "e",
+    "usa network",
+    "syfy",
+    "oxygen",
+}
+
+
+def normalize_query_term(value: str | None) -> str:
+    """Collapse whitespace and strip a query term."""
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def is_nbc_family_term(value: str | None) -> bool:
+    """Return True when *value* is an NBCU-family network/provider name."""
+    return normalize_query_term(value).casefold() in _NBC_FAMILY_TERMS
+
+
+def build_query_plan(
+    person_name: str,
+    *,
+    credit_show_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the canonical Getty direct-search query plan.
+
+    Parameters
+    ----------
+    person_name:
+        Display name used as the base search phrase.
+    credit_show_rows:
+        Optional list of show dicts with ``networks`` and
+        ``streaming_providers`` list fields.  When supplied the plan
+        includes credit/network/provider-driven queries and
+        NBC-family collection variants, matching the live backend
+        behavior.  When *None* the plan falls back to the minimal
+        bravo + broad pair used by the prefetch path today.
+    """
+    normalized = normalize_query_term(person_name)
+    if not normalized:
+        return []
+
+    plan: list[dict[str, Any]] = []
+    seen_signatures: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+
+    def _append(phrase: str, *, query_params: dict[str, str] | None = None, label: str | None = None) -> None:
+        cleaned_phrase = normalize_query_term(phrase)
+        if not cleaned_phrase:
+            return
+        cleaned_params = {
+            str(k).strip(): str(v).strip() for k, v in (query_params or {}).items() if str(k).strip() and str(v).strip()
+        }
+        sig = (
+            cleaned_phrase.casefold(),
+            tuple(sorted((k.casefold(), v.casefold()) for k, v in cleaned_params.items())),
+        )
+        if sig in seen_signatures:
+            return
+        seen_signatures.add(sig)
+        entry: dict[str, Any] = {"phrase": cleaned_phrase, "query_params": cleaned_params}
+        if label:
+            entry["label"] = label
+        plan.append(entry)
+
+    if credit_show_rows is not None:
+        # Full credit-aware plan (live backend path)
+        credit_terms: list[str] = []
+        seen_terms: set[str] = set()
+
+        def _push_term(term: str | None) -> None:
+            cleaned = normalize_query_term(term)
+            if not cleaned:
+                return
+            norm = cleaned.casefold()
+            if norm in seen_terms:
+                return
+            seen_terms.add(norm)
+            credit_terms.append(cleaned)
+
+        for show_row in credit_show_rows:
+            for collection_name in ("networks", "streaming_providers"):
+                raw_values = show_row.get(collection_name)
+                for raw_value in raw_values if isinstance(raw_values, list) else []:
+                    _push_term(str(raw_value or "").strip())
+
+        prioritized = sorted(
+            credit_terms,
+            key=lambda t: (
+                0 if t.casefold() == "bravo" else 1,
+                0 if is_nbc_family_term(t) else 1,
+                t.casefold(),
+            ),
+        )
+
+        has_bravo = any(t.casefold() == "bravo" for t in prioritized)
+        if has_bravo:
+            _append(f"{normalized} Bravo", label="Bravo Search")
+        _append(normalized, label="Broad Search")
+        for term in prioritized:
+            _append(f"{normalized} {term}")
+            if is_nbc_family_term(term):
+                _append(f"{normalized} {term}", query_params={"collections": "nbc"})
+    else:
+        # Minimal plan (prefetch path without DB access)
+        _append(f"{normalized} Bravo", label="Bravo Search")
+        _append(normalized, label="Broad Search")
+
+    return plan
