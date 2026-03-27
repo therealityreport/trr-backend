@@ -23218,6 +23218,21 @@ def _fetch_shared_catalog_rows(
         return []
 
 
+def _catalog_newest_stored_post_at(platform: str, account_handle: str) -> datetime | None:
+    """Return the posted_at of the newest stored catalog post for this account."""
+    table, _source_id_column, posted_at_column = _shared_catalog_base_query_parts(platform)
+    normalized_account = _normalize_account_handle(account_handle)
+    row = pg.fetch_one(
+        f"""
+        select max({posted_at_column}) as newest_at
+        from social.{table}
+        where lower(source_account) = %s
+        """,
+        [normalized_account],
+    )
+    return _coerce_dt((row or {}).get("newest_at"))
+
+
 def _shared_catalog_total_posts(platform: str, account_handle: str, *, statuses: list[str] | None = None) -> int:
     table, _, _ = _shared_catalog_base_query_parts(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -46447,6 +46462,40 @@ def sync_recent_social_account_catalog(
         account_handle,
         source_scope=source_scope,
         date_start=now_utc - timedelta(days=safe_lookback_days),
+        date_end=now_utc,
+        initiated_by=initiated_by,
+        inline_worker_id=inline_worker_id,
+    )
+
+
+def sync_newer_social_account_catalog(
+    platform: str,
+    account_handle: str,
+    *,
+    source_scope: str = "bravo",
+    initiated_by: str | None = None,
+    inline_worker_id: str | None = None,
+) -> dict[str, Any]:
+    """Fill the head gap: fetch all posts newer than the newest stored post."""
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    newest_at = _catalog_newest_stored_post_at(normalized_platform, normalized_account)
+    if newest_at is None:
+        raise SocialIngestValidationError(
+            "NO_STORED_POSTS",
+            "No stored posts found for this account. Run a full backfill first.",
+        )
+    now_utc = _now_utc()
+    if newest_at >= now_utc:
+        raise SocialIngestValidationError(
+            "ALREADY_CURRENT",
+            "Newest stored post is already at or beyond the current time.",
+        )
+    return start_social_account_catalog_backfill(
+        platform,
+        account_handle,
+        source_scope=source_scope,
+        date_start=newest_at,
         date_end=now_utc,
         initiated_by=initiated_by,
         inline_worker_id=inline_worker_id,
