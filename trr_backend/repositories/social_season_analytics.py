@@ -46502,6 +46502,68 @@ def sync_newer_social_account_catalog(
     )
 
 
+def resume_tail_social_account_catalog(
+    platform: str,
+    account_handle: str,
+    *,
+    source_scope: str = "bravo",
+    initiated_by: str | None = None,
+    inline_worker_id: str | None = None,
+) -> dict[str, Any]:
+    """Fill the tail gap: resume from the last backfill's frontier cursor."""
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    frontier = _latest_account_frontier(normalized_platform, normalized_account)
+    next_cursor = str(frontier.get("next_cursor") or "").strip() or None
+    if not next_cursor:
+        raise SocialIngestValidationError(
+            "NO_RESUMABLE_FRONTIER",
+            "No resumable frontier cursor found. The previous backfill either completed fully or has no saved progress.",
+        )
+    if frontier.get("exhausted"):
+        raise SocialIngestValidationError(
+            "FRONTIER_ALREADY_EXHAUSTED",
+            "The previous backfill's frontier is already exhausted (all posts were reached).",
+        )
+    # Start a new full_history backfill — it will use the frontier strategy
+    result = start_social_account_catalog_backfill(
+        platform,
+        account_handle,
+        source_scope=source_scope,
+        date_start=None,
+        date_end=None,
+        initiated_by=initiated_by,
+        inline_worker_id=inline_worker_id,
+    )
+    # Seed the new run's frontier with the recovered cursor
+    new_run_id = str(result.get("run_id") or "").strip()
+    if new_run_id:
+        _ensure_shared_account_run_frontier(
+            run_id=new_run_id,
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+            status="queued",
+            next_cursor=next_cursor,
+            total_posts=frontier.get("total_posts"),
+            posts_checked=frontier.get("posts_checked") or 0,
+            posts_saved=frontier.get("posts_saved") or 0,
+            pages_scanned=frontier.get("pages_scanned") or 0,
+            metadata={
+                "resumed_from_run_id": frontier.get("run_id"),
+                "resumed_from_frontier_id": frontier.get("id"),
+                "resumed_cursor": next_cursor,
+            },
+        )
+    return {
+        **result,
+        "resumed_from_cursor": True,
+        "source_frontier_run_id": frontier.get("run_id"),
+        "source_frontier_pages_scanned": frontier.get("pages_scanned"),
+        "source_frontier_posts_checked": frontier.get("posts_checked"),
+    }
+
+
 def resolve_social_account_catalog_review_queue_item(
     *,
     item_id: str,
