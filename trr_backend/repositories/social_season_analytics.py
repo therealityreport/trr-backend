@@ -42,8 +42,10 @@ from trr_backend.job_plane import (
 from trr_backend.modal_dispatch import (
     dispatch_social_job,
     inspect_modal_function_call,
+    modal_app_name,
     modal_dispatch_enabled,
     modal_dispatch_ready,
+    modal_environment_name,
     modal_social_job_function_name,
 )
 from trr_backend.socials.crawlee_runtime import (
@@ -23481,10 +23483,17 @@ def _social_account_profile_hashtag_items(
     assignment_rows: list[dict[str, Any]] | None = None,
     lookback_days: int | None = None,
     limit: int | None = None,
+    rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS) and normalized_platform != "instagram" and lookback_days is None:
+    preloaded_rows = [dict(row) for row in rows] if rows is not None else None
+    if (
+        preloaded_rows is None
+        and normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS)
+        and normalized_platform != "instagram"
+        and lookback_days is None
+    ):
         try:
             items = _shared_catalog_hashtag_items(
                 normalized_platform,
@@ -23519,11 +23528,15 @@ def _social_account_profile_hashtag_items(
                 item["assigned_shows"] = list((fallback_item or {}).get("assigned_shows") or [])
                 item["assigned_seasons"] = list((fallback_item or {}).get("assigned_seasons") or [])
             return items
-    rows = _social_account_profile_analysis_rows(normalized_platform, normalized_account, limit=limit)
+    analysis_rows = (
+        preloaded_rows
+        if preloaded_rows is not None
+        else _social_account_profile_analysis_rows(normalized_platform, normalized_account, limit=limit)
+    )
     if lookback_days is not None and lookback_days > 0:
         window_start = _now_utc() - timedelta(days=int(lookback_days))
         filtered_rows: list[dict[str, Any]] = []
-        for row in rows:
+        for row in analysis_rows:
             posted_at = row.get("posted_at")
             if isinstance(posted_at, datetime):
                 normalized_posted_at = posted_at.astimezone(UTC) if posted_at.tzinfo else posted_at.replace(tzinfo=UTC)
@@ -23538,9 +23551,9 @@ def _social_account_profile_hashtag_items(
                 normalized_posted_at = parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
             if normalized_posted_at >= window_start:
                 filtered_rows.append(row)
-        rows = filtered_rows
+        analysis_rows = filtered_rows
     return _build_social_account_profile_hashtag_items(
-        rows,
+        analysis_rows,
         platform=normalized_platform,
         account_handle=normalized_account,
         assignment_rows=assignment_rows,
@@ -24233,6 +24246,49 @@ def _get_shared_account_run_frontier(
         limit 1
         """,
         [run_id, _normalize_platform_name(platform), _normalize_account_handle(account_handle)],
+    )
+    return _shared_account_frontier_row_to_payload(row)
+
+
+def _latest_account_frontier(
+    platform: str,
+    account_handle: str,
+) -> dict[str, Any]:
+    """Return the most recent non-exhausted frontier for this account, across all runs."""
+    if not _shared_account_run_frontiers_table_ready():
+        return {}
+    normalized_platform = _normalize_platform_name(platform)
+    normalized_account = _normalize_account_handle(account_handle)
+    row = pg.fetch_one(
+        """
+        select
+          id::text as id,
+          run_id::text as run_id,
+          platform,
+          account_handle,
+          strategy,
+          status,
+          next_cursor,
+          total_posts,
+          posts_checked,
+          posts_saved,
+          pages_scanned,
+          last_transport,
+          retry_count,
+          exhausted,
+          metadata,
+          created_at,
+          updated_at
+        from social.shared_account_run_frontiers
+        where platform = %s
+          and account_handle = %s
+          and coalesce(exhausted, false) = false
+          and next_cursor is not null
+          and nullif(trim(next_cursor), '') is not null
+        order by updated_at desc
+        limit 1
+        """,
+        [normalized_platform, normalized_account],
     )
     return _shared_account_frontier_row_to_payload(row)
 
@@ -31529,12 +31585,18 @@ def _derive_run_progress_status(stored_status: Any, job_rows: Sequence[Mapping[s
 
 def _build_run_dispatch_health(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     queued_unclaimed_jobs = 0
+    dispatch_blocked_jobs = 0
     modal_pending_jobs = 0
     modal_running_unclaimed_jobs = 0
     retrying_dispatch_jobs = 0
     stale_dispatch_failed_jobs = 0
     latest_dispatch_requested_at: datetime | None = None
     latest_remote_invocation_checked_at: datetime | None = None
+    latest_dispatch_backend: str | None = None
+    latest_dispatch_error: str | None = None
+    latest_dispatch_error_code: str | None = None
+    latest_remote_blocked_reason: str | None = None
+    latest_dispatch_detail_at: datetime | None = None
     for row in job_rows:
         status = str(row.get("status") or "").strip().lower()
         dispatch = _job_dispatch_metadata(row)
@@ -31550,17 +31612,35 @@ def _build_run_dispatch_health(job_rows: Sequence[Mapping[str, Any]]) -> dict[st
         ):
             latest_remote_invocation_checked_at = remote_invocation_checked_at
         dispatch_error_code = _dispatch_metadata_error_code(dispatch)
+        dispatch_error = str(dispatch.get("last_dispatch_error") or "").strip() or None
         stale_recovery_count = _dispatch_metadata_recovery_count(dispatch)
         worker_id = str(row.get("worker_id") or "").strip()
         row_error_code = str(row.get("last_error_code") or dispatch_error_code or "").strip().lower()
         remote_invocation_status = _modal_invocation_status(dispatch)
+        remote_blocked_reason = str(dispatch.get("remote_blocked_reason") or "").strip() or None
+        dispatch_backend = str(dispatch.get("dispatch_backend") or "").strip() or None
+        latest_detail_candidate = remote_invocation_checked_at or dispatch_requested_at
+
+        if latest_detail_candidate is not None and (
+            latest_dispatch_detail_at is None or latest_detail_candidate > latest_dispatch_detail_at
+        ):
+            latest_dispatch_detail_at = latest_detail_candidate
+            latest_dispatch_backend = dispatch_backend
+            latest_dispatch_error = dispatch_error
+            latest_dispatch_error_code = dispatch_error_code or None
+            latest_remote_blocked_reason = remote_blocked_reason
 
         if status in {"queued", "pending"} and dispatch_requested_at is not None and not worker_id:
+            is_dispatch_blocked = bool(
+                dispatch_error_code == "modal_dispatch_failed" or remote_blocked_reason or dispatch_error
+            )
+            if is_dispatch_blocked:
+                dispatch_blocked_jobs += 1
             if remote_invocation_status == "pending":
                 modal_pending_jobs += 1
             elif remote_invocation_status == "running":
                 modal_running_unclaimed_jobs += 1
-            else:
+            elif not is_dispatch_blocked:
                 queued_unclaimed_jobs += 1
         if status == "retrying" and (
             stale_recovery_count > 0 or dispatch_error_code == STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE
@@ -31571,12 +31651,20 @@ def _build_run_dispatch_health(job_rows: Sequence[Mapping[str, Any]]) -> dict[st
 
     return {
         "queued_unclaimed_jobs": queued_unclaimed_jobs,
+        "dispatch_blocked_jobs": dispatch_blocked_jobs,
         "modal_pending_jobs": modal_pending_jobs,
         "modal_running_unclaimed_jobs": modal_running_unclaimed_jobs,
         "retrying_dispatch_jobs": retrying_dispatch_jobs,
         "stale_dispatch_failed_jobs": stale_dispatch_failed_jobs,
         "latest_dispatch_requested_at": _iso(latest_dispatch_requested_at),
         "remote_invocation_checked_at": _iso(latest_remote_invocation_checked_at),
+        "latest_dispatch_backend": latest_dispatch_backend,
+        "latest_dispatch_error": latest_dispatch_error,
+        "latest_dispatch_error_code": latest_dispatch_error_code,
+        "latest_remote_blocked_reason": latest_remote_blocked_reason,
+        "configured_app_name": modal_app_name() or None,
+        "configured_function_name": modal_social_job_function_name() or None,
+        "modal_environment": modal_environment_name(),
         "max_stale_dispatch_retries": _resolve_stale_modal_dispatch_recovery_limit(),
     }
 
@@ -44711,7 +44799,11 @@ def _fetch_social_account_profile_source_rows(platform: str, account_handle: str
     ]
 
 
-def _fetch_instagram_touching_catalog_rows(account_handle: str) -> list[dict[str, Any]]:
+def _fetch_instagram_touching_catalog_rows(
+    account_handle: str,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     normalized_handle_sql = (
         "nullif("
@@ -44720,9 +44812,12 @@ def _fetch_instagram_touching_catalog_rows(account_handle: str) -> list[dict[str
         "'[^a-z0-9._-]+', '', 'g'"
         "), '')"
     )
-    try:
-        return pg.fetch_all(
-            f"""
+    limit_clause = ""
+    owner_params: list[Any] = [normalized_account]
+    if limit is not None:
+        limit_clause = "limit %s"
+        owner_params.append(max(1, int(limit)))
+    select_sql = f"""
             select
               p.id::text as id,
               p.source_id as source_id,
@@ -44740,33 +44835,81 @@ def _fetch_instagram_touching_catalog_rows(account_handle: str) -> list[dict[str
             from social.instagram_account_catalog_posts p
             left join core.seasons s on s.id = p.assigned_season_id
             left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+    """
+    try:
+        owner_rows = pg.fetch_all(
+            f"""
+            {select_sql}
             where lower(p.source_account) = %s
-               or exists (
-                    select 1
-                    from jsonb_array_elements_text(coalesce(p.collaborators, '[]'::jsonb)) as collaborator(value)
-                    where {normalized_handle_sql.replace('%s', 'collaborator.value')} = %s
-               )
-               or exists (
-                    select 1
-                    from jsonb_array_elements(coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb)) as collaborator_detail(value)
-                    where {normalized_handle_sql.replace('%s', "collaborator_detail.value ->> 'username'")} = %s
-               )
             order by p.posted_at desc nulls last, p.id desc
+            {limit_clause}
             """,
-            [normalized_account, normalized_account, normalized_account],
+            owner_params,
         )
+        if limit is not None and len(owner_rows) >= max(1, int(limit)):
+            return owner_rows[: max(1, int(limit))]
+
+        collaborator_limit = None if limit is None else max(1, int(limit) - len(owner_rows))
+        collaborator_limit_clause = ""
+        collaborator_params: list[Any] = [normalized_account, normalized_account, normalized_account]
+        if collaborator_limit is not None:
+            collaborator_limit_clause = "limit %s"
+            collaborator_params.append(collaborator_limit)
+        collaborator_rows = pg.fetch_all(
+            f"""
+            {select_sql}
+            where lower(p.source_account) <> %s
+              and (
+                    exists (
+                        select 1
+                        from jsonb_array_elements_text(coalesce(p.collaborators, '[]'::jsonb)) as collaborator(value)
+                        where {normalized_handle_sql.replace('%s', 'collaborator.value')} = %s
+                    )
+                 or exists (
+                        select 1
+                        from jsonb_array_elements(coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb)) as collaborator_detail(value)
+                        where {normalized_handle_sql.replace('%s', "collaborator_detail.value ->> 'username'")} = %s
+                    )
+              )
+            order by p.posted_at desc nulls last, p.id desc
+            {collaborator_limit_clause}
+            """,
+            collaborator_params,
+        )
+        combined_rows = [*owner_rows, *collaborator_rows]
+        combined_rows.sort(
+            key=lambda row: (
+                _social_account_profile_row_sort_value(row.get("posted_at")),
+                str(row.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            return combined_rows[: max(1, int(limit))]
+        return combined_rows
     except psycopg_errors.UndefinedTable:
         return []
+
+
+def _instagram_social_account_profile_has_any_dataset_rows(account_handle: str) -> bool:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if not normalized_account:
+        return False
+    if _fetch_social_account_profile_rows("instagram", normalized_account, limit=1):
+        return True
+    return bool(_fetch_instagram_touching_catalog_rows(normalized_account, limit=1))
 
 
 def _instagram_social_account_profile_dataset_rows(
     account_handle: str,
     *,
     search: str | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    materialized_rows = _fetch_social_account_profile_rows("instagram", normalized_account)
-    catalog_rows = _fetch_instagram_touching_catalog_rows(normalized_account)
+    fetch_limit = max(1, int(limit)) if limit is not None else None
+    materialized_rows = _fetch_social_account_profile_rows("instagram", normalized_account, limit=fetch_limit)
+    catalog_rows = _fetch_instagram_touching_catalog_rows(normalized_account, limit=fetch_limit)
     combined_rows: list[dict[str, Any]] = []
 
     for row in materialized_rows:
@@ -44832,6 +44975,8 @@ def _instagram_social_account_profile_dataset_rows(
         ),
         reverse=True,
     )
+    if fetch_limit is not None:
+        return dataset_rows[:fetch_limit]
     return dataset_rows
 
 
@@ -44894,7 +45039,7 @@ def _social_account_profile_analysis_rows(
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     if normalized_platform == "instagram":
-        rows = _instagram_social_account_profile_dataset_rows(normalized_account)
+        rows = _instagram_social_account_profile_dataset_rows(normalized_account, limit=limit)
         if limit is not None:
             return rows[: max(1, int(limit))]
         return rows
@@ -45066,19 +45211,24 @@ def _fetch_social_account_profile_rows(
 
 
 def _assert_social_account_profile_exists(platform: str, account_handle: str) -> list[dict[str, Any]]:
-    source_rows = _fetch_social_account_profile_source_rows(platform, account_handle)
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    source_rows = _fetch_social_account_profile_source_rows(normalized_platform, normalized_account)
     if source_rows:
         return source_rows
 
+    if normalized_platform == "instagram" and _instagram_social_account_profile_has_any_dataset_rows(normalized_account):
+        return source_rows
+
     catalog_total_posts = (
-        _shared_catalog_total_posts(platform, account_handle)
-        if _normalize_social_account_profile_platform(platform) in set(CATALOG_SUPPORTED_PLATFORMS)
+        _shared_catalog_total_posts(normalized_platform, normalized_account)
+        if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS)
         else 0
     )
     if catalog_total_posts > 0:
         return source_rows
 
-    total_posts = _social_account_profile_total_posts(platform, account_handle)
+    total_posts = _social_account_profile_total_posts(normalized_platform, normalized_account)
     if total_posts <= 0 and catalog_total_posts <= 0 and not source_rows:
         raise LookupError("Social account profile not found.")
     return source_rows
@@ -45701,6 +45851,7 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
             normalized_platform,
             normalized_account,
             assignment_rows=assignment_rows,
+            rows=analysis_rows if normalized_platform == "instagram" else None,
         )
         per_show_counts, per_season_counts = (
             _serialize_social_account_profile_post_buckets(
