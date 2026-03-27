@@ -23222,14 +23222,17 @@ def _catalog_newest_stored_post_at(platform: str, account_handle: str) -> dateti
     """Return the posted_at of the newest stored catalog post for this account."""
     table, _source_id_column, posted_at_column = _shared_catalog_base_query_parts(platform)
     normalized_account = _normalize_account_handle(account_handle)
-    row = pg.fetch_one(
-        f"""
+    try:
+        row = pg.fetch_one(
+            f"""
         select max({posted_at_column}) as newest_at
         from social.{table}
         where lower(source_account) = %s
         """,
-        [normalized_account],
-    )
+            [normalized_account],
+        )
+    except psycopg_errors.UndefinedTable:
+        return None
     return _coerce_dt((row or {}).get("newest_at"))
 
 
@@ -23237,14 +23240,17 @@ def _catalog_oldest_stored_post_at(platform: str, account_handle: str) -> dateti
     """Return the posted_at of the oldest stored catalog post for this account."""
     table, _source_id_column, posted_at_column = _shared_catalog_base_query_parts(platform)
     normalized_account = _normalize_account_handle(account_handle)
-    row = pg.fetch_one(
-        f"""
+    try:
+        row = pg.fetch_one(
+            f"""
         select min({posted_at_column}) as oldest_at
         from social.{table}
         where lower(source_account) = %s
         """,
-        [normalized_account],
-    )
+            [normalized_account],
+        )
+    except psycopg_errors.UndefinedTable:
+        return None
     return _coerce_dt((row or {}).get("oldest_at"))
 
 
@@ -24304,6 +24310,8 @@ def _latest_account_frontier(
           posts_saved,
           pages_scanned,
           last_transport,
+          lease_owner,
+          lease_expires_at,
           retry_count,
           exhausted,
           metadata,
@@ -46557,6 +46565,8 @@ def resume_tail_social_account_catalog(
             "NO_RESUMABLE_FRONTIER",
             "No resumable frontier cursor found. The previous backfill either completed fully or has no saved progress.",
         )
+    # Defensive guard — _latest_account_frontier already filters exhausted=false in SQL,
+    # but we check again to be safe against future query changes.
     if frontier.get("exhausted"):
         raise SocialIngestValidationError(
             "FRONTIER_ALREADY_EXHAUSTED",
