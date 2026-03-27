@@ -23233,6 +23233,21 @@ def _catalog_newest_stored_post_at(platform: str, account_handle: str) -> dateti
     return _coerce_dt((row or {}).get("newest_at"))
 
 
+def _catalog_oldest_stored_post_at(platform: str, account_handle: str) -> datetime | None:
+    """Return the posted_at of the oldest stored catalog post for this account."""
+    table, _source_id_column, posted_at_column = _shared_catalog_base_query_parts(platform)
+    normalized_account = _normalize_account_handle(account_handle)
+    row = pg.fetch_one(
+        f"""
+        select min({posted_at_column}) as oldest_at
+        from social.{table}
+        where lower(source_account) = %s
+        """,
+        [normalized_account],
+    )
+    return _coerce_dt((row or {}).get("oldest_at"))
+
+
 def _shared_catalog_total_posts(platform: str, account_handle: str, *, statuses: list[str] | None = None) -> int:
     table, _, _ = _shared_catalog_base_query_parts(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -46241,6 +46256,13 @@ def get_social_account_catalog_freshness(platform: str, account_handle: str) -> 
     active_run = get_active_social_account_catalog_run(normalized_platform, normalized_account)
     active_run_status = str((active_run or {}).get("status") or "").strip().lower() or None
     stored_total_posts = _shared_catalog_total_posts(normalized_platform, normalized_account)
+    catalog_newest_at = _catalog_newest_stored_post_at(normalized_platform, normalized_account)
+    catalog_oldest_at = _catalog_oldest_stored_post_at(normalized_platform, normalized_account)
+    frontier = _latest_account_frontier(normalized_platform, normalized_account)
+    has_resumable_frontier = bool(
+        frontier.get("next_cursor")
+        and not frontier.get("exhausted")
+    )
     checked_at = _now_utc().isoformat()
 
     if active_run:
@@ -46256,6 +46278,11 @@ def get_social_account_catalog_freshness(platform: str, account_handle: str) -> 
             "needs_recent_sync": False,
             "latest_catalog_run_status": latest_run_status,
             "active_run_status": active_run_status,
+            "catalog_newest_post_at": _iso(catalog_newest_at),
+            "catalog_oldest_post_at": _iso(catalog_oldest_at),
+            "has_resumable_frontier": has_resumable_frontier,
+            "frontier_pages_scanned": frontier.get("pages_scanned") if has_resumable_frontier else None,
+            "frontier_posts_checked": frontier.get("posts_checked") if has_resumable_frontier else None,
         }
     if latest_run_status != "completed":
         return {
@@ -46270,6 +46297,11 @@ def get_social_account_catalog_freshness(platform: str, account_handle: str) -> 
             "needs_recent_sync": False,
             "latest_catalog_run_status": latest_run_status,
             "active_run_status": active_run_status,
+            "catalog_newest_post_at": _iso(catalog_newest_at),
+            "catalog_oldest_post_at": _iso(catalog_oldest_at),
+            "has_resumable_frontier": has_resumable_frontier,
+            "frontier_pages_scanned": frontier.get("pages_scanned") if has_resumable_frontier else None,
+            "frontier_posts_checked": frontier.get("posts_checked") if has_resumable_frontier else None,
         }
 
     live_total_posts = _cached_live_profile_total_posts(normalized_platform, normalized_account)
@@ -46290,6 +46322,11 @@ def get_social_account_catalog_freshness(platform: str, account_handle: str) -> 
         "needs_recent_sync": needs_recent_sync,
         "latest_catalog_run_status": latest_run_status,
         "active_run_status": active_run_status,
+        "catalog_newest_post_at": _iso(catalog_newest_at),
+        "catalog_oldest_post_at": _iso(catalog_oldest_at),
+        "has_resumable_frontier": has_resumable_frontier,
+        "frontier_pages_scanned": frontier.get("pages_scanned") if has_resumable_frontier else None,
+        "frontier_posts_checked": frontier.get("posts_checked") if has_resumable_frontier else None,
     }
 
 
