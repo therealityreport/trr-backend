@@ -1277,6 +1277,8 @@ class TestRefreshShowPhotosStream:
 
     def test_skip_cast_photos_runs_gallery_only_stream(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "test-bucket")
+        monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
         token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
         show_id = str(uuid4())
 

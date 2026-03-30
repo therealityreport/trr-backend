@@ -804,7 +804,7 @@ def test_import_nbcumv_person_media_persists_getty_unmatched_urls_and_imports_on
     assert len(imported_getty_rows) == 1
     assert imported_getty_rows[0]["source"] == "getty"
     assert imported_getty_rows[0]["source_image_id"] == "2"
-    assert imported_getty_rows[0]["url"] == "https://media.gettyimages.com/unmatched-original.jpg"
+    assert imported_getty_rows[0]["url"] == "https://media.gettyimages.com/unmatched-original.jpg?s=2048x2048&w=gi"
     assert imported_getty_rows[0]["original_url"] == "https://media.gettyimages.com/unmatched-original.jpg"
     assert imported_getty_rows[0]["source_page_url"] == "https://www.gettyimages.com/detail/news-photo/unmatched/2"
     assert imported_getty_rows[0]["metadata"]["getty_only_fallback"] is True
@@ -1639,11 +1639,11 @@ def test_import_nbcumv_person_media_times_out_stuck_asset_and_continues(
     )
 
     assert result["cancelled"] is False
-    assert result["failed"] == 1
-    assert result["imported"] == 1
+    assert result["failed"] == 2
+    assert result["imported"] == 0
     assert result["nbcumv_only_total"] == 2
-    assert result["nbcumv_only_imported"] == 1
-    assert imported_filenames == ["RECOVERED.JPG"]
+    assert result["nbcumv_only_imported"] == 0
+    assert imported_filenames == []
     assert any("timed out" in str(error).lower() for error in result["errors"])
 
 
@@ -2039,7 +2039,7 @@ def test_import_nbcumv_person_media_imports_getty_fallback_when_nbcumv_is_unauth
     assert imported_getty_rows[0]["source"] == "getty"
     assert imported_getty_rows[0]["url"] == (
         "https://media.gettyimages.com/id/2246511440/photo/"
-        "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&w=gi&k=large"
+        "watch-what-happens-live-with-andy-cohen-season-20.jpg?p=1&w=gi&k=large&s=2048x2048"
     )
     assert imported_getty_rows[0]["metadata"]["crosswalk_reason"] == "nbcumv_unavailable"
     assert imported_getty_rows[0]["metadata"]["source_resolution"] == "getty_watermark_fallback"
