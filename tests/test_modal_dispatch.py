@@ -140,3 +140,69 @@ def test_inspect_modal_function_call_only_requires_modal_app_name(
 
     assert payload["status"] == "completed"
     assert payload["reason"] is None
+
+
+def test_resolve_modal_function_classifies_missing_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_modal = types.SimpleNamespace(
+        Function=types.SimpleNamespace(
+            from_name=lambda _app_name, _function_name: (_ for _ in ()).throw(
+                RuntimeError("App 'trr-backend-jobs' not found in environment 'main'")
+            )
+        )
+    )
+
+    monkeypatch.setattr(modal_dispatch, "modal_dispatch_ready", lambda *, function_name: (True, None))
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "main")
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+
+    payload = modal_dispatch.resolve_modal_function("run_social_job")
+
+    assert payload["resolved"] is False
+    assert payload["reason"] == "modal_app_not_found"
+    assert payload["function_name"] == "run_social_job"
+    assert payload["modal_environment"] == "main"
+
+
+def test_resolve_modal_function_classifies_missing_function(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_modal = types.SimpleNamespace(
+        Function=types.SimpleNamespace(
+            from_name=lambda _app_name, _function_name: (_ for _ in ()).throw(
+                RuntimeError("Function 'run_social_job' not found in app 'trr-backend-jobs'")
+            )
+        )
+    )
+
+    monkeypatch.setattr(modal_dispatch, "modal_dispatch_ready", lambda *, function_name: (True, None))
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+
+    payload = modal_dispatch.resolve_modal_function("run_social_job")
+
+    assert payload["resolved"] is False
+    assert payload["reason"] == "modal_function_not_found"
+    assert payload["app_name"] == "trr-backend-jobs"
+
+
+def test_resolve_modal_function_hydrates_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    hydrated = {"called": False}
+
+    class _FakeHandle:
+        def hydrate(self) -> None:
+            hydrated["called"] = True
+
+    fake_modal = types.SimpleNamespace(
+        Function=types.SimpleNamespace(
+            from_name=lambda _app_name, _function_name: _FakeHandle(),
+        )
+    )
+
+    monkeypatch.setattr(modal_dispatch, "modal_dispatch_ready", lambda *, function_name: (True, None))
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+
+    payload = modal_dispatch.resolve_modal_function("run_social_job")
+
+    assert payload["resolved"] is True
+    assert payload["reason"] is None
+    assert hydrated["called"] is True

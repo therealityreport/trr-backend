@@ -197,6 +197,8 @@ def test_run_tiktok_comment_media_mirror_stage_repairs_and_resolves_week_index(
 
 def test_run_tiktok_comment_media_mirror_stage_skips_when_already_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(social_repo, "_tiktok_comments_has_column", lambda _column: True)
+    monkeypatch.setattr(social_repo, "_hosted_urls_need_cdn_host_repair", lambda **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_hosted_media_urls_need_content_repair", lambda **_kwargs: False)
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
@@ -467,6 +469,7 @@ def test_run_platform_stage_retires_youtube_comment_media_lane() -> None:
 
 def test_run_platform_media_mirror_stage_instagram_selects_asset_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_sql: list[str] = []
+    captured_asset_meta_updates: list[dict[str, object]] = []
 
     def _fake_fetch_one(sql: str, _params: list[object]) -> dict[str, object]:
         captured_sql.append(sql)
@@ -496,6 +499,22 @@ def test_run_platform_media_mirror_stage_instagram_selects_asset_manifest(monkey
         "_platform_posts_has_column",
         lambda _platform, column: column in {"media_urls", "asset_manifest"},
     )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_media_asset_meta",
+        lambda **kwargs: captured_asset_meta_updates.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_mirror_platform_media_to_s3_result",
+        lambda *_args, **_kwargs: {
+            "status": "mirrored",
+            "error": None,
+            "hosted_thumbnail_url": "https://cdn.test/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/media.jpg"],
+            "retryable_error": False,
+        },
+    )
 
     social_repo._run_platform_media_mirror_stage(  # noqa: SLF001
         context=_season_context(),
@@ -505,6 +524,7 @@ def test_run_platform_media_mirror_stage_instagram_selects_asset_manifest(monkey
     )
 
     assert "asset_manifest" in captured_sql[0].lower()
+    assert captured_asset_meta_updates
 
 
 def test_get_post_comments_facebook_filters_missing_comments(monkeypatch: pytest.MonkeyPatch) -> None:

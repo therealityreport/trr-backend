@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from typing import Any
@@ -157,9 +158,7 @@ def resolve_show_slug(slug: str) -> dict[str, Any] | None:
             if not selected:
                 continue
         preferred_slug = (
-            _pick_preferred_show_alias_slug(selected.get("alternative_names"))
-            or selected.get("slug")
-            or base_slug
+            _pick_preferred_show_alias_slug(selected.get("alternative_names")) or selected.get("slug") or base_slug
         )
         has_collision = len(rows) > 1
         return {
@@ -357,10 +356,19 @@ def _to_list(value: Any) -> list[Any] | None:
 
 def _thumbnail_crop_fields(value: Any) -> dict[str, Any]:
     crop = value if isinstance(value, dict) else {}
+
+    def _finite_number(candidate: Any) -> float | int | None:
+        if isinstance(candidate, bool) or not isinstance(candidate, (int, float)):
+            return None
+        normalized = float(candidate)
+        if not math.isfinite(normalized):
+            return None
+        return candidate
+
     return {
-        "thumbnail_focus_x": crop.get("focus_x") if isinstance(crop.get("focus_x"), (int, float)) else None,
-        "thumbnail_focus_y": crop.get("focus_y") if isinstance(crop.get("focus_y"), (int, float)) else None,
-        "thumbnail_zoom": crop.get("zoom") if isinstance(crop.get("zoom"), (int, float)) else None,
+        "thumbnail_focus_x": _finite_number(crop.get("focus_x")),
+        "thumbnail_focus_y": _finite_number(crop.get("focus_y")),
+        "thumbnail_zoom": _finite_number(crop.get("zoom")),
         "thumbnail_crop_mode": crop.get("mode") if isinstance(crop.get("mode"), str) else None,
     }
 
@@ -402,14 +410,10 @@ def _map_cast_photo_row(row: dict[str, Any]) -> dict[str, Any]:
         "thumbnail_zoom": crop["thumbnail_zoom"],
         "thumbnail_crop_mode": crop["thumbnail_crop_mode"],
         "people_count": (
-            people_count
-            if isinstance(people_count, int)
-            else _parse_optional_int(row.get("metadata_people_count"))
+            people_count if isinstance(people_count, int) else _parse_optional_int(row.get("metadata_people_count"))
         ),
         "people_count_source": (
-            people_count_source
-            if isinstance(people_count_source, str)
-            else row.get("metadata_people_count_source")
+            people_count_source if isinstance(people_count_source, str) else row.get("metadata_people_count_source")
         ),
         "face_boxes": _to_list(row.get("face_boxes")),
         "face_crops": _to_list(row.get("face_crops")),
@@ -418,9 +422,7 @@ def _map_cast_photo_row(row: dict[str, Any]) -> dict[str, Any]:
         "bucket_label": row.get("bucket_label") if isinstance(row.get("bucket_label"), str) else None,
         "resolved_show_id": row.get("resolved_show_id") if isinstance(row.get("resolved_show_id"), str) else None,
         "resolved_show_name": (
-            row.get("resolved_show_name")
-            if isinstance(row.get("resolved_show_name"), str)
-            else None
+            row.get("resolved_show_name") if isinstance(row.get("resolved_show_name"), str) else None
         ),
         "media_asset_id": None,
         "origin": "cast_photos",
@@ -460,9 +462,7 @@ def _map_media_link_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "bucket_label": row.get("bucket_label") if isinstance(row.get("bucket_label"), str) else None,
         "resolved_show_id": row.get("resolved_show_id") if isinstance(row.get("resolved_show_id"), str) else None,
         "resolved_show_name": (
-            row.get("resolved_show_name")
-            if isinstance(row.get("resolved_show_name"), str)
-            else None
+            row.get("resolved_show_name") if isinstance(row.get("resolved_show_name"), str) else None
         ),
         "media_asset_id": row.get("media_asset_id"),
         "origin": "media_links",
@@ -585,14 +585,7 @@ def get_person_gallery_page(
 
     has_more = len(merged) > limit
     page_rows = merged[:limit]
-    photos = [
-        {
-            key: value
-            for key, value in row.items()
-            if not key.startswith("_")
-        }
-        for row in page_rows
-    ]
+    photos = [{key: value for key, value in row.items() if not key.startswith("_")} for row in page_rows]
     return (
         {
             "photos": photos,

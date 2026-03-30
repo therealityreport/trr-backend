@@ -36,6 +36,9 @@ supabase==2.28.3
 postgrest==2.28.3
 sse-starlette>=2.0.0
 
+# Claude computer use
+anthropic>=0.43.0
+
 # Dev / test
 pytest>=8.0.0
 httpx>=0.28.0

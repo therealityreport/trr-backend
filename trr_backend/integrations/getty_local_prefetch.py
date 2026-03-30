@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -16,6 +15,12 @@ import requests
 
 from trr_backend.integrations import getty as getty_integration
 from trr_backend.utils.env import load_env
+from trr_backend.utils.playwright_runtime import (
+    create_seeded_profile_dir,
+    exclusive_runtime_lock,
+    launch_persistent_context,
+    playwright_ready,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +29,10 @@ _DEFAULT_CHROME_PROFILE_GLOBS = (
     "codex-agent-*",
 )
 _GETTY_SIGN_IN_URL = "https://www.gettyimages.com/sign-in"
-_CHROME_EXECUTABLE = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 _BROWSER_WAIT_MS = 1_500
 _DEFAULT_BROWSER_SEARCH_PAGE_CONCURRENCY = 3
+_DEFAULT_GETTY_BROWSER_MODE = "isolated"
+_DEFAULT_GETTY_MAX_CONCURRENT_JOBS = 1
 GettyPrefetchProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -134,16 +140,6 @@ def _load_cookie_jar(cookie_file: Path) -> tuple[requests.cookies.RequestsCookie
     return cookies, count
 
 
-def _playwright_ready() -> bool:
-    if not Path(_CHROME_EXECUTABLE).exists():
-        return False
-    try:
-        import playwright.sync_api  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
 def _resolve_browser_search_page_concurrency() -> int:
     raw_value = str(os.getenv("TRR_GETTY_BROWSER_SEARCH_PAGE_CONCURRENCY") or "").strip()
     if not raw_value:
@@ -221,6 +217,24 @@ def _browser_page_result(search_page: Any, response: Any | None) -> dict[str, An
     }
 
 
+def _resolve_getty_browser_mode() -> str:
+    raw_value = str(os.getenv("TRR_GETTY_BROWSER_MODE") or "").strip().lower()
+    if raw_value in {"live", "cookies"}:
+        return raw_value
+    return _DEFAULT_GETTY_BROWSER_MODE
+
+
+def _resolve_getty_max_concurrent_jobs() -> int:
+    raw_value = str(os.getenv("TRR_GETTY_MAX_CONCURRENT_JOBS") or "").strip()
+    if not raw_value:
+        return _DEFAULT_GETTY_MAX_CONCURRENT_JOBS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return _DEFAULT_GETTY_MAX_CONCURRENT_JOBS
+    return max(1, parsed)
+
+
 def _profile_is_authenticated(page: Any) -> bool:
     page.goto(_GETTY_SIGN_IN_URL, wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_timeout(_BROWSER_WAIT_MS)
@@ -237,8 +251,59 @@ def _submit_login(page: Any, *, email: str, password: str) -> bool:
     return "/sign-in" not in str(page.url or "")
 
 
+def _build_search_page_fetcher(browser_context: Any) -> getty_integration.GettySearchPageFetcher:
+    search_page_slots = BoundedSemaphore(_resolve_browser_search_page_concurrency())
+    query_pages: dict[str, dict[str, Any]] = {}
+
+    def _fetch_search_page(url: str) -> getty_integration.GettySearchPageFetchResult:
+        with search_page_slots:
+            requested_page = _extract_requested_search_page(url)
+            query_key = _canonicalize_search_url(url)
+            query_state = query_pages.get(query_key)
+            search_page = None
+            response = None
+            try:
+                if query_state is None:
+                    search_page = browser_context.new_page()
+                else:
+                    search_page = query_state["page"]
+                response = search_page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                search_page.wait_for_timeout(_BROWSER_WAIT_MS)
+                result = _browser_page_result(search_page, response)
+                query_pages[query_key] = {
+                    "page": search_page,
+                    "current_page": result.get("current_page") or requested_page,
+                }
+                return result
+            finally:
+                if search_page is not None and query_pages.get(query_key, {}).get("page") is not search_page:
+                    try:
+                        search_page.close()
+                    except Exception:
+                        pass
+
+    return _fetch_search_page
+
+
+@contextmanager
+def _getty_job_slot() -> Iterator[None]:
+    if _resolve_getty_max_concurrent_jobs() > 1:
+        yield
+        return
+    try:
+        with exclusive_runtime_lock("getty-prefetch-playwright"):
+            yield
+    except RuntimeError as exc:
+        if not str(exc).startswith("browser_runtime_locked:"):
+            raise
+        _raise_getty_session_error(
+            "Another Getty browser job is already running.",
+            code="getty_browser_job_locked",
+        )
+
+
 def _build_browser_bridge(profile_dir: Path) -> LocalGettyBridge | None:
-    if not _playwright_ready():
+    if not playwright_ready():
         logger.info("Getty browser bridge skipped: Playwright or Chrome unavailable.")
         return None
 
@@ -255,13 +320,11 @@ def _build_browser_bridge(profile_dir: Path) -> LocalGettyBridge | None:
 
     browser_context = None
     try:
-        browser_context = playwright.chromium.launch_persistent_context(
+        browser_context = launch_persistent_context(
+            playwright,
             user_data_dir=str(profile_dir),
-            executable_path=_CHROME_EXECUTABLE,
             headless=True,
         )
-        search_page_slots = BoundedSemaphore(_resolve_browser_search_page_concurrency())
-        query_pages: dict[str, dict[str, Any]] = {}
         page = browser_context.new_page()
         authenticated = _profile_is_authenticated(page)
         auth_mode = "chrome_profile_browser_session"
@@ -277,33 +340,6 @@ def _build_browser_bridge(profile_dir: Path) -> LocalGettyBridge | None:
 
         session, cookie_count = _context_cookies_to_session(browser_context)
 
-        def _fetch_search_page(url: str) -> getty_integration.GettySearchPageFetchResult:
-            with search_page_slots:
-                requested_page = _extract_requested_search_page(url)
-                query_key = _canonicalize_search_url(url)
-                query_state = query_pages.get(query_key)
-                search_page = None
-                response = None
-                try:
-                    if query_state is None:
-                        search_page = browser_context.new_page()
-                    else:
-                        search_page = query_state["page"]
-                    response = search_page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                    search_page.wait_for_timeout(_BROWSER_WAIT_MS)
-                    result = _browser_page_result(search_page, response)
-                    query_pages[query_key] = {
-                        "page": search_page,
-                        "current_page": result.get("current_page") or requested_page,
-                    }
-                    return result
-                finally:
-                    if search_page is not None and query_pages.get(query_key, {}).get("page") is not search_page:
-                        try:
-                            search_page.close()
-                        except Exception:
-                            pass
-
         return LocalGettyBridge(
             session=session,
             auth_details={
@@ -313,7 +349,7 @@ def _build_browser_bridge(profile_dir: Path) -> LocalGettyBridge | None:
                 "auth_cookie_count": cookie_count,
                 "auth_warning": auth_warning,
             },
-            search_page_fetcher=_fetch_search_page,
+            search_page_fetcher=_build_search_page_fetcher(browser_context),
             browser_context=browser_context,
             cleanup_cb=playwright.stop,
             profile_dir=str(profile_dir),
@@ -361,21 +397,8 @@ def _build_cookie_bridge() -> LocalGettyBridge:
     return LocalGettyBridge(session=session, auth_details=auth_details)
 
 
-def _make_isolated_profile_dir(seed_profile_dir: Path) -> Path:
-    root = Path(tempfile.mkdtemp(prefix="trr-getty-profile-"))
-    default_dir = root / "Default"
-    default_dir.mkdir(parents=True, exist_ok=True)
-    local_state_src = seed_profile_dir / "Local State"
-    if local_state_src.exists():
-        try:
-            shutil.copy2(local_state_src, root / "Local State")
-        except Exception:
-            pass
-    return root
-
-
 def _build_isolated_browser_bridge(seed_profile_dir: Path) -> LocalGettyBridge | None:
-    if not _playwright_ready():
+    if not playwright_ready():
         logger.info("Getty isolated browser bridge skipped: Playwright or Chrome unavailable.")
         return None
 
@@ -390,7 +413,7 @@ def _build_isolated_browser_bridge(seed_profile_dir: Path) -> LocalGettyBridge |
     except Exception:
         return None
 
-    isolated_profile_dir = _make_isolated_profile_dir(seed_profile_dir)
+    isolated_profile_dir = create_seeded_profile_dir(seed_profile_dir, prefix="trr-getty-profile-")
     try:
         playwright = sync_playwright().start()
     except Exception as exc:
@@ -400,13 +423,11 @@ def _build_isolated_browser_bridge(seed_profile_dir: Path) -> LocalGettyBridge |
 
     browser_context = None
     try:
-        browser_context = playwright.chromium.launch_persistent_context(
+        browser_context = launch_persistent_context(
+            playwright,
             user_data_dir=str(isolated_profile_dir),
-            executable_path=_CHROME_EXECUTABLE,
             headless=True,
         )
-        search_page_slots = BoundedSemaphore(_resolve_browser_search_page_concurrency())
-        query_pages: dict[str, dict[str, Any]] = {}
         page = browser_context.new_page()
         if not _submit_login(page, email=email, password=password):
             logger.warning("Getty isolated browser bridge login bootstrap failed for %s.", seed_profile_dir)
@@ -416,33 +437,6 @@ def _build_isolated_browser_bridge(seed_profile_dir: Path) -> LocalGettyBridge |
             return None
 
         session, cookie_count = _context_cookies_to_session(browser_context)
-
-        def _fetch_search_page(url: str) -> getty_integration.GettySearchPageFetchResult:
-            with search_page_slots:
-                requested_page = _extract_requested_search_page(url)
-                query_key = _canonicalize_search_url(url)
-                query_state = query_pages.get(query_key)
-                search_page = None
-                response = None
-                try:
-                    if query_state is None:
-                        search_page = browser_context.new_page()
-                    else:
-                        search_page = query_state["page"]
-                    response = search_page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                    search_page.wait_for_timeout(_BROWSER_WAIT_MS)
-                    result = _browser_page_result(search_page, response)
-                    query_pages[query_key] = {
-                        "page": search_page,
-                        "current_page": result.get("current_page") or requested_page,
-                    }
-                    return result
-                finally:
-                    if search_page is not None and query_pages.get(query_key, {}).get("page") is not search_page:
-                        try:
-                            search_page.close()
-                        except Exception:
-                            pass
 
         def _cleanup() -> None:
             try:
@@ -459,7 +453,7 @@ def _build_isolated_browser_bridge(seed_profile_dir: Path) -> LocalGettyBridge |
                 "auth_cookie_count": cookie_count,
                 "auth_warning": None,
             },
-            search_page_fetcher=_fetch_search_page,
+            search_page_fetcher=_build_search_page_fetcher(browser_context),
             browser_context=browser_context,
             cleanup_cb=_cleanup,
             profile_dir=str(isolated_profile_dir),
@@ -484,16 +478,19 @@ def local_getty_bridge() -> Iterator[LocalGettyBridge]:
     bridge: LocalGettyBridge | None = None
     try:
         profile_dirs = _iter_profile_dirs()
-        for profile_dir in profile_dirs:
-            bridge = _build_browser_bridge(profile_dir)
-            if bridge is not None:
-                logger.info(
-                    "Getty bridge selected live browser profile %s (auth_mode=%s).",
-                    bridge.profile_dir or profile_dir,
-                    bridge.auth_details.get("auth_mode"),
-                )
-                break
-        if bridge is None:
+        browser_mode = _resolve_getty_browser_mode()
+
+        if browser_mode == "live":
+            for profile_dir in profile_dirs:
+                bridge = _build_browser_bridge(profile_dir)
+                if bridge is not None:
+                    logger.info(
+                        "Getty bridge selected live browser profile %s (auth_mode=%s).",
+                        bridge.profile_dir or profile_dir,
+                        bridge.auth_details.get("auth_mode"),
+                    )
+                    break
+        if bridge is None and browser_mode != "cookies":
             for profile_dir in profile_dirs:
                 bridge = _build_isolated_browser_bridge(profile_dir)
                 if bridge is not None:
@@ -501,6 +498,19 @@ def local_getty_bridge() -> Iterator[LocalGettyBridge]:
                         "Getty bridge selected isolated browser profile %s seeded from %s (auth_mode=%s).",
                         bridge.profile_dir or "unknown",
                         profile_dir,
+                        bridge.auth_details.get("auth_mode"),
+                    )
+                    break
+        if bridge is None and browser_mode == "isolated":
+            for profile_dir in profile_dirs:
+                bridge = _build_browser_bridge(profile_dir)
+                if bridge is not None:
+                    logger.info(
+                        (
+                            "Getty bridge selected live browser profile %s after isolated "
+                            "bootstrap fallback (auth_mode=%s)."
+                        ),
+                        bridge.profile_dir or profile_dir,
                         bridge.auth_details.get("auth_mode"),
                     )
                     break
@@ -546,22 +556,43 @@ def _raise_getty_session_error(message: str, *, code: str) -> None:
     raise GettyPrefetchSessionError(message, code=code)
 
 
-def _build_query_specs(person_name: str, show_name: str | None = None) -> list[dict[str, Any]]:
-    normalized_person_name = str(person_name or "").strip()
-    queries = [
-        {
-            "label": "Bravo Search",
-            "scope": "bravo",
-            "phrase": f"{normalized_person_name} Bravo".strip(),
-            "query_params": {"sort": "newest"},
-        },
-        {
-            "label": "Broad Search",
-            "scope": "broad",
-            "phrase": normalized_person_name,
-            "query_params": {"sort": "newest"},
-        },
-    ]
+def _build_query_specs(
+    person_name: str,
+    show_name: str | None = None,
+    *,
+    credit_show_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build prefetch query specs using the shared query-plan builder.
+
+    When *credit_show_rows* is provided, the plan includes
+    credit/network/provider-driven queries matching the live backend.
+    Otherwise it falls back to the minimal bravo + broad pair.
+
+    Each returned dict has ``label``, ``scope``, ``phrase``, and
+    ``query_params`` keys for backward compatibility with prefetch
+    progress reporting.
+    """
+    raw_plan = getty_integration.build_query_plan(
+        person_name,
+        credit_show_rows=credit_show_rows,
+    )
+    queries: list[dict[str, Any]] = []
+    for index, entry in enumerate(raw_plan):
+        phrase = str(entry.get("phrase") or "").strip()
+        raw_params = dict(entry.get("query_params") or {})
+        raw_params.setdefault("sort", "newest")
+        label = str(entry.get("label") or "").strip()
+        if not label:
+            label = f"Credit Search {index + 1}" if index >= 2 else ("Bravo Search" if index == 0 else "Broad Search")
+        scope = label.split()[0].lower() if label else f"query_{index}"
+        queries.append(
+            {
+                "label": label,
+                "scope": scope,
+                "phrase": phrase,
+                "query_params": raw_params,
+            }
+        )
     return queries
 
 
@@ -629,140 +660,103 @@ def fetch_person_getty_prefetch_payload(
     normalized_mode = str(mode or "full").strip().lower()
     discovery_mode = normalized_mode == "discovery"
     credentials_available = bool(
-        str(os.getenv("TRR_GETTY_EMAIL") or "").strip()
-        and str(os.getenv("TRR_GETTY_PASSWORD") or "").strip()
+        str(os.getenv("TRR_GETTY_EMAIL") or "").strip() and str(os.getenv("TRR_GETTY_PASSWORD") or "").strip()
     )
 
     t0 = time.perf_counter()
-    with local_getty_bridge() as bridge:
-        active_bridge = bridge
-        replacement_bridge: LocalGettyBridge | None = None
-        try:
-            if not _bridge_supports_authenticated_browser_session(active_bridge):
-                replacement_bridge = _build_isolated_bridge_from_bridge(active_bridge)
-                if (
-                    replacement_bridge is not None
-                    and _bridge_supports_authenticated_browser_session(replacement_bridge)
-                ):
-                    active_bridge = replacement_bridge
-                else:
-                    if replacement_bridge is not None:
-                        replacement_bridge.close()
-                        replacement_bridge = None
-                    if credentials_available:
+    with _getty_job_slot():
+        with local_getty_bridge() as bridge:
+            active_bridge = bridge
+            replacement_bridge: LocalGettyBridge | None = None
+            try:
+                if not _bridge_supports_authenticated_browser_session(active_bridge):
+                    replacement_bridge = _build_isolated_bridge_from_bridge(active_bridge)
+                    if replacement_bridge is not None and _bridge_supports_authenticated_browser_session(
+                        replacement_bridge
+                    ):
+                        active_bridge = replacement_bridge
+                    else:
+                        if replacement_bridge is not None:
+                            replacement_bridge.close()
+                            replacement_bridge = None
+                        if credentials_available:
+                            _raise_getty_session_error(
+                                "Getty login bootstrap failed for the codex Chrome profile.",
+                                code="getty_login_bootstrap_failed",
+                            )
                         _raise_getty_session_error(
-                            "Getty login bootstrap failed for the codex Chrome profile.",
-                            code="getty_login_bootstrap_failed",
+                            "Getty profile is not authenticated in the codex Chrome profile.",
+                            code="getty_profile_not_authenticated",
                         )
-                    _raise_getty_session_error(
-                        "Getty profile is not authenticated in the codex Chrome profile.",
-                        code="getty_profile_not_authenticated",
-                    )
 
-            session = active_bridge.session
-            auth_details = active_bridge.auth_details
-            search_page_fetcher = active_bridge.search_page_fetcher
-            query_summaries: list[dict[str, Any]] = []
-            merged_assets: list[dict[str, Any]] = []
-            seen_editorial_ids: set[str] = set()
-
-            query_specs = _build_query_specs(normalized_person_name, normalized_show_name or None)
-            queries_total = len(query_specs)
-            queries_completed = 0
-
-            _emit_prefetch_progress(
-                progress_cb,
-                heartbeat_cb,
-                {
-                    "type": "phase",
-                    "phase": "bridge_ready",
-                    "status": "running",
-                    "message": "Getty Chrome profile bridge ready.",
-                    "person_name": normalized_person_name,
-                    "show_name": normalized_show_name or None,
-                    "prefetch_mode": "discovery" if discovery_mode else "full",
-                    "queries_total": queries_total,
-                    "queries_completed": queries_completed,
-                    "auth_mode": auth_details.get("auth_mode"),
-                    "auth_warning": auth_details.get("auth_warning"),
-                    "session_validated": False,
-                    "session_truncated": False,
-                },
-            )
-
-            def _refresh_bridge_state() -> None:
-                nonlocal session, auth_details, search_page_fetcher
                 session = active_bridge.session
                 auth_details = active_bridge.auth_details
                 search_page_fetcher = active_bridge.search_page_fetcher
+                query_summaries: list[dict[str, Any]] = []
+                merged_assets: list[dict[str, Any]] = []
+                seen_editorial_ids: set[str] = set()
 
-            def _attempt_isolated_replacement() -> bool:
-                nonlocal active_bridge, replacement_bridge
-                if active_bridge is not bridge:
-                    return False
-                candidate = _build_isolated_bridge_from_bridge(bridge)
-                if candidate is None or not _bridge_supports_authenticated_browser_session(candidate):
-                    if candidate is not None:
-                        candidate.close()
-                    return False
-                replacement_bridge = candidate
-                active_bridge = candidate
-                _refresh_bridge_state()
-                return True
+                query_specs = _build_query_specs(normalized_person_name, normalized_show_name or None)
+                queries_total = len(query_specs)
+                queries_completed = 0
 
-            def _run_query(query_spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-                summary: dict[str, Any] = {}
                 _emit_prefetch_progress(
                     progress_cb,
                     heartbeat_cb,
                     {
-                        "type": "query_started",
-                        "phase": "discovery",
+                        "type": "phase",
+                        "phase": "bridge_ready",
                         "status": "running",
-                        "message": f"Starting {query_spec['label']}...",
-                        "label": query_spec["label"],
-                        "scope": query_spec["scope"],
-                        "phrase": query_spec["phrase"],
-                        "query_url": getty_integration._build_search_url(  # noqa: SLF001
-                            query_spec["phrase"],
-                            query_params=dict(query_spec.get("query_params") or {}),
-                        ),
+                        "message": "Getty Chrome profile bridge ready.",
+                        "person_name": normalized_person_name,
+                        "show_name": normalized_show_name or None,
+                        "prefetch_mode": "discovery" if discovery_mode else "full",
                         "queries_total": queries_total,
                         "queries_completed": queries_completed,
                         "auth_mode": auth_details.get("auth_mode"),
                         "auth_warning": auth_details.get("auth_warning"),
-                        "session_validated": bool(auth_details.get("session_validated")),
-                        "session_truncated": bool(auth_details.get("session_truncated")),
+                        "session_validated": False,
+                        "session_truncated": False,
                     },
                 )
 
-                def _candidate_progress(payload: dict[str, Any]) -> None:
+                def _refresh_bridge_state() -> None:
+                    nonlocal session, auth_details, search_page_fetcher
+                    session = active_bridge.session
+                    auth_details = active_bridge.auth_details
+                    search_page_fetcher = active_bridge.search_page_fetcher
+
+                def _attempt_isolated_replacement() -> bool:
+                    nonlocal active_bridge, replacement_bridge
+                    if active_bridge is not bridge:
+                        return False
+                    candidate = _build_isolated_bridge_from_bridge(bridge)
+                    if candidate is None or not _bridge_supports_authenticated_browser_session(candidate):
+                        if candidate is not None:
+                            candidate.close()
+                        return False
+                    replacement_bridge = candidate
+                    active_bridge = candidate
+                    _refresh_bridge_state()
+                    return True
+
+                def _run_query(query_spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                    summary: dict[str, Any] = {}
                     _emit_prefetch_progress(
                         progress_cb,
                         heartbeat_cb,
                         {
-                            "type": str(payload.get("type") or "page"),
+                            "type": "query_started",
                             "phase": "discovery",
                             "status": "running",
-                            "message": _build_query_progress_message(str(query_spec["label"]), payload),
+                            "message": f"Starting {query_spec['label']}...",
                             "label": query_spec["label"],
                             "scope": query_spec["scope"],
                             "phrase": query_spec["phrase"],
-                            "query_url": payload.get("query_url"),
-                            "requested_page": payload.get("requested_page"),
-                            "expected_page": payload.get("expected_page"),
-                            "current_page": payload.get("current_page"),
-                            "response_url": payload.get("response_url"),
-                            "page_classification": payload.get("page_classification"),
-                            "page_candidate_count": payload.get("page_candidate_count"),
-                            "new_unique_count": payload.get("new_unique_count"),
-                            "fetched_candidates_total": payload.get("fetched_candidates_total"),
-                            "termination_reason": payload.get("termination_reason"),
-                            "page_signature": payload.get("page_signature"),
-                            "first_editorial_ids": payload.get("first_editorial_ids"),
-                            "site_image_total": payload.get("site_image_total"),
-                            "site_event_total": payload.get("site_event_total"),
-                            "site_video_total": payload.get("site_video_total"),
+                            "query_url": getty_integration._build_search_url(  # noqa: SLF001
+                                query_spec["phrase"],
+                                query_params=dict(query_spec.get("query_params") or {}),
+                            ),
                             "queries_total": queries_total,
                             "queries_completed": queries_completed,
                             "auth_mode": auth_details.get("auth_mode"),
@@ -772,214 +766,255 @@ def fetch_person_getty_prefetch_payload(
                         },
                     )
 
-                raw_assets = getty_integration.search_editorial_assets(
-                    query_spec["phrase"],
-                    limit=0,
-                    session=session,
-                    query_params=dict(query_spec.get("query_params") or {}),
-                    query_summary_out=summary,
-                    search_page_fetcher=search_page_fetcher,
-                    include_details=not discovery_mode,
-                    candidate_progress_cb=_candidate_progress,
-                )
-                return summary, raw_assets
-
-            for query_spec in query_specs:
-                summary, raw_assets = _run_query(query_spec)
-                if _query_indicates_session_truncation(summary):
-                    auth_details["session_truncated"] = True
-                    if _attempt_isolated_replacement():
-                        summary, raw_assets = _run_query(query_spec)
-                    if _query_indicates_session_truncation(summary):
-                        requested_page = summary.get("expected_page") or 4
-                        current_page = summary.get("current_page") or 1
-                        _raise_getty_session_error(
-                            (
-                                "Getty session appears truncated after page 3. "
-                                f"Getty rewrote page {requested_page} to page {current_page}."
-                            ),
-                            code="getty_session_truncated",
+                    def _candidate_progress(payload: dict[str, Any]) -> None:
+                        _emit_prefetch_progress(
+                            progress_cb,
+                            heartbeat_cb,
+                            {
+                                "type": str(payload.get("type") or "page"),
+                                "phase": "discovery",
+                                "status": "running",
+                                "message": _build_query_progress_message(str(query_spec["label"]), payload),
+                                "label": query_spec["label"],
+                                "scope": query_spec["scope"],
+                                "phrase": query_spec["phrase"],
+                                "query_url": payload.get("query_url"),
+                                "requested_page": payload.get("requested_page"),
+                                "expected_page": payload.get("expected_page"),
+                                "current_page": payload.get("current_page"),
+                                "response_url": payload.get("response_url"),
+                                "page_classification": payload.get("page_classification"),
+                                "page_candidate_count": payload.get("page_candidate_count"),
+                                "new_unique_count": payload.get("new_unique_count"),
+                                "fetched_candidates_total": payload.get("fetched_candidates_total"),
+                                "termination_reason": payload.get("termination_reason"),
+                                "page_signature": payload.get("page_signature"),
+                                "first_editorial_ids": payload.get("first_editorial_ids"),
+                                "site_image_total": payload.get("site_image_total"),
+                                "site_event_total": payload.get("site_event_total"),
+                                "site_video_total": payload.get("site_video_total"),
+                                "queries_total": queries_total,
+                                "queries_completed": queries_completed,
+                                "auth_mode": auth_details.get("auth_mode"),
+                                "auth_warning": auth_details.get("auth_warning"),
+                                "session_validated": bool(auth_details.get("session_validated")),
+                                "session_truncated": bool(auth_details.get("session_truncated")),
+                            },
                         )
-                    auth_details["session_truncated"] = False
-                auth_details["session_validated"] = True
 
-                usable_assets: list[dict[str, Any]] = []
-                overlap_count = 0
-                for asset in raw_assets:
-                    editorial_id = str(asset.get("editorial_id") or "").strip()
-                    if editorial_id and editorial_id in seen_editorial_ids:
-                        overlap_count += 1
+                    raw_assets = getty_integration.search_editorial_assets(
+                        query_spec["phrase"],
+                        limit=0,
+                        session=session,
+                        query_params=dict(query_spec.get("query_params") or {}),
+                        query_summary_out=summary,
+                        search_page_fetcher=search_page_fetcher,
+                        include_details=not discovery_mode,
+                        candidate_progress_cb=_candidate_progress,
+                    )
+                    return summary, raw_assets
+
+                for query_spec in query_specs:
+                    summary, raw_assets = _run_query(query_spec)
+                    if _query_indicates_session_truncation(summary):
+                        auth_details["session_truncated"] = True
+                        if _attempt_isolated_replacement():
+                            summary, raw_assets = _run_query(query_spec)
+                        if _query_indicates_session_truncation(summary):
+                            requested_page = summary.get("expected_page") or 4
+                            current_page = summary.get("current_page") or 1
+                            _raise_getty_session_error(
+                                (
+                                    "Getty session appears truncated after page 3. "
+                                    f"Getty rewrote page {requested_page} to page {current_page}."
+                                ),
+                                code="getty_session_truncated",
+                            )
+                        auth_details["session_truncated"] = False
+                    auth_details["session_validated"] = True
+
+                    usable_assets: list[dict[str, Any]] = []
+                    overlap_count = 0
+                    for asset in raw_assets:
+                        editorial_id = str(asset.get("editorial_id") or "").strip()
+                        if editorial_id and editorial_id in seen_editorial_ids:
+                            overlap_count += 1
+                            continue
+                        if editorial_id:
+                            seen_editorial_ids.add(editorial_id)
+                        enriched_asset = dict(asset)
+                        enriched_asset["source_query_scope"] = query_spec["scope"]
+                        enriched_asset["source_query_label"] = query_spec["label"]
+                        enriched_asset["source_query_phrase"] = query_spec["phrase"]
+                        merged_assets.append(enriched_asset)
+                        usable_assets.append(enriched_asset)
+
+                    summary["label"] = query_spec["label"]
+                    summary["scope"] = query_spec["scope"]
+                    summary["phrase"] = query_spec["phrase"]
+                    summary["query_params"] = dict(query_spec.get("query_params") or {})
+                    summary["fetched_asset_total"] = int(
+                        summary.get("fetched_candidates_total") or len(raw_assets) or 0
+                    )
+                    summary["usable_after_dedupe_total"] = len(usable_assets)
+                    summary["overlap_with_prior_queries"] = overlap_count
+                    summary["auth_mode"] = auth_details["auth_mode"]
+                    summary["session_validated"] = bool(auth_details.get("session_validated"))
+                    summary["session_truncated"] = bool(auth_details.get("session_truncated"))
+                    query_summaries.append(summary)
+                    queries_completed += 1
+                    _emit_prefetch_progress(
+                        progress_cb,
+                        heartbeat_cb,
+                        {
+                            "type": "query_completed",
+                            "phase": "discovery",
+                            "status": "running",
+                            "message": (
+                                f"{query_spec['label']} complete: {len(usable_assets)} usable assets "
+                                f"({overlap_count} overlap)."
+                            ),
+                            "label": query_spec["label"],
+                            "scope": query_spec["scope"],
+                            "phrase": query_spec["phrase"],
+                            "query_url": summary.get("query_url"),
+                            "site_image_total": summary.get("site_image_total"),
+                            "site_event_total": summary.get("site_event_total"),
+                            "site_video_total": summary.get("site_video_total"),
+                            "fetched_asset_total": summary.get("fetched_asset_total"),
+                            "usable_after_dedupe_total": len(usable_assets),
+                            "overlap_with_prior_queries": overlap_count,
+                            "termination_reason": summary.get("termination_reason"),
+                            "expected_page": summary.get("expected_page"),
+                            "current_page": summary.get("current_page"),
+                            "response_url": summary.get("response_url"),
+                            "page_signature": summary.get("page_signature"),
+                            "first_editorial_ids": summary.get("first_editorial_ids"),
+                            "queries_total": queries_total,
+                            "queries_completed": queries_completed,
+                            "merged_total": len(merged_assets),
+                            "auth_mode": auth_details.get("auth_mode"),
+                            "auth_warning": auth_details.get("auth_warning"),
+                            "session_validated": bool(auth_details.get("session_validated")),
+                            "session_truncated": bool(auth_details.get("session_truncated")),
+                        },
+                    )
+
+                if discovery_mode:
+                    bravo_events: list[dict[str, Any]] = []
+                    broad_events: list[dict[str, Any]] = []
+                else:
+                    _emit_prefetch_progress(
+                        progress_cb,
+                        heartbeat_cb,
+                        {
+                            "type": "phase",
+                            "phase": "grouped_events",
+                            "status": "running",
+                            "message": "Fetching Getty grouped-event fallbacks...",
+                            "queries_total": queries_total,
+                            "queries_completed": queries_completed,
+                            "merged_total": len(merged_assets),
+                            "auth_mode": auth_details.get("auth_mode"),
+                            "session_validated": bool(auth_details.get("session_validated")),
+                            "session_truncated": bool(auth_details.get("session_truncated")),
+                        },
+                    )
+                    bravo_phrase = f"{normalized_person_name} Bravo".strip()
+                    broad_phrase = normalized_person_name
+                    bravo_events = getty_integration.search_grouped_events(
+                        bravo_phrase,
+                        limit=0,
+                        person_name=normalized_person_name,
+                        source_query_scope="bravo",
+                        full_scan_person_assets=True,
+                        session=session,
+                        query_params={"sort": "newest"},
+                        search_page_fetcher=search_page_fetcher,
+                    )
+                    broad_events = getty_integration.search_grouped_events(
+                        broad_phrase,
+                        limit=0,
+                        person_name=normalized_person_name,
+                        person_match_required=True,
+                        minimum_grouped_image_count=2,
+                        source_query_scope="broad",
+                        session=session,
+                        query_params={"sort": "best", "numberofpeople": "one,two"},
+                        search_page_fetcher=search_page_fetcher,
+                    )
+
+                merged_events: list[dict[str, Any]] = []
+                seen_event_urls: set[str] = set()
+                for event in bravo_events + broad_events:
+                    event_url = str(event.get("event_url") or "").strip()
+                    if event_url and event_url in seen_event_urls:
                         continue
-                    if editorial_id:
-                        seen_editorial_ids.add(editorial_id)
-                    enriched_asset = dict(asset)
-                    enriched_asset["source_query_scope"] = query_spec["scope"]
-                    enriched_asset["source_query_label"] = query_spec["label"]
-                    enriched_asset["source_query_phrase"] = query_spec["phrase"]
-                    merged_assets.append(enriched_asset)
-                    usable_assets.append(enriched_asset)
+                    if event_url:
+                        seen_event_urls.add(event_url)
+                    merged_events.append(event)
 
-                summary["label"] = query_spec["label"]
-                summary["scope"] = query_spec["scope"]
-                summary["phrase"] = query_spec["phrase"]
-                summary["query_params"] = dict(query_spec.get("query_params") or {})
-                summary["fetched_asset_total"] = int(summary.get("fetched_candidates_total") or len(raw_assets) or 0)
-                summary["usable_after_dedupe_total"] = len(usable_assets)
-                summary["overlap_with_prior_queries"] = overlap_count
-                summary["auth_mode"] = auth_details["auth_mode"]
-                summary["session_validated"] = bool(auth_details.get("session_validated"))
-                summary["session_truncated"] = bool(auth_details.get("session_truncated"))
-                query_summaries.append(summary)
-                queries_completed += 1
-                _emit_prefetch_progress(
-                    progress_cb,
-                    heartbeat_cb,
-                    {
-                        "type": "query_completed",
-                        "phase": "discovery",
-                        "status": "running",
-                        "message": (
-                            f"{query_spec['label']} complete: {len(usable_assets)} usable assets "
-                            f"({overlap_count} overlap)."
-                        ),
-                        "label": query_spec["label"],
-                        "scope": query_spec["scope"],
-                        "phrase": query_spec["phrase"],
-                        "query_url": summary.get("query_url"),
-                        "site_image_total": summary.get("site_image_total"),
-                        "site_event_total": summary.get("site_event_total"),
-                        "site_video_total": summary.get("site_video_total"),
-                        "fetched_asset_total": summary.get("fetched_asset_total"),
-                        "usable_after_dedupe_total": len(usable_assets),
-                        "overlap_with_prior_queries": overlap_count,
-                        "termination_reason": summary.get("termination_reason"),
-                        "expected_page": summary.get("expected_page"),
-                        "current_page": summary.get("current_page"),
-                        "response_url": summary.get("response_url"),
-                        "page_signature": summary.get("page_signature"),
-                        "first_editorial_ids": summary.get("first_editorial_ids"),
-                        "queries_total": queries_total,
-                        "queries_completed": queries_completed,
-                        "merged_total": len(merged_assets),
-                        "auth_mode": auth_details.get("auth_mode"),
-                        "auth_warning": auth_details.get("auth_warning"),
-                        "session_validated": bool(auth_details.get("session_validated")),
-                        "session_truncated": bool(auth_details.get("session_truncated")),
-                    },
-                )
-
-            if discovery_mode:
-                bravo_events: list[dict[str, Any]] = []
-                broad_events: list[dict[str, Any]] = []
-            else:
+                elapsed_seconds = round(time.perf_counter() - t0, 1)
                 _emit_prefetch_progress(
                     progress_cb,
                     heartbeat_cb,
                     {
                         "type": "phase",
-                        "phase": "grouped_events",
-                        "status": "running",
-                        "message": "Fetching Getty grouped-event fallbacks...",
+                        "phase": "completed",
+                        "status": "completed",
+                        "message": (
+                            f"Getty {'discovery' if discovery_mode else 'prefetch'} complete: "
+                            f"{len(merged_assets)} assets, {len(merged_events)} events."
+                        ),
                         "queries_total": queries_total,
                         "queries_completed": queries_completed,
                         "merged_total": len(merged_assets),
+                        "merged_events_total": len(merged_events),
                         "auth_mode": auth_details.get("auth_mode"),
+                        "auth_warning": auth_details.get("auth_warning"),
                         "session_validated": bool(auth_details.get("session_validated")),
                         "session_truncated": bool(auth_details.get("session_truncated")),
+                        "elapsed_seconds": elapsed_seconds,
                     },
                 )
-                bravo_phrase = f"{normalized_person_name} Bravo".strip()
-                broad_phrase = normalized_person_name
-                bravo_events = getty_integration.search_grouped_events(
-                    bravo_phrase,
-                    limit=0,
-                    person_name=normalized_person_name,
-                    source_query_scope="bravo",
-                    session=session,
-                    query_params={"sort": "newest"},
-                    search_page_fetcher=search_page_fetcher,
-                )
-                broad_events = getty_integration.search_grouped_events(
-                    broad_phrase,
-                    limit=0,
-                    person_name=normalized_person_name,
-                    source_query_scope="broad",
-                    session=session,
-                    query_params={"sort": "newest"},
-                    search_page_fetcher=search_page_fetcher,
-                )
 
-            merged_events: list[dict[str, Any]] = []
-            seen_event_urls: set[str] = set()
-            for event in bravo_events + broad_events:
-                event_url = str(event.get("event_url") or "").strip()
-                if event_url and event_url in seen_event_urls:
-                    continue
-                if event_url:
-                    seen_event_urls.add(event_url)
-                merged_events.append(event)
-
-            elapsed_seconds = round(time.perf_counter() - t0, 1)
-            _emit_prefetch_progress(
-                progress_cb,
-                heartbeat_cb,
-                {
-                    "type": "phase",
-                    "phase": "completed",
-                    "status": "completed",
-                    "message": (
-                        f"Getty {'discovery' if discovery_mode else 'prefetch'} complete: "
-                        f"{len(merged_assets)} assets, {len(merged_events)} events."
-                    ),
-                    "queries_total": queries_total,
-                    "queries_completed": queries_completed,
+                return {
+                    "person": normalized_person_name,
+                    "show_name": normalized_show_name or None,
+                    "prefetch_mode": "discovery" if discovery_mode else "full",
+                    "discovery_ready": True,
+                    "enrichment_status": "pending" if discovery_mode else "completed",
+                    "merged": merged_assets,
                     "merged_total": len(merged_assets),
+                    "discovery_manifest": merged_assets,
+                    "candidate_manifest_total": len(merged_assets),
+                    "merged_events": merged_events,
                     "merged_events_total": len(merged_events),
-                    "auth_mode": auth_details.get("auth_mode"),
+                    "detail_enrichment_total": len(
+                        {
+                            str(asset.get("editorial_id") or "").strip()
+                            for asset in merged_assets
+                            if str(asset.get("editorial_id") or "").strip()
+                        }
+                    ),
+                    "deferred_editorial_ids": sorted(
+                        {
+                            str(asset.get("editorial_id") or "").strip()
+                            for asset in merged_assets
+                            if str(asset.get("editorial_id") or "").strip()
+                        }
+                    ),
+                    "image_overlap_count": sum(
+                        int(item.get("overlap_with_prior_queries") or 0) for item in query_summaries
+                    ),
+                    "event_overlap_count": len(bravo_events) + len(broad_events) - len(merged_events),
+                    "query_summaries": query_summaries,
+                    "auth_mode": auth_details["auth_mode"],
                     "auth_warning": auth_details.get("auth_warning"),
                     "session_validated": bool(auth_details.get("session_validated")),
                     "session_truncated": bool(auth_details.get("session_truncated")),
                     "elapsed_seconds": elapsed_seconds,
-                },
-            )
-
-            return {
-                "person": normalized_person_name,
-                "show_name": normalized_show_name or None,
-                "prefetch_mode": "discovery" if discovery_mode else "full",
-                "discovery_ready": True,
-                "enrichment_status": "pending" if discovery_mode else "completed",
-                "merged": merged_assets,
-                "merged_total": len(merged_assets),
-                "discovery_manifest": merged_assets,
-                "candidate_manifest_total": len(merged_assets),
-                "merged_events": merged_events,
-                "merged_events_total": len(merged_events),
-                "detail_enrichment_total": len(
-                    {
-                        str(asset.get("editorial_id") or "").strip()
-                        for asset in merged_assets
-                        if str(asset.get("editorial_id") or "").strip()
-                    }
-                ),
-                "deferred_editorial_ids": sorted(
-                    {
-                        str(asset.get("editorial_id") or "").strip()
-                        for asset in merged_assets
-                        if str(asset.get("editorial_id") or "").strip()
-                    }
-                ),
-                "image_overlap_count": sum(
-                    int(item.get("overlap_with_prior_queries") or 0) for item in query_summaries
-                ),
-                "event_overlap_count": len(bravo_events) + len(broad_events) - len(merged_events),
-                "query_summaries": query_summaries,
-                "auth_mode": auth_details["auth_mode"],
-                "auth_warning": auth_details.get("auth_warning"),
-                "session_validated": bool(auth_details.get("session_validated")),
-                "session_truncated": bool(auth_details.get("session_truncated")),
-                "elapsed_seconds": elapsed_seconds,
-            }
-        finally:
-            if replacement_bridge is not None:
-                replacement_bridge.close()
+                }
+            finally:
+                if replacement_bridge is not None:
+                    replacement_bridge.close()

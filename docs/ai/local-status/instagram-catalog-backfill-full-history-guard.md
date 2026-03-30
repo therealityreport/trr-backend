@@ -1,6 +1,6 @@
 # Instagram Catalog Backfill Full History Guard
 
-Last updated: 2026-03-22
+Last updated: 2026-03-30
 
 ## Status
 - Backend phase complete.
@@ -17,10 +17,10 @@ Last updated: 2026-03-22
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
-  last_updated: 2026-03-22
-  current_phase: "backend full-history catalog backfill contract guard shipped"
-  next_action: "keep request-shape guards at the router boundary if additional catalog backfill scopes are added"
+  include: false
+  state: archived
+  last_updated: 2026-03-30
+  current_phase: "archived continuity note"
+  next_action: "Refer to newer status notes if follow-up work resumes on this thread."
   detail: self
 ```

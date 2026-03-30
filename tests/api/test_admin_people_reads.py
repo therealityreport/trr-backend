@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -213,6 +215,53 @@ def test_get_gallery_returns_narrow_fields(monkeypatch: pytest.MonkeyPatch) -> N
         "origin": "media_links",
         "source_page_url": "https://example.com/page",
     }
+
+
+def test_get_gallery_sanitizes_non_finite_thumbnail_crop_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def fake_fetch_all(query: str, params: list[object]):
+        calls.append((query, params))
+        if len(calls) == 1:
+            return [
+                {
+                    "id": "photo-1",
+                    "person_id": "person-1",
+                    "source": "imdb",
+                    "url": "https://example.com/source.jpg",
+                    "hosted_url": "https://cdn.example.com/photo.jpg",
+                    "hosted_content_type": "image/jpeg",
+                    "caption": "caption",
+                    "width": 800,
+                    "height": 600,
+                    "source_page_url": None,
+                    "thumbnail_crop": {"focus_x": math.nan, "focus_y": math.inf, "zoom": 1.2, "mode": "face"},
+                    "metadata_people_count": None,
+                    "metadata_people_count_source": None,
+                    "face_boxes": [],
+                    "face_crops": [],
+                    "bucket_type": None,
+                    "bucket_key": None,
+                    "bucket_label": None,
+                    "resolved_show_id": None,
+                    "resolved_show_name": None,
+                    "gallery_status": None,
+                    "people_count": None,
+                    "people_count_source": None,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(router_module.people_repo.pg, "fetch_all", fake_fetch_all)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/person-1/gallery")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["photos"][0]["thumbnail_focus_x"] is None
+    assert payload["photos"][0]["thumbnail_focus_y"] is None
+    assert payload["photos"][0]["thumbnail_zoom"] == 1.2
 
 
 def test_invalidate_person_cache_clears_backend_cache(monkeypatch: pytest.MonkeyPatch) -> None:

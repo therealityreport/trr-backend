@@ -192,6 +192,8 @@ class FacebookScrapeConfig:
     season_number: int | None = None
     person_id: int | None = None
     max_scroll_iterations: int = 50
+    max_scrape_seconds: float = 600.0
+    """Overall wall-clock timeout for the entire scrape() call (default: 10 min)."""
 
     def __post_init__(self):
         """Apply fast_mode overrides when enabled."""
@@ -1264,6 +1266,23 @@ class FacebookScraper:
                 continue
             seen.add(source)
             pairs.append((source, "photo"))
+        # Share URLs: facebook.com/share/v/... , .../share/p/... , .../share/r/...
+        for match in _SHARE_URL_RE.finditer(page_html):
+            source = match.group(0)
+            if source in seen:
+                continue
+            seen.add(source)
+            # Determine type: v/ → video/reel, r/ → reel, p/ → feed post
+            segment = source.rsplit("/", 2)[-2] if source.count("/") >= 2 else ""
+            post_type = "reel" if segment in ("v", "r") else "feed"
+            pairs.append((source, post_type))
+        # Direct video URLs: facebook.com/PAGE/videos/NNN
+        for match in _VIDEO_URL_RE.finditer(page_html):
+            source = match.group(0)
+            if source in seen:
+                continue
+            seen.add(source)
+            pairs.append((source, "reel"))
         # Inline JSON permalink_url: Facebook embeds post permalinks in script
         # data that are not visible as <a href> but contain real post URLs.
         for match in _PERMALINK_URL_JSON_RE.finditer(page_html):
@@ -1728,6 +1747,19 @@ class FacebookScraper:
         matched_posts = 0
         surface_fetch_failures = 0
         candidate_fetch_failures = 0
+        scrape_start = time.monotonic()
+        timed_out = False
+
+        def _check_timeout() -> bool:
+            nonlocal timed_out
+            if time.monotonic() - scrape_start > config.max_scrape_seconds:
+                timed_out = True
+                logger.warning(
+                    "[facebook] scrape timed out after %.0fs (limit: %.0fs)",
+                    time.monotonic() - scrape_start,
+                    config.max_scrape_seconds,
+                )
+            return timed_out
 
         # When a date window is specified and Playwright is available, use
         # scroll-based pagination on the feed to reach older posts.
@@ -1744,6 +1776,8 @@ class FacebookScraper:
         if feed_candidates_from_scroll:
             feed_url = f"{self.BASE_URL}/{handle}"
             for candidate_url, kind in feed_candidates_from_scroll:
+                if _check_timeout():
+                    break
                 posts_checked += 1
                 try:
                     post_html = self._fetch_html(
@@ -1823,6 +1857,8 @@ class FacebookScraper:
             surface_urls = [u for u in surface_urls if u != feed_url]
 
         for surface_url in surface_urls:
+            if _check_timeout():
+                break
             if config.max_pages is not None and pages_scanned >= max(1, int(config.max_pages)):
                 break
             try:
@@ -1855,6 +1891,8 @@ class FacebookScraper:
                     )
 
             for candidate_url, kind in candidates:
+                if _check_timeout():
+                    break
                 if config.max_pages is not None and posts_checked >= max(1, int(config.max_pages)) * 100:
                     break
                 posts_checked += 1
@@ -1931,6 +1969,7 @@ class FacebookScraper:
                         }
                     )
 
+        scrape_elapsed = time.monotonic() - scrape_start
         self.last_retrieval_meta = {
             "source": "scroll_and_static" if feed_candidates_from_scroll is not None else "public_meta_fallback",
             "pages_scanned": pages_scanned,
@@ -1939,6 +1978,8 @@ class FacebookScraper:
             "cookies_supplied": bool(self.cookies),
             "surface_fetch_failures": surface_fetch_failures,
             "candidate_fetch_failures": candidate_fetch_failures,
+            "scrape_elapsed_seconds": round(scrape_elapsed, 1),
+            "timed_out": timed_out,
         }
         if matched_posts == 0 and (surface_fetch_failures > 0 or candidate_fetch_failures > 0):
             self.last_retrieval_meta["error_code"] = "facebook_catalog_fetch_failed"

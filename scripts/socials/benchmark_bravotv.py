@@ -12,7 +12,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ── bootstrap ──────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -33,7 +33,7 @@ BRAVO_HANDLES = {
 # Date window: last 7 days
 NOW = datetime.now(timezone.utc)
 DATE_END = NOW
-DATE_START = datetime(NOW.year, NOW.month, max(1, NOW.day - 7), tzinfo=timezone.utc)
+DATE_START = NOW - timedelta(days=7)
 
 
 def _load_cookies(platform: str) -> dict | None:
@@ -71,6 +71,7 @@ def benchmark_facebook():
         include_reels=True,
         include_photos=False,
         fast_mode=True,
+        max_scrape_seconds=300,  # 5 min cap for benchmarks
     )
 
     t0 = time.monotonic()
@@ -163,8 +164,11 @@ def benchmark_instagram():
         hashtags=[],
         date_start=DATE_START,
         date_end=DATE_END,
-        max_pages=1,
+        max_pages=3,
         fast_mode=True,
+        scrape_mode="auto",  # graphql → browser_intercept fallback
+        require_auth=True,  # auto-refresh via Playwright if cookies missing/expired
+        max_scrape_seconds=300,  # 5 min cap for benchmarks
     )
 
     t0 = time.monotonic()
@@ -347,12 +351,13 @@ BENCHMARKS = {
 def main():
     parser = argparse.ArgumentParser(description="Benchmark TRR scrapers with BravoTV handles")
     parser.add_argument("--platform", choices=list(BENCHMARKS) + ["all"], default="all")
+    parser.add_argument("--output", type=str, default=None, help="JSON output file path")
     args = parser.parse_args()
 
     platforms = list(BENCHMARKS) if args.platform == "all" else [args.platform]
 
     print(f"═══ TRR Scraper Benchmark — BravoTV ═══")
-    print(f"Date window: {DATE_START.strftime('%Y-%m-%d')} → {DATE_END.strftime('%Y-%m-%d')}")
+    print(f"Date window: {DATE_START.strftime('%Y-%m-%d %H:%M')} → {DATE_END.strftime('%Y-%m-%d %H:%M')}")
     print()
 
     results = {}
@@ -379,23 +384,11 @@ def main():
                 for line in result["traceback"].strip().split("\n")[-5:]:
                     print(f"    {line}")
 
-        if result.get("meta"):
-            meta = result["meta"]
+        if result.get("meta") and isinstance(result["meta"], dict):
+            # Print all scalar meta values (skip large nested objects like raw payloads)
             meta_summary = {
-                k: v
-                for k, v in (meta if isinstance(meta, dict) else {}).items()
-                if k
-                in (
-                    "pages_scanned",
-                    "posts_checked",
-                    "matched_count",
-                    "source",
-                    "scrape_mode",
-                    "fallback_used",
-                    "auth_failed",
-                    "error",
-                    "reason",
-                )
+                k: v for k, v in result["meta"].items()
+                if isinstance(v, (str, int, float, bool, type(None)))
             }
             if meta_summary:
                 print(f"  meta: {json.dumps(meta_summary, default=str)}")
@@ -415,6 +408,30 @@ def main():
         err = r.get("error", "")[:60] if s == "error" else ""
         reason = r.get("reason", "") if s == "skip" else ""
         print(f"  {p:12s}  {s:6s}  {str(count):>4s} items  {dur:>8s}  {err}{reason}")
+
+    # JSON output
+    output_path = args.output
+    if output_path is None:
+        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "docs", "ai", "benchmarks")
+        os.makedirs(output_dir, exist_ok=True)
+        ts = NOW.strftime("%Y%m%dT%H%M%SZ")
+        output_path = os.path.join(output_dir, f"bravotv_benchmark_{ts}.json")
+    payload = {
+        "generated_at": NOW.isoformat(),
+        "date_start": DATE_START.isoformat(),
+        "date_end": DATE_END.isoformat(),
+        "handles": BRAVO_HANDLES,
+        "platforms": {p: _sanitize_result(results[p]) for p in platforms},
+    }
+    with open(output_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    print(f"\nResults written to: {output_path}")
+
+
+def _sanitize_result(result: dict) -> dict:
+    """Remove traceback for JSON output, keep everything else."""
+    clean = {k: v for k, v in result.items() if k != "traceback"}
+    return clean
 
 
 if __name__ == "__main__":

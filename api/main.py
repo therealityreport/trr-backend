@@ -20,11 +20,13 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.realtime.broker import init_broker, shutdown_broker
 from trr_backend.db import pg
-from trr_backend.db.connection import log_database_resolution_summary
+from trr_backend.db.connection import log_database_resolution_summary, resolve_database_url_candidate_details
+from trr_backend.db.pg import DatabaseServiceUnavailableError, database_service_unavailable_detail
 from trr_backend.observability import (
     CONTENT_TYPE_LATEST,
     bind_trace_id,
@@ -88,6 +90,37 @@ def _validate_startup_config() -> None:
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     service_token = (os.getenv("SCREENALYTICS_SERVICE_TOKEN") or "").strip()
     log_database_resolution_summary()
+    winner = next(iter(resolve_database_url_candidate_details()), None)
+
+    if winner:
+        winner_source = str(winner.get("source") or "")
+        winner_connection_class = str(winner.get("connection_class") or "")
+        if winner_source in {"SUPABASE_DB_URL", "DATABASE_URL"}:
+            logger.warning(
+                "[startup-config] legacy_runtime_db_env_in_use source=%s; set TRR_DB_URL and optional TRR_DB_FALLBACK_URL instead",
+                winner_source,
+            )
+        if winner_connection_class == "session":
+            raw_minconn = (os.getenv("TRR_DB_POOL_MINCONN") or "").strip()
+            raw_maxconn = (os.getenv("TRR_DB_POOL_MAXCONN") or "").strip()
+            try:
+                minconn = int(raw_minconn) if raw_minconn else None
+            except ValueError:
+                minconn = None
+            try:
+                maxconn = int(raw_maxconn) if raw_maxconn else None
+            except ValueError:
+                maxconn = None
+            if (minconn is not None and minconn > 1) or (maxconn is not None and maxconn > 2):
+                logger.warning(
+                    "[startup-config] oversized_session_pool_override detected for Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",
+                    raw_minconn or "<unset>",
+                    raw_maxconn or "<unset>",
+                )
+            if _env_flag("SOCIAL_QUEUE_ENABLED", False):
+                logger.warning(
+                    "[startup-config] session_pooler_with_social_queue_enabled; keep local worker lanes and DB pool sizing conservative when using pooler.supabase.com:5432"
+                )
 
     if screenalytics_api_url:
         parsed = urlparse(screenalytics_api_url)
@@ -185,6 +218,19 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(DatabaseServiceUnavailableError)
+async def database_service_unavailable_exception_handler(
+    request: Request, exc: DatabaseServiceUnavailableError
+) -> JSONResponse:
+    payload = database_service_unavailable_detail(exc)
+    logger.warning(
+        "[api] database_service_unavailable path=%s reason=%s",
+        request.url.path,
+        payload.get("reason"),
+    )
+    return JSONResponse(status_code=503, content={"detail": payload})
 
 
 @app.middleware("http")

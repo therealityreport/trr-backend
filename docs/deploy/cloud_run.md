@@ -30,14 +30,12 @@ Rule: Cloud Build + Cloud Run history wins over memory.
 The table below is sourced from current code and `.env.example`.
 Put secrets in Secret Manager and reference them in Cloud Run. Do not paste secrets into plain env var fields.
 
-Set only one DB URL in Cloud Run. If multiple are set, you may connect to the wrong database depending on precedence.
-Precedence is `SUPABASE_DB_URL` → `DATABASE_URL` → `TRR_DB_URL`.
+Set exactly one runtime DB URL in Cloud Run. The canonical runtime contract is `TRR_DB_URL`, and it should point at the Supavisor session pooler on `pooler.supabase.com:5432`. Keep `DATABASE_URL` toolchain-only for external tools that insist on it.
 
 | Variable name | Required? | Secret? | Where it comes from | Notes / expected format |
 | --- | --- | --- | --- | --- |
-| `SUPABASE_DB_URL` | Y | Y | Supabase | Preferred DB connection string for production. Example: `postgresql://...` |
-| `DATABASE_URL` | N (fallback) | Y | Postgres | Standard connection string. Used only if `SUPABASE_DB_URL` is unset. |
-| `TRR_DB_URL` | N (fallback) | Y | Legacy | Legacy alias. Used only if `SUPABASE_DB_URL` and `DATABASE_URL` are unset. |
+| `TRR_DB_URL` | Y | Y | Supabase | Canonical runtime connection string. Use the Supavisor session pooler host on port `5432`. |
+| `TRR_DB_FALLBACK_URL` | N | Y | Supabase | Optional break-glass fallback only. Keep unset unless a specific deploy needs it. |
 | `SUPABASE_JWT_SECRET` | Y | Y | Supabase | JWT signing secret used to verify Supabase access tokens. |
 | `CORS_ALLOW_ORIGINS` | N | N | App config | Comma-separated origins. Include Vercel prod and any preview domains you need. Credentials require explicit origins. |
 | `ADMIN_EMAIL_ALLOWLIST` | N | N | App config | Comma-separated emails for allowlist-only admin endpoints. |
@@ -78,6 +76,7 @@ Notes:
 
 1. Boot check: `GET /openapi.json` returns 200.
 2. DB check: pick a DB-backed endpoint listed in `/openapi.json` and confirm its auth requirements.
+3. Startup logs should report `winner_env=TRR_DB_URL` and `connection_class=session`.
 
 Example DB check (public, no auth required):
 

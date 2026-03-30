@@ -121,7 +121,7 @@ def with_schema_cache_retry(
                 hint = (
                     "\n\nPostgREST schema cache may still be stale after retry. "
                     "Wait 30-60s and try again, or run:\n"
-                    '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
+                    '  psql "${TRR_DB_URL:-${TRR_DB_FALLBACK_URL:-$DATABASE_URL}}" -f scripts/db/reload_postgrest_schema.sql'
                 )
                 raise type(e)(f"{e}{hint}") from e
 
@@ -167,7 +167,7 @@ def verify_core_schema_exists(database_url: str | None = None) -> bool:
         if not result:
             raise PostgrestCacheError(
                 "Wrong database URL: `core` schema not found.\n\n"
-                "Ensure SUPABASE_DB_URL points to your Supabase project database."
+                "Ensure TRR_DB_URL points to your runtime Supabase database."
             )
 
         return True

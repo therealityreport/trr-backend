@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -183,6 +184,43 @@ def test_search_global_skips_episode_lookup_for_short_non_episode_queries(monkey
     assert payload["people"][0]["person_slug"] == "alan-cumming"
 
 
+def test_search_global_people_matches_interior_name_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repo.pg, "db_read_connection", lambda label="read": nullcontext(_FakeConnection()))
+    recorded_params: list[list[object] | None] = []
+
+    def fake_fetch_all_with_cursor(_cur, _query, params=None):
+        recorded_params.append(params)
+        call_index = len(recorded_params)
+        if call_index == 1:
+            return []
+        if call_index == 2:
+            return [
+                {
+                    "id": "person-1",
+                    "full_name": "Alan Cumming",
+                    "known_for": "Host",
+                    "show_context": "the-traitors-us",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(repo.pg, "fetch_all_with_cursor", fake_fetch_all_with_cursor)
+
+    payload, query_count = repo.search_global("Cumming", limit=8)
+
+    assert query_count == 3
+    assert payload["people"] == [
+        {
+            "id": "person-1",
+            "full_name": "Alan Cumming",
+            "known_for": "Host",
+            "show_context": "the-traitors-us",
+            "person_slug": "alan-cumming",
+        }
+    ]
+    assert recorded_params[1] == ["Cumming", "Cumming%", "%Cumming%", 8]
+
+
 def test_get_show_detail_strips_raw_metadata_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         repo,
@@ -280,7 +318,10 @@ def test_get_show_seasons_include_episode_signal_preserves_overview_contract(
                 "overview": "Salt Lake City returns.",
                 "premiere_date": "2024-09-18",
                 "url_original_poster": "https://cdn.example.com/season-6.jpg",
+                "episode_count": 18,
                 "episode_airdate_count": 18,
+                "first_episode_air_date": "2024-09-18",
+                "last_episode_air_date": "2025-01-22",
                 "has_scheduled_or_aired_episode": True,
             }
         ]
@@ -301,13 +342,19 @@ def test_get_show_seasons_include_episode_signal_preserves_overview_contract(
             "overview": "Salt Lake City returns.",
             "premiere_date": "2024-09-18",
             "url_original_poster": "https://cdn.example.com/season-6.jpg",
+            "episode_count": 18,
             "episode_airdate_count": 18,
+            "first_episode_air_date": "2024-09-18",
+            "last_episode_air_date": "2025-01-22",
             "has_scheduled_or_aired_episode": True,
         }
     ]
     assert "s.overview" in str(captured["query"])
     assert "s.synopsis" not in str(captured["query"])
+    assert "episode_count" in str(captured["query"])
     assert "episode_airdate_count" in str(captured["query"])
+    assert "first_episode_air_date" in str(captured["query"])
+    assert "last_episode_air_date" in str(captured["query"])
     assert "s.episode_count" not in str(captured["query"])
 
 
@@ -331,6 +378,8 @@ def test_get_show_seasons_normalizes_json_unsafe_values(monkeypatch: pytest.Monk
                 "trr_score": Decimal("7.25"),
                 "created_at": datetime(2024, 2, 14, 12, 30, tzinfo=UTC),
                 "updated_at": datetime(2024, 2, 15, 6, 45, tzinfo=UTC),
+                "first_episode_air_date": date(2024, 2, 14),
+                "last_episode_air_date": date(2024, 5, 20),
                 "episode_airdate_count": "18",
                 "has_scheduled_or_aired_episode": True,
             }
@@ -356,6 +405,8 @@ def test_get_show_seasons_normalizes_json_unsafe_values(monkeypatch: pytest.Monk
             "trr_score": 7.25,
             "created_at": "2024-02-14T12:30:00+00:00",
             "updated_at": "2024-02-15T06:45:00+00:00",
+            "first_episode_air_date": "2024-02-14",
+            "last_episode_air_date": "2024-05-20",
             "episode_airdate_count": 18,
             "has_scheduled_or_aired_episode": True,
         }
@@ -875,6 +926,26 @@ def test_shape_show_cast_payload_respects_membership_mode_and_filters() -> None:
             "archive_episode_count": 0,
         }
     ]
+
+
+def test_fetch_show_cast_base_rows_can_skip_photo_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_fetch_all_rows(query: str, params: list[Any], cur: Any | None = None) -> list[dict[str, Any]]:
+        captured["query"] = query
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all_rows)
+
+    rows, query_count = repo._fetch_show_cast_base_rows("show-1", include_photos=False)
+
+    assert rows == []
+    assert query_count == 1
+    assert captured["params"] == ["show-1", "show-1"]
+    assert "NULL::text AS photo_url" in captured["query"]
+    assert "AS primary_photo ON TRUE" not in captured["query"]
+    assert "core.v_cast_photos" not in captured["query"]
 
 
 def test_shape_season_cast_payload_suppresses_fallback_for_archive_only() -> None:

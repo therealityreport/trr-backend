@@ -33,7 +33,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
         hint = (
             f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
             "Wait 30-60s and try again, or run:\n"
-            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
+            '  psql "${TRR_DB_URL:-$SUPABASE_DB_URL}" -f scripts/db/reload_postgrest_schema.sql'
         )
         raise CastPhotoRepositoryError(f"{exc}{hint}") from exc
 
@@ -299,7 +299,7 @@ def fetch_cast_photos_missing_hosted(
             .table("cast_photos")
             .select(
                 "id,person_id,imdb_person_id,source,source_page_url,image_url,url,thumb_url,"
-                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type"
+                "hosted_url,hosted_sha256,hosted_key,hosted_bucket,hosted_content_type,metadata"
             )
         )
         if include_archived_filter:

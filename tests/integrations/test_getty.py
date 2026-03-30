@@ -1048,3 +1048,110 @@ def test_search_grouped_events_passes_numberofpeople_query_param(monkeypatch) ->
     assert len(captured_urls) == 1
     assert "numberofpeople=one" in captured_urls[0]
     assert "groupbyevent=true" in captured_urls[0]
+
+
+# ---------------------------------------------------------------------------
+# build_query_plan tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_query_plan_minimal_without_credit_rows() -> None:
+    """Without credit data the plan produces bravo + broad only."""
+    plan = getty.build_query_plan("Lisa Barlow")
+    assert len(plan) == 2
+    assert plan[0]["phrase"] == "Lisa Barlow Bravo"
+    assert plan[0].get("label") == "Bravo Search"
+    assert plan[1]["phrase"] == "Lisa Barlow"
+    assert plan[1].get("label") == "Broad Search"
+
+
+def test_build_query_plan_with_bravo_credit() -> None:
+    """With a Bravo credit the plan includes Bravo-primary + broad + credit terms."""
+    credit_rows = [
+        {"networks": ["Bravo"], "streaming_providers": ["Peacock"]},
+    ]
+    plan = getty.build_query_plan("Lisa Barlow", credit_show_rows=credit_rows)
+    phrases = [entry["phrase"] for entry in plan]
+    assert phrases[0] == "Lisa Barlow Bravo"
+    assert "Lisa Barlow" in phrases
+    assert "Lisa Barlow Peacock" in phrases
+
+
+def test_build_query_plan_nbc_family_adds_collection_variant() -> None:
+    """NBC-family terms produce an extra collections=nbc query."""
+    credit_rows = [
+        {"networks": ["USA Network"], "streaming_providers": []},
+    ]
+    plan = getty.build_query_plan("Kyle Richards", credit_show_rows=credit_rows)
+    nbc_variants = [entry for entry in plan if entry.get("query_params", {}).get("collections") == "nbc"]
+    assert len(nbc_variants) >= 1
+    assert any("USA Network" in entry["phrase"] for entry in nbc_variants)
+
+
+def test_build_query_plan_deduplicates_phrases() -> None:
+    """Duplicate phrase+params signatures are suppressed."""
+    credit_rows = [
+        {"networks": ["Bravo", "bravo"], "streaming_providers": []},
+    ]
+    plan = getty.build_query_plan("Teresa Giudice", credit_show_rows=credit_rows)
+    # Each (phrase, params) signature should be unique
+    signatures = [
+        (
+            entry["phrase"].casefold(),
+            tuple(sorted(entry.get("query_params", {}).items())),
+        )
+        for entry in plan
+    ]
+    assert len(signatures) == len(set(signatures))
+    # "bravo" (lowercase dup) should not generate an additional plain query
+    plain_bravo_count = sum(
+        1
+        for entry in plan
+        if entry["phrase"].casefold() == "teresa giudice bravo"
+        and not entry.get("query_params")
+    )
+    assert plain_bravo_count == 1
+
+
+def test_build_query_plan_empty_person_returns_empty() -> None:
+    assert getty.build_query_plan("") == []
+    assert getty.build_query_plan("  ") == []
+
+
+def test_normalize_query_term() -> None:
+    assert getty.normalize_query_term("  Lisa   Barlow  ") == "Lisa Barlow"
+    assert getty.normalize_query_term(None) == ""
+
+
+def test_is_nbc_family_term() -> None:
+    assert getty.is_nbc_family_term("Bravo") is True
+    assert getty.is_nbc_family_term("peacock") is True
+    assert getty.is_nbc_family_term("HBO") is False
+    assert getty.is_nbc_family_term("") is False
+
+
+def test_search_editorial_assets_skip_grouped_merge(monkeypatch) -> None:
+    """skip_grouped_merge=True prevents the redundant grouped re-search."""
+    grouped_search_calls: list[str] = []
+
+    def _fake_search_candidates(phrase, *, limit, session=None, query_params=None, **kwargs):
+        return [{"detail_url": "https://example.com/detail/1", "editorial_id": "1"}]
+
+    def _fake_merge_grouped(phrase, candidates, **kwargs):
+        grouped_search_calls.append(phrase)
+        return candidates
+
+    def _fake_fetch_detail(url, **kwargs):
+        return {"editorial_id": "1", "object_name": "Test"}
+
+    monkeypatch.setattr(getty, "_search_asset_candidates_for_phrase", _fake_search_candidates)
+    monkeypatch.setattr(getty, "_merge_grouped_event_metadata", _fake_merge_grouped)
+    monkeypatch.setattr(getty, "fetch_asset_detail", _fake_fetch_detail)
+
+    # With skip_grouped_merge=True, _merge_grouped_event_metadata should not be called
+    getty.search_editorial_assets("Test Person", limit=10, skip_grouped_merge=True)
+    assert grouped_search_calls == []
+
+    # Without skip, it should be called
+    getty.search_editorial_assets("Test Person", limit=10, skip_grouped_merge=False)
+    assert grouped_search_calls == ["Test Person"]

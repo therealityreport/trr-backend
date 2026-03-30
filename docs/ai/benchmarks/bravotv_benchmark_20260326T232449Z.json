@@ -1,0 +1,92 @@
+{
+  "generated_at": "2026-03-26T23:24:49.007578+00:00",
+  "date_start": "2026-03-19T23:24:49.007578+00:00",
+  "date_end": "2026-03-26T23:24:49.007578+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "youtube": {
+      "status": "ok",
+      "videos": 56,
+      "duration": "202.6s",
+      "sample": [
+        {
+          "id": "MqxyL2h3FrM",
+          "title": "SNEAK PEEK: Still To Come On Ladies of London: The New Reign Season 4 | Midseaso",
+          "views": 2322,
+          "likes": 68,
+          "is_short": false,
+          "published_at": 1774549489,
+          "url": "https://www.youtube.com/watch?v=MqxyL2h3FrM"
+        },
+        {
+          "id": "dimhvwWRZCk",
+          "title": "Emma Thynn Reveals Why Andy Cohen Slid Into Her DMs | Ladies of London (S4) | Br",
+          "views": 4553,
+          "likes": 98,
+          "is_short": false,
+          "published_at": 1774542289,
+          "url": "https://www.youtube.com/watch?v=dimhvwWRZCk&pp=0gcJCdsKAYcqIYzv"
+        },
+        {
+          "id": "n5IiRdmIjzE",
+          "title": "SNEAK PEEK: Joe Bradley Is \"Feeling Emo\" About Turning 30 | Southern Hospitality",
+          "views": 4105,
+          "likes": 90,
+          "is_short": false,
+          "published_at": 1774538689,
+          "url": "https://www.youtube.com/watch?v=n5IiRdmIjzE"
+        }
+      ],
+      "meta": {
+        "retrieval_mode": "channel_continuation",
+        "continuation_pages": 4,
+        "continuation_pages_by_surface": {
+          "videos": 2,
+          "shorts": 2
+        },
+        "pages_scanned": 6,
+        "posts_checked": 234,
+        "matched_posts": 56,
+        "checked_renderers": 234,
+        "timestamp_unknown_count": 0,
+        "in_range_hits": 56,
+        "pre_window_pages": 4,
+        "before_window_pages": 4,
+        "after_window_pages": 0,
+        "pre_window_page_cap": 12,
+        "first_page_count": 28,
+        "first_page_counts": {
+          "videos": 28,
+          "shorts": 28
+        },
+        "ownership_filtered": 0,
+        "scan_capped_reason": null,
+        "videos_pages_scanned": 3,
+        "shorts_pages_scanned": 3,
+        "surface_cap_override_applied": false,
+        "requested_max_results": null,
+        "effective_max_results": null,
+        "continuation_failure_reason": null,
+        "continuation_failure_count": 0,
+        "precise_publish_attempts": 148,
+        "precise_publish_successes": 148,
+        "precise_publish_failures": 0,
+        "shorts_candidates_found": 28,
+        "shorts_precise_publish_attempts": 144,
+        "shorts_precise_publish_successes": 144,
+        "shorts_precise_publish_failures": 0,
+        "canonical_handle": "bravo",
+        "canonical_channel_id": "UCjSKDpYQkGS005Vf13NAe8A",
+        "resolved_channel_title": "Bravo",
+        "resolved_channel_avatar_url": "https://yt3.googleusercontent.com/ytc/AIdro_lkC2Vcxa2Bw7TwyT1-qv5s_LXyPm39FAn7PGdScrcvDWQ=s1024-c-k-c0x00ffffff-no-rj"
+      }
+    }
+  }
+}
