@@ -8,7 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 from requests import Session
@@ -1528,6 +1528,72 @@ def _parse_image_url_dimensions(url: str | None) -> tuple[int | None, int | None
     if size_match:
         return int(size_match.group(1)), int(size_match.group(2))
     return None, None
+
+
+def _is_getty_media_url(url: str | None) -> bool:
+    """Return True if *url* is a Getty Images media CDN URL."""
+    if not url:
+        return False
+    try:
+        hostname = urlparse(str(url)).hostname or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return hostname == "media.gettyimages.com" or hostname.endswith(".gettyimages.com")
+
+
+def rewrite_getty_url(
+    url: str | None,
+    *,
+    size: str = "2048x2048",
+    watermark: str | None = None,
+) -> str | None:
+    """Rewrite a Getty media URL's size and watermark query params.
+
+    Parameters
+    ----------
+    url : str | None
+        A ``media.gettyimages.com`` URL.
+    size : str
+        Desired ``s=`` parameter, e.g. ``"612x612"`` or ``"2048x2048"``.
+    watermark : str | None
+        ``"gi"`` for watermarked, ``"0"`` for watermark-free.  ``None``
+        leaves whatever the original URL had.
+
+    Returns
+    -------
+    str | None
+        The rewritten URL, or *None* if *url* is falsy / not a Getty URL.
+    """
+    cleaned = str(url or "").strip()
+    if not cleaned or not _is_getty_media_url(cleaned):
+        return None
+    parsed = urlparse(cleaned)
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    params["s"] = [size]
+    if watermark is not None:
+        params["w"] = [watermark]
+    new_query = urlencode({k: v[0] for k, v in params.items()}, doseq=False)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+def build_getty_url_variants(url: str | None) -> dict[str, str | None]:
+    """Build all useful Getty URL variants from any Getty media URL.
+
+    Returns a dict with:
+    - ``full_res``: 2048x2048, watermarked (``w=gi``) — highest res available
+      without a licence.
+    - ``full_res_clean``: 2048x2048, NO watermark (``w=0``) — may be
+      unavailable for some images; caller should test or fall back.
+    - ``thumb_clean``: 612x612, NO watermark (``w=0``) — best for gallery
+      thumbnails.
+    - ``thumb_watermarked``: 612x612, watermarked (``w=gi``).
+    """
+    return {
+        "full_res": rewrite_getty_url(url, size="2048x2048", watermark="gi"),
+        "full_res_clean": rewrite_getty_url(url, size="2048x2048", watermark="0"),
+        "thumb_clean": rewrite_getty_url(url, size="612x612", watermark="0"),
+        "thumb_watermarked": rewrite_getty_url(url, size="612x612", watermark="gi"),
+    }
 
 
 def _is_significantly_smaller_than_expected(

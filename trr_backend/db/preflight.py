@@ -58,7 +58,7 @@ def assert_core_schema_exists(db: DbSession) -> None:
             raise DatabasePreflightError(
                 "Database preflight failed: schema `core` does not exist.\n"
                 "This likely means you're connected to the wrong database.\n"
-                "Check SUPABASE_URL / DATABASE_URL environment variables.\n"
+                "Check TRR_DB_URL / TRR_DB_FALLBACK_URL / SUPABASE_URL environment variables.\n"
                 "For Supabase, ensure the `core` schema is exposed in API settings."
             ) from exc
         if _is_missing_table_error(msg):
@@ -83,7 +83,7 @@ def assert_core_schema_exists(db: DbSession) -> None:
         raise DatabasePreflightError(
             "Database preflight failed: schema `core` does not exist.\n"
             "This likely means you're connected to the wrong database.\n"
-            "Check SUPABASE_URL / DATABASE_URL environment variables.\n"
+            "Check TRR_DB_URL / TRR_DB_FALLBACK_URL / SUPABASE_URL environment variables.\n"
             "For Supabase, ensure the `core` schema is exposed in API settings."
         )
     if _is_missing_table_error(combined):
@@ -96,21 +96,23 @@ def assert_core_schema_exists(db: DbSession) -> None:
 
 def assert_migration_safe(*, require_core_schema: bool = True) -> None:
     """
-    Standalone check for migration scripts using DATABASE_URL directly.
+    Standalone check for migration tooling that may still use raw Postgres URLs.
 
-    This is for scripts that use psql/psycopg2 directly rather than Supabase client.
-    It validates environment configuration before attempting migrations.
+    Runtime code should use TRR_DB_URL and optional TRR_DB_FALLBACK_URL.
+    Tooling may still accept DATABASE_URL for isolated migration or psql flows.
 
     Args:
         require_core_schema: If True, warn if migrating against a DB that likely
                              doesn't have the core schema (heuristic based on URL).
     """
-    db_url = (os.getenv("DATABASE_URL") or os.getenv("TRR_DB_URL") or "").strip()
+    db_url = (os.getenv("TRR_DB_URL") or os.getenv("TRR_DB_FALLBACK_URL") or os.getenv("DATABASE_URL") or "").strip()
     supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
 
     if not db_url and not supabase_url:
         raise DatabasePreflightError(
-            "No database URL configured.\nSet DATABASE_URL, TRR_DB_URL, or SUPABASE_URL environment variable."
+            "No database URL configured.\n"
+            "Set TRR_DB_URL for runtime use, optionally TRR_DB_FALLBACK_URL for an explicit fallback, "
+            "or DATABASE_URL only for tool-specific migration flows."
         )
 
     if require_core_schema and db_url:
@@ -118,5 +120,5 @@ def assert_migration_safe(*, require_core_schema: bool = True) -> None:
         if "localhost" in db_url or "127.0.0.1" in db_url:
             if "supabase" not in db_url.lower():
                 print(
-                    "WARNING: DATABASE_URL points to localhost. Ensure `core` schema exists before running migrations."
+                    "WARNING: runtime DB URL points to localhost. Ensure `core` schema exists before running migrations."
                 )

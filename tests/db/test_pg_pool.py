@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import pytest
+from psycopg2 import InterfaceError
 from psycopg2.extensions import TRANSACTION_STATUS_IDLE, TRANSACTION_STATUS_INTRANS
 from psycopg2.pool import PoolError
 
@@ -15,9 +16,17 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.commit_calls = 0
         self.rollback_calls = 0
-        self.autocommit = False
+        self._autocommit = False
         self.closed = False
         self.transaction_status = TRANSACTION_STATUS_IDLE
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        self._autocommit = value
 
     def commit(self) -> None:
         self.commit_calls += 1
@@ -78,11 +87,30 @@ class _FakePoolClosedOnPut(_FakePool):
         raise PoolError("connection pool is closed")
 
 
+class _FakeConnectionClosedOnAutocommitRestore(_FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_restore_once = True
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        if self.fail_restore_once and value is False:
+            self.closed = True
+            self.fail_restore_once = False
+            raise InterfaceError("connection already closed")
+        self._autocommit = value
+
+
 def _detail(url: str) -> dict[str, object]:
     return {
         "url": url,
         "source": "test",
         "host_class": "other",
+        "connection_class": "other",
         "host": "db.example.com",
         "port": 5432,
         "database": "postgres",
@@ -136,6 +164,27 @@ def test_db_read_connection_uses_autocommit_and_returns_clean_connection(
     assert fake_pool.connection.autocommit is False
 
 
+def test_db_read_connection_discards_closed_connection_on_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakePool()
+    fake_pool.connection = _FakeConnectionClosedOnAutocommitRestore()
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: fake_pool)
+
+    with pg.db_read_connection():
+        assert fake_pool.connection.autocommit is True
+
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+    assert fake_pool.closed_putconn_calls == 1
+    assert fake_pool.connection.closed is True
+
+
 def test_db_connection_rolls_back_and_returns_connection_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_pool = _FakePool()
     monkeypatch.setattr(
@@ -153,6 +202,24 @@ def test_db_connection_rolls_back_and_returns_connection_on_error(monkeypatch: p
     assert fake_pool.putconn_calls == 1
     assert fake_pool.connection.commit_calls == 0
     assert fake_pool.connection.rollback_calls == 1
+
+
+def test_db_connection_discards_closed_connection_on_return(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePool()
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: fake_pool)
+
+    with pg.db_connection() as conn:
+        conn.closed = True
+
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+    assert fake_pool.closed_putconn_calls == 1
+    assert fake_pool.connection.closed is True
 
 
 def test_db_connection_rolls_back_dirty_connection_on_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,6 +261,7 @@ def test_pool_init_falls_back_after_transient_dns_failure(monkeypatch: pytest.Mo
                 "url": primary,
                 "source": "SUPABASE_DB_URL",
                 "host_class": "pooler",
+                "connection_class": "transaction",
                 "host": "aws-1-us-east-1.pooler.supabase.com",
                 "port": 6543,
                 "database": "postgres",
@@ -202,6 +270,7 @@ def test_pool_init_falls_back_after_transient_dns_failure(monkeypatch: pytest.Mo
                 "url": fallback,
                 "source": "TRR_DB_FALLBACK_URL",
                 "host_class": "pooler",
+                "connection_class": "session",
                 "host": "aws-1-us-east-1.pooler.supabase.com",
                 "port": 5432,
                 "database": "postgres",
@@ -221,7 +290,7 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_cursor(*, conn=None):  # noqa: ARG001
+    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
     def _fetch_one_with_cursor(_cur, _query, _params=None):
@@ -230,7 +299,7 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
             raise RuntimeError("SSL SYSCALL error: EOF detected")
         return {"ok": True}
 
-    monkeypatch.setattr(pg, "db_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
 
@@ -242,8 +311,40 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
 
 def test_is_database_service_unavailable_error_detects_pool_exhaustion_and_init_failure() -> None:
     assert pg.is_database_service_unavailable_error(PoolError("connection pool exhausted")) is True
+    assert (
+        pg.is_database_service_unavailable_error(
+            pg.DatabaseServiceUnavailableError("Database pool initialization failed: boom")
+        )
+        is True
+    )
     assert pg.is_database_service_unavailable_error(RuntimeError("Database pool initialization failed: boom")) is True
     assert pg.is_database_service_unavailable_error(RuntimeError("other failure")) is False
+
+
+def test_database_service_unavailable_detail_distinguishes_pool_capacity() -> None:
+    detail = pg.database_service_unavailable_detail(
+        pg.DatabaseServiceUnavailableError(
+            "Database pool initialization failed: FATAL: MaxClientsInSessionMode",
+            reason="session_pool_capacity",
+        )
+    )
+
+    assert detail["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert detail["reason"] == "session_pool_capacity"
+    assert "session-pool capacity" in detail["message"]
+
+
+def test_database_service_unavailable_detail_distinguishes_configuration_errors() -> None:
+    detail = pg.database_service_unavailable_detail(
+        pg.DatabaseServiceUnavailableError(
+            "Database pool initialization failed: missing runtime database URL",
+            reason="database_configuration",
+        )
+    )
+
+    assert detail["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert detail["reason"] == "database_configuration"
+    assert "TRR_DB_URL" in detail["message"]
 
 
 def test_get_pool_logs_effective_session_pooler_defaults_warning(
@@ -261,8 +362,9 @@ def test_get_pool_logs_effective_session_pooler_defaults_warning(
         lambda: (
             {
                 "url": session_pooler_dsn,
-                "source": "SUPABASE_DB_URL",
+                "source": "TRR_DB_URL",
                 "host_class": "pooler",
+                "connection_class": "session",
                 "host": "aws-1-us-east-1.pooler.supabase.com",
                 "port": 5432,
                 "database": "postgres",
@@ -277,6 +379,7 @@ def test_get_pool_logs_effective_session_pooler_defaults_warning(
 
     assert "minconn=1 maxconn=2" in caplog.text
     assert "minconn_source=default maxconn_source=default" in caplog.text
+    assert "application_name=trr-backend" in caplog.text
     assert "session_pooler_tiny_defaults" in caplog.text
 
 
@@ -284,7 +387,7 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_cursor(*, conn=None):  # noqa: ARG001
+    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
     def _fetch_one_with_cursor(_cur, _query, _params=None):
@@ -293,7 +396,7 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
             raise RuntimeError("SSL connection has been closed unexpectedly")
         return {"ok": True}
 
-    monkeypatch.setattr(pg, "db_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
 
@@ -308,7 +411,7 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_cursor(*, conn=None):  # noqa: ARG001
+    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
     def _fetch_all_with_cursor(_cur, _query, _params=None):
@@ -317,7 +420,7 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
             raise RuntimeError("cursor already closed")
         return [{"ok": True}]
 
-    monkeypatch.setattr(pg, "db_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_all_with_cursor", _fetch_all_with_cursor)
     monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
 
@@ -332,7 +435,7 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_cursor(*, conn=None):  # noqa: ARG001
+    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
     def _fetch_one_with_cursor(_cur, _query, _params=None):
@@ -341,7 +444,7 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
             raise PoolError("connection pool is closed")
         return {"ok": True}
 
-    monkeypatch.setattr(pg, "db_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
 
@@ -397,6 +500,7 @@ def test_build_pool_for_session_mode_supavisor_uses_smaller_default_pool(monkeyp
         captured["maxconn"] = maxconn
         captured["dsn"] = kwargs.get("dsn")
         captured["options"] = kwargs.get("options")
+        captured["application_name"] = kwargs.get("application_name")
         return _FakePool()
 
     monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
@@ -406,6 +510,7 @@ def test_build_pool_for_session_mode_supavisor_uses_smaller_default_pool(monkeyp
     assert captured["minconn"] == 1
     assert captured["maxconn"] == 2
     assert captured["options"] == "-c idle_in_transaction_session_timeout=60000"
+    assert captured["application_name"] == "trr-backend"
 
 
 def test_build_pool_for_non_session_urls_keeps_default_pool_size(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -147,6 +147,7 @@ def _getty_preferred_source_url(row: Mapping[str, Any]) -> str | None:
         (
             candidate.strip()
             for candidate in (
+                metadata.get("getty_full_res_url"),
                 metadata.get("getty_original_image_url"),
                 metadata.get("original_source_url"),
                 metadata.get("original_source_file_url"),
@@ -1446,6 +1447,35 @@ def mirror_cast_photo_row(
             patch["image_url"] = used_url
             patch["url"] = used_url
             patch["image_url_canonical"] = used_url
+
+    # --- Mirror watermark-free thumbnail for Getty images ---
+    if source == "getty":
+        thumb_clean_url = (metadata.get("getty_thumb_clean_url") or "").strip() if metadata else ""
+        if thumb_clean_url and thumb_clean_url.startswith("https://"):
+            try:
+                thumb_data, thumb_ct = download_image(thumb_clean_url, source="getty", referer=None)
+                thumb_sha = _sha256_bytes(thumb_data)
+                thumb_ext = guess_ext_from_content_type(thumb_ct)
+                thumb_key = build_shared_media_s3_key(thumb_sha, thumb_ext)
+                thumb_head = _head_object(s3_client, bucket, thumb_key)
+                if thumb_head is None:
+                    upload_bytes_to_s3(
+                        s3_client,
+                        bucket=bucket,
+                        key=thumb_key,
+                        data=thumb_data,
+                        content_type=thumb_ct or "application/octet-stream",
+                    )
+                # Store in metadata JSONB since cast_photos doesn't have
+                # a dedicated hosted_thumbnail_url column yet.
+                existing_meta = dict(metadata) if metadata else {}
+                existing_meta["hosted_thumb_url"] = build_hosted_url(thumb_key)
+                existing_meta["hosted_thumb_key"] = thumb_key
+                existing_meta["hosted_thumb_sha256"] = thumb_sha
+                patch["metadata"] = existing_meta
+            except Exception:
+                logger.debug("Getty thumb mirror failed for %s", row.get("id"), exc_info=True)
+
     return patch
 
 

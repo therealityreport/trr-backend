@@ -1,8 +1,104 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
 
 from trr_backend.integrations import getty_local_prefetch
+
+
+def test_resolve_getty_browser_mode_defaults_to_isolated(monkeypatch) -> None:
+    monkeypatch.delenv("TRR_GETTY_BROWSER_MODE", raising=False)
+    assert getty_local_prefetch._resolve_getty_browser_mode() == "isolated"
+
+    monkeypatch.setenv("TRR_GETTY_BROWSER_MODE", " cookies ")
+    assert getty_local_prefetch._resolve_getty_browser_mode() == "cookies"
+
+    monkeypatch.setenv("TRR_GETTY_BROWSER_MODE", "unexpected")
+    assert getty_local_prefetch._resolve_getty_browser_mode() == "isolated"
+
+
+def test_local_getty_bridge_prefers_isolated_browser_mode(monkeypatch) -> None:
+    profile_dir = Path("/tmp/codex-agent")
+    attempts: list[tuple[str, Path]] = []
+    isolated_bridge = getty_local_prefetch.LocalGettyBridge(
+        session=object(),  # type: ignore[arg-type]
+        auth_details={"auth_mode": "chrome_profile_browser_login_bootstrap_isolated"},
+        profile_dir="/tmp/trr-getty-profile-123",
+    )
+
+    monkeypatch.delenv("TRR_GETTY_BROWSER_MODE", raising=False)
+    monkeypatch.setattr(getty_local_prefetch, "_iter_profile_dirs", lambda: [profile_dir])
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "_build_isolated_browser_bridge",
+        lambda candidate: attempts.append(("isolated", candidate)) or isolated_bridge,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "_build_browser_bridge",
+        lambda candidate: attempts.append(("live", candidate)) or None,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "_build_cookie_bridge",
+        lambda: pytest.fail("cookie fallback should not be used when isolated bridge succeeds"),
+    )
+
+    with getty_local_prefetch.local_getty_bridge() as bridge:
+        assert bridge is isolated_bridge
+
+    assert attempts == [("isolated", profile_dir)]
+
+
+def test_local_getty_bridge_live_mode_is_opt_in(monkeypatch) -> None:
+    profile_dir = Path("/tmp/codex-agent")
+    attempts: list[tuple[str, Path]] = []
+    live_bridge = getty_local_prefetch.LocalGettyBridge(
+        session=object(),  # type: ignore[arg-type]
+        auth_details={"auth_mode": "chrome_profile_browser_session"},
+        profile_dir=str(profile_dir),
+    )
+
+    monkeypatch.setenv("TRR_GETTY_BROWSER_MODE", "live")
+    monkeypatch.setattr(getty_local_prefetch, "_iter_profile_dirs", lambda: [profile_dir])
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "_build_browser_bridge",
+        lambda candidate: attempts.append(("live", candidate)) or live_bridge,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "_build_isolated_browser_bridge",
+        lambda candidate: attempts.append(("isolated", candidate)) or None,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "_build_cookie_bridge",
+        lambda: pytest.fail("cookie fallback should not be used when live bridge succeeds"),
+    )
+
+    with getty_local_prefetch.local_getty_bridge() as bridge:
+        assert bridge is live_bridge
+
+    assert attempts == [("live", profile_dir)]
+
+
+def test_getty_job_slot_rejects_concurrent_browser_jobs(monkeypatch) -> None:
+    @contextmanager
+    def _locked(_name: str):
+        raise RuntimeError("browser_runtime_locked:getty-prefetch-playwright")
+        yield
+
+    monkeypatch.setattr(getty_local_prefetch, "_resolve_getty_max_concurrent_jobs", lambda: 1)
+    monkeypatch.setattr(getty_local_prefetch, "exclusive_runtime_lock", _locked)
+
+    with pytest.raises(getty_local_prefetch.GettyPrefetchSessionError) as excinfo:
+        with getty_local_prefetch._getty_job_slot():
+            pass
+
+    assert excinfo.value.code == "getty_browser_job_locked"
 
 
 def test_fetch_person_getty_prefetch_payload_discovery_mode_skips_grouped_events(monkeypatch) -> None:
@@ -258,3 +354,189 @@ def test_fetch_person_getty_prefetch_payload_fails_fast_on_session_truncation(mo
         assert "truncated after page 3" in str(exc).lower()
     else:
         raise AssertionError("expected GettyPrefetchSessionError")
+
+
+def test_fetch_person_getty_prefetch_payload_retries_with_isolated_bridge(monkeypatch) -> None:
+    def base_fetcher(url: str) -> tuple[str, str, int]:
+        return "<html></html>", url, 200
+
+    def isolated_fetcher(url: str) -> tuple[str, str, int]:
+        return "<html></html>", url, 200
+
+    query_attempts: list[tuple[str, str]] = []
+
+    base_bridge = getty_local_prefetch.LocalGettyBridge(
+        session=object(),  # type: ignore[arg-type]
+        auth_details={"auth_mode": "chrome_profile_browser_session", "auth_warning": None},
+        search_page_fetcher=base_fetcher,
+        profile_dir="/tmp/codex-agent",
+    )
+    isolated_bridge = getty_local_prefetch.LocalGettyBridge(
+        session=object(),  # type: ignore[arg-type]
+        auth_details={"auth_mode": "chrome_profile_browser_login_bootstrap_isolated", "auth_warning": None},
+        search_page_fetcher=isolated_fetcher,
+        profile_dir="/tmp/trr-getty-profile-123",
+    )
+
+    @contextmanager
+    def _fake_bridge():
+        yield base_bridge
+
+    def _fake_search_editorial_assets(phrase: str, **kwargs):
+        summary = kwargs.get("query_summary_out")
+        search_page_fetcher = kwargs.get("search_page_fetcher")
+        attempt_source = "isolated" if search_page_fetcher is isolated_fetcher else "live"
+        query_attempts.append((phrase, attempt_source))
+        if isinstance(summary, dict):
+            summary.update(
+                {
+                    "query_url": f"https://www.gettyimages.com/search?q={phrase}",
+                    "site_image_total": 4823,
+                    "response_url": f"https://www.gettyimages.com/search?q={phrase}",
+                }
+            )
+            if search_page_fetcher is base_fetcher:
+                summary.update(
+                    {
+                        "fetched_candidates_total": 180,
+                        "termination_reason": "pagination_rewrite",
+                        "expected_page": 4,
+                        "current_page": 1,
+                        "pagination_rewrite_detected": True,
+                        "first_editorial_ids": ["1", "2", "3"],
+                    }
+                )
+                return []
+            editorial_id = phrase.lower().replace(" ", "-")
+            summary.update(
+                {
+                    "fetched_candidates_total": 1,
+                    "termination_reason": "natural_exhaustion",
+                    "expected_page": 1,
+                    "current_page": 1,
+                    "first_editorial_ids": [editorial_id],
+                }
+            )
+            return [
+                {
+                    "editorial_id": editorial_id,
+                    "detail_url": f"https://www.gettyimages.com/detail/news-photo/{editorial_id}/1",
+                    "original_image_url": f"https://media.gettyimages.com/id/{editorial_id}/photo/example.jpg",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(getty_local_prefetch, "load_env", lambda: None)
+    monkeypatch.setattr(getty_local_prefetch, "local_getty_bridge", _fake_bridge)
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "_build_isolated_bridge_from_bridge",
+        lambda bridge: isolated_bridge,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_editorial_assets",
+        _fake_search_editorial_assets,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_grouped_events",
+        lambda *args, **kwargs: [],
+    )
+
+    payload = getty_local_prefetch.fetch_person_getty_prefetch_payload(
+        "Brandi Glanville",
+        mode="discovery",
+    )
+
+    assert query_attempts == [
+        ("Brandi Glanville Bravo", "live"),
+        ("Brandi Glanville Bravo", "isolated"),
+        ("Brandi Glanville", "isolated"),
+    ]
+    assert payload["auth_mode"] == "chrome_profile_browser_login_bootstrap_isolated"
+    assert payload["session_validated"] is True
+    assert payload["session_truncated"] is False
+    assert payload["merged_total"] == 2
+
+
+def test_build_query_specs_uses_shared_query_plan() -> None:
+    """_build_query_specs delegates to the shared query-plan builder."""
+    specs = getty_local_prefetch._build_query_specs("Lisa Barlow")
+    assert len(specs) == 2
+    assert specs[0]["phrase"] == "Lisa Barlow Bravo"
+    assert specs[0]["scope"] == "bravo"
+    assert specs[0]["label"] == "Bravo Search"
+    assert specs[0]["query_params"]["sort"] == "newest"
+    assert specs[1]["phrase"] == "Lisa Barlow"
+    assert specs[1]["scope"] == "broad"
+    assert specs[1]["label"] == "Broad Search"
+
+
+def test_build_query_specs_with_credit_rows_adds_network_queries() -> None:
+    """When credit_show_rows are provided, extra network queries appear."""
+    credit_rows = [
+        {"networks": ["Bravo", "E!"], "streaming_providers": ["Peacock"]},
+    ]
+    specs = getty_local_prefetch._build_query_specs(
+        "Kyle Richards",
+        credit_show_rows=credit_rows,
+    )
+    phrases = [s["phrase"] for s in specs]
+    assert "Kyle Richards Bravo" in phrases
+    assert "Kyle Richards" in phrases
+    assert "Kyle Richards Peacock" in phrases
+    # All should have sort=newest default
+    assert all(s["query_params"].get("sort") == "newest" for s in specs)
+
+
+def test_prefetch_full_mode_grouped_events_match_live_params(monkeypatch) -> None:
+    """Full-mode prefetch grouped-event calls should use the same params as the live backend."""
+    grouped_calls: list[dict[str, object]] = []
+
+    @contextmanager
+    def _fake_bridge():
+        yield getty_local_prefetch.LocalGettyBridge(
+            session=object(),  # type: ignore[arg-type]
+            auth_details={"auth_mode": "chrome_profile_browser_session"},
+            search_page_fetcher=lambda url: ("<html></html>", url, 200),
+        )
+
+    def _fake_search_editorial_assets(phrase: str, **kwargs):
+        return [{"editorial_id": phrase.lower().replace(" ", "-"), "detail_url": "https://example.com/1"}]
+
+    def _fake_search_grouped_events(*args, **kwargs):
+        grouped_calls.append({"args": args, "kwargs": kwargs})
+        return []
+
+    monkeypatch.setattr(getty_local_prefetch, "local_getty_bridge", _fake_bridge)
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_editorial_assets",
+        _fake_search_editorial_assets,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_grouped_events",
+        _fake_search_grouped_events,
+    )
+
+    getty_local_prefetch.fetch_person_getty_prefetch_payload(
+        "Brandi Glanville",
+        mode="full",
+    )
+
+    assert len(grouped_calls) == 2
+
+    # Bravo grouped: full_scan_person_assets=True
+    bravo_call = grouped_calls[0]["kwargs"]
+    assert bravo_call["source_query_scope"] == "bravo"
+    assert bravo_call["full_scan_person_assets"] is True
+
+    # Broad grouped: person_match_required=True, minimum_grouped_image_count=2
+    broad_call = grouped_calls[1]["kwargs"]
+    assert broad_call["source_query_scope"] == "broad"
+    assert broad_call["person_match_required"] is True
+    assert broad_call["minimum_grouped_image_count"] == 2
+    assert broad_call["query_params"]["sort"] == "best"
+    assert "numberofpeople" in broad_call["query_params"]

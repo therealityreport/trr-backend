@@ -1,6 +1,6 @@
 # Person Refresh NBCUMV Timeout And Cancel Hardening
 
-Date: 2026-03-22
+Last updated: 2026-03-30
 
 ## Summary
 - Hardened the person image refresh NBCUMV import path so a single stuck asset cannot pin the whole refresh forever.
@@ -29,10 +29,10 @@ Date: 2026-03-22
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
-  last_updated: 2026-03-22
-  current_phase: "person refresh NBCUMV timeout and cooperative cancel hardening shipped"
-  next_action: "watch the next stuck NBCUMV asset refresh and tune TRR_NBCUMV_IMPORT_ITEM_TIMEOUT_S only if real assets still need more than the default 120s"
+  include: false
+  state: archived
+  last_updated: 2026-03-30
+  current_phase: "archived continuity note"
+  next_action: "Refer to newer status notes if follow-up work resumes on this thread."
   detail: self
 ```

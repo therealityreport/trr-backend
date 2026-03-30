@@ -92,6 +92,11 @@ def modal_app_name() -> str:
     return str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip()
 
 
+def modal_environment_name() -> str | None:
+    value = str(os.getenv("MODAL_ENVIRONMENT") or "").strip()
+    return value or None
+
+
 def modal_execution_metadata() -> dict[str, str]:
     return {
         "execution_mode_canonical": _REMOTE_EXECUTION_MODE,
@@ -125,6 +130,52 @@ def modal_dispatch_ready(*, function_name: str) -> tuple[bool, str | None]:
     if not normalized_function:
         return False, "modal_function_name_missing"
     return True, None
+
+
+def _classify_modal_resolution_error(error: str) -> str:
+    normalized = str(error or "").strip().lower()
+    if not normalized:
+        return "modal_resolution_failed"
+    if "function" in normalized and "not found" in normalized:
+        return "modal_function_not_found"
+    if "app" in normalized and "not found" in normalized:
+        return "modal_app_not_found"
+    if "modal" in normalized and "unavailable" in normalized:
+        return "modal_sdk_unavailable"
+    return "modal_resolution_failed"
+
+
+def resolve_modal_function(function_name: str) -> dict[str, Any]:
+    normalized_function = str(function_name or "").strip()
+    app_name = modal_app_name()
+    environment_name = modal_environment_name()
+    ready, reason = modal_dispatch_ready(function_name=normalized_function)
+    payload: dict[str, Any] = {
+        "resolved": False,
+        "reason": reason,
+        "error": None,
+        "app_name": app_name,
+        "function_name": normalized_function,
+        "modal_environment": environment_name,
+    }
+    if not ready:
+        return payload
+
+    try:
+        import modal
+
+        fn = modal.Function.from_name(app_name, normalized_function)
+        hydrate = getattr(fn, "hydrate", None)
+        if callable(hydrate):
+            hydrate()
+    except Exception as exc:  # noqa: BLE001
+        payload["reason"] = _classify_modal_resolution_error(str(exc))
+        payload["error"] = str(exc)
+        return payload
+
+    payload["resolved"] = True
+    payload["reason"] = None
+    return payload
 
 
 def _utcnow_iso() -> str:
@@ -348,6 +399,8 @@ def _spawn_named_modal_function(
             metadata_updates={
                 "dispatch_enabled": False,
                 "last_dispatch_error": reason,
+                "last_dispatch_error_code": reason,
+                "last_dispatch_blocked_reason": reason,
                 "last_dispatch_error_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
             },
             supported_platforms=supported_platforms,
@@ -355,6 +408,7 @@ def _spawn_named_modal_function(
         return {
             "dispatched": False,
             "reason": reason,
+            "reason_code": reason,
             "call_id": None,
         }
 
@@ -373,6 +427,8 @@ def _spawn_named_modal_function(
                 "dispatch_enabled": True,
                 "last_dispatch_success_at": _utcnow_iso(),
                 "last_dispatch_error": None,
+                "last_dispatch_error_code": None,
+                "last_dispatch_blocked_reason": None,
                 "last_dispatch_label": log_label,
                 "last_dispatch_function": normalized_function,
                 "last_dispatch_call_id": call_id,
@@ -391,15 +447,24 @@ def _spawn_named_modal_function(
         return {
             "dispatched": True,
             "reason": None,
+            "reason_code": None,
             "call_id": call_id,
         }
     except Exception as exc:  # noqa: BLE001
+        reason_code = _classify_modal_resolution_error(str(exc))
         _record_dispatcher_heartbeat(
             dispatcher_name=dispatcher_name,
             status="idle",
             metadata_updates={
-                "dispatch_enabled": True,
+                "dispatch_enabled": reason_code not in {
+                    "modal_sdk_unavailable",
+                    "modal_app_not_found",
+                    "modal_function_not_found",
+                    "modal_resolution_failed",
+                },
                 "last_dispatch_error": str(exc),
+                "last_dispatch_error_code": reason_code,
+                "last_dispatch_blocked_reason": reason_code,
                 "last_dispatch_error_at": _utcnow_iso(),
                 "last_dispatch_label": log_label,
                 "last_dispatch_function": normalized_function,
@@ -417,6 +482,7 @@ def _spawn_named_modal_function(
         return {
             "dispatched": False,
             "reason": str(exc),
+            "reason_code": reason_code,
             "call_id": None,
         }
 

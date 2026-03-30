@@ -2679,8 +2679,20 @@ def _import_nbcumv_person_media(
         detail_url = str(asset.get("detail_url") or "").strip() or None
         if not editorial_id or not original_url:
             return None
+
+        # --- Getty URL variants (full-res + watermark-free thumbnail) ---
+        _any_getty_url = original_url or preview_url
+        getty_variants = getty_integration.build_getty_url_variants(_any_getty_url)
+        # Prefer the full-res watermarked as "original" (highest quality we can
+        # get without a licence) — fall back to whatever the scraper found.
+        full_res_url = getty_variants.get("full_res") or original_url
+        # Watermark-free thumbnail for gallery display
+        thumb_clean_url = getty_variants.get("thumb_clean") or preview_url or original_url
+        # Full-res clean (may or may not be available for every image)
+        full_res_clean_url = getty_variants.get("full_res_clean")
+
         width, height = _getty_dimensions(asset)
-        resolved_image_url = str(public_replacement.image_url).strip() if public_replacement else original_url
+        resolved_image_url = str(public_replacement.image_url).strip() if public_replacement else full_res_url
         resolved_page_url = str(public_replacement.page_url).strip() if public_replacement else detail_url
         resolved_width = public_replacement.width if public_replacement and public_replacement.width else width
         resolved_height = public_replacement.height if public_replacement and public_replacement.height else height
@@ -2714,6 +2726,9 @@ def _import_nbcumv_person_media(
             "crosswalk_reason": crosswalk_reason,
             "source_resolution": (public_replacement.mode if public_replacement else "getty_watermark_fallback"),
             "getty_original_image_url": original_url,
+            "getty_full_res_url": full_res_url,
+            "getty_full_res_clean_url": full_res_clean_url,
+            "getty_thumb_clean_url": thumb_clean_url,
             "getty_preview_image_url": preview_url,
             "getty_detail_page_url": detail_url,
             "getty_details": dict(asset.get("details") or {}) if isinstance(asset.get("details"), dict) else {},
@@ -2726,6 +2741,7 @@ def _import_nbcumv_person_media(
             "getty_event_slug": str(asset.get("event_url_slug") or "").strip() or None,
             "getty_event_date": str(asset.get("event_date") or "").strip() or None,
             "getty_date_created": str(asset.get("date_created") or "").strip() or None,
+            "getty_upload_date": str(asset.get("upload_date") or "").strip() or None,
             "grouped_image_count": asset.get("grouped_image_count"),
             "person_image_count": asset.get("person_image_count"),
             "source_query_scope": str(asset.get("source_query_scope") or "").strip() or None,
@@ -2799,7 +2815,8 @@ def _import_nbcumv_person_media(
             "thumb_url": (
                 resolved_image_url
                 if public_replacement
-                else str(asset.get("thumb_url") or asset.get("thumbUrl") or preview_url or original_url).strip()
+                else thumb_clean_url
+                or str(asset.get("thumb_url") or asset.get("thumbUrl") or preview_url or original_url).strip()
                 or preview_url
                 or original_url
             ),
@@ -13281,13 +13298,27 @@ async def refresh_person_images_stream(
                         ),
                     )
                 )
+                # --- Resilient task monitor ---
+                # The NBCUMV/Getty import is long-running and must NOT be
+                # cancelled when the SSE client disconnects (e.g. Next.js
+                # hot-reload).  On disconnect we break out of the progress
+                # loop but let the task finish in the background.  The
+                # import writes its own results to the database so nothing
+                # is lost even if the stream is gone.
+                _nbcumv_client_gone = False
                 while not nbcumv_task.done():
                     await asyncio.sleep(2)
                     if nbcumv_task.done():
                         break
-                    if await _client_disconnected("nbcumv_import"):
-                        nbcumv_task.cancel()
-                        return
+                    if not _nbcumv_client_gone and await _client_disconnected("nbcumv_import"):
+                        _nbcumv_client_gone = True
+                        logger.info(
+                            "SSE client disconnected during nbcumv_import for person_id=%s; "
+                            "letting task finish in background.",
+                            person_id_str,
+                        )
+                        # Do NOT cancel — break out of progress loop only
+                        break
                     if await _cancel_requested("nbcumv_import") and not nbcumv_cancel_notice_emitted:
                         nbcumv_cancel_notice_emitted = True
                         yield progress(
@@ -13322,6 +13353,22 @@ async def refresh_person_images_stream(
                             "elapsed_ms": int((time.perf_counter() - nbcumv_started_at) * 1000),
                         }
                     )
+                # If client disconnected, await the background task silently
+                # and then return — we can't yield anything to a dead stream.
+                if _nbcumv_client_gone:
+                    try:
+                        await nbcumv_task
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Background nbcumv_import failed after SSE disconnect for person_id=%s",
+                            person_id_str,
+                        )
+                    logger.info(
+                        "Background nbcumv_import completed for person_id=%s after SSE disconnect.",
+                        person_id_str,
+                    )
+                    return
+
                 nbcumv_result = await nbcumv_task
                 with nbcumv_progress_lock:
                     nbcumv_snapshot = dict(nbcumv_progress)
@@ -13777,15 +13824,22 @@ async def refresh_person_images_stream(
                         ),
                     )
                 )
+                # --- Resilient task monitor (same pattern as nbcumv) ---
+                _bravotv_client_gone = False
                 while not bravotv_task.done():
                     await asyncio.sleep(2)
                     if bravotv_task.done():
                         break
                     if await _abort_if_requested("bravotv_import", task=bravotv_task):
                         return
-                    if await _client_disconnected("bravotv_import"):
-                        bravotv_task.cancel()
-                        return
+                    if not _bravotv_client_gone and await _client_disconnected("bravotv_import"):
+                        _bravotv_client_gone = True
+                        logger.info(
+                            "SSE client disconnected during bravotv_import for person_id=%s; "
+                            "letting task finish in background.",
+                            person_id_str,
+                        )
+                        break
                     with bravotv_progress_lock:
                         bravotv_snapshot = dict(bravotv_progress)
                         bravotv_pending_events = list(bravotv_progress_events)
@@ -13809,6 +13863,20 @@ async def refresh_person_images_stream(
                             "elapsed_ms": int((time.perf_counter() - bravotv_started_at) * 1000),
                         }
                     )
+                if _bravotv_client_gone:
+                    try:
+                        await bravotv_task
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Background bravotv_import failed after SSE disconnect for person_id=%s",
+                            person_id_str,
+                        )
+                    logger.info(
+                        "Background bravotv_import completed for person_id=%s after SSE disconnect.",
+                        person_id_str,
+                    )
+                    return
+
                 bravotv_result = await bravotv_task
                 bravotv_photos_fetched = int(bravotv_result.get("fetched") or 0)
                 bravotv_assets_imported = int(bravotv_result.get("imported") or 0)

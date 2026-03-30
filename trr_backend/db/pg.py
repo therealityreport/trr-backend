@@ -37,6 +37,7 @@ DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
 DEFAULT_QUERY_TRANSIENT_ATTEMPTS = 3
 DEFAULT_IDLE_IN_TX_TIMEOUT_MS = 60000
+DEFAULT_DB_APPLICATION_NAME = "trr-backend"
 
 _pool: ThreadedConnectionPool | None = None
 _active_pool_dsn: str | None = None
@@ -48,6 +49,14 @@ _checked_out_connections: dict[int, dict[str, Any]] = {}
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+
+
+class DatabaseServiceUnavailableError(RuntimeError):
+    """Raised when the Postgres runtime is unavailable or saturated."""
+
+    def __init__(self, message: str, *, reason: str = "database_unavailable") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -90,9 +99,49 @@ def _is_pool_exhausted_error(error: Exception) -> bool:
     return "connection pool exhausted" in _error_message(error)
 
 
+def _database_service_unavailable_reason(message: str) -> str:
+    if "maxclientsinsessionmode" in message or "max clients reached - in session mode" in message:
+        return "session_pool_capacity"
+    if "connection pool exhausted" in message or "pool exhausted" in message:
+        return "pool_capacity"
+    if "no database url candidates available" in message:
+        return "database_configuration"
+    if "database pool initialization failed" in message:
+        return "pool_initialization"
+    return "database_unavailable"
+
+
 def is_database_service_unavailable_error(error: Exception) -> bool:
+    if isinstance(error, DatabaseServiceUnavailableError):
+        return True
     message = _error_message(error)
     return _is_pool_exhausted_error(error) or "database pool initialization failed" in message
+
+
+def database_service_unavailable_detail(error: Exception) -> dict[str, str]:
+    if isinstance(error, DatabaseServiceUnavailableError):
+        reason = error.reason
+    else:
+        reason = _database_service_unavailable_reason(_error_message(error))
+
+    if reason == "session_pool_capacity":
+        safe_message = (
+            "Database service unavailable: Supabase session-pool capacity is saturated. "
+            "Reduce local DB concurrency or use the explicit local fallback lane."
+        )
+    elif reason == "database_configuration":
+        safe_message = (
+            "Database service unavailable: runtime DB configuration is incomplete. "
+            "Set TRR_DB_URL and optional TRR_DB_FALLBACK_URL."
+        )
+    else:
+        safe_message = "Database service unavailable. Check runtime DB connectivity and pool sizing."
+
+    return {
+        "code": "DATABASE_SERVICE_UNAVAILABLE",
+        "reason": reason,
+        "message": safe_message,
+    }
 
 
 def _is_transient_transport_error(error: Exception) -> bool:
@@ -150,13 +199,22 @@ def _resolve_pool_sizing(url: str) -> dict[str, Any]:
     }
 
 
+def _resolve_application_name() -> dict[str, str]:
+    raw = (os.getenv("TRR_DB_APPLICATION_NAME") or "").strip()
+    if raw:
+        return {"application_name": raw, "application_name_source": "env:TRR_DB_APPLICATION_NAME"}
+    return {"application_name": DEFAULT_DB_APPLICATION_NAME, "application_name_source": "default"}
+
+
 def _build_pool_for_url(url: str) -> ThreadedConnectionPool:
     sizing = _resolve_pool_sizing(url)
     minconn = int(sizing["minconn"])
     maxconn = int(sizing["maxconn"])
+    app_name = _resolve_application_name()
 
     sslmode = _sslmode_for_url(url)
     connect_kwargs: dict[str, Any] = {"dsn": url}
+    connect_kwargs["application_name"] = app_name["application_name"]
     if sslmode:
         connect_kwargs["sslmode"] = sslmode
     idle_in_tx_timeout_ms = _env_int(
@@ -202,6 +260,13 @@ def _transaction_status_name(conn: connection_type) -> str:
     if status == TRANSACTION_STATUS_UNKNOWN:
         return "driver_unknown"
     return str(status)
+
+
+def _is_connection_closed(conn: connection_type) -> bool:
+    try:
+        return bool(getattr(conn, "closed", False))
+    except Exception:
+        return True
 
 
 def _log_checkout(
@@ -261,6 +326,14 @@ def _log_return(
 
 
 def _ensure_connection_idle(conn: connection_type, *, label: str, phase: str) -> bool:
+    if _is_connection_closed(conn):
+        logger.warning(
+            "[db-pool] discard_closed_connection label=%s phase=%s backend_pid=%s",
+            label,
+            phase,
+            getattr(conn, "get_backend_pid", lambda: None)(),
+        )
+        return False
     tx_status = _transaction_status_name(conn)
     if tx_status in {"idle", "driver_unknown"}:
         return True
@@ -307,17 +380,22 @@ def _get_pool() -> ThreadedConnectionPool:
         for index, candidate_detail in enumerate(candidate_details):
             candidate = str(candidate_detail["url"])
             sizing = _resolve_pool_sizing(candidate)
+            app_name = _resolve_application_name()
             try:
                 logger.info(
                     (
-                        "[db-pool] init_attempt=%s source=%s host_class=%s host=%s port=%s "
-                        "minconn=%s maxconn=%s minconn_source=%s maxconn_source=%s"
+                        "[db-pool] init_attempt=%s source=%s host_class=%s connection_class=%s host=%s port=%s "
+                        "application_name=%s application_name_source=%s minconn=%s maxconn=%s "
+                        "minconn_source=%s maxconn_source=%s"
                     ),
                     index,
                     candidate_detail["source"],
                     candidate_detail["host_class"],
+                    candidate_detail["connection_class"],
                     candidate_detail["host"],
                     candidate_detail["port"],
+                    app_name["application_name"],
+                    app_name["application_name_source"],
                     sizing["minconn"],
                     sizing["maxconn"],
                     sizing["minconn_source"],
@@ -328,13 +406,17 @@ def _get_pool() -> ThreadedConnectionPool:
                 _active_pool_dsn = candidate
                 logger.info(
                     (
-                        "[db-pool] init_selected source=%s host_class=%s host=%s port=%s "
-                        "minconn=%s maxconn=%s minconn_source=%s maxconn_source=%s pool_creations=%s"
+                        "[db-pool] init_selected source=%s host_class=%s connection_class=%s host=%s port=%s "
+                        "application_name=%s application_name_source=%s minconn=%s maxconn=%s "
+                        "minconn_source=%s maxconn_source=%s pool_creations=%s"
                     ),
                     candidate_detail["source"],
                     candidate_detail["host_class"],
+                    candidate_detail["connection_class"],
                     candidate_detail["host"],
                     candidate_detail["port"],
+                    app_name["application_name"],
+                    app_name["application_name_source"],
                     sizing["minconn"],
                     sizing["maxconn"],
                     sizing["minconn_source"],
@@ -354,6 +436,23 @@ def _get_pool() -> ThreadedConnectionPool:
                         sizing["minconn"],
                         sizing["maxconn"],
                     )
+                elif sizing["session_pooler"] and (
+                    int(sizing["minconn"]) > DEFAULT_SESSION_POOLER_MINCONN
+                    or int(sizing["maxconn"]) > DEFAULT_SESSION_POOLER_MAXCONN
+                ):
+                    logger.warning(
+                        (
+                            "[db-pool] oversized_session_pool_override source=%s host=%s port=%s "
+                            "minconn=%s maxconn=%s default_minconn=%s default_maxconn=%s"
+                        ),
+                        candidate_detail["source"],
+                        candidate_detail["host"],
+                        candidate_detail["port"],
+                        sizing["minconn"],
+                        sizing["maxconn"],
+                        sizing["default_minconn"],
+                        sizing["default_maxconn"],
+                    )
                 return _pool
             except Exception as error:
                 init_errors.append(error)
@@ -368,11 +467,20 @@ def _get_pool() -> ThreadedConnectionPool:
                 has_more = index < len(candidate_details) - 1
                 if has_more and _is_transient_transport_error(error):
                     continue
-                raise RuntimeError(f"Database pool initialization failed: {error}") from error
+                raise DatabaseServiceUnavailableError(
+                    f"Database pool initialization failed: {error}",
+                    reason=_database_service_unavailable_reason(_error_message(error)),
+                ) from error
 
         if init_errors:
-            raise RuntimeError(f"Database pool initialization failed: {init_errors[-1]}") from init_errors[-1]
-        raise RuntimeError("Database pool initialization failed: no database URL candidates available")
+            raise DatabaseServiceUnavailableError(
+                f"Database pool initialization failed: {init_errors[-1]}",
+                reason=_database_service_unavailable_reason(_error_message(init_errors[-1])),
+            ) from init_errors[-1]
+        raise DatabaseServiceUnavailableError(
+            "Database pool initialization failed: no database URL candidates available",
+            reason="database_configuration",
+        )
 
 
 def reset_pool() -> None:
@@ -483,7 +591,11 @@ def db_connection(*, label: str = "write"):
             pass
         raise
     finally:
-        should_close = not _ensure_connection_idle(conn, label=label, phase="return")
+        should_close = _is_connection_closed(conn) or not _ensure_connection_idle(
+            conn,
+            label=label,
+            phase="return",
+        )
         if should_close:
             try:
                 _log_return(pool=pool, conn=conn, checkout_id=checkout_id, label=label)
@@ -503,17 +615,29 @@ def db_connection(*, label: str = "write"):
 def db_read_connection(*, label: str = "read"):
     pool, conn, checkout_id = _get_connection_with_retry(label=label)
     previous_autocommit = getattr(conn, "autocommit", False)
+    autocommit_restore_failed = False
     try:
         if not previous_autocommit:
             conn.autocommit = True
         yield conn
     finally:
         try:
-            if not previous_autocommit and not getattr(conn, "closed", False):
+            if not previous_autocommit and not _is_connection_closed(conn):
                 conn.autocommit = previous_autocommit
-        except Exception:
-            logger.exception("[db-pool] autocommit_restore_failed label=%s", label)
-        should_close = not _ensure_connection_idle(conn, label=label, phase="read-return")
+        except Exception as error:
+            autocommit_restore_failed = True
+            if _is_connection_closed(conn) or _is_transient_transport_error(error):
+                logger.warning(
+                    "[db-pool] autocommit_restore_failed_closed_connection label=%s",
+                    label,
+                )
+            else:
+                logger.exception("[db-pool] autocommit_restore_failed label=%s", label)
+        should_close = (
+            autocommit_restore_failed
+            or _is_connection_closed(conn)
+            or not _ensure_connection_idle(conn, label=label, phase="read-return")
+        )
         if should_close:
             try:
                 _log_return(pool=pool, conn=conn, checkout_id=checkout_id, label=label)

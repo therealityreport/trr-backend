@@ -19,13 +19,20 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+
 logger = logging.getLogger(__name__)
+_INSTAGRAM_BROWSER_SESSIONS = AccountBrowserSessionManager(
+    platform="instagram",
+    cookie_domains=(".instagram.com",),
+)
 
 
 @dataclass
@@ -53,6 +60,13 @@ class ScrapeConfig:
     fetch_comment_replies: bool = True
     """When False, only fetch top-level comments and skip reply chains.
     Useful for bulk scrapes where replies aren't needed immediately."""
+
+    max_scrape_seconds: float = 420.0
+    """Overall wall-clock timeout for the entire scrape() call (default: 7 min)."""
+
+    require_auth: bool = False
+    """When True, scrape() returns early with an error meta if cookies are
+    missing or invalid instead of silently falling back to profile_info mode."""
 
     # Metadata for tracking
     show_id: int | None = None
@@ -268,9 +282,18 @@ class InstagramScraper:
         "overlay_text",
     )
 
-    def __init__(self, cookies: dict | None = None, session: requests.Session | None = None):
+    def __init__(
+        self,
+        cookies: dict | None = None,
+        session: requests.Session | None = None,
+        *,
+        browser_account_id: str | None = None,
+        browser_session_manager: AccountBrowserSessionManager | None = None,
+    ):
         self.cookies = cookies or {}
         self.session = session if session is not None else self._create_session()
+        self.browser_account_id = str(browser_account_id or "").strip() or None
+        self._browser_session_manager = browser_session_manager or _INSTAGRAM_BROWSER_SESSIONS
         self._request_count = 0
         self._last_429_at: float = 0.0
         self._consecutive_success: int = 0
@@ -283,6 +306,83 @@ class InstagramScraper:
             self.REQUEST_CONNECT_TIMEOUT_SECONDS,
             self.REQUEST_READ_TIMEOUT_SECONDS,
         )
+
+    def _resolved_browser_account_id(self, fallback_account_id: str | None = None) -> str:
+        return self._browser_session_manager.resolve_account_id(
+            self.browser_account_id,
+            fallback_account_id=fallback_account_id,
+        )
+
+    # ── Cookie / auth helpers ────────────────────────────────────────────
+
+    def _validate_cookies(self) -> dict[str, Any]:
+        """Structural check that cookies contain the minimum fields for auth.
+
+        Does NOT hit the API — Instagram returns 400 for fresh sessions
+        before context warming, so we just check key presence.
+        """
+        result: dict[str, Any] = {
+            "valid": False,
+            "reason": None,
+            "cookies_present": bool(self.cookies),
+            "sessionid_present": bool(self.cookies.get("sessionid")),
+        }
+        sessionid = str(self.cookies.get("sessionid") or "").strip()
+        if not sessionid:
+            result["reason"] = "no_sessionid"
+            return result
+
+        csrftoken = str(self.cookies.get("csrftoken") or "").strip()
+        ds_user_id = str(self.cookies.get("ds_user_id") or "").strip()
+        if csrftoken or ds_user_id:
+            result["valid"] = True
+            result["has_csrftoken"] = bool(csrftoken)
+            result["has_ds_user_id"] = bool(ds_user_id)
+        else:
+            result["reason"] = "missing_csrftoken_and_ds_user_id"
+        return result
+
+    def _try_auto_refresh_cookies(self) -> dict[str, Any]:
+        """Refresh cookies via Playwright login using env-var credentials.
+
+        Env vars: INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD,
+        SOCIAL_INSTAGRAM_COOKIES_FILE (default: data/instagram_cookies.json).
+        """
+        from .cookie_refresh import refresh_instagram_cookies
+
+        ig_user = (os.getenv("INSTAGRAM_USERNAME") or "").strip()
+        ig_pass = (os.getenv("INSTAGRAM_PASSWORD") or "").strip()
+        if not ig_user or not ig_pass:
+            return {"refreshed": False, "reason": "no_credentials_in_env"}
+
+        cookie_file = (os.getenv("SOCIAL_INSTAGRAM_COOKIES_FILE") or "").strip() or "data/instagram_cookies.json"
+        cookie_path = Path(cookie_file)
+        if not cookie_path.is_absolute():
+            project_root = Path(__file__).resolve().parent.parent.parent.parent
+            cookie_path = project_root / cookie_file
+
+        logger.info("[instagram] attempting cookie auto-refresh via Playwright login (%s)", ig_user)
+        try:
+            fresh_cookies = refresh_instagram_cookies(
+                username=ig_user,
+                password=ig_pass,
+                cookie_file=str(cookie_path),
+                account_id=self._resolved_browser_account_id(ig_user),
+                headless=True,
+                timeout_seconds=90,
+            )
+            if not fresh_cookies or not fresh_cookies.get("sessionid"):
+                return {"refreshed": False, "reason": "refresh_returned_no_sessionid"}
+
+            self.cookies = fresh_cookies
+            for k, v in fresh_cookies.items():
+                self.session.cookies.set(k, v, domain=".instagram.com")
+            self._profile_page_context_cache.clear()
+            logger.info("[instagram] cookie auto-refresh succeeded — sessionid=%s…", fresh_cookies["sessionid"][:8])
+            return {"refreshed": True, "reason": None, "cookie_file": str(cookie_path)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[instagram] cookie auto-refresh failed: %s", exc)
+            return {"refreshed": False, "reason": f"refresh_error: {exc}"}
 
     def _profile_posts_doc_ids(self) -> list[str]:
         override = (os.getenv("INSTAGRAM_PROFILE_POSTS_DOC_ID") or "").strip()
@@ -360,8 +460,6 @@ class InstagramScraper:
             )
             return None
 
-        from trr_backend.socials.browser_cookie_refresh import launch_browser
-
         timeout = request_timeout or self.request_timeout
         if isinstance(timeout, tuple):
             timeout_ms = int(max(timeout) * 1000)
@@ -372,15 +470,15 @@ class InstagramScraper:
         user_agent = self._get_headers().get("user-agent", "Mozilla/5.0")
 
         with sync_playwright() as playwright:
-            browser = launch_browser(playwright, headless=True)
-            try:
-                context = browser.new_context(
-                    viewport={"width": 1280, "height": 1400},
-                    user_agent=user_agent,
-                )
-                browser_cookies = self._browser_cookie_payload()
-                if browser_cookies:
-                    context.add_cookies(browser_cookies)
+            with self._browser_session_manager.account_context(
+                playwright=playwright,
+                account_id=self._resolved_browser_account_id(username),
+                headless=True,
+                viewport={"width": 1280, "height": 1400},
+                user_agent=user_agent,
+                seed_cookies=self._request_cookies(),
+            ) as browser_session:
+                context = browser_session.context
                 page = context.new_page()
                 page.goto(
                     f"https://www.instagram.com/{username}/",
@@ -590,8 +688,6 @@ class InstagramScraper:
                     }
                 )
                 return None
-            finally:
-                browser.close()
 
     def _reset_request_session(self) -> None:
         preserved_cookies = self._request_cookies()
@@ -1792,7 +1888,7 @@ class InstagramScraper:
                 if attempts_remaining <= 0:
                     break
                 self._warm_profile_request_context(username, timeout=timeout, force=True)
-        logger.error(f"Failed to fetch profile info for {username}: {last_error}")
+        logger.error("Failed to fetch profile info for %s: %s", username, last_error)
         return None
 
     def fetch_posts_graphql(
@@ -1818,7 +1914,12 @@ class InstagramScraper:
         ):
             self.last_retrieval_meta.pop(key, None)
         timeout = request_timeout or self.request_timeout
-        attempt_limit = 1 if fast_mode else self._resolve_graphql_cursor_retry_attempts(cursor)
+        # Always allow at least 2 attempts for the initial page (cursor=None)
+        # to survive a single transient failure, even in fast_mode.
+        if fast_mode:
+            attempt_limit = 2 if not cursor else 1
+        else:
+            attempt_limit = self._resolve_graphql_cursor_retry_attempts(cursor)
         last_error: requests.exceptions.RequestException | None = None
         for attempt_index in range(attempt_limit):
             # In fast_mode, only warm context on the first page and every 5th page
@@ -2782,20 +2883,56 @@ class InstagramScraper:
         Returns:
             List of InstagramPost objects matching the filters.
         """
+        scrape_start = time.monotonic()
+
         logger.info(
             "Starting scrape for @%s (mode=%s, fast=%s)",
             config.username, config.scrape_mode, config.fast_mode,
         )
         if config.hashtags:
-            logger.info(f"Filtering by hashtags: {config.hashtags}")
+            logger.info("Filtering by hashtags: %s", config.hashtags)
         if config.date_start or config.date_end:
-            logger.info(f"Date range: {config.date_start} to {config.date_end}")
+            logger.info("Date range: %s to %s", config.date_start, config.date_end)
 
         has_auth = bool(self.cookies.get("sessionid"))
 
-        # Route to the requested scrape mode
+        # ── Auth gate (with auto-refresh) ─────────────────────────────
+        auto_refresh_result: dict[str, Any] | None = None
+
+        if not has_auth:
+            auto_refresh_result = self._try_auto_refresh_cookies()
+            if auto_refresh_result.get("refreshed"):
+                has_auth = True
+            elif config.require_auth:
+                logger.warning("[instagram] scrape aborted for @%s: no sessionid, auto-refresh failed (%s)",
+                               config.username, auto_refresh_result.get("reason"))
+                self.last_retrieval_meta = self._auth_failure_meta(
+                    scrape_start, mode="auth_required", code="instagram_auth_required",
+                    cls="InstagramAuthRequired", auto_refresh=auto_refresh_result,
+                )
+                return []
+
+        if has_auth and config.require_auth:
+            auth_check = self._validate_cookies()
+            if not auth_check["valid"]:
+                auto_refresh_result = self._try_auto_refresh_cookies()
+                if auto_refresh_result.get("refreshed"):
+                    auth_check = self._validate_cookies()
+                if not auth_check["valid"]:
+                    logger.warning("[instagram] scrape aborted for @%s: cookies invalid (%s)",
+                                   config.username, auth_check.get("reason"))
+                    self.last_retrieval_meta = self._auth_failure_meta(
+                        scrape_start, mode="auth_validation_failed", code="instagram_auth_invalid",
+                        cls="InstagramAuthInvalid", auto_refresh=auto_refresh_result,
+                        validation_reason=auth_check.get("reason"),
+                    )
+                    return []
+
+        # ── Route to the requested scrape mode ─────────────────────────
         if config.scrape_mode == "browser_intercept" and has_auth:
-            return self._scrape_browser_intercept(config, progress_cb=progress_cb)
+            posts = self._scrape_browser_intercept(config, progress_cb=progress_cb)
+            self._finalize_scrape_meta(scrape_start, config)
+            return posts
 
         if config.scrape_mode == "auto" and has_auth:
             posts = self._scrape_graphql(config, progress_cb=progress_cb)
@@ -2806,9 +2943,13 @@ class InstagramScraper:
                 )
                 posts = self._scrape_browser_intercept(config, progress_cb=progress_cb)
                 if posts:
+                    self._finalize_scrape_meta(scrape_start, config)
                     return posts
                 # Final fallback to profile-info mode
-                return self._scrape_profile_info(config, progress_cb=progress_cb)
+                posts = self._scrape_profile_info(config, progress_cb=progress_cb)
+                self._finalize_scrape_meta(scrape_start, config)
+                return posts
+            self._finalize_scrape_meta(scrape_start, config)
             return posts
 
         # Default: graphql mode (original behavior)
@@ -2826,8 +2967,48 @@ class InstagramScraper:
                 self.last_retrieval_meta["retrieval_mode"] = "profile_info_fallback"
                 self.last_retrieval_meta["fallback_reason"] = fallback_reason
                 self.last_retrieval_meta["first_page_count"] = len(posts)
+            self._finalize_scrape_meta(scrape_start, config)
             return posts
-        return self._scrape_profile_info(config, progress_cb=progress_cb)
+        posts = self._scrape_profile_info(config, progress_cb=progress_cb)
+        self._finalize_scrape_meta(scrape_start, config)
+        return posts
+
+    def _finalize_scrape_meta(self, scrape_start: float, config: ScrapeConfig) -> None:
+        """Append wall-clock timing and timeout status to retrieval meta."""
+        elapsed = time.monotonic() - scrape_start
+        timed_out = elapsed >= config.max_scrape_seconds
+        self.last_retrieval_meta["scrape_elapsed_seconds"] = round(elapsed, 1)
+        self.last_retrieval_meta["timed_out"] = timed_out
+        if timed_out:
+            logger.warning("[instagram] scrape timed out after %.0fs (limit: %.0fs)", elapsed, config.max_scrape_seconds)
+
+    def _auth_failure_meta(
+        self,
+        scrape_start: float,
+        *,
+        mode: str,
+        code: str,
+        cls: str,
+        auto_refresh: dict[str, Any] | None,
+        validation_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a retrieval-meta dict for an auth-gate abort."""
+        meta: dict[str, Any] = {
+            "retrieval_mode": mode,
+            "error_code": code,
+            "error_class": cls,
+            "retryable": True,
+            "cookies_valid": False,
+            "cookies_present": bool(self.cookies),
+            "sessionid_present": bool(self.cookies.get("sessionid")),
+            "auto_refresh_attempted": bool(auto_refresh),
+            "auto_refresh_reason": (auto_refresh or {}).get("reason"),
+            "scrape_elapsed_seconds": round(time.monotonic() - scrape_start, 1),
+            "timed_out": False,
+        }
+        if validation_reason:
+            meta["cookies_validation_reason"] = validation_reason
+        return meta
 
     def _scrape_profile_info(
         self,
@@ -2861,7 +3042,7 @@ class InstagramScraper:
             if config.matches_hashtags(caption):
                 post = self._parse_post_node(node, config)
                 posts.append(post)
-                logger.info(f"Found: {post.shortcode} ({post.date_time})")
+                logger.info("Found: %s (%s)", post.shortcode, post.date_time)
             self._emit_progress(
                 progress_cb,
                 phase="scrape_profile_page",
@@ -2875,7 +3056,7 @@ class InstagramScraper:
             posts,
             profile_pic_url=self._extract_profile_avatar_from_profile_payload(data),
         )
-        logger.info(f"Scrape complete: {len(posts)} posts found")
+        logger.info("Scrape complete: %d posts found", len(posts))
         self.last_retrieval_meta = {
             "retrieval_mode": "profile_info",
             "first_page_count": len(posts),
@@ -2895,6 +3076,7 @@ class InstagramScraper:
     ) -> list[InstagramPost]:
         """Scrape using GraphQL API with full pagination."""
         logger.info("Using GraphQL API (authenticated, full pagination)")
+        _t0 = time.monotonic()
 
         posts = []
         cursor = None
@@ -2919,11 +3101,18 @@ class InstagramScraper:
         while not reached_date_limit:
             page_num += 1
             if config.max_pages and page_num > config.max_pages:
-                logger.info(f"Reached max pages limit ({config.max_pages})")
+                logger.info("Reached max pages limit (%s)", config.max_pages)
                 stop_reason = "max_pages_reached"
                 break
+            if time.monotonic() - _t0 > config.max_scrape_seconds:
+                logger.warning(
+                    "[instagram] graphql pagination timed out after %.0fs (limit: %.0fs)",
+                    time.monotonic() - _t0, config.max_scrape_seconds,
+                )
+                stop_reason = "timeout"
+                break
 
-            logger.info(f"Fetching page {page_num}...{' [fast]' if config.fast_mode else ''}")
+            logger.info("Fetching page %d%s", page_num, " [fast]" if config.fast_mode else "")
             data = self.fetch_posts_graphql(
                 config.username, cursor, config.delay_seconds,
                 fast_mode=config.fast_mode,
@@ -2965,8 +3154,9 @@ class InstagramScraper:
                     posts.append(post)
                     page_matches += 1
                     logger.info(
-                        f"Found #{len(posts)}: {post.shortcode} ({post.date_time}) "
-                        f"- {post.post_type} - {post.likes:,} likes"
+                        "Found #%d: %s (%s) - %s - %s likes",
+                        len(posts), post.shortcode, post.date_time,
+                        getattr(post, "post_type", "?"), getattr(post, "likes", 0),
                     )
 
             self._emit_progress(
@@ -3014,9 +3204,9 @@ class InstagramScraper:
                 stop_reason = "no_more_pages"
                 break
 
-            logger.info(f"Page {page_num}: checked {posts_on_page} posts, {len(posts)} matches total")
+            logger.info("Page %d: checked %d posts, %d matches total", page_num, posts_on_page, len(posts))
 
-        logger.info(f"Scrape complete: checked {posts_checked} posts, found {len(posts)} matches")
+        logger.info("Scrape complete: checked %d posts, found %d matches", posts_checked, len(posts))
         profile_avatar_backfilled_posts = 0
         if posts and any(not getattr(post, "owner_profile_pic_url", None) for post in posts):
             profile_data = profile_info_data or self.fetch_profile_info(config.username, config.delay_seconds)
@@ -3064,8 +3254,6 @@ class InstagramScraper:
             })
             return []
 
-        from trr_backend.socials.browser_cookie_refresh import launch_browser
-
         logger.info(
             "Starting browser_intercept scrape for @%s (Sort Feed technique)",
             config.username,
@@ -3081,128 +3269,146 @@ class InstagramScraper:
 
         user_agent = self._get_headers().get("user-agent", "Mozilla/5.0")
         timeout_ms = 60_000
+        max_posts = config.max_pages * 50 if config.max_pages else 10_000
 
         with sync_playwright() as playwright:
-            browser = launch_browser(playwright, headless=True)
             try:
-                context = browser.new_context(
+                with self._browser_session_manager.account_context(
+                    playwright=playwright,
+                    account_id=self._resolved_browser_account_id(config.username),
+                    headless=True,
                     viewport={"width": 1280, "height": 900},
                     user_agent=user_agent,
-                )
-                browser_cookies = self._browser_cookie_payload()
-                if browser_cookies:
-                    context.add_cookies(browser_cookies)
-                page = context.new_page()
+                    seed_cookies=self._request_cookies(),
+                ) as browser_session:
+                    context = browser_session.context
+                    page = context.new_page()
 
-                # Navigate to profile
-                page.goto(
-                    f"https://www.instagram.com/{config.username}/",
-                    wait_until="domcontentloaded",
-                    timeout=timeout_ms,
-                )
-                page.wait_for_timeout(2_000)
+                    # Navigate to profile
+                    page.goto(
+                        f"https://www.instagram.com/{config.username}/",
+                        wait_until="domcontentloaded",
+                        timeout=timeout_ms,
+                    )
+                    page.wait_for_timeout(2_000)
 
-                # Register response interceptor for ALL GraphQL paginated responses
-                def _handle_graphql_response(response: Any) -> None:
-                    nonlocal total_posts, reached_date_limit, no_new_data_scrolls
-                    try:
-                        if "/graphql/query" not in str(response.url or ""):
-                            return
-                        if not response.ok:
-                            return
-                        payload = response.json()
-                        connection = payload.get("data", {}).get(
-                            "xdt_api__v1__feed__user_timeline_graphql_connection", {}
-                        )
-                        if not connection:
-                            return
-                        edges = connection.get("edges") or []
-                        if not edges:
-                            return
-
-                        # Extract total post count if available
-                        if total_posts is None:
-                            count_val = self._coerce_int(connection.get("count"), default=0)
-                            if count_val > 0:
-                                total_posts = count_val
-
-                        new_posts_this_batch = 0
-                        for edge in edges:
-                            node = edge.get("node", {})
-                            pk = str(node.get("pk") or node.get("id", ""))
-                            if not pk or pk in seen_pks:
-                                continue
-                            seen_pks.add(pk)
-
-                            # Check date range
-                            timestamp = self._extract_timestamp(node)
-                            in_range = config.is_in_date_range(timestamp)
-                            if in_range is None:  # Before date range — stop
-                                reached_date_limit = True
+                    # Register response interceptor for ALL GraphQL paginated responses
+                    def _handle_graphql_response(response: Any) -> None:
+                        nonlocal total_posts, reached_date_limit, no_new_data_scrolls
+                        try:
+                            resp_url = str(response.url or "")
+                            if "/graphql" not in resp_url and "/api/graphql" not in resp_url:
                                 return
-                            if in_range is False:  # After date range — skip
-                                continue
+                            if not response.ok:
+                                return
+                            payload = response.json()
+                            data_obj = payload.get("data", {})
+                            # Try the known connection key first, then scan for
+                            # any key containing "timeline" or "feed" as a
+                            # fallback in case Instagram renamed the field.
+                            connection = data_obj.get(
+                                "xdt_api__v1__feed__user_timeline_graphql_connection"
+                            )
+                            if not connection:
+                                for key in data_obj:
+                                    if "timeline" in key.lower() or "feed" in key.lower():
+                                        candidate = data_obj[key]
+                                        if isinstance(candidate, dict) and (
+                                            "edges" in candidate or "page_info" in candidate
+                                        ):
+                                            connection = candidate
+                                            logger.info("browser_intercept: matched alt connection key '%s'", key)
+                                            break
+                            if not connection:
+                                return
+                            edges = connection.get("edges") or []
+                            if not edges:
+                                return
 
-                            # Check hashtag filter
-                            caption = self._extract_caption(node)
-                            if config.matches_hashtags(caption):
-                                post = self._parse_post_node(node, config)
-                                posts.append(post)
-                                new_posts_this_batch += 1
+                            # Extract total post count if available
+                            if total_posts is None:
+                                count_val = self._coerce_int(connection.get("count"), default=0)
+                                if count_val > 0:
+                                    total_posts = count_val
 
-                        if new_posts_this_batch > 0:
+                            new_posts_this_batch = 0
+                            for edge in edges:
+                                node = edge.get("node", {})
+                                pk = str(node.get("pk") or node.get("id", ""))
+                                if not pk or pk in seen_pks:
+                                    continue
+                                seen_pks.add(pk)
+
+                                # Check date range
+                                timestamp = self._extract_timestamp(node)
+                                in_range = config.is_in_date_range(timestamp)
+                                if in_range is None:  # Before date range — stop
+                                    reached_date_limit = True
+                                    return
+                                if in_range is False:  # After date range — skip
+                                    continue
+
+                                # Check hashtag filter
+                                caption = self._extract_caption(node)
+                                if config.matches_hashtags(caption):
+                                    post = self._parse_post_node(node, config)
+                                    posts.append(post)
+                                    new_posts_this_batch += 1
+
+                            if new_posts_this_batch > 0:
+                                no_new_data_scrolls = 0
+                                logger.info(
+                                    "browser_intercept: +%d posts (total: %d)",
+                                    new_posts_this_batch, len(posts),
+                                )
+                                self._emit_progress(
+                                    progress_cb,
+                                    phase="browser_intercept_batch",
+                                    posts_checked=len(seen_pks),
+                                    matched_posts=len(posts),
+                                    total_posts=total_posts,
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.debug("browser_intercept: failed to parse GraphQL response", exc_info=True)
+
+                    page.on("response", _handle_graphql_response)
+
+                    # Auto-scroll loop
+                    scroll_interval_ms = 600  # Sort Feed-style fast scrolling
+                    while not reached_date_limit and no_new_data_scrolls < max_no_new_data_scrolls:
+                        if len(posts) >= max_posts:
+                            logger.info("browser_intercept: reached max posts (%d)", max_posts)
+                            break
+
+                        prev_count = len(posts)
+                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        page.wait_for_timeout(scroll_interval_ms)
+                        scroll_count += 1
+
+                        # Check if we got new posts from the intercepted responses
+                        if len(posts) == prev_count:
+                            no_new_data_scrolls += 1
+                        else:
                             no_new_data_scrolls = 0
+
+                        if scroll_count % 20 == 0:
                             logger.info(
-                                "browser_intercept: +%d posts (total: %d)",
-                                new_posts_this_batch, len(posts),
+                                "browser_intercept: scrolled %d times, %d posts collected",
+                                scroll_count, len(posts),
                             )
-                            self._emit_progress(
-                                progress_cb,
-                                phase="browser_intercept_batch",
-                                posts_checked=len(seen_pks),
-                                matched_posts=len(posts),
-                                total_posts=total_posts,
-                            )
-                    except Exception:  # noqa: BLE001
-                        pass  # Ignore parse errors — don't break the scroll loop
-
-                page.on("response", _handle_graphql_response)
-
-                # Auto-scroll loop
-                max_posts = config.max_pages * 50 if config.max_pages else 10_000
-                scroll_interval_ms = 600  # Sort Feed-style fast scrolling
-                while not reached_date_limit and no_new_data_scrolls < max_no_new_data_scrolls:
-                    if len(posts) >= max_posts:
-                        logger.info("browser_intercept: reached max posts (%d)", max_posts)
-                        break
-
-                    prev_count = len(posts)
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(scroll_interval_ms)
-                    scroll_count += 1
-
-                    # Check if we got new posts from the intercepted responses
-                    if len(posts) == prev_count:
-                        no_new_data_scrolls += 1
-                    else:
-                        no_new_data_scrolls = 0
-
-                    if scroll_count % 20 == 0:
-                        logger.info(
-                            "browser_intercept: scrolled %d times, %d posts collected",
-                            scroll_count, len(posts),
-                        )
-
             except Exception as exc:
                 logger.error("browser_intercept failed for @%s: %s", config.username, exc)
-                self.last_retrieval_meta.update({
+                self.last_retrieval_meta = {
                     "retrieval_mode": "browser_intercept",
                     "error_code": "browser_intercept_error",
                     "error_class": type(exc).__name__,
                     "error_message": str(exc),
-                })
-            finally:
-                browser.close()
+                    "posts_checked": len(seen_pks),
+                    "pages_scanned": scroll_count,
+                }
+                if total_posts:
+                    self.last_retrieval_meta["total_posts"] = total_posts
+                return posts
 
         stop_reason = (
             "date_start_reached" if reached_date_limit

@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from api.auth import AdminUser
-from trr_backend.db.pg import is_database_service_unavailable_error
+from trr_backend.db.pg import database_service_unavailable_detail, is_database_service_unavailable_error
 from trr_backend.job_plane import (
     canonical_execution_mode,
     execution_backend_canonical,
@@ -79,15 +79,19 @@ def _reddit_refresh_worker_health_payload(
     return payload
 
 
-def _raise_if_modal_social_dispatch_unresolvable() -> None:
+def _raise_if_modal_social_dispatch_unresolvable(platform: str | None = None) -> None:
     resolution = resolve_modal_function(modal_social_job_function_name())
     if bool(resolution.get("resolved")):
         return
+    platform_label = str(platform or "social").strip().lower() or "social"
     raise HTTPException(
         status_code=503,
         detail={
             "code": "SOCIAL_MODAL_DISPATCH_UNAVAILABLE",
-            "message": "Instagram shared-account catalog dispatch is configured for Modal, but the configured Modal target could not be resolved.",
+            "message": (
+                f"{platform_label.capitalize()} shared-account catalog dispatch is configured for Modal, "
+                "but the configured Modal target could not be resolved."
+            ),
             "reason": resolution.get("reason") or "modal_resolution_failed",
             "resolution_error": resolution.get("error"),
             "configured_app_name": resolution.get("app_name") or modal_app_name(),
@@ -677,8 +681,12 @@ def _to_social_read_http_exception(error: Exception) -> HTTPException:
     if isinstance(error, ValueError):
         return _value_error_to_bad_request(error)
     if is_database_service_unavailable_error(error):
-        return HTTPException(status_code=503, detail=str(error))
+        return HTTPException(status_code=503, detail=database_service_unavailable_detail(error))
     return HTTPException(status_code=500, detail=str(error) or "Internal server error")
+
+
+def _worker_health_detail(worker_health: Any) -> Any:
+    return jsonable_encoder(worker_health) if worker_health is not None else None
 
 
 def _account_profile_cache_key(
@@ -989,7 +997,7 @@ async def scrape_instagram_async(
                         ),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
-                        "worker_health": exc.worker_health,
+                        "worker_health": _worker_health_detail(exc.worker_health),
                     },
                 ) from exc
     elif not remote_plane_enforced:
@@ -3105,7 +3113,7 @@ async def orchestrate_season_social_ingest(
                         "message": "Season social orchestration requires healthy remote workers reporting heartbeats.",
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
-                        "worker_health": exc.worker_health,
+                        "worker_health": _worker_health_detail(exc.worker_health),
                     },
                 ) from exc
             queue_enabled = False
@@ -3202,7 +3210,7 @@ async def create_season_sync_session(
             try:
                 assert_worker_available_when_queue_enabled()
             except SocialWorkerUnavailableError as exc:
-                worker_health_detail = jsonable_encoder(exc.worker_health) if exc.worker_health is not None else None
+                worker_health_detail = _worker_health_detail(exc.worker_health)
                 requested_platforms = {
                     str(platform or "").strip().lower()
                     for platform in (payload.platforms or [])
@@ -3274,6 +3282,8 @@ async def create_season_sync_session(
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to create sync session: season=%s", sid)
+        if is_database_service_unavailable_error(exc):
+            raise HTTPException(status_code=503, detail=database_service_unavailable_detail(exc)) from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -3805,7 +3815,7 @@ async def post_social_account_catalog_backfill_route(
                 platform=platform if requires_modal_executor else None,
             )
             if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable()
+                _raise_if_modal_social_dispatch_unresolvable(platform)
         except SocialWorkerUnavailableError as exc:
             if (
                 payload.allow_inline_dev_fallback
@@ -3834,7 +3844,7 @@ async def post_social_account_catalog_backfill_route(
                         ),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
-                        "worker_health": exc.worker_health,
+                        "worker_health": _worker_health_detail(exc.worker_health),
                         "required_execution_backend": "modal" if requires_modal_executor else None,
                     },
                 ) from exc
@@ -3886,7 +3896,7 @@ async def post_social_account_catalog_backfill_route(
                 "message": str(exc),
                 "execution_mode": canonical_execution_mode(),
                 "execution_owner": execution_owner_label(),
-                "worker_health": exc.worker_health,
+                "worker_health": _worker_health_detail(exc.worker_health),
                 "required_execution_backend": "modal" if requires_modal_executor else None,
             },
         ) from exc
@@ -3944,7 +3954,7 @@ async def post_social_account_catalog_sync_recent_route(
                 platform=platform if requires_modal_executor else None,
             )
             if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable()
+                _raise_if_modal_social_dispatch_unresolvable(platform)
         except SocialWorkerUnavailableError as exc:
             if (
                 payload.allow_inline_dev_fallback
@@ -3973,7 +3983,7 @@ async def post_social_account_catalog_sync_recent_route(
                         ),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
-                        "worker_health": exc.worker_health,
+                        "worker_health": _worker_health_detail(exc.worker_health),
                         "required_execution_backend": "modal" if requires_modal_executor else None,
                     },
                 ) from exc
@@ -4022,7 +4032,7 @@ async def post_social_account_catalog_sync_recent_route(
                 "message": str(exc),
                 "execution_mode": canonical_execution_mode(),
                 "execution_owner": execution_owner_label(),
-                "worker_health": exc.worker_health,
+                "worker_health": _worker_health_detail(exc.worker_health),
                 "required_execution_backend": "modal" if requires_modal_executor else None,
             },
         ) from exc
@@ -4080,7 +4090,7 @@ async def post_social_account_catalog_sync_newer_route(
                 platform=platform if requires_modal_executor else None,
             )
             if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable()
+                _raise_if_modal_social_dispatch_unresolvable(platform)
         except SocialWorkerUnavailableError as exc:
             if (
                 payload.allow_inline_dev_fallback
@@ -4109,7 +4119,7 @@ async def post_social_account_catalog_sync_newer_route(
                         ),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
-                        "worker_health": exc.worker_health,
+                        "worker_health": _worker_health_detail(exc.worker_health),
                         "required_execution_backend": "modal" if requires_modal_executor else None,
                     },
                 ) from exc
@@ -4157,7 +4167,7 @@ async def post_social_account_catalog_sync_newer_route(
                 "message": str(exc),
                 "execution_mode": canonical_execution_mode(),
                 "execution_owner": execution_owner_label(),
-                "worker_health": exc.worker_health,
+                "worker_health": _worker_health_detail(exc.worker_health),
                 "required_execution_backend": "modal" if requires_modal_executor else None,
             },
         ) from exc
@@ -4215,7 +4225,7 @@ async def post_social_account_catalog_resume_tail_route(
                 platform=platform if requires_modal_executor else None,
             )
             if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable()
+                _raise_if_modal_social_dispatch_unresolvable(platform)
         except SocialWorkerUnavailableError as exc:
             if (
                 payload.allow_inline_dev_fallback
@@ -4244,7 +4254,7 @@ async def post_social_account_catalog_resume_tail_route(
                         ),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
-                        "worker_health": exc.worker_health,
+                        "worker_health": _worker_health_detail(exc.worker_health),
                         "required_execution_backend": "modal" if requires_modal_executor else None,
                     },
                 ) from exc
@@ -4292,7 +4302,7 @@ async def post_social_account_catalog_resume_tail_route(
                 "message": str(exc),
                 "execution_mode": canonical_execution_mode(),
                 "execution_owner": execution_owner_label(),
-                "worker_health": exc.worker_health,
+                "worker_health": _worker_health_detail(exc.worker_health),
                 "required_execution_backend": "modal" if requires_modal_executor else None,
             },
         ) from exc
@@ -4553,7 +4563,7 @@ async def ingest_shared_social_accounts(
                         ),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
-                        "worker_health": exc.worker_health,
+                        "worker_health": _worker_health_detail(exc.worker_health),
                     },
                 ) from exc
     elif not remote_plane_enforced:
@@ -4776,6 +4786,26 @@ def cancel_social_ingest_stuck_jobs(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to cancel stuck social ingest jobs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/ingest/dispatch-blocked-jobs/cancel")
+def cancel_social_ingest_dispatch_blocked_jobs(
+    payload: CancelStuckJobsRequest | None = None,
+    user: AdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import cancel_dispatch_blocked_jobs
+
+    try:
+        job_ids = [str(job_id) for job_id in (payload.job_ids if payload and payload.job_ids else [])]
+        return cancel_dispatch_blocked_jobs(
+            job_ids=job_ids or None,
+            cancelled_by=(user or {}).get("email"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to cancel dispatch-blocked social ingest jobs")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

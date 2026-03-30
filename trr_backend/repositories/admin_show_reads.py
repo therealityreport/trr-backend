@@ -1559,10 +1559,15 @@ def search_global(query: str, limit: int | None = None) -> tuple[dict[str, Any],
                   SELECT
                     p.id,
                     p.full_name,
-                    p.known_for
+                    p.known_for,
+                    CASE
+                      WHEN p.full_name ILIKE %s THEN 0
+                      WHEN p.full_name ILIKE %s THEN 1
+                      ELSE 2
+                    END AS match_rank
                   FROM core.people AS p
                   WHERE p.full_name ILIKE %s
-                  ORDER BY p.full_name ASC
+                  ORDER BY match_rank ASC, p.full_name ASC
                   LIMIT %s OFFSET 0
                 )
                 SELECT
@@ -1586,7 +1591,7 @@ def search_global(query: str, limit: int | None = None) -> tuple[dict[str, Any],
                   ) AS show_context
                 FROM person_hits
                 """,
-                [f"{query}%", normalized_limit],
+                [query, f"{query}%", f"%{query}%", normalized_limit],
                 cur=cur,
             )
             query_count += 1
@@ -1901,14 +1906,19 @@ def list_show_seasons(
                    s.id::text AS id,
                    s.created_at,
                    s.updated_at,
+                   COALESCE(ep.episode_count, 0)::int AS episode_count,
                    COALESCE(ep.episode_airdate_count, 0)::int AS episode_airdate_count,
+                   ep.first_episode_air_date,
+                   ep.last_episode_air_date,
                    (COALESCE(ep.episode_airdate_count, 0) > 0) AS has_scheduled_or_aired_episode
               FROM core.seasons AS s
               LEFT JOIN LATERAL (
-                SELECT COUNT(*)::int AS episode_airdate_count
+                SELECT COUNT(*)::int AS episode_count,
+                       COUNT(*) FILTER (WHERE e.air_date IS NOT NULL)::int AS episode_airdate_count,
+                       MIN(e.air_date) AS first_episode_air_date,
+                       MAX(e.air_date) AS last_episode_air_date
                   FROM core.episodes AS e
                  WHERE e.season_id = s.id
-                   AND e.air_date IS NOT NULL
               ) AS ep ON TRUE
              WHERE s.show_id = %s::uuid
              ORDER BY s.season_number DESC
@@ -2003,57 +2013,20 @@ def get_season_episodes(
     return rows, 1
 
 
-def _fetch_show_cast_base_rows(show_id: str, *, cur: Any | None = None) -> tuple[list[dict[str, Any]], int]:
-    rows = _fetch_all_rows(
-        """
-        WITH episode_counts AS (
-          SELECT
-            vec.person_id,
-            COUNT(
-              DISTINCT CASE
-                WHEN COALESCE(vec.appearance_type, 'appears') <> 'archive_footage'
-                THEN vec.episode_id
-              END
-            )::int AS regular_episodes,
-            COUNT(
-              DISTINCT CASE
-                WHEN COALESCE(vec.appearance_type, '') = 'archive_footage'
-                THEN vec.episode_id
-              END
-            )::int AS archive_episodes
-          FROM core.v_episode_credits AS vec
-          WHERE vec.show_id = %s::uuid
-          GROUP BY vec.person_id
-        )
-        SELECT
-          vsc.id::text AS id,
-          vsc.show_id::text AS show_id,
-          vsc.show_name,
-          vsc.person_id::text AS person_id,
-          vsc.cast_member_name,
-          vsc.role,
-          vsc.billing_order,
-          vsc.credit_category,
-          vsc.source_type,
-          vsc.created_at,
-          vsc.updated_at,
-          p.full_name,
-          p.known_for,
+def _fetch_show_cast_base_rows(
+    show_id: str,
+    *,
+    include_photos: bool = True,
+    cur: Any | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    photo_select_sql = """
           COALESCE(primary_photo.photo_url, fallback_photo.photo_url) AS photo_url,
           COALESCE(primary_photo.thumbnail_focus_x, fallback_photo.thumbnail_focus_x) AS thumbnail_focus_x,
           COALESCE(primary_photo.thumbnail_focus_y, fallback_photo.thumbnail_focus_y) AS thumbnail_focus_y,
           COALESCE(primary_photo.thumbnail_zoom, fallback_photo.thumbnail_zoom) AS thumbnail_zoom,
           COALESCE(primary_photo.thumbnail_crop_mode, fallback_photo.thumbnail_crop_mode) AS thumbnail_crop_mode,
-          cover.photo_url AS cover_photo_url,
-          COALESCE(episode_counts.regular_episodes, 0)::int AS total_episodes,
-          COALESCE(episode_counts.archive_episodes, 0)::int AS archive_episode_count
-        FROM core.v_show_cast AS vsc
-        LEFT JOIN episode_counts
-          ON episode_counts.person_id = vsc.person_id
-        LEFT JOIN core.people AS p
-          ON p.id = vsc.person_id
-        LEFT JOIN admin.person_cover_photos AS cover
-          ON cover.person_id = vsc.person_id
+    """
+    photo_join_sql = """
         LEFT JOIN LATERAL (
           SELECT
             ranked.photo_url,
@@ -2131,6 +2104,64 @@ def _fetch_show_cast_base_rows(show_id: str, *, cur: Any | None = None) -> tuple
             cp.gallery_index ASC NULLS LAST
           LIMIT 1
         ) AS fallback_photo ON primary_photo.photo_url IS NULL
+    """
+    if not include_photos:
+        photo_select_sql = """
+          NULL::text AS photo_url,
+          NULL::double precision AS thumbnail_focus_x,
+          NULL::double precision AS thumbnail_focus_y,
+          NULL::double precision AS thumbnail_zoom,
+          NULL::text AS thumbnail_crop_mode,
+    """
+        photo_join_sql = ""
+
+    rows = _fetch_all_rows(
+        f"""
+        WITH episode_counts AS (
+          SELECT
+            vec.person_id,
+            COUNT(
+              DISTINCT CASE
+                WHEN COALESCE(vec.appearance_type, 'appears') <> 'archive_footage'
+                THEN vec.episode_id
+              END
+            )::int AS regular_episodes,
+            COUNT(
+              DISTINCT CASE
+                WHEN COALESCE(vec.appearance_type, '') = 'archive_footage'
+                THEN vec.episode_id
+              END
+            )::int AS archive_episodes
+          FROM core.v_episode_credits AS vec
+          WHERE vec.show_id = %s::uuid
+          GROUP BY vec.person_id
+        )
+        SELECT
+          vsc.id::text AS id,
+          vsc.show_id::text AS show_id,
+          vsc.show_name,
+          vsc.person_id::text AS person_id,
+          vsc.cast_member_name,
+          vsc.role,
+          vsc.billing_order,
+          vsc.credit_category,
+          vsc.source_type,
+          vsc.created_at,
+          vsc.updated_at,
+          p.full_name,
+          p.known_for,
+          {photo_select_sql}
+          cover.photo_url AS cover_photo_url,
+          COALESCE(episode_counts.regular_episodes, 0)::int AS total_episodes,
+          COALESCE(episode_counts.archive_episodes, 0)::int AS archive_episode_count
+        FROM core.v_show_cast AS vsc
+        LEFT JOIN episode_counts
+          ON episode_counts.person_id = vsc.person_id
+        LEFT JOIN core.people AS p
+          ON p.id = vsc.person_id
+        LEFT JOIN admin.person_cover_photos AS cover
+          ON cover.person_id = vsc.person_id
+        {photo_join_sql}
         WHERE vsc.show_id = %s::uuid
         ORDER BY vsc.billing_order ASC NULLS LAST, vsc.person_id ASC
         """,
@@ -2221,10 +2252,11 @@ def get_show_cast(
     require_image: bool = False,
     roster_mode: str = "episode_evidence",
     photo_fallback: str = "none",
+    include_photos: bool = True,
 ) -> tuple[dict[str, Any], int]:
     del photo_fallback
     normalized_limit, normalized_offset = _normalize_pagination(limit, offset)
-    rows, query_count = _fetch_show_cast_base_rows(show_id)
+    rows, query_count = _fetch_show_cast_base_rows(show_id, include_photos=include_photos)
     payload = _shape_show_cast_payload(
         rows,
         limit=normalized_limit,

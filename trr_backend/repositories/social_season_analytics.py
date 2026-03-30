@@ -18,7 +18,7 @@ import time as time_module
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
@@ -44,9 +44,9 @@ from trr_backend.modal_dispatch import (
     inspect_modal_function_call,
     modal_app_name,
     modal_dispatch_enabled,
-    modal_dispatch_ready,
     modal_environment_name,
     modal_social_job_function_name,
+    resolve_modal_function,
 )
 from trr_backend.socials.crawlee_runtime import (
     AuthPreflightError,
@@ -118,6 +118,9 @@ SOCIAL_INSTAGRAM_COOKIE_VALIDATION_TTL_SECONDS_DEFAULT = 900
 SOCIAL_INSTAGRAM_COOKIE_REFRESH_TIMEOUT_SECONDS_DEFAULT = 120
 SOCIAL_QUEUE_STATUS_STALE_FALLBACK_SECONDS_DEFAULT = 120
 SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT = 100
+SOCIAL_QUEUE_STATUS_DISPATCH_BLOCKED_JOBS_LIMIT_DEFAULT = 100
+SOCIAL_MODAL_DISPATCH_NO_PROGRESS_SECONDS_DEFAULT = 600
+SOCIAL_MODAL_DISPATCH_BLOCKED_FAILURE_LIMIT_DEFAULT = 3
 SOCIAL_MODAL_DISPATCH_RETRY_DELAY_SECONDS_DEFAULT = 120
 SOCIAL_MODAL_DISPATCH_LIMIT_DEFAULT = 25
 SOCIAL_MODAL_STALE_UNCLAIMED_RECOVERY_LIMIT_DEFAULT = 3
@@ -1334,8 +1337,30 @@ def _modal_dispatch_limit() -> int:
     )
 
 
+def _modal_social_dispatch_resolution() -> dict[str, Any]:
+    return resolve_modal_function(modal_social_job_function_name())
+
+
 def _modal_social_dispatch_ready() -> tuple[bool, str | None]:
-    return modal_dispatch_ready(function_name=modal_social_job_function_name())
+    resolution = _modal_social_dispatch_resolution()
+    return bool(resolution.get("resolved")), str(resolution.get("reason") or "").strip() or None
+
+
+def _resolve_modal_dispatch_no_progress_seconds() -> int:
+    return _resolve_positive_int_env(
+        "SOCIAL_MODAL_DISPATCH_NO_PROGRESS_SECONDS",
+        SOCIAL_MODAL_DISPATCH_NO_PROGRESS_SECONDS_DEFAULT,
+        minimum=300,
+    )
+
+
+def _resolve_modal_dispatch_blocked_failure_limit() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_MODAL_DISPATCH_BLOCKED_FAILURE_LIMIT",
+        SOCIAL_MODAL_DISPATCH_BLOCKED_FAILURE_LIMIT_DEFAULT,
+        minimum=1,
+        maximum=10,
+    )
 
 
 def _touch_modal_social_dispatcher_heartbeat(
@@ -1419,6 +1444,7 @@ def _stale_running_count() -> int:
 def _build_modal_executor_health_payload(*, reason: str | None = None) -> dict[str, Any]:
     workers_payload = _query_worker_health()
     dispatcher_id = _modal_social_dispatcher_worker_id()
+    dispatcher_readiness = _modal_social_dispatch_resolution()
     dispatcher_row = next(
         (
             worker
@@ -1447,6 +1473,12 @@ def _build_modal_executor_health_payload(*, reason: str | None = None) -> dict[s
             "stale_running_count": stale_running_count,
             "last_dispatch_success_at": str(dispatcher_metadata.get("last_dispatch_success_at") or "").strip() or None,
             "last_dispatch_error": str(dispatcher_metadata.get("last_dispatch_error") or "").strip() or None,
+            "last_dispatch_blocked_reason": (
+                str(dispatcher_metadata.get("last_dispatch_blocked_reason") or "").strip()
+                or str(dispatcher_readiness.get("reason") or "").strip()
+                or None
+            ),
+            "dispatcher_readiness": dispatcher_readiness,
         }
     )
     return workers_payload
@@ -1777,7 +1809,9 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
             _touch_modal_social_dispatcher_heartbeat(
                 metadata_updates={
                     "dispatch_enabled": True,
-                    "last_dispatch_success_at": _iso(_now_utc()),
+                    "last_dispatch_error": None,
+                    "last_dispatch_error_code": None,
+                    "last_dispatch_blocked_reason": None,
                 }
             )
         else:
@@ -1785,6 +1819,8 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
                 metadata_updates={
                     "dispatch_enabled": False,
                     "last_dispatch_error": reason,
+                    "last_dispatch_error_code": reason,
+                    "last_dispatch_blocked_reason": reason,
                     "last_dispatch_error_at": _iso(_now_utc()),
                 }
             )
@@ -2374,6 +2410,97 @@ def _count_stuck_jobs() -> int:
     return int(row.get("total") or 0)
 
 
+def _list_dispatch_blocked_jobs(
+    *,
+    limit: int = SOCIAL_QUEUE_STATUS_DISPATCH_BLOCKED_JOBS_LIMIT_DEFAULT,
+) -> tuple[list[dict[str, Any]], int]:
+    safe_limit = max(1, min(int(limit), 500))
+    where_clause, where_params = _dispatch_blocked_jobs_filter_clause(table_alias="j")
+    rows = pg.fetch_all(
+        f"""
+        select
+          j.id::text as id,
+          j.run_id::text as run_id,
+          j.platform,
+          j.job_type,
+          j.status,
+          j.worker_id,
+          j.created_at,
+          j.heartbeat_at,
+          j.available_at,
+          j.error_message,
+          j.last_error_code,
+          j.metadata
+        from social.scrape_jobs j
+        where {where_clause}
+        order by coalesce(
+          nullif(j.metadata->'dispatch'->>'dispatch_blocked_first_seen_at', '')::timestamptz,
+          nullif(j.metadata->'dispatch'->>'last_dispatch_error_at', '')::timestamptz,
+          nullif(j.metadata->'dispatch'->>'remote_invocation_checked_at', '')::timestamptz,
+          nullif(j.metadata->'dispatch'->>'dispatch_requested_at', '')::timestamptz,
+          j.available_at,
+          j.created_at
+        ) asc nulls last,
+        j.created_at asc
+        limit %s
+        """,
+        [*where_params, safe_limit],
+    )
+    total_row = (
+        pg.fetch_one(
+            f"""
+            select count(*)::int as total
+            from social.scrape_jobs j
+            where {where_clause}
+            """,
+            where_params,
+        )
+        or {}
+    )
+    entries = []
+    for row in rows:
+        dispatch = _job_dispatch_metadata(row)
+        reason = _normalize_dispatch_blocked_reason(
+            remote_blocked_reason=dispatch.get("remote_blocked_reason"),
+            last_dispatch_error_code=dispatch.get("last_dispatch_error_code"),
+            last_dispatch_error=dispatch.get("last_dispatch_error"),
+        )
+        entries.append(
+            {
+                "id": str(row.get("id") or ""),
+                "run_id": str(row.get("run_id") or "") or None,
+                "platform": str(row.get("platform") or ""),
+                "job_type": str(row.get("job_type") or ""),
+                "status": str(row.get("status") or ""),
+                "worker_id": str(row.get("worker_id") or "") or None,
+                "created_at": _iso(_coerce_dt(row.get("created_at"))),
+                "heartbeat_at": _iso(_coerce_dt(row.get("heartbeat_at"))),
+                "available_at": _iso(_coerce_dt(row.get("available_at"))),
+                "error_message": str(row.get("error_message") or "") or None,
+                "last_error_code": str(row.get("last_error_code") or "") or None,
+                "stuck_reason": reason,
+                "stuck_for_seconds": _dispatch_blocked_seconds(dispatch, row),
+            }
+        )
+    return entries, int(total_row.get("total") or 0)
+
+
+def _count_dispatch_blocked_jobs() -> int:
+    where_clause, where_params = _dispatch_blocked_jobs_filter_clause(table_alias="j")
+    row = (
+        pg.fetch_one(
+            f"""
+            select count(*)::int as total
+            from social.scrape_jobs j
+            where {where_clause}
+            """,
+            where_params,
+        )
+        or {}
+    )
+    return int(row.get("total") or 0)
+
+
 _ACTIVE_CANCEL_JOB_STATUSES = ("queued", "pending", "retrying", "running", "cancelling")
 _RECENT_FAILURE_TERMINAL_STATUSES = ("failed", "retrying")
 _RECENT_FAILURE_DISMISSED_AT_KEY = "failure_dismissed_at"
@@ -2483,6 +2610,83 @@ def _reconcile_active_queue_runs(*, limit: int = 100) -> list[str]:
     return reconciled
 
 
+def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 500))
+    blocked_rows, _ = _list_dispatch_blocked_jobs(limit=safe_limit)
+    no_progress_seconds = _resolve_modal_dispatch_no_progress_seconds()
+    blocked_failure_limit = _resolve_modal_dispatch_blocked_failure_limit()
+    recovered: list[dict[str, Any]] = []
+    affected_run_ids: set[str] = set()
+    for row in blocked_rows:
+        job_id = str(row.get("id") or "").strip()
+        if not job_id:
+            continue
+        full_row = (
+            pg.fetch_one(
+                """
+                select
+                  id::text as id,
+                  run_id::text as run_id,
+                  status,
+                  items_found,
+                  error_message,
+                  last_error_code,
+                  metadata
+                from social.scrape_jobs
+                where id = %s::uuid
+                """,
+                [job_id],
+            )
+            or {}
+        )
+        if not _job_is_dispatch_blocked(full_row):
+            continue
+        dispatch = _job_dispatch_metadata(full_row)
+        blocked_for_seconds = _dispatch_blocked_seconds(dispatch, full_row)
+        blocked_failure_count = _dispatch_metadata_blocked_failure_count(dispatch) or _dispatch_metadata_attempt_count(
+            dispatch
+        )
+        if blocked_for_seconds < no_progress_seconds and blocked_failure_count < blocked_failure_limit:
+            continue
+        reason = _normalize_dispatch_blocked_reason(
+            remote_blocked_reason=dispatch.get("remote_blocked_reason"),
+            last_dispatch_error_code=dispatch.get("last_dispatch_error_code"),
+            last_dispatch_error=dispatch.get("last_dispatch_error"),
+        )
+        _finish_job(
+            job_id,
+            status="failed",
+            items_found=_normalize_non_negative_int(full_row.get("items_found")),
+            error_message=str(dispatch.get("last_dispatch_error") or "Modal dispatch blocked"),
+            metadata={
+                "dispatch": {
+                    **dispatch,
+                    "remote_invocation_status": "failed",
+                    "remote_invocation_checked_at": _iso(_now_utc()),
+                    "remote_blocked_reason": reason,
+                    "dispatch_blocked_failure_count": blocked_failure_count,
+                    "dispatch_blocked_terminalized_at": _iso(_now_utc()),
+                }
+            },
+            last_error_code="modal_dispatch_blocked",
+            last_error_class="ModalDispatchBlocked",
+        )
+        run_id = str(full_row.get("run_id") or "").strip()
+        if run_id:
+            affected_run_ids.add(run_id)
+        recovered.append(
+            {
+                "id": job_id,
+                "run_id": run_id or None,
+                "status": "failed",
+                "stuck_reason": reason,
+            }
+        )
+    for run_id in sorted(affected_run_ids):
+        _finalize_run_status(run_id, force_recompute=True)
+    return recovered
+
+
 def get_queue_status(
     *,
     recent_failures_limit: int = 20,
@@ -2558,6 +2762,11 @@ def get_queue_status(
         "recent_failures": [],
         "stuck_jobs": [],
         "stuck_jobs_total": 0,
+        "dispatch_blocked_jobs": [],
+        "dispatch_blocked_jobs_total": 0,
+        "dispatch_blocked_by_reason": {},
+        "waiting_for_claim_jobs_total": 0,
+        "retrying_dispatch_jobs_total": 0,
         "stale_claims": {
             "total": 0,
             "by_reason": {},
@@ -2587,6 +2796,12 @@ def get_queue_status(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Queue status active-run reconciliation failed: %s", exc)
         errors.append(f"queue_run_reconciliation_failed: {exc}")
+
+    try:
+        recover_dispatch_blocked_no_progress_jobs(limit=safe_stuck_jobs_limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status blocked-job recovery failed: %s", exc)
+        errors.append(f"queue_dispatch_blocked_recovery_failed: {exc}")
 
     try:
         with pg.db_connection() as conn:
@@ -2780,6 +2995,45 @@ def get_queue_status(
             logger.warning("Queue status stuck-jobs query failed: %s", exc)
             errors.append(f"queue_stuck_jobs_query_failed: {exc}")
 
+    try:
+        dispatch_blocked_jobs, dispatch_blocked_jobs_total = _list_dispatch_blocked_jobs(limit=safe_stuck_jobs_limit)
+        queue_payload["dispatch_blocked_jobs"] = dispatch_blocked_jobs
+        queue_payload["dispatch_blocked_jobs_total"] = dispatch_blocked_jobs_total
+        blocked_by_reason: dict[str, int] = {}
+        for row in dispatch_blocked_jobs:
+            reason = str(row.get("stuck_reason") or "dispatch_blocked").strip().lower() or "dispatch_blocked"
+            blocked_by_reason[reason] = int(blocked_by_reason.get(reason) or 0) + 1
+        queue_payload["dispatch_blocked_by_reason"] = blocked_by_reason
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status dispatch-blocked query failed: %s", exc)
+        errors.append(f"queue_dispatch_blocked_query_failed: {exc}")
+
+    try:
+        dispatch_rows = pg.fetch_all(
+            """
+            select
+              id::text as id,
+              status,
+              worker_id,
+              metadata,
+              available_at,
+              created_at
+            from social.scrape_jobs
+            where status in ('queued', 'pending', 'retrying')
+              and lower(coalesce(metadata->'dispatch'->>'dispatch_backend', '')) = 'modal'
+            """
+        )
+        dispatch_health = _build_run_dispatch_health(dispatch_rows)
+        queue_payload["waiting_for_claim_jobs_total"] = _normalize_non_negative_int(
+            dispatch_health.get("queued_unclaimed_jobs")
+        )
+        queue_payload["retrying_dispatch_jobs_total"] = _normalize_non_negative_int(
+            dispatch_health.get("retrying_dispatch_jobs")
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Queue status dispatch-health query failed: %s", exc)
+        errors.append(f"queue_dispatch_health_query_failed: {exc}")
+
     if safe_include_runs_summary:
         try:
             if _relation_exists("social.scrape_runs"):
@@ -2947,6 +3201,80 @@ def cancel_stuck_jobs(
         "cancelled_job_ids": cancelled_job_ids,
         "affected_run_ids": affected_run_ids,
         "stuck_jobs_remaining": _count_stuck_jobs(),
+    }
+
+
+def cancel_dispatch_blocked_jobs(
+    *,
+    job_ids: list[str] | None = None,
+    cancelled_by: str | None = None,
+) -> dict[str, Any]:
+    _assert_social_queue_schema_ready()
+    if not _relation_exists("social.scrape_jobs"):
+        raise ValueError("scrape_jobs table not found")
+
+    requested_ids = []
+    seen_ids: set[str] = set()
+    for raw in job_ids or []:
+        value = str(raw or "").strip()
+        if not value or value in seen_ids:
+            continue
+        seen_ids.add(value)
+        requested_ids.append(value)
+
+    where_clause, where_params = _dispatch_blocked_jobs_filter_clause(table_alias="j")
+    metadata_payload = {
+        "cancel_reason": "dispatch_blocked_job_cancelled_by_admin",
+        "cancelled_by": cancelled_by,
+        "cancelled_at": _iso(_now_utc()),
+    }
+    updated_rows = pg.fetch_all(
+        f"""
+        with candidate_jobs as (
+          select j.id
+          from social.scrape_jobs j
+          where {where_clause}
+            and (%s::uuid[] is null or j.id = any(%s::uuid[]))
+          for update skip locked
+        )
+        update social.scrape_jobs as j
+        set
+          status = 'cancelled',
+          completed_at = now(),
+          error_message = coalesce(j.error_message, 'Cancelled by user request (dispatch blocked job)'),
+          metadata = coalesce(j.metadata, '{{}}'::jsonb) || %s::jsonb
+        from candidate_jobs c
+        where j.id = c.id
+        returning j.id::text as id, j.run_id::text as run_id
+        """,
+        [
+            *where_params,
+            requested_ids if requested_ids else None,
+            requested_ids if requested_ids else None,
+            json.dumps(metadata_payload),
+        ],
+    )
+    cancelled_job_ids = [str(row.get("id") or "") for row in updated_rows if str(row.get("id") or "").strip()]
+    for cancelled_job_id in cancelled_job_ids:
+        _clear_worker_heartbeat_for_job(
+            job_id=cancelled_job_id,
+            status="idle",
+            metadata={"source": "cancel_dispatch_blocked_jobs", "job_status": "cancelled"},
+        )
+
+    affected_run_ids = sorted(
+        {str(row.get("run_id") or "").strip() for row in updated_rows if str(row.get("run_id") or "").strip()}
+    )
+    for run_id in affected_run_ids:
+        _finalize_run_status(run_id, force_recompute=True)
+
+    _invalidate_queue_status_cache()
+    return {
+        "requested_job_ids_count": len(requested_ids),
+        "cancelled_jobs": len(cancelled_job_ids),
+        "cancelled_job_ids": cancelled_job_ids,
+        "affected_run_ids": affected_run_ids,
+        "dispatch_blocked_jobs_remaining": _count_dispatch_blocked_jobs(),
     }
 
 
@@ -3827,9 +4155,15 @@ _scraper_cache: dict[str, tuple[float, Any]] = {}  # key → (created_at, scrape
 _SCRAPER_CACHE_TTL_SEC = 300  # 5 minutes
 
 
-def _get_cached_scraper(cookies: dict[str, str]) -> Any:
+def _scoped_scraper_cache_key(cookies: dict[str, str], *, cache_scope: str | None = None) -> str:
+    scope = str(cache_scope or "default").strip().lower()
+    raw_key = json.dumps({"scope": scope, "cookies": cookies}, sort_keys=True)
+    return hashlib.sha256(raw_key.encode()).hexdigest()[:16]
+
+
+def _get_cached_scraper(cookies: dict[str, str], *, cache_scope: str | None = None) -> Any:
     """Return a cached InstagramScraper if one exists for these cookies and is still fresh."""
-    cache_key = hashlib.sha256(json.dumps(cookies, sort_keys=True).encode()).hexdigest()[:16]
+    cache_key = _scoped_scraper_cache_key(cookies, cache_scope=cache_scope)
     entry = _scraper_cache.get(cache_key)
     if entry is not None:
         created_at, scraper = entry
@@ -3840,9 +4174,9 @@ def _get_cached_scraper(cookies: dict[str, str]) -> Any:
     return None
 
 
-def _cache_scraper(cookies: dict[str, str], scraper: Any) -> None:
+def _cache_scraper(cookies: dict[str, str], scraper: Any, *, cache_scope: str | None = None) -> None:
     """Store a scraper instance in the cache keyed by cookies hash."""
-    cache_key = hashlib.sha256(json.dumps(cookies, sort_keys=True).encode()).hexdigest()[:16]
+    cache_key = _scoped_scraper_cache_key(cookies, cache_scope=cache_scope)
     _scraper_cache[cache_key] = (time_module.time(), scraper)
 
 
@@ -4975,7 +5309,10 @@ def _validate_instagram_cookie_health(cookies: dict[str, str]) -> tuple[bool, st
     validation_reason: str | None = None
     is_valid = False
     try:
-        scraper = InstagramScraper(cookies=cookies)
+        scraper = InstagramScraper(
+            cookies=cookies,
+            browser_account_id=_instagram_cookie_validation_username(),
+        )
         payload = scraper.fetch_posts_graphql(
             _instagram_cookie_validation_username(),
             delay=0.0,
@@ -7698,11 +8035,14 @@ def _touch_job_dispatch_metadata(
     lease_expires_at: datetime | None | object = FIELD_UNSET,
     last_dispatch_error: str | None | object = FIELD_UNSET,
     last_dispatch_error_code: str | None | object = FIELD_UNSET,
+    last_dispatch_error_at: datetime | None | object = FIELD_UNSET,
     remote_invocation_status: str | None | object = FIELD_UNSET,
     remote_invocation_checked_at: datetime | None | object = FIELD_UNSET,
     remote_task_id: str | None | object = FIELD_UNSET,
     remote_pending_since: datetime | None | object = FIELD_UNSET,
     remote_blocked_reason: str | None | object = FIELD_UNSET,
+    dispatch_blocked_failure_count: int | None | object = FIELD_UNSET,
+    dispatch_blocked_first_seen_at: datetime | None | object = FIELD_UNSET,
 ) -> None:
     existing_row = pg.fetch_one("select metadata from social.scrape_jobs where id = %s::uuid", [job_id]) or {}
     existing_metadata = dict(existing_row.get("metadata") or {})
@@ -7735,11 +8075,21 @@ def _touch_job_dispatch_metadata(
         "lease_expires_at": _resolve_dt(lease_expires_at, "lease_expires_at"),
         "last_dispatch_error": _resolve_text(last_dispatch_error, "last_dispatch_error"),
         "last_dispatch_error_code": _resolve_text(last_dispatch_error_code, "last_dispatch_error_code"),
+        "last_dispatch_error_at": _resolve_dt(last_dispatch_error_at, "last_dispatch_error_at"),
         "remote_invocation_status": _resolve_text(remote_invocation_status, "remote_invocation_status"),
         "remote_invocation_checked_at": _resolve_dt(remote_invocation_checked_at, "remote_invocation_checked_at"),
         "remote_task_id": _resolve_text(remote_task_id, "remote_task_id"),
         "remote_pending_since": _resolve_dt(remote_pending_since, "remote_pending_since"),
         "remote_blocked_reason": _resolve_text(remote_blocked_reason, "remote_blocked_reason"),
+        "dispatch_blocked_failure_count": (
+            _normalize_non_negative_int(existing_dispatch.get("dispatch_blocked_failure_count"))
+            if dispatch_blocked_failure_count is FIELD_UNSET
+            else _normalize_non_negative_int(dispatch_blocked_failure_count)
+        ),
+        "dispatch_blocked_first_seen_at": _resolve_dt(
+            dispatch_blocked_first_seen_at,
+            "dispatch_blocked_first_seen_at",
+        ),
     }
     existing_metadata["dispatch"] = dispatch_payload
     pg.fetch_one(
@@ -7774,6 +8124,111 @@ def _dispatch_metadata_error_code(dispatch: Mapping[str, Any] | None) -> str:
 
 def _dispatch_metadata_attempt_count(dispatch: Mapping[str, Any] | None) -> int:
     return max(1, _normalize_non_negative_int(_metadata_dict(dispatch).get("dispatch_attempt_count")) or 1)
+
+
+def _dispatch_metadata_blocked_failure_count(dispatch: Mapping[str, Any] | None) -> int:
+    return _normalize_non_negative_int(_metadata_dict(dispatch).get("dispatch_blocked_failure_count"))
+
+
+def _normalize_dispatch_blocked_reason(
+    *,
+    remote_blocked_reason: Any = None,
+    last_dispatch_error_code: Any = None,
+    last_dispatch_error: Any = None,
+) -> str:
+    explicit_reason = str(remote_blocked_reason or "").strip().lower()
+    if explicit_reason:
+        return explicit_reason
+    error_code = str(last_dispatch_error_code or "").strip().lower()
+    error_message = str(last_dispatch_error or "").strip().lower()
+    if error_code and error_code != "modal_dispatch_failed":
+        return error_code
+    if "no module named 'modal'" in error_message:
+        return "modal_sdk_unavailable"
+    if "function" in error_message and "not found" in error_message:
+        return "modal_function_not_found"
+    if "app" in error_message and "not found" in error_message:
+        return "modal_app_not_found"
+    if "modal" in error_message and "unavailable" in error_message:
+        return "modal_sdk_unavailable"
+    if error_code:
+        return error_code
+    return "dispatch_blocked"
+
+
+def _dispatch_blocked_reference_at(
+    dispatch: Mapping[str, Any] | None,
+    row: Mapping[str, Any] | None = None,
+) -> datetime | None:
+    dispatch_payload = _metadata_dict(dispatch)
+    for key in (
+        "dispatch_blocked_first_seen_at",
+        "last_dispatch_error_at",
+        "remote_invocation_checked_at",
+        "dispatch_requested_at",
+    ):
+        resolved = _coerce_dt(dispatch_payload.get(key))
+        if resolved is not None:
+            return resolved
+    if isinstance(row, Mapping):
+        return _coerce_dt(row.get("available_at") or row.get("created_at"))
+    return None
+
+
+def _dispatch_blocked_seconds(
+    dispatch: Mapping[str, Any] | None,
+    row: Mapping[str, Any] | None = None,
+) -> int:
+    reference_at = _dispatch_blocked_reference_at(dispatch, row)
+    if reference_at is None:
+        return 0
+    return max(0, int((_now_utc() - reference_at).total_seconds()))
+
+
+def _job_is_dispatch_blocked(row: Mapping[str, Any] | None) -> bool:
+    if not isinstance(row, Mapping):
+        return False
+    status = str(row.get("status") or "").strip().lower()
+    if status not in {"queued", "pending", "retrying"}:
+        return False
+    if str(row.get("worker_id") or "").strip():
+        return False
+    dispatch = _job_dispatch_metadata(row)
+    if str(dispatch.get("dispatch_backend") or "").strip().lower() != "modal":
+        return False
+    if str(dispatch.get("remote_invocation_id") or "").strip():
+        return False
+    return bool(
+        str(dispatch.get("last_dispatch_error") or "").strip()
+        or str(dispatch.get("remote_blocked_reason") or "").strip()
+        or _dispatch_metadata_error_code(dispatch) == "modal_dispatch_failed"
+    )
+
+
+def _dispatch_blocked_jobs_filter_clause(*, table_alias: str = "j") -> tuple[str, list[Any]]:
+    dispatch_backend_expr = f"lower(coalesce({table_alias}.metadata->'dispatch'->>'dispatch_backend', ''))"
+    remote_invocation_expr = f"nullif(coalesce({table_alias}.metadata->'dispatch'->>'remote_invocation_id', ''), '')"
+    last_dispatch_error_expr = f"nullif(coalesce({table_alias}.metadata->'dispatch'->>'last_dispatch_error', ''), '')"
+    last_dispatch_error_code_expr = (
+        f"lower(coalesce({table_alias}.metadata->'dispatch'->>'last_dispatch_error_code', ''))"
+    )
+    remote_blocked_reason_expr = (
+        f"nullif(coalesce({table_alias}.metadata->'dispatch'->>'remote_blocked_reason', ''), '')"
+    )
+    return (
+        f"""
+        {table_alias}.status in ('queued', 'pending', 'retrying')
+        and coalesce({table_alias}.worker_id, '') = ''
+        and {dispatch_backend_expr} = 'modal'
+        and {remote_invocation_expr} is null
+        and (
+          {last_dispatch_error_code_expr} = 'modal_dispatch_failed'
+          or {remote_blocked_reason_expr} is not null
+          or {last_dispatch_error_expr} is not null
+        )
+        """,
+        [],
+    )
 
 
 def _modal_invocation_status(dispatch: Mapping[str, Any] | None) -> str:
@@ -8003,6 +8458,7 @@ def _finish_job(
             status="queued" if status == "retrying" else status,
             metadata_updates={"source": "job_finish", "job_status": status},
         )
+    _invalidate_queue_status_cache()
 
 
 def _create_run(
@@ -8104,6 +8560,7 @@ def _set_run_status(run_id: str, status: str) -> None:
         """,
         [status, status, status, status, run_id],
     )
+    _invalidate_queue_status_cache()
     if status in {"completed", "failed", "cancelled"}:
         _invalidate_week_detail_cache_after_run_terminal_status()
 
@@ -8559,11 +9016,7 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
         current = pg.fetch_one("select status, config from social.scrape_runs where id = %s", [run_id]) or {}
         if str(current.get("status")) == "cancelled":
             return summary
-        run_config = _metadata_dict(current.get("config"))
         status_breakdown = _run_job_status_breakdown(run_id)
-        if _shared_account_catalog_background_classify_only(run_config=run_config, summary=summary):
-            _set_run_status(run_id, "completed")
-            return summary
         if status_breakdown["running_jobs"] > 0:
             _set_run_status(run_id, "running")
         elif status_breakdown["cancelling_jobs"] > 0:
@@ -10480,10 +10933,11 @@ def _resolve_instagram_media_for_shortcode(
     from trr_backend.socials.instagram import InstagramScraper, resolve_instagram_media
 
     cookies = _load_instagram_cookies()
-    scraper = _get_cached_scraper(cookies)
+    cache_scope = f"instagram:shortcode:{shortcode}"
+    scraper = _get_cached_scraper(cookies, cache_scope=cache_scope)
     if scraper is None:
-        scraper = InstagramScraper(cookies=cookies)
-        _cache_scraper(cookies, scraper)
+        scraper = InstagramScraper(cookies=cookies, browser_account_id=shortcode)
+        _cache_scraper(cookies, scraper, cache_scope=cache_scope)
 
     def _api_fetcher(value: str) -> dict[str, Any] | None:
         return scraper.fetch_post_info(value, delay=0.0)
@@ -11320,7 +11774,7 @@ def _mirror_instagram_profile_pics_for_post(
         try:
             from trr_backend.socials.instagram import InstagramScraper
 
-            scraper = InstagramScraper(cookies=_load_instagram_cookies())
+            scraper = InstagramScraper(cookies=_load_instagram_cookies(), browser_account_id="comment-avatar-refresh")
             for handle in sorted(deferred_handles):
                 cached_entry = _avatar_registry_lookup_any(platform="instagram", account_handle=handle)
                 cached_status = str((cached_entry or {}).get("status") or "").strip().lower()
@@ -15338,10 +15792,11 @@ def _ingest_instagram(
     instagram_authenticated = bool(cookies.get("sessionid"))
     if not instagram_authenticated:
         logger.warning("Instagram ingest running without sessionid cookie; results may be limited to ~12 recent posts")
-    scraper = _get_cached_scraper(cookies)
+    cache_scope = f"instagram:ingest:{account.strip().lower()}"
+    scraper = _get_cached_scraper(cookies, cache_scope=cache_scope)
     if scraper is None:
-        scraper = InstagramScraper(cookies=cookies)
-        _cache_scraper(cookies, scraper)
+        scraper = InstagramScraper(cookies=cookies, browser_account_id=account)
+        _cache_scraper(cookies, scraper, cache_scope=cache_scope)
 
     retrieval_meta: dict[str, Any] = {"instagram_authenticated": instagram_authenticated}
     matched_post_count = 0
@@ -23538,7 +23993,9 @@ def _social_account_profile_hashtag_items(
                 limit=limit,
             )
         except RuntimeError as exc:
-            if "Database pool initialization failed" not in str(exc):
+            from trr_backend.db.pg import is_database_service_unavailable_error
+
+            if not is_database_service_unavailable_error(exc):
                 raise
             items = []
         if items:
@@ -23947,12 +24404,6 @@ def _catalog_recent_runs(platform: str, account_handle: str, *, limit: int = 10)
                 safe_limit,
             ],
         )
-        for row in rows:
-            if _shared_account_catalog_background_classify_only(
-                run_config=_metadata_dict(row.get("run_config")),
-                summary=_metadata_dict(row.get("run_summary")),
-            ):
-                row["status"] = "completed"
         return rows
     except psycopg_errors.UndefinedTable:
         return []
@@ -25152,18 +25603,18 @@ def _shared_catalog_progress_interval_posts() -> int:
     )
 
 
-def _build_shared_instagram_scraper(*, authenticated: bool = False):
+def _build_shared_instagram_scraper(*, authenticated: bool = False, browser_account_id: str | None = None):
     from trr_backend.socials.instagram import InstagramScraper
 
     if authenticated:
         cookies = _load_instagram_cookies()
         if not cookies.get("sessionid"):
             return None
-        return InstagramScraper(cookies=cookies)
+        return InstagramScraper(cookies=cookies, browser_account_id=browser_account_id)
 
     # Shared-account catalog backfills prefer the warmed public path first to
     # avoid depending on auth cookies when the public transport is healthy.
-    return InstagramScraper(cookies={})
+    return InstagramScraper(cookies={}, browser_account_id=browser_account_id)
 
 
 def _shared_instagram_graphql_page_has_posts(data: Mapping[str, Any] | None) -> bool:
@@ -25318,6 +25769,41 @@ def _shared_instagram_graphql_delay_seconds(*, jitter: bool = False) -> float:
     return base_delay + (0.03 * seed)
 
 
+def _shared_instagram_account_lock_key(account_handle: str) -> int:
+    normalized_account = str(account_handle or "").strip().lower() or "instagram"
+    return int(hashlib.md5(f"instagram-account:{normalized_account}".encode()).hexdigest()[:15], 16) % (2**31)
+
+
+@contextmanager
+def _shared_instagram_account_execution(account_handle: str):
+    from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+
+    browser_sessions = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
+    resolved_account = browser_sessions.resolve_account_id(account_handle, fallback_account_id="instagram")
+    lock_key = _shared_instagram_account_lock_key(resolved_account)
+    lock_label = f"instagram-account-lock:{resolved_account[:48]}"
+
+    with browser_sessions.execution_lock(resolved_account):
+        logger.info("[instagram-account-lock] waiting for account=%s lock=%s", resolved_account, lock_key)
+        with pg.db_connection(label=lock_label) as conn:
+            with pg.db_cursor(conn=conn, label=lock_label) as cur:
+                pg.fetch_one_with_cursor(cur, "select pg_advisory_lock(%s) as locked", [lock_key])
+            logger.info("[instagram-account-lock] acquired account=%s lock=%s", resolved_account, lock_key)
+            try:
+                yield resolved_account
+            finally:
+                try:
+                    with pg.db_cursor(conn=conn, label=lock_label) as cur:
+                        pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[instagram-account-lock] advisory unlock failed for account=%s lock=%s",
+                        resolved_account,
+                        lock_key,
+                        exc_info=True,
+                    )
+
+
 def _fetch_shared_instagram_graphql_posts_page(
     *,
     account_handle: str,
@@ -25327,18 +25813,25 @@ def _fetch_shared_instagram_graphql_posts_page(
     auth_allowed: bool,
 ) -> tuple[list[Any], dict[str, Any], dict[str, Any], str | None]:
     from trr_backend.socials.instagram import ScrapeConfig
+    from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 
-    public_scraper = _build_shared_instagram_scraper()
-    auth_scraper = _build_shared_instagram_scraper(authenticated=True) if auth_allowed else None
-    scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
-    data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
-        account_handle=account_handle,
-        cursor=cursor,
-        delay_seconds=delay_seconds,
-        public_scraper=public_scraper,
-        auth_scraper=auth_scraper,
-        preferred_transport=preferred_transport,
-    )
+    browser_sessions = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
+    with browser_sessions.execution_lock(account_handle):
+        public_scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
+        auth_scraper = (
+            _build_shared_instagram_scraper(authenticated=True, browser_account_id=account_handle)
+            if auth_allowed
+            else None
+        )
+        scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
+        data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
+            account_handle=account_handle,
+            cursor=cursor,
+            delay_seconds=delay_seconds,
+            public_scraper=public_scraper,
+            auth_scraper=auth_scraper,
+            preferred_transport=preferred_transport,
+        )
     if not data:
         return [], {}, dict(page_meta or {}), selected_transport
     page_info: dict[str, Any] = {}
@@ -25566,138 +26059,139 @@ def _discover_instagram_cursor_partitions(
     runner_count: int,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
-    public_scraper = _build_shared_instagram_scraper()
-    auth_scraper = _build_shared_instagram_scraper(authenticated=True)
-    # Avoid the public web_profile_info endpoint here; on Modal it frequently
-    # 429s before we ever reach the warmed public GraphQL path.
-    total_posts = None
-    delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
-    target_posts_per_shard = _catalog_full_history_posts_per_shard("instagram")
-    partitions: list[SharedAccountCursorPartition] = []
-    lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
-    shard_index = 0
-    cursor: str | None = None
-    partition_start_cursor: str | None = None
-    partition_start_at: datetime | None = None
-    partition_posts = 0
-    partition_pages = 0
-    pages_scanned = 0
-    posts_checked = 0
-    seen_cursors: set[str] = set()
-    selected_transport: str | None = None
-    last_retrieval_meta: dict[str, Any] = {}
+    with _shared_instagram_account_execution(account_handle):
+        public_scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
+        auth_scraper = _build_shared_instagram_scraper(authenticated=True, browser_account_id=account_handle)
+        # Avoid the public web_profile_info endpoint here; on Modal it frequently
+        # 429s before we ever reach the warmed public GraphQL path.
+        total_posts = None
+        delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
+        target_posts_per_shard = _catalog_full_history_posts_per_shard("instagram")
+        partitions: list[SharedAccountCursorPartition] = []
+        lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
+        shard_index = 0
+        cursor: str | None = None
+        partition_start_cursor: str | None = None
+        partition_start_at: datetime | None = None
+        partition_posts = 0
+        partition_pages = 0
+        pages_scanned = 0
+        posts_checked = 0
+        seen_cursors: set[str] = set()
+        selected_transport: str | None = None
+        last_retrieval_meta: dict[str, Any] = {}
 
-    while True:
-        pages_scanned += 1
-        data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
-            account_handle=account_handle,
-            cursor=cursor,
-            delay_seconds=delay_seconds,
-            public_scraper=public_scraper,
-            auth_scraper=auth_scraper,
-            preferred_transport=selected_transport,
-        )
-        if page_meta:
-            last_retrieval_meta = dict(page_meta)
-        if not data:
-            break
-        page_info: dict[str, Any] = {}
-        timestamps: list[int] = []
-        page_posts = 0
-        for node, pi in public_scraper._iter_posts_from_graphql(data):
-            page_info = pi
-            timestamp = public_scraper._extract_timestamp(node)
-            if timestamp > 0:
-                timestamps.append(timestamp)
-            page_posts += 1
-        if page_posts <= 0:
-            break
-        if total_posts is None:
-            total_posts = public_scraper._extract_profile_total_posts(data, source="graphql")
-        posts_checked += page_posts
-        partition_posts += page_posts
-        partition_pages += 1
-        page_newest_at = datetime.fromtimestamp(max(timestamps), tz=UTC) if timestamps else None
-        page_oldest_at = datetime.fromtimestamp(min(timestamps), tz=UTC) if timestamps else None
-        if partition_start_at is None:
-            partition_start_at = page_newest_at
-        next_cursor = str(page_info.get("end_cursor") or "").strip() or None
-        has_next = bool(page_info.get("has_next_page"))
-        if progress_cb:
-            progress_cb(
-                {
-                    "phase": "discover_history",
-                    "pages_scanned": pages_scanned,
-                    "posts_checked": posts_checked,
-                    "matched_posts": 0,
-                    "saved_posts": 0,
-                    "total_posts": total_posts,
-                    "discovered_partitions": len(partitions),
-                }
-            )
-        should_finalize = partition_posts >= target_posts_per_shard or not has_next or not next_cursor
-        if next_cursor and next_cursor in seen_cursors:
-            should_finalize = True
-            has_next = False
-            next_cursor = None
-        if should_finalize:
-            partition_key = _shared_account_partition_key(
-                run_id="pending",
-                platform="instagram",
+        while True:
+            pages_scanned += 1
+            data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
                 account_handle=account_handle,
-                shard_index=shard_index,
-                cursor_start=partition_start_cursor,
-                cursor_end=next_cursor,
+                cursor=cursor,
+                delay_seconds=delay_seconds,
+                public_scraper=public_scraper,
+                auth_scraper=auth_scraper,
+                preferred_transport=selected_transport,
             )
-            partitions.append(
-                SharedAccountCursorPartition(
-                    partition_key=partition_key,
+            if page_meta:
+                last_retrieval_meta = dict(page_meta)
+            if not data:
+                break
+            page_info: dict[str, Any] = {}
+            timestamps: list[int] = []
+            page_posts = 0
+            for node, pi in public_scraper._iter_posts_from_graphql(data):
+                page_info = pi
+                timestamp = public_scraper._extract_timestamp(node)
+                if timestamp > 0:
+                    timestamps.append(timestamp)
+                page_posts += 1
+            if page_posts <= 0:
+                break
+            if total_posts is None:
+                total_posts = public_scraper._extract_profile_total_posts(data, source="graphql")
+            posts_checked += page_posts
+            partition_posts += page_posts
+            partition_pages += 1
+            page_newest_at = datetime.fromtimestamp(max(timestamps), tz=UTC) if timestamps else None
+            page_oldest_at = datetime.fromtimestamp(min(timestamps), tz=UTC) if timestamps else None
+            if partition_start_at is None:
+                partition_start_at = page_newest_at
+            next_cursor = str(page_info.get("end_cursor") or "").strip() or None
+            has_next = bool(page_info.get("has_next_page"))
+            if progress_cb:
+                progress_cb(
+                    {
+                        "phase": "discover_history",
+                        "pages_scanned": pages_scanned,
+                        "posts_checked": posts_checked,
+                        "matched_posts": 0,
+                        "saved_posts": 0,
+                        "total_posts": total_posts,
+                        "discovered_partitions": len(partitions),
+                    }
+                )
+            should_finalize = partition_posts >= target_posts_per_shard or not has_next or not next_cursor
+            if next_cursor and next_cursor in seen_cursors:
+                should_finalize = True
+                has_next = False
+                next_cursor = None
+            if should_finalize:
+                partition_key = _shared_account_partition_key(
+                    run_id="pending",
+                    platform="instagram",
+                    account_handle=account_handle,
                     shard_index=shard_index,
-                    shard_total=0,
-                    runner_lane=lanes[shard_index % len(lanes)],
                     cursor_start=partition_start_cursor,
                     cursor_end=next_cursor,
-                    boundary_start_at=partition_start_at,
-                    boundary_end_at=page_oldest_at,
-                    metadata={
-                        "pages_scanned": partition_pages,
-                        "posts_discovered": partition_posts,
-                    },
                 )
-            )
-            shard_index += 1
-            partition_start_cursor = next_cursor
-            partition_start_at = None
-            partition_posts = 0
-            partition_pages = 0
-        if not has_next or not next_cursor:
-            break
-        cursor = next_cursor
-        seen_cursors.add(cursor)
-    shard_total = max(1, len(partitions))
-    for partition in partitions:
-        partition.shard_total = shard_total
-    return partitions, {
-        "pages_scanned": pages_scanned,
-        "posts_checked": posts_checked,
-        "total_posts": total_posts,
-        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-        "retrieval_transport": selected_transport or str(last_retrieval_meta.get("transport") or "").strip() or None,
-        **{
-            key: value
-            for key, value in last_retrieval_meta.items()
-            if key
-            in {
-                "error_code",
-                "error_class",
-                "error_status_code",
-                "error_message",
-                "retryable",
-                "graphql_cursor",
-            }
-            and value is not None
-        },
-    }
+                partitions.append(
+                    SharedAccountCursorPartition(
+                        partition_key=partition_key,
+                        shard_index=shard_index,
+                        shard_total=0,
+                        runner_lane=lanes[shard_index % len(lanes)],
+                        cursor_start=partition_start_cursor,
+                        cursor_end=next_cursor,
+                        boundary_start_at=partition_start_at,
+                        boundary_end_at=page_oldest_at,
+                        metadata={
+                            "pages_scanned": partition_pages,
+                            "posts_discovered": partition_posts,
+                        },
+                    )
+                )
+                shard_index += 1
+                partition_start_cursor = next_cursor
+                partition_start_at = None
+                partition_posts = 0
+                partition_pages = 0
+            if not has_next or not next_cursor:
+                break
+            cursor = next_cursor
+            seen_cursors.add(cursor)
+        shard_total = max(1, len(partitions))
+        for partition in partitions:
+            partition.shard_total = shard_total
+        return partitions, {
+            "pages_scanned": pages_scanned,
+            "posts_checked": posts_checked,
+            "total_posts": total_posts,
+            "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "retrieval_transport": selected_transport or str(last_retrieval_meta.get("transport") or "").strip() or None,
+            **{
+                key: value
+                for key, value in last_retrieval_meta.items()
+                if key
+                in {
+                    "error_code",
+                    "error_class",
+                    "error_status_code",
+                    "error_message",
+                    "retryable",
+                    "graphql_cursor",
+                }
+                and value is not None
+            },
+        }
 
 
 def _bootstrap_shared_tiktok_account_context(
@@ -25891,91 +26385,92 @@ def _scrape_shared_instagram_posts_partitioned(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from trr_backend.socials.instagram import ScrapeConfig
 
-    public_scraper = _build_shared_instagram_scraper()
-    auth_scraper = _build_shared_instagram_scraper(authenticated=True)
-    delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
-    scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
-    cursor = str(config.get("cursor_start") or "").strip() or None
-    end_cursor = str(config.get("cursor_end") or "").strip() or None
-    profile_total_posts = _normalize_non_negative_int(config.get("discovery_total_posts"))
-    pages_scanned = 0
-    posts_checked = 0
-    rows: list[dict[str, Any]] = []
-    seen_cursors: set[str] = set()
-    selected_transport: str | None = None
-    last_retrieval_meta: dict[str, Any] = {}
+    with _shared_instagram_account_execution(account_handle):
+        public_scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
+        auth_scraper = _build_shared_instagram_scraper(authenticated=True, browser_account_id=account_handle)
+        delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
+        scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
+        cursor = str(config.get("cursor_start") or "").strip() or None
+        end_cursor = str(config.get("cursor_end") or "").strip() or None
+        profile_total_posts = _normalize_non_negative_int(config.get("discovery_total_posts"))
+        pages_scanned = 0
+        posts_checked = 0
+        rows: list[dict[str, Any]] = []
+        seen_cursors: set[str] = set()
+        selected_transport: str | None = None
+        last_retrieval_meta: dict[str, Any] = {}
 
-    while True:
-        pages_scanned += 1
-        data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
-            account_handle=account_handle,
-            cursor=cursor,
-            delay_seconds=scrape_config.delay_seconds,
-            public_scraper=public_scraper,
-            auth_scraper=auth_scraper,
-            preferred_transport=selected_transport,
-        )
-        if page_meta:
-            last_retrieval_meta = dict(page_meta)
-        if not data:
-            break
-        page_info: dict[str, Any] = {}
-        page_posts: list[Any] = []
-        for node, pi in public_scraper._iter_posts_from_graphql(data):
-            page_info = pi
-            page_posts.append(public_scraper._parse_post_node(node, scrape_config))
-        if not page_posts:
-            break
-        posts_checked += len(page_posts)
-        for post in page_posts:
-            row = _upsert_shared_catalog_post(
-                platform="instagram",
-                run_id=run_id,
+        while True:
+            pages_scanned += 1
+            data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
                 account_handle=account_handle,
-                post=post,
+                cursor=cursor,
+                delay_seconds=scrape_config.delay_seconds,
+                public_scraper=public_scraper,
+                auth_scraper=auth_scraper,
+                preferred_transport=selected_transport,
             )
-            if row:
-                rows.append(row)
-        if progress_cb:
-            progress_cb(
-                {
-                    "phase": "scrape_partition_page",
-                    "pages_scanned": pages_scanned,
-                    "posts_checked": posts_checked,
-                    "matched_posts": len(rows),
-                    "saved_posts": len(rows),
-                    "total_posts": profile_total_posts or None,
-                }
-            )
-        next_cursor = str(page_info.get("end_cursor") or "").strip() or None
-        has_next = bool(page_info.get("has_next_page"))
-        if end_cursor and next_cursor == end_cursor:
-            break
-        if not has_next or not next_cursor or next_cursor in seen_cursors:
-            break
-        cursor = next_cursor
-        seen_cursors.add(cursor)
-    retrieval_meta = {
-        "retrieval_mode": "graphql_partition",
-        "pages_scanned": pages_scanned,
-        "posts_checked": posts_checked,
-        "total_posts": profile_total_posts or None,
-        "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-        "retrieval_transport": selected_transport or str(last_retrieval_meta.get("transport") or "").strip() or None,
-        "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
-    }
-    for key in (
-        "error_code",
-        "error_class",
-        "error_status_code",
-        "error_message",
-        "retryable",
-        "graphql_cursor",
-    ):
-        value = last_retrieval_meta.get(key)
-        if value is not None:
-            retrieval_meta[key] = value
-    return rows, retrieval_meta
+            if page_meta:
+                last_retrieval_meta = dict(page_meta)
+            if not data:
+                break
+            page_info: dict[str, Any] = {}
+            page_posts: list[Any] = []
+            for node, pi in public_scraper._iter_posts_from_graphql(data):
+                page_info = pi
+                page_posts.append(public_scraper._parse_post_node(node, scrape_config))
+            if not page_posts:
+                break
+            posts_checked += len(page_posts)
+            for post in page_posts:
+                row = _upsert_shared_catalog_post(
+                    platform="instagram",
+                    run_id=run_id,
+                    account_handle=account_handle,
+                    post=post,
+                )
+                if row:
+                    rows.append(row)
+            if progress_cb:
+                progress_cb(
+                    {
+                        "phase": "scrape_partition_page",
+                        "pages_scanned": pages_scanned,
+                        "posts_checked": posts_checked,
+                        "matched_posts": len(rows),
+                        "saved_posts": len(rows),
+                        "total_posts": profile_total_posts or None,
+                    }
+                )
+            next_cursor = str(page_info.get("end_cursor") or "").strip() or None
+            has_next = bool(page_info.get("has_next_page"))
+            if end_cursor and next_cursor == end_cursor:
+                break
+            if not has_next or not next_cursor or next_cursor in seen_cursors:
+                break
+            cursor = next_cursor
+            seen_cursors.add(cursor)
+        retrieval_meta = {
+            "retrieval_mode": "graphql_partition",
+            "pages_scanned": pages_scanned,
+            "posts_checked": posts_checked,
+            "total_posts": profile_total_posts or None,
+            "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "retrieval_transport": selected_transport or str(last_retrieval_meta.get("transport") or "").strip() or None,
+            "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
+        }
+        for key in (
+            "error_code",
+            "error_class",
+            "error_status_code",
+            "error_message",
+            "retryable",
+            "graphql_cursor",
+        ):
+            value = last_retrieval_meta.get(key)
+            if value is not None:
+                retrieval_meta[key] = value
+        return rows, retrieval_meta
 
 
 def _scrape_shared_tiktok_posts_partitioned(
@@ -26078,16 +26573,17 @@ def _scrape_shared_instagram_posts(
 
     from trr_backend.socials.instagram import ScrapeConfig
 
-    scraper = _build_shared_instagram_scraper()
-    scrape_config = ScrapeConfig(
-        username=account_handle,
-        hashtags=[],
-        date_start=_coerce_dt(config.get("date_start")),
-        date_end=_coerce_dt(config.get("date_end")),
-        delay_seconds=float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15"),
-        max_pages=_shared_stage_post_limit(config),
-    )
-    posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
+    with _shared_instagram_account_execution(account_handle):
+        scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
+        scrape_config = ScrapeConfig(
+            username=account_handle,
+            hashtags=[],
+            date_start=_coerce_dt(config.get("date_start")),
+            date_end=_coerce_dt(config.get("date_end")),
+            delay_seconds=float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15"),
+            max_pages=_shared_stage_post_limit(config),
+        )
+        posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     rows: list[dict[str, Any]] = []
     if _shared_catalog_mode(config):
@@ -28160,16 +28656,28 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "queue_disabled"}
     if not is_modal_remote_executor_enabled():
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "remote_executor_not_modal"}
-    ready, reason = _modal_social_dispatch_ready()
+    recovered_blocked = recover_dispatch_blocked_no_progress_jobs(limit=max(safe_limit, 25))
+    resolution = _modal_social_dispatch_resolution()
+    ready = bool(resolution.get("resolved"))
+    reason = str(resolution.get("reason") or "").strip() or None
     if not ready:
         _touch_modal_social_dispatcher_heartbeat(
             metadata_updates={
                 "dispatch_enabled": False,
                 "last_dispatch_error": reason,
+                "last_dispatch_error_code": reason,
+                "last_dispatch_blocked_reason": reason,
                 "last_dispatch_error_at": _iso(_now_utc()),
             }
         )
-        return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": reason}
+        return {
+            "dispatched_job_ids": [],
+            "dispatch_attempts": 0,
+            "reason": reason,
+            "recovered_dispatch_blocked_job_ids": [
+                str(row.get("id") or "").strip() for row in recovered_blocked if str(row.get("id") or "").strip()
+            ],
+        }
 
     recovered_unclaimed = recover_stale_unclaimed_dispatched_jobs(
         run_id=run_id,
@@ -28242,6 +28750,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             continue
         dispatch_attempts += 1
         dispatch_attempt_count = _dispatch_metadata_attempt_count(job_dispatch) + 1
+        blocked_failure_count = _dispatch_metadata_blocked_failure_count(job_dispatch)
+        blocked_first_seen_at = _coerce_dt(job_dispatch.get("dispatch_blocked_first_seen_at"))
         lease_expires_at = _now_utc() + timedelta(
             seconds=_resolve_stale_seconds_for_job(
                 platform=platform,
@@ -28257,11 +28767,14 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             lease_expires_at=lease_expires_at,
             last_dispatch_error=None,
             last_dispatch_error_code=None,
+            last_dispatch_error_at=None,
             remote_invocation_status=None,
             remote_invocation_checked_at=None,
             remote_task_id=None,
             remote_pending_since=None,
             remote_blocked_reason=None,
+            dispatch_blocked_failure_count=0,
+            dispatch_blocked_first_seen_at=None,
         )
         dispatch_result = dispatch_social_job(job_id=job_id)
         if dispatch_result.get("dispatched"):
@@ -28274,11 +28787,14 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 lease_expires_at=lease_expires_at,
                 last_dispatch_error=None,
                 last_dispatch_error_code=None,
+                last_dispatch_error_at=None,
                 remote_invocation_status="unknown",
                 remote_invocation_checked_at=None,
                 remote_task_id=None,
                 remote_pending_since=None,
                 remote_blocked_reason=None,
+                dispatch_blocked_failure_count=0,
+                dispatch_blocked_first_seen_at=None,
             )
             dispatched_job_ids.append(job_id)
             running_by_stage[stage] = running_by_stage.get(stage, 0) + 1
@@ -28289,33 +28805,87 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     key = (job_run_id, stage, platform)
                     running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
         else:
+            dispatch_reason = str(dispatch_result.get("reason") or "dispatch_failed")
+            dispatch_reason_code = str(dispatch_result.get("reason_code") or "").strip().lower() or (
+                _normalize_dispatch_blocked_reason(
+                    last_dispatch_error_code="modal_dispatch_failed",
+                    last_dispatch_error=dispatch_reason,
+                )
+            )
+            blocked_failure_count = max(1, blocked_failure_count + 1)
+            blocked_first_seen_at = blocked_first_seen_at or _now_utc()
+            blocked_for_seconds = max(0, int((_now_utc() - blocked_first_seen_at).total_seconds()))
             _touch_job_dispatch_metadata(
                 job_id,
                 dispatch_backend="modal",
                 dispatch_requested_at=_now_utc(),
                 dispatch_attempt_count=dispatch_attempt_count,
-                lease_expires_at=lease_expires_at,
-                last_dispatch_error=str(dispatch_result.get("reason") or "dispatch_failed"),
+                lease_expires_at=None,
+                last_dispatch_error=dispatch_reason,
                 last_dispatch_error_code="modal_dispatch_failed",
+                last_dispatch_error_at=_now_utc(),
                 remote_invocation_status="unknown",
                 remote_invocation_checked_at=_now_utc(),
                 remote_task_id=None,
                 remote_pending_since=None,
-                remote_blocked_reason=str(dispatch_result.get("reason") or "dispatch_failed"),
+                remote_blocked_reason=dispatch_reason_code,
+                dispatch_blocked_failure_count=blocked_failure_count,
+                dispatch_blocked_first_seen_at=blocked_first_seen_at,
             )
+            if (
+                blocked_failure_count >= _resolve_modal_dispatch_blocked_failure_limit()
+                or blocked_for_seconds >= _resolve_modal_dispatch_no_progress_seconds()
+            ):
+                _finish_job(
+                    job_id,
+                    status="failed",
+                    items_found=_normalize_non_negative_int(job.get("items_found")),
+                    error_message=dispatch_reason,
+                    metadata={
+                        "dispatch": {
+                            **job_dispatch,
+                            "dispatch_backend": "modal",
+                            "dispatch_requested_at": _iso(_now_utc()),
+                            "dispatch_attempt_count": dispatch_attempt_count,
+                            "last_dispatch_error": dispatch_reason,
+                            "last_dispatch_error_code": "modal_dispatch_failed",
+                            "last_dispatch_error_at": _iso(_now_utc()),
+                            "remote_invocation_status": "failed",
+                            "remote_invocation_checked_at": _iso(_now_utc()),
+                            "remote_blocked_reason": dispatch_reason_code,
+                            "dispatch_blocked_failure_count": blocked_failure_count,
+                            "dispatch_blocked_first_seen_at": _iso(blocked_first_seen_at),
+                            "dispatch_blocked_terminalized_at": _iso(_now_utc()),
+                        }
+                    },
+                    last_error_code="modal_dispatch_blocked",
+                    last_error_class="ModalDispatchBlocked",
+                )
+                if job_run_id:
+                    _finalize_run_status(job_run_id, force_recompute=True)
 
-    _touch_modal_social_dispatcher_heartbeat(
-        metadata_updates={
-            "dispatch_enabled": True,
-            "active_invocations": sum(running_by_stage.values()),
-            "last_dispatch_success_at": _iso(_now_utc()) if dispatched_job_ids else None,
-        }
-    )
+    heartbeat_updates: dict[str, Any] = {
+        "dispatch_enabled": True,
+        "active_invocations": sum(running_by_stage.values()),
+    }
+    if dispatched_job_ids:
+        heartbeat_updates.update(
+            {
+                "last_dispatch_success_at": _iso(_now_utc()),
+                "last_dispatch_error": None,
+                "last_dispatch_error_code": None,
+                "last_dispatch_blocked_reason": None,
+            }
+        )
+    _touch_modal_social_dispatcher_heartbeat(metadata_updates=heartbeat_updates)
     return {
         "dispatched_job_ids": dispatched_job_ids,
         "dispatch_attempts": dispatch_attempts,
         "recovered_unclaimed_job_ids": [
             str(row.get("id") or "").strip() for row in recovered_unclaimed if str(row.get("id") or "").strip()
+        ],
+        "recovered_dispatch_blocked_job_ids": [
+            str(row.get("id") or "").strip() for row in recovered_blocked if str(row.get("id") or "").strip()
         ],
         "reason": None,
     }
@@ -31668,17 +32238,15 @@ def _build_run_dispatch_health(job_rows: Sequence[Mapping[str, Any]]) -> dict[st
             latest_dispatch_error_code = dispatch_error_code or None
             latest_remote_blocked_reason = remote_blocked_reason
 
-        if status in {"queued", "pending"} and dispatch_requested_at is not None and not worker_id:
-            is_dispatch_blocked = bool(
-                dispatch_error_code == "modal_dispatch_failed" or remote_blocked_reason or dispatch_error
-            )
+        if status in {"queued", "pending", "retrying"} and dispatch_requested_at is not None and not worker_id:
+            is_dispatch_blocked = _job_is_dispatch_blocked(row)
             if is_dispatch_blocked:
                 dispatch_blocked_jobs += 1
             if remote_invocation_status == "pending":
                 modal_pending_jobs += 1
             elif remote_invocation_status == "running":
                 modal_running_unclaimed_jobs += 1
-            elif not is_dispatch_blocked:
+            elif status in {"queued", "pending"} and not is_dispatch_blocked:
                 queued_unclaimed_jobs += 1
         if status == "retrying" and (
             stale_recovery_count > 0 or dispatch_error_code == STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE
@@ -32171,12 +32739,15 @@ def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int 
         from trr_backend.socials.instagram import InstagramScraper
 
         auth_cookies = _load_instagram_cookies()
-        scraper_candidates: list[tuple[str, InstagramScraper]] = [("public_profile_info", InstagramScraper(cookies={}))]
+        scraper_candidates: list[tuple[str, InstagramScraper]] = [
+            ("public_profile_info", InstagramScraper(cookies={}, browser_account_id=normalized_account))
+        ]
         if auth_cookies:
             scraper_candidates.append(
                 (
                     "authenticated_profile_info",
-                    _get_cached_scraper(auth_cookies) or InstagramScraper(cookies=auth_cookies),
+                    _get_cached_scraper(auth_cookies, cache_scope=f"instagram:{normalized_account}")
+                    or InstagramScraper(cookies=auth_cookies, browser_account_id=normalized_account),
                 )
             )
 
@@ -32345,6 +32916,7 @@ def get_social_account_catalog_run_progress(
         account_handle=normalized_account,
         limit=25,
     )
+    recover_dispatch_blocked_no_progress_jobs(limit=25)
 
     select_worker_id = "j.worker_id" if bool(features.get("has_queue_fields")) else "null::text as worker_id"
     select_last_error_code = (
@@ -32512,8 +33084,6 @@ def get_social_account_catalog_run_progress(
     payload["classify_incomplete"] = classify_total > 0 and (
         classify_completed + classify_failed < classify_total or classify_active > 0 or classify_waiting > 0
     )
-    if _shared_account_catalog_background_classify_only(run_config=run_config, summary=payload.get("summary")):
-        payload["run_status"] = "completed"
     if (
         str(payload.get("run_status") or "").strip().lower() == "completed"
         and _normalize_non_negative_int(post_progress.get("completed_posts")) <= 0
@@ -42258,7 +42828,7 @@ def _refresh_instagram_post_detail_sync(
         media_mirror_last_attempt_at=_coerce_dt(row_json.get("media_mirror_last_attempt_at")),
         media_mirror_last_job_id=str(row_json.get("media_mirror_last_job_id") or "") or None,
     )
-    scraper = InstagramScraper(cookies=_load_instagram_cookies())
+    scraper = InstagramScraper(cookies=_load_instagram_cookies(), browser_account_id=str(post.username or post.pk or "post"))
     _enrich_instagram_post_from_permalink(post=post, scraper=scraper, now_utc=_now_utc())
     with pg.db_connection() as conn:
         upserted = _upsert_instagram_post(
@@ -42949,7 +43519,7 @@ def refresh_post_comments(
         from trr_backend.socials.instagram import InstagramScraper
 
         account = str(row.get("account") or "")
-        scraper = InstagramScraper(cookies=_load_instagram_cookies())
+        scraper = InstagramScraper(cookies=_load_instagram_cookies(), browser_account_id=account)
         comments: list[Any] = []
         upserted = 0
         fetch_failed = False
@@ -46353,11 +46923,6 @@ def get_active_social_account_catalog_run(
         run_summary = _metadata_dict(
             row.get("run_summary") if row.get("run_summary") is not None else row.get("summary")
         )
-        if _shared_account_catalog_background_classify_only(
-            run_config=run_config,
-            summary=run_summary,
-        ):
-            continue
         return {
             "run_id": str(row.get("run_id") or "").strip(),
             "status": normalized_status,

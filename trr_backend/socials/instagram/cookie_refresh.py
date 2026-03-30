@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+
 logger = logging.getLogger(__name__)
 
 INSTAGRAM_LOGIN_URL = "https://www.instagram.com/accounts/login/"
@@ -28,6 +30,10 @@ COOKIE_NAMES_PRIORITY = (
     "rur",
     "ig_did",
     "datr",
+)
+_INSTAGRAM_BROWSER_SESSIONS = AccountBrowserSessionManager(
+    platform="instagram",
+    cookie_domains=(".instagram.com",),
 )
 
 
@@ -101,6 +107,7 @@ def refresh_instagram_cookies(
     username: str,
     password: str,
     cookie_file: str | Path,
+    account_id: str | None = None,
     headless: bool = True,
     timeout_seconds: int = 120,
     validation_username: str | None = None,
@@ -183,6 +190,11 @@ def refresh_instagram_cookies(
             if not cookies.get("sessionid"):
                 raise RuntimeError("Instagram session cookie disappeared before refresh completed")
 
+            _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
+                account_id,
+                context.storage_state(),
+                fallback_account_id=normalized_validation_username or username,
+            )
             _write_cookie_file(target_file, cookies)
             logger.info("Refreshed Instagram cookies into %s", target_file)
             return cookies

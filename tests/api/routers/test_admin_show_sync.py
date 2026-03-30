@@ -1274,3 +1274,57 @@ class TestRefreshShowPhotosStream:
         assert event_seq_matches
         assert event_seq_matches == sorted(event_seq_matches)
         assert len(event_seq_matches) == len(set(event_seq_matches))
+
+    def test_skip_cast_photos_runs_gallery_only_stream(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+        show_id = str(uuid4())
+
+        mock_db = MagicMock()
+        query = MagicMock()
+        query.select.return_value = query
+        query.eq.return_value = query
+        query.in_.return_value = query
+        query.order.return_value = query
+        query.limit.return_value = query
+
+        show_resp = MagicMock()
+        show_resp.error = None
+        show_resp.data = [
+            {
+                "id": show_id,
+                "name": "The Real Housewives of Test",
+                "imdb_id": None,
+                "tmdb_id": None,
+                "external_ids": {},
+            }
+        ]
+        empty_resp = MagicMock()
+        empty_resp.error = None
+        empty_resp.data = []
+        query.execute.side_effect = [show_resp] + [empty_resp] * 20
+        mock_db.schema.return_value.table.return_value = query
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            response = client.post(
+                f"/api/v1/admin/shows/{show_id}/refresh-photos/stream",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "skip_cast_photos": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert "Skipping cast photos (skip_cast_photos=true)." in response.text
+        assert "Skipping cast photo mirroring (skip_cast_photos=true)." in response.text
+        assert "Skipping cast photo prune (skip_cast_photos=true)." in response.text
+        assert "Skipping auto-count (skip_cast_photos=true)." in response.text
+        assert "Skipping word detection (skip_cast_photos=true)." in response.text
+        assert '"skip_reason": "skip_cast_photos"' in response.text or '"skip_reason":"skip_cast_photos"' in response.text
+        assert '"live_counts"' in response.text
+
+        table_calls = [str(call.args[0]) for call in mock_db.schema.return_value.table.call_args_list]
+        assert "episode_appearances" not in table_calls
+        assert "show_cast" not in table_calls
+        assert "people" not in table_calls
+        assert "cast_photos" not in table_calls

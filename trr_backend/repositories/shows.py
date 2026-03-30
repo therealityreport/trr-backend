@@ -82,7 +82,7 @@ def _handle_pgrst204_with_retry(exc: Exception, attempt: int, context: str) -> b
         hint = (
             f"\n\nPostgREST schema cache may still be stale after retry during {context}. "
             "Wait 30-60s and try again, or run:\n"
-            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
+            '  psql "${TRR_DB_URL:-$SUPABASE_DB_URL}" -f scripts/db/reload_postgrest_schema.sql'
         )
         raise ShowRepositoryError(f"{exc}{hint}") from exc
 

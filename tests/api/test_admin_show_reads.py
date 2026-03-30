@@ -464,6 +464,33 @@ def test_show_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["pagination"] == {"limit": 25, "offset": 0, "count": 1}
 
 
+def test_show_cast_forwards_include_photos_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, object] = {}
+
+    def fake_get_show_cast(show_id: str, **kwargs):
+        recorded["show_id"] = show_id
+        recorded["kwargs"] = kwargs
+        return (
+            {
+                "cast": [],
+                "archive_footage_cast": [],
+                "cast_source": "imdb_show_membership",
+                "eligibility_warning": None,
+                "pagination": {"limit": kwargs["limit"], "offset": kwargs["offset"], "count": 0},
+            },
+            1,
+        )
+
+    monkeypatch.setattr(router_module.show_reads_repo, "get_show_cast", fake_get_show_cast)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/trr-api/shows/show-1/cast?limit=500&include_photos=false")
+
+    assert response.status_code == 200
+    assert recorded["show_id"] == "show-1"
+    assert recorded["kwargs"]["include_photos"] is False
+
+
 def test_season_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         router_module.show_reads_repo,

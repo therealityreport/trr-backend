@@ -50,9 +50,11 @@ The TRR Backend Data Pipeline is a Supabase-first data processing system that tr
    ```
 
 4. **Add credentials**
-   - Set Supabase credentials in `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
-   - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `TVDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
-   - Optional: `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_PUBLIC_BASE_URL` for media mirroring
+  - Set Supabase credentials in `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+  - Set the runtime Postgres URL in `.env`: `TRR_DB_URL` (Supavisor session mode on `pooler.supabase.com:5432`)
+  - Optional local-only escape hatch: `TRR_DB_FALLBACK_URL` or `TRR_DB_ENABLE_DIRECT_FALLBACK=1` when you are intentionally bypassing session-mode saturation in dev
+  - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `TVDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
+  - Optional: `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_PUBLIC_BASE_URL` for media mirroring
 
 5. **Verify environment**
    ```bash
@@ -104,7 +106,7 @@ python -m scripts.sync_all_tables --tables shows,episodes,episode_appearances --
 Common filters: `--show-id`, `--tmdb-id`, `--imdb-id`, `--limit`, `--dry-run`, `--verbose`.
 
 Media mirroring requires `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, and `OBJECT_STORAGE_PUBLIC_BASE_URL` (must start with `https://` and not contain placeholders like `dxxxx`). Optional: `OBJECT_STORAGE_PROFILE`.
-Schema verification uses `SUPABASE_DB_URL` (remote Supabase only).
+Runtime DB access uses `TRR_DB_URL` and optional `TRR_DB_FALLBACK_URL`. Tooling can still accept legacy DB envs where explicitly documented.
 
 TMDb backfill flow: resolve missing `tmdb_id` via `/find` using IMDb ids, then backfill `/tv/{id}` details into `core.shows` (typed columns + `tmdb_meta`). Both scripts are idempotent; omit `--all` for incremental updates. See `docs/architecture.md` for the full TMDb enrichment pipeline documentation.
 
@@ -185,7 +187,10 @@ GEMINI_API_KEY=your_gemini_api_key
 # Supabase Configuration
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-SUPABASE_DB_URL=postgresql://user:password@db.your-project.supabase.co:5432/postgres
+TRR_DB_URL=postgresql://postgres.<project>:password@aws-1-us-east-1.pooler.supabase.com:5432/postgres
+TRR_DB_FALLBACK_URL=
+# Local-only emergency fallback when you intentionally bypass session-mode saturation:
+# TRR_DB_ENABLE_DIRECT_FALLBACK=1
 
 # Optional Configuration
 REALITEASE_TMDB_SHOW_LIMIT=5

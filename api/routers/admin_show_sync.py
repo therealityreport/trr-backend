@@ -2255,6 +2255,7 @@ class RefreshShowPhotosRequest(BaseModel):
     limit_per_source: int = Field(default=50, ge=1, le=200)
     imdb_mediaindex_max_pages: int = Field(default=25, ge=1, le=100)
     imdb_mediaindex_max_images: int | None = Field(default=None, ge=1, le=5000)
+    skip_cast_photos: bool = False
     skip_s3: bool = False
     skip_prune: bool = False
     skip_auto_count: bool = False
@@ -3705,10 +3706,10 @@ def refresh_show_photos_stream(
     Includes:
     - Show images (TMDb + IMDb section-images + IMDb mediaindex gallery)
     - Season posters + episode stills (TMDb)
-    - Cast photos (IMDb + TMDb + Fandom + Fandom gallery)
+    - Cast photos (IMDb + TMDb + Fandom + Fandom gallery) unless skip_cast_photos
     - S3 mirroring for all of the above (unless skip_s3)
-    - Auto-count people (cast photos; best-effort)
-    - Text overlay detection (cast photos; best-effort)
+    - Auto-count people (cast photos; best-effort, unless skip_cast_photos)
+    - Text overlay detection (cast photos; best-effort, unless skip_cast_photos)
     """
 
     payload = payload or RefreshShowPhotosRequest()
@@ -4343,190 +4344,173 @@ def refresh_show_photos_stream(
                     person_ids.add(str(pid))
             return list(person_ids)
 
-        person_ids = _fetch_person_ids_for_show(season_scope)
-        if not person_ids:
-            if season_scope is not None:
-                yield progress(
-                    stage="sync_cast_photos",
-                    message=f"No cast members found for season {season_scope}; skipping cast photos.",
-                )
-            else:
-                yield progress(stage="sync_cast_photos", message="No cast members found; skipping cast photos.")
-        else:
-            people_rows: list[dict] = []
-            for i in range(0, len(person_ids), 200):
-                chunk = person_ids[i : i + 200]
-                try:
-                    resp = (
-                        db.schema("core").table("people").select("id,full_name,external_ids").in_("id", chunk).execute()
-                    )
-                except Exception:  # noqa: BLE001
-                    errors.append("People lookup: query failed")
-                    continue
-                if hasattr(resp, "error") and resp.error:
-                    errors.append(f"People lookup: {resp.error}")
-                    continue
-                if isinstance(resp.data, list):
-                    people_rows.extend(resp.data)
-
-            # Build inputs per person.
-            targets: list[dict[str, object]] = []
-            for person in people_rows:
-                pid = str(person.get("id") or "").strip()
-                if not pid:
-                    continue
-                full_name = str(person.get("full_name") or "").strip() or None
-                external_ids = person.get("external_ids") if isinstance(person.get("external_ids"), dict) else {}
-
-                imdb_person_id = str(external_ids.get("imdb") or "").strip() or None
-                tmdb_person_id = None
-                try:
-                    if external_ids.get("tmdb_id") or external_ids.get("tmdb"):
-                        tmdb_person_id = int(external_ids.get("tmdb_id") or external_ids.get("tmdb"))
-                except Exception:
-                    tmdb_person_id = None
-
-                try:
-                    tmdb_row = get_cast_tmdb_by_person_id(db, pid)
-                except Exception:
-                    tmdb_row = None
-                if tmdb_row:
-                    if not imdb_person_id:
-                        imdb_person_id = str(tmdb_row.get("imdb_id") or "").strip() or imdb_person_id
-                    if tmdb_person_id is None and tmdb_row.get("tmdb_id"):
-                        try:
-                            tmdb_person_id = int(tmdb_row.get("tmdb_id"))
-                        except Exception:
-                            tmdb_person_id = tmdb_person_id
-
-                targets.append(
-                    {
-                        "person_id": pid,
-                        "person_name": full_name,
-                        "imdb_person_id": imdb_person_id,
-                        "tmdb_person_id": tmdb_person_id,
-                    }
-                )
-
-            # Compute fetch work (only count source fetches that have required ids).
-            fetch_units = 0
-            for t in targets:
-                if t.get("imdb_person_id"):
-                    fetch_units += 1  # IMDb
-                if t.get("tmdb_person_id"):
-                    fetch_units += 1  # TMDb
-                if allow_fandom_sources and t.get("person_name"):
-                    fetch_units += 2  # Fandom person + Fandom gallery
-
-            bump_total(fetch_units)
+        person_ids: list[str] = []
+        if payload.skip_cast_photos:
             yield progress(
                 stage="sync_cast_photos",
-                message=(
-                    "Syncing cast photos (IMDb/TMDb/Fandom)..."
-                    if allow_fandom_sources
-                    else "Syncing cast photos (IMDb/TMDb)..."
-                ),
-                stage_total=fetch_units,
+                message="Skipping cast photos (skip_cast_photos=true).",
+                extra={"skip_reason": "skip_cast_photos"},
             )
-            if not allow_fandom_sources:
+            if not payload.skip_s3:
                 yield progress(
-                    stage="sync_fandom",
-                    message="Skipping Fandom cast photos for non-Real Housewives shows.",
+                    stage="mirror_cast_photos",
+                    message="Skipping cast photo mirroring (skip_cast_photos=true).",
+                    extra={"skip_reason": "skip_cast_photos"},
                 )
-
-            stage_done = 0
-            for t in targets:
-                pid = str(t.get("person_id"))
-                pname = t.get("person_name")
-                imdb_pid = t.get("imdb_person_id")
-                tmdb_pid = t.get("tmdb_person_id")
-
-                def _tag_show_context(rows: list[dict]) -> None:
-                    for row in rows:
-                        meta = dict(row.get("metadata") or {})
-                        meta.setdefault("show_id", show_id_str)
-                        if show_name:
-                            meta.setdefault("show_name", show_name)
-                        row["metadata"] = meta
-
-                # IMDb
-                if imdb_pid:
-                    source_total = _get_known_person_source_total("imdb", str(imdb_pid), None)
-                    mirrored_count = (
-                        _count_mirrored_cast_photos_for_source(db, pid, "imdb") if source_total is not None else None
+            if not payload.skip_prune:
+                yield progress(
+                    stage="prune_cast_photos",
+                    message="Skipping cast photo prune (skip_cast_photos=true).",
+                    extra={"skip_reason": "skip_cast_photos"},
+                )
+        else:
+            person_ids = _fetch_person_ids_for_show(season_scope)
+            if not person_ids:
+                if season_scope is not None:
+                    yield progress(
+                        stage="sync_cast_photos",
+                        message=f"No cast members found for season {season_scope}; skipping cast photos.",
                     )
-                    if (
-                        source_total is not None
-                        and mirrored_count is not None
-                        and mirrored_count >= source_total
-                        and not payload.force_mirror
-                    ):
-                        stage_done += 1
-                        source_skip_details.append(
-                            {
-                                "source": "imdb",
-                                "reason": "already_mirrored",
-                                "source_total": source_total,
-                                "mirrored_count": mirrored_count,
-                            }
+                else:
+                    yield progress(stage="sync_cast_photos", message="No cast members found; skipping cast photos.")
+            else:
+                people_rows: list[dict] = []
+                for i in range(0, len(person_ids), 200):
+                    chunk = person_ids[i : i + 200]
+                    try:
+                        resp = (
+                            db.schema("core").table("people").select("id,full_name,external_ids").in_("id", chunk).execute()
                         )
-                        yield progress(
-                            stage="sync_imdb",
-                            message=(
-                                f"Skipping IMDb cast photos ({pid}): already mirrored {mirrored_count}/{source_total}."
-                            ),
-                            stage_current=stage_done,
-                            stage_total=fetch_units,
-                            extra={
-                                "source": "imdb",
-                                "skip_reason": "already_mirrored",
-                                "source_total": source_total,
-                                "mirrored_count": mirrored_count,
-                            },
-                        )
-                        bump_current(1)
-                    else:
-                        stage_done += 1
-                        yield progress(
-                            stage="sync_imdb",
-                            message=f"Syncing IMDb cast photos ({pid})...",
-                            stage_current=stage_done,
-                            stage_total=fetch_units,
-                            extra={
-                                "source": "imdb",
-                                "source_total": source_total,
-                                "mirrored_count": mirrored_count,
-                                "heartbeat": True,
-                                "elapsed_ms": 0,
-                            },
-                        )
-                        started_at = time.perf_counter()
-                        fetch_result: dict[str, Any] = {"rows": [], "error": None}
-                        imdb_pid_for_stage = int(imdb_pid)
-                        person_id_for_stage = pid
-                        stage_limit = int(payload.limit_per_source)
+                    except Exception:  # noqa: BLE001
+                        errors.append("People lookup: query failed")
+                        continue
+                    if hasattr(resp, "error") and resp.error:
+                        errors.append(f"People lookup: {resp.error}")
+                        continue
+                    if isinstance(resp.data, list):
+                        people_rows.extend(resp.data)
 
-                        def run_imdb_fetch(
-                            *,
-                            result: dict[str, Any] = fetch_result,
-                            imdb_id: int = imdb_pid_for_stage,
-                            person_id: str = person_id_for_stage,
-                            limit: int = stage_limit,
-                        ) -> None:
+                # Build inputs per person.
+                targets: list[dict[str, object]] = []
+                for person in people_rows:
+                    pid = str(person.get("id") or "").strip()
+                    if not pid:
+                        continue
+                    full_name = str(person.get("full_name") or "").strip() or None
+                    external_ids = person.get("external_ids") if isinstance(person.get("external_ids"), dict) else {}
+
+                    imdb_person_id = str(external_ids.get("imdb") or "").strip() or None
+                    tmdb_person_id = None
+                    try:
+                        if external_ids.get("tmdb_id") or external_ids.get("tmdb"):
+                            tmdb_person_id = int(external_ids.get("tmdb_id") or external_ids.get("tmdb"))
+                    except Exception:
+                        tmdb_person_id = None
+
+                    try:
+                        tmdb_row = get_cast_tmdb_by_person_id(db, pid)
+                    except Exception:
+                        tmdb_row = None
+                    if tmdb_row:
+                        if not imdb_person_id:
+                            imdb_person_id = str(tmdb_row.get("imdb_id") or "").strip() or imdb_person_id
+                        if tmdb_person_id is None and tmdb_row.get("tmdb_id"):
                             try:
-                                result["rows"] = fetch_imdb_cast_photos(
-                                    str(imdb_id),
-                                    person_id,
-                                    limit=limit,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                result["error"] = exc
+                                tmdb_person_id = int(tmdb_row.get("tmdb_id"))
+                            except Exception:
+                                tmdb_person_id = tmdb_person_id
 
-                        fetch_thread = Thread(target=run_imdb_fetch, daemon=True)
-                        fetch_thread.start()
-                        while fetch_thread.is_alive():
-                            fetch_thread.join(timeout=10)
-                            if fetch_thread.is_alive():
+                    targets.append(
+                        {
+                            "person_id": pid,
+                            "person_name": full_name,
+                            "imdb_person_id": imdb_person_id,
+                            "tmdb_person_id": tmdb_person_id,
+                        }
+                    )
+
+                # Compute fetch work (only count source fetches that have required ids).
+                fetch_units = 0
+                for t in targets:
+                    if t.get("imdb_person_id"):
+                        fetch_units += 1  # IMDb
+                    if t.get("tmdb_person_id"):
+                        fetch_units += 1  # TMDb
+                    if allow_fandom_sources and t.get("person_name"):
+                        fetch_units += 2  # Fandom person + Fandom gallery
+
+                bump_total(fetch_units)
+                yield progress(
+                    stage="sync_cast_photos",
+                    message=(
+                        "Syncing cast photos (IMDb/TMDb/Fandom)..."
+                        if allow_fandom_sources
+                        else "Syncing cast photos (IMDb/TMDb)..."
+                    ),
+                    stage_total=fetch_units,
+                )
+                if not allow_fandom_sources:
+                    yield progress(
+                        stage="sync_fandom",
+                        message="Skipping Fandom cast photos for non-Real Housewives shows.",
+                    )
+
+                stage_done = 0
+                for t in targets:
+                    pid = str(t.get("person_id"))
+                    pname = t.get("person_name")
+                    imdb_pid = t.get("imdb_person_id")
+                    tmdb_pid = t.get("tmdb_person_id")
+
+                    def _tag_show_context(rows: list[dict]) -> None:
+                        for row in rows:
+                            meta = dict(row.get("metadata") or {})
+                            meta.setdefault("show_id", show_id_str)
+                            if show_name:
+                                meta.setdefault("show_name", show_name)
+                            row["metadata"] = meta
+
+                    # IMDb
+                    if imdb_pid:
+                        try:
+                            source_total = _get_known_person_source_total("imdb", str(imdb_pid), None)
+                            mirrored_count = (
+                                _count_mirrored_cast_photos_for_source(db, pid, "imdb")
+                                if source_total is not None
+                                else None
+                            )
+                            if (
+                                source_total is not None
+                                and mirrored_count is not None
+                                and mirrored_count >= source_total
+                                and not payload.force_mirror
+                            ):
+                                stage_done += 1
+                                source_skip_details.append(
+                                    {
+                                        "source": "imdb",
+                                        "reason": "already_mirrored",
+                                        "source_total": source_total,
+                                        "mirrored_count": mirrored_count,
+                                    }
+                                )
+                                yield progress(
+                                    stage="sync_imdb",
+                                    message=(
+                                        f"Skipping IMDb cast photos ({pid}): already mirrored {mirrored_count}/{source_total}."
+                                    ),
+                                    stage_current=stage_done,
+                                    stage_total=fetch_units,
+                                    extra={
+                                        "source": "imdb",
+                                        "skip_reason": "already_mirrored",
+                                        "source_total": source_total,
+                                        "mirrored_count": mirrored_count,
+                                    },
+                                )
+                                bump_current(1)
+                            else:
+                                stage_done += 1
                                 yield progress(
                                     stage="sync_imdb",
                                     message=f"Syncing IMDb cast photos ({pid})...",
@@ -4534,34 +4518,76 @@ def refresh_show_photos_stream(
                                     stage_total=fetch_units,
                                     extra={
                                         "source": "imdb",
+                                        "source_total": source_total,
+                                        "mirrored_count": mirrored_count,
                                         "heartbeat": True,
+                                        "elapsed_ms": 0,
+                                    },
+                                )
+                                started_at = time.perf_counter()
+                                fetch_result: dict[str, Any] = {"rows": [], "error": None}
+                                imdb_pid_for_stage = int(imdb_pid)
+                                person_id_for_stage = pid
+                                stage_limit = int(payload.limit_per_source)
+
+                                def run_imdb_fetch(
+                                    *,
+                                    result: dict[str, Any] = fetch_result,
+                                    imdb_id: int = imdb_pid_for_stage,
+                                    person_id: str = person_id_for_stage,
+                                    limit: int = stage_limit,
+                                ) -> None:
+                                    try:
+                                        result["rows"] = fetch_imdb_cast_photos(
+                                            str(imdb_id),
+                                            person_id,
+                                            limit=limit,
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        result["error"] = exc
+
+                                fetch_thread = Thread(target=run_imdb_fetch, daemon=True)
+                                fetch_thread.start()
+                                while fetch_thread.is_alive():
+                                    fetch_thread.join(timeout=10)
+                                    if fetch_thread.is_alive():
+                                        yield progress(
+                                            stage="sync_imdb",
+                                            message=f"Syncing IMDb cast photos ({pid})...",
+                                            stage_current=stage_done,
+                                            stage_total=fetch_units,
+                                            extra={
+                                                "source": "imdb",
+                                                "heartbeat": True,
+                                                "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+                                            },
+                                        )
+                                fetch_thread.join()
+                                try:
+                                    if fetch_result["error"] is not None:
+                                        raise fetch_result["error"]
+                                    rows = fetch_result["rows"] if isinstance(fetch_result["rows"], list) else []
+                                    _tag_show_context(rows)
+                                    cast_photos_fetched += len(rows)
+                                    if rows:
+                                        upserted = upsert_cast_photos(db, rows, dedupe_on="source_image_id")
+                                        cast_photos_upserted += len(upserted)
+                                    sources_used.add("imdb")
+                                except Exception as exc:  # noqa: BLE001
+                                    errors.append(f"IMDb cast photos {pid}: {exc}")
+                                bump_current(1)
+                                yield progress(
+                                    stage="sync_imdb",
+                                    message=f"Synced IMDb cast photos ({pid}).",
+                                    stage_current=stage_done,
+                                    stage_total=fetch_units,
+                                    extra={
+                                        "source": "imdb",
                                         "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
                                     },
                                 )
-                        fetch_thread.join()
-                        try:
-                            if fetch_result["error"] is not None:
-                                raise fetch_result["error"]
-                            rows = fetch_result["rows"] if isinstance(fetch_result["rows"], list) else []
-                            _tag_show_context(rows)
-                            cast_photos_fetched += len(rows)
-                            if rows:
-                                upserted = upsert_cast_photos(db, rows, dedupe_on="source_image_id")
-                                cast_photos_upserted += len(upserted)
-                            sources_used.add("imdb")
                         except Exception as exc:  # noqa: BLE001
                             errors.append(f"IMDb cast photos {pid}: {exc}")
-                        bump_current(1)
-                        yield progress(
-                            stage="sync_imdb",
-                            message=f"Synced IMDb cast photos ({pid}).",
-                            stage_current=stage_done,
-                            stage_total=fetch_units,
-                            extra={
-                                "source": "imdb",
-                                "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
-                            },
-                        )
 
                 # TMDb
                 if tmdb_pid:
@@ -4799,7 +4825,13 @@ def refresh_show_photos_stream(
         auto_counts_attempted = 0
         auto_counts_succeeded = 0
         auto_counts_failed = 0
-        if payload.skip_auto_count:
+        if payload.skip_cast_photos:
+            yield progress(
+                stage="auto_count",
+                message="Skipping auto-count (skip_cast_photos=true).",
+                extra={"skip_reason": "skip_cast_photos"},
+            )
+        elif payload.skip_auto_count:
             yield progress(stage="auto_count", message="Skipping auto-count (fast mode).")
         elif is_screenalytics_configured() and person_ids and not payload.skip_s3:
             unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
@@ -4909,7 +4941,13 @@ def refresh_show_photos_stream(
         text_overlay_attempted = 0
         text_overlay_succeeded = 0
         text_overlay_failed = 0
-        if payload.skip_word_detection:
+        if payload.skip_cast_photos:
+            yield progress(
+                stage="word_id",
+                message="Skipping word detection (skip_cast_photos=true).",
+                extra={"skip_reason": "skip_cast_photos"},
+            )
+        elif payload.skip_word_detection:
             yield progress(stage="word_id", message="Skipping word detection (fast mode).")
         else:
             try:
