@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import math
 import re
+import time
 import unicodedata
 from typing import Any
 
 from trr_backend.db import pg
+from trr_backend.read_path_diagnostics import log_read_path
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 PERSON_SLUG_SUFFIX_RE = re.compile(r"--([0-9a-f]{8})$", re.I)
@@ -171,12 +173,19 @@ def resolve_show_slug(slug: str) -> dict[str, Any] | None:
 
 
 def resolve_person_slug(slug: str, show_input: str | None = None) -> tuple[dict[str, Any] | None, str | None, int]:
+    started_at = time.perf_counter()
     raw_slug = slug or ""
     raw_suffix_match = PERSON_SLUG_SUFFIX_RE.search(raw_slug)
     requested_prefix = raw_suffix_match.group(1).lower() if raw_suffix_match else None
     raw_base = raw_slug[: -len(raw_suffix_match.group(0))] if raw_suffix_match else raw_slug
     base_slug = _slugify_token(raw_base)
     if not base_slug:
+        log_read_path(
+            "admin-people.resolve-person-slug",
+            latency_ms=(time.perf_counter() - started_at) * 1000.0,
+            query_count=0,
+            extra={"matched": False},
+        )
         return None, None, 0
 
     query_count = 0
@@ -191,84 +200,55 @@ def resolve_person_slug(slug: str, show_input: str | None = None) -> tuple[dict[
             resolved_show_id = str(resolved_show["show_id"]) if resolved_show else None
 
     candidate_full_names = _build_candidate_person_full_names(base_slug)
-    if candidate_full_names:
-        query_count += 1
-        exact_rows = pg.fetch_all(
-            """
-            SELECT
-              p.id::text AS id,
-              p.full_name,
-              CASE
-                WHEN %s::uuid IS NOT NULL AND EXISTS (
-                  SELECT 1
-                  FROM core.show_cast AS sc
-                  WHERE sc.person_id = p.id
-                    AND sc.show_id = %s::uuid
-                )
-                  THEN true
-                ELSE false
-              END AS on_show
-            FROM core.people AS p
-            WHERE p.full_name = ANY(%s::text[])
-            ORDER BY on_show DESC, p.id ASC
-            """,
-            [resolved_show_id, resolved_show_id, candidate_full_names],
-        )
-        if exact_rows:
-            preferred_rows = (
-                [row for row in exact_rows if row.get("on_show")]
-                if resolved_show_id and any(row.get("on_show") for row in exact_rows)
-                else exact_rows
-            )
-            selected = preferred_rows[0]
-            if requested_prefix:
-                selected = next((row for row in preferred_rows if row["id"].lower().startswith(requested_prefix)), None)
-                if selected is None:
-                    selected = next((row for row in exact_rows if row["id"].lower().startswith(requested_prefix)), None)
-            if selected and selected.get("full_name"):
-                has_collision = len(exact_rows) > 1
-                return (
-                    {
-                        "person_id": selected["id"],
-                        "slug": base_slug,
-                        "canonical_slug": f"{base_slug}--{selected['id'][:8].lower()}" if has_collision else base_slug,
-                    },
-                    resolved_show_id,
-                    query_count,
-                )
-
     query_count += 1
     rows = pg.fetch_all(
         """
-        SELECT
-          p.id::text AS id,
-          p.full_name,
-          CASE
-            WHEN %s::uuid IS NOT NULL AND EXISTS (
-              SELECT 1
-              FROM core.show_cast AS sc
-              WHERE sc.person_id = p.id
-                AND sc.show_id = %s::uuid
-            )
-              THEN true
-            ELSE false
-          END AS on_show
-        FROM core.people AS p
-        WHERE lower(
-          trim(
-            both '-' FROM regexp_replace(
-              regexp_replace(COALESCE(p.full_name, ''), '&', ' and ', 'gi'),
-              '[^a-z0-9]+',
-              '-',
-              'gi'
-            )
+        WITH candidate_people AS (
+          SELECT
+            p.id::text AS id,
+            p.full_name,
+            CASE
+              WHEN %s::uuid IS NOT NULL AND EXISTS (
+                SELECT 1
+                FROM core.show_cast AS sc
+                WHERE sc.person_id = p.id
+                  AND sc.show_id = %s::uuid
+              )
+                THEN true
+              ELSE false
+            END AS on_show,
+            CASE
+              WHEN p.full_name = ANY(%s::text[]) THEN 0
+              ELSE 1
+            END AS match_rank
+          FROM core.people AS p
+          WHERE (
+            p.full_name = ANY(%s::text[])
+            OR lower(
+              trim(
+                both '-' FROM regexp_replace(
+                  regexp_replace(COALESCE(p.full_name, ''), '&', ' and ', 'gi'),
+                  '[^a-z0-9]+',
+                  '-',
+                  'gi'
+                )
+              )
+            ) = %s
           )
-        ) = %s
-        ORDER BY on_show DESC, p.id ASC
+        )
+        SELECT id, full_name, on_show, match_rank
+        FROM candidate_people
+        ORDER BY on_show DESC, match_rank ASC, id ASC
         """,
-        [resolved_show_id, resolved_show_id, base_slug],
+        [resolved_show_id, resolved_show_id, candidate_full_names, candidate_full_names, base_slug],
     )
     if not rows:
+        log_read_path(
+            "admin-people.resolve-person-slug",
+            latency_ms=(time.perf_counter() - started_at) * 1000.0,
+            query_count=query_count,
+            extra={"matched": False, "resolved_show": bool(resolved_show_id)},
+        )
         return None, resolved_show_id, query_count
 
     preferred_rows = (
@@ -282,17 +262,27 @@ def resolve_person_slug(slug: str, show_input: str | None = None) -> tuple[dict[
         if selected is None:
             selected = next((row for row in rows if row["id"].lower().startswith(requested_prefix)), None)
     if not selected or not selected.get("full_name"):
+        log_read_path(
+            "admin-people.resolve-person-slug",
+            latency_ms=(time.perf_counter() - started_at) * 1000.0,
+            query_count=query_count,
+            extra={"matched": False, "resolved_show": bool(resolved_show_id)},
+        )
         return None, resolved_show_id, query_count
     has_collision = len(rows) > 1
-    return (
-        {
-            "person_id": selected["id"],
-            "slug": base_slug,
-            "canonical_slug": f"{base_slug}--{selected['id'][:8].lower()}" if has_collision else base_slug,
-        },
-        resolved_show_id,
-        query_count,
+    payload = {
+        "person_id": selected["id"],
+        "slug": base_slug,
+        "canonical_slug": f"{base_slug}--{selected['id'][:8].lower()}" if has_collision else base_slug,
+    }
+    log_read_path(
+        "admin-people.resolve-person-slug",
+        latency_ms=(time.perf_counter() - started_at) * 1000.0,
+        query_count=query_count,
+        payload=payload,
+        extra={"matched": True, "resolved_show": bool(resolved_show_id)},
     )
+    return payload, resolved_show_id, query_count
 
 
 def get_person_detail(person_id: str) -> tuple[dict[str, Any] | None, int]:
@@ -471,6 +461,87 @@ def _map_media_link_row(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _merge_person_gallery_rows(
+    cast_rows: list[dict[str, Any]],
+    media_rows: list[dict[str, Any]],
+    *,
+    include_broken: bool,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    index_by_key: dict[tuple[Any, ...], int] = {}
+    for row in cast_rows:
+        if not include_broken and row["_broken"]:
+            continue
+        key = _media_key(row)
+        index_by_key[key] = len(merged)
+        merged.append(row)
+    for row in media_rows:
+        if not include_broken and row["_broken"]:
+            continue
+        key = _media_key(row)
+        existing_index = index_by_key.get(key)
+        if existing_index is None:
+            index_by_key[key] = len(merged)
+            merged.append(row)
+            continue
+        merged[existing_index] = row
+    return merged
+
+
+def _count_person_gallery_rows(
+    person_id: str,
+    *,
+    requested_sources: list[str] | None,
+    include_broken: bool,
+) -> int:
+    count_cast_rows = pg.fetch_all(
+        """
+        SELECT
+          cp.id,
+          cp.person_id::text AS person_id,
+          lower(cp.source) AS source,
+          cp.url,
+          cp.hosted_url,
+          cp.metadata ->> 'gallery_status' AS gallery_status
+        FROM core.cast_photos AS cp
+        WHERE cp.person_id = %s::uuid
+          AND cp.hosted_url IS NOT NULL
+          AND (%s::text[] IS NULL OR lower(cp.source) = ANY(%s::text[]))
+        ORDER BY cp.gallery_index ASC NULLS LAST, lower(cp.source) ASC, cp.id ASC
+        """,
+        [person_id, requested_sources, requested_sources],
+    )
+    count_media_rows = pg.fetch_all(
+        """
+        SELECT
+          ml.id::text AS link_id,
+          %s::text AS person_id,
+          ml.media_asset_id::text AS media_asset_id,
+          lower(ma.source) AS source,
+          COALESCE(ma.metadata ->> 'source_url', ma.source_url) AS resolved_source_url,
+          ma.hosted_url,
+          COALESCE(ml.context ->> 'gallery_status', ma.metadata ->> 'gallery_status') AS gallery_status
+        FROM core.media_links AS ml
+        JOIN core.media_assets AS ma
+          ON ma.id = ml.media_asset_id
+        WHERE ml.entity_type = 'person'
+          AND ml.entity_id = %s::uuid
+          AND ml.kind = 'gallery'
+          AND ma.hosted_url IS NOT NULL
+          AND (%s::text[] IS NULL OR lower(coalesce(ma.source, '')) = ANY(%s::text[]))
+        ORDER BY ml.position ASC NULLS LAST, ml.id ASC
+        """,
+        [person_id, person_id, requested_sources, requested_sources],
+    )
+    return len(
+        _merge_person_gallery_rows(
+            [_map_cast_photo_row(row) for row in count_cast_rows],
+            [row for row in (_map_media_link_row(item) for item in count_media_rows) if row is not None],
+            include_broken=include_broken,
+        )
+    )
+
+
 def get_person_gallery_page(
     person_id: str,
     *,
@@ -478,6 +549,7 @@ def get_person_gallery_page(
     offset: int,
     include_broken: bool,
     sources: list[str] | None,
+    include_total_count: bool = True,
 ) -> tuple[dict[str, Any], int]:
     normalized_sources = [source.strip().lower() for source in (sources or []) if source and source.strip()]
     requested_sources = normalized_sources or None
@@ -564,28 +636,24 @@ def get_person_gallery_page(
     )
     cast_photos = [_map_cast_photo_row(row) for row in cast_rows]
     media_photos = [row for row in (_map_media_link_row(item) for item in media_rows) if row is not None]
-    merged: list[dict[str, Any]] = []
-    index_by_key: dict[tuple[Any, ...], int] = {}
-    for row in cast_photos:
-        if not include_broken and row["_broken"]:
-            continue
-        key = _media_key(row)
-        index_by_key[key] = len(merged)
-        merged.append(row)
-    for row in media_photos:
-        if not include_broken and row["_broken"]:
-            continue
-        key = _media_key(row)
-        existing_index = index_by_key.get(key)
-        if existing_index is None:
-            index_by_key[key] = len(merged)
-            merged.append(row)
-            continue
-        merged[existing_index] = row
+    merged = _merge_person_gallery_rows(
+        cast_photos,
+        media_photos,
+        include_broken=include_broken,
+    )
 
     has_more = len(merged) > limit
     page_rows = merged[:limit]
     photos = [{key: value for key, value in row.items() if not key.startswith("_")} for row in page_rows]
+    total_count = (
+        _count_person_gallery_rows(
+            person_id,
+            requested_sources=requested_sources,
+            include_broken=include_broken,
+        )
+        if include_total_count
+        else None
+    )
     return (
         {
             "photos": photos,
@@ -593,9 +661,11 @@ def get_person_gallery_page(
                 "limit": limit,
                 "offset": offset,
                 "count": len(photos),
+                "total_count": total_count,
+                "total_count_status": "exact" if include_total_count else "deferred",
                 "next_offset": offset + len(photos),
                 "has_more": has_more,
             },
         },
-        2,
+        4 if include_total_count else 2,
     )

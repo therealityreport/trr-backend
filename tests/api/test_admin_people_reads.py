@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +10,7 @@ from fastapi.testclient import TestClient
 from api.auth import require_internal_admin
 from api.main import app
 from api.routers import admin_people_reads as router_module
+from trr_backend.db.pg import DatabaseServiceUnavailableError
 
 
 @pytest.fixture(autouse=True)
@@ -294,3 +297,77 @@ def test_invalidate_person_cache_clears_backend_cache(monkeypatch: pytest.Monkey
     client.get("/api/v1/admin/people/person-1")
 
     assert calls["count"] == 2
+
+
+def test_get_gallery_returns_retryable_503_on_pool_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_person_gallery_page(*args, **kwargs):
+        raise DatabaseServiceUnavailableError("connection pool exhausted", reason="pool_capacity")
+
+    monkeypatch.setattr(router_module.people_repo, "get_person_gallery_page", fake_get_person_gallery_page)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/person-1/gallery")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "DATABASE_SERVICE_UNAVAILABLE",
+        "reason": "pool_capacity",
+        "message": "Database service unavailable. Check runtime DB connectivity and pool sizing.",
+        "retryable": True,
+        "retry_after_ms": 1000,
+    }
+
+
+def test_get_gallery_preserves_non_retryable_server_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_person_gallery_page(*args, **kwargs):
+        raise RuntimeError("gallery exploded")
+
+    monkeypatch.setattr(router_module.people_repo, "get_person_gallery_page", fake_get_person_gallery_page)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/people/person-1/gallery")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "gallery exploded"}
+
+
+def test_get_person_detail_collapses_concurrent_cold_misses(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = Event()
+    release = Event()
+    calls = {"count": 0}
+
+    def fake_get_person_detail(person_id: str):
+        calls["count"] += 1
+        started.set()
+        assert release.wait(timeout=1), "detail loader was never released"
+        return (
+            {
+                "id": person_id,
+                "full_name": "Brandi Glanville",
+                "known_for": None,
+                "external_ids": {},
+                "birthday": None,
+                "gender": None,
+                "biography": None,
+                "place_of_birth": None,
+                "homepage": None,
+                "profile_image_url": None,
+                "alternative_names": [],
+            },
+            1,
+        )
+
+    monkeypatch.setattr(router_module.people_repo, "get_person_detail", fake_get_person_detail)
+
+    client = TestClient(app)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(client.get, "/api/v1/admin/people/person-1")
+        assert started.wait(timeout=1), "detail loader never started"
+        second_future = executor.submit(client.get, "/api/v1/admin/people/person-1")
+        release.set()
+        first = first_future.result()
+        second = second_future.result()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls["count"] == 1

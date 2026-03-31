@@ -332,6 +332,8 @@ def test_database_service_unavailable_detail_distinguishes_pool_capacity() -> No
     assert detail["code"] == "DATABASE_SERVICE_UNAVAILABLE"
     assert detail["reason"] == "session_pool_capacity"
     assert "session-pool capacity" in detail["message"]
+    assert detail["retryable"] is True
+    assert detail["retry_after_ms"] == 1000
 
 
 def test_database_service_unavailable_detail_distinguishes_configuration_errors() -> None:
@@ -377,10 +379,21 @@ def test_get_pool_logs_effective_session_pooler_defaults_warning(
         with pg.db_connection():
             pass
 
-    assert "minconn=1 maxconn=2" in caplog.text
+    assert "minconn=1 maxconn=4" in caplog.text
     assert "minconn_source=default maxconn_source=default" in caplog.text
     assert "application_name=trr-backend" in caplog.text
-    assert "session_pooler_tiny_defaults" in caplog.text
+    assert "session_pooler_tiny_defaults" not in caplog.text
+
+
+def test_resolve_pool_sizing_keeps_production_session_defaults_conservative(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRR_DB_POOL_MINCONN", raising=False)
+    monkeypatch.delenv("TRR_DB_POOL_MAXCONN", raising=False)
+    monkeypatch.setenv("APP_ENV", "production")
+
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
+
+    assert sizing["minconn"] == 1
+    assert sizing["maxconn"] == 2
 
 
 def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -492,7 +505,7 @@ def test_db_connection_retries_pool_acquire_on_pool_exhaustion(monkeypatch: pyte
     assert fake_pool.putconn_calls == 1
 
 
-def test_build_pool_for_session_mode_supavisor_uses_smaller_default_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_pool_for_session_mode_supavisor_uses_local_dev_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     def _pool_factory(*, minconn, maxconn, **kwargs):
@@ -508,7 +521,7 @@ def test_build_pool_for_session_mode_supavisor_uses_smaller_default_pool(monkeyp
     pg._build_pool_for_url("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
     assert captured["minconn"] == 1
-    assert captured["maxconn"] == 2
+    assert captured["maxconn"] == 4
     assert captured["options"] == "-c idle_in_transaction_session_timeout=60000"
     assert captured["application_name"] == "trr-backend"
 
