@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Lock, Thread
 from time import monotonic, perf_counter
@@ -31,7 +31,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from trr_backend.db.pg import database_service_unavailable_detail, is_database_service_unavailable_error
 from trr_backend.job_plane import (
     canonical_execution_mode,
@@ -138,6 +138,8 @@ _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE: dict[Any, tuple[float, dict[str, Any]]]
 _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_COLLABORATORS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_SINGLEFLIGHT: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK = Lock()
 _WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST = 0
 _WEEK_DETAIL_DEFAULT_POST_LIMIT = 20
 _WEEK_DETAIL_DEFAULT_POST_OFFSET = 0
@@ -252,11 +254,12 @@ def _social_execution_mode_deprecation_payload() -> dict[str, Any]:
 
 
 def _start_runs_in_background(run_ids: list[str], background_tasks: BackgroundTasks, *, worker_prefix: str) -> None:
-    from trr_backend.repositories.social_season_analytics import execute_run
+    from trr_backend.repositories.social_season_analytics import execute_run_with_inline_worker_registration
 
     def _runner() -> None:
         for index, run_id in enumerate(run_ids, start=1):
-            execute_run(run_id, worker_id=f"{worker_prefix}:{index}")
+            worker_id = f"{worker_prefix}:{index}"
+            execute_run_with_inline_worker_registration(run_id, worker_id=worker_id)
 
     if not run_ids:
         return
@@ -698,6 +701,7 @@ def _account_profile_cache_key(
     page_size: int | None = None,
     search: str | None = None,
     window: str | None = None,
+    extra: tuple[Any, ...] | None = None,
 ) -> tuple[Any, ...]:
     return (
         surface,
@@ -707,6 +711,7 @@ def _account_profile_cache_key(
         page_size,
         str(search or "").strip().lower() or None,
         str(window or "").strip().lower() or None,
+        *(extra or ()),
     )
 
 
@@ -716,6 +721,57 @@ def _clear_account_profile_caches() -> None:
     _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE, _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_COLLABORATORS_CACHE, _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK)
+    with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
+        _ACCOUNT_PROFILE_SINGLEFLIGHT.clear()
+
+
+def _resolve_account_profile_singleflight(
+    cache_key: tuple[Any, ...],
+    loader: Callable[[], dict[str, Any]],
+    *,
+    cache: dict[Any, tuple[float, dict[str, Any]]] | None = None,
+    cache_lock: Lock | None = None,
+    ttl_seconds: int | None = None,
+    max_entries: int | None = None,
+) -> dict[str, Any]:
+    if cache is not None and cache_lock is not None:
+        cached_payload = _get_ttl_cached_payload(cache, cache_lock, cache_key)
+        if cached_payload is not None:
+            return cached_payload
+
+    with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
+        in_flight = _ACCOUNT_PROFILE_SINGLEFLIGHT.get(cache_key)
+        if in_flight is None:
+            in_flight = Future()
+            _ACCOUNT_PROFILE_SINGLEFLIGHT[cache_key] = in_flight
+            owns_loader = True
+        else:
+            owns_loader = False
+
+    if not owns_loader:
+        return copy.deepcopy(in_flight.result())
+
+    try:
+        payload = loader()
+        resolved_payload = copy.deepcopy(payload)
+        if cache is not None and cache_lock is not None and ttl_seconds is not None and max_entries is not None:
+            _set_ttl_cached_payload(
+                cache,
+                cache_lock,
+                cache_key,
+                resolved_payload,
+                ttl_seconds=ttl_seconds,
+                max_entries=max_entries,
+            )
+        in_flight.set_result(copy.deepcopy(resolved_payload))
+        return resolved_payload
+    except Exception as exc:
+        in_flight.set_exception(exc)
+        raise
+    finally:
+        with _ACCOUNT_PROFILE_SINGLEFLIGHT_LOCK:
+            if _ACCOUNT_PROFILE_SINGLEFLIGHT.get(cache_key) is in_flight:
+                _ACCOUNT_PROFILE_SINGLEFLIGHT.pop(cache_key, None)
 
 
 def _is_local_or_dev_runtime() -> bool:
@@ -733,7 +789,18 @@ def _is_local_or_dev_runtime() -> bool:
     if _env_truthy("TRR_LOCAL_DEV") or _env_truthy("SOCIAL_ALLOW_INLINE_DEV_FALLBACK"):
         return True
 
+    if canonical_execution_mode() == "local" and not is_remote_job_plane_enabled():
+        return True
+
     return False
+
+
+def _can_use_local_catalog_inline_fallback(
+    *,
+    allow_inline_dev_fallback: bool,
+    remote_plane_enforced: bool,
+) -> bool:
+    return bool(allow_inline_dev_fallback) and _is_local_or_dev_runtime() and not remote_plane_enforced
 
 
 def _load_social_auth_or_503(
@@ -845,7 +912,7 @@ class SocialAccountConfig(BaseModel):
 @router.post("/instagram/scrape", response_model=InstagramScrapeResponse)
 async def scrape_instagram(
     request: InstagramScrapeRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> InstagramScrapeResponse:
     """
     Scrape Instagram posts from a profile with optional filtering.
@@ -922,7 +989,7 @@ async def scrape_instagram(
 async def scrape_instagram_async(
     request: InstagramScrapeRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict:
     """
     Start an async Instagram scrape operation.
@@ -1082,7 +1149,7 @@ async def scrape_instagram_async(
 @router.get("/instagram/preview/{username}")
 async def preview_instagram_profile(
     username: str,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict:
     """
     Preview basic info about an Instagram profile.
@@ -1187,7 +1254,7 @@ class TikTokScrapeResponse(BaseModel):
 @router.post("/tiktok/scrape", response_model=TikTokScrapeResponse)
 async def scrape_tiktok(
     request: TikTokScrapeRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> TikTokScrapeResponse:
     """
     Scrape TikTok posts from a profile with optional filtering.
@@ -1264,7 +1331,7 @@ async def scrape_tiktok(
 @router.get("/tiktok/preview/{username}")
 async def preview_tiktok_profile(
     username: str,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict:
     """
     Preview basic info about a TikTok profile.
@@ -1279,7 +1346,10 @@ async def preview_tiktok_profile(
     logger.info(f"TikTok preview requested by {user.get('email')} for @{username}")
 
     try:
-        scraper = TikTokScraper()
+        from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
+
+        tiktok_cookies = _load_social_auth_or_503(platform="tiktok", surface="preview", loader=_load_tiktok_cookies)
+        scraper = TikTokScraper(cookies=tiktok_cookies)
         data = scraper.fetch_user_detail(username, delay=0)
 
         if not data:
@@ -1450,7 +1520,7 @@ def _tweet_to_response(tweet: Any) -> TweetResponse:
 @router.post("/twitter/search", response_model=TwitterSearchResponse)
 async def search_twitter(
     request: TwitterSearchRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> TwitterSearchResponse:
     """
     Search Twitter/X for tweets matching a query (hashtag or phrase).
@@ -1570,7 +1640,7 @@ async def search_twitter(
 @router.post("/twitter/replies", response_model=TweetRepliesResponse)
 async def fetch_tweet_replies(
     request: TweetRepliesRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> TweetRepliesResponse:
     """
     Fetch replies/comments for a specific tweet.
@@ -1618,7 +1688,7 @@ async def fetch_tweet_replies(
 @router.post("/twitter/quotes", response_model=TweetQuotesResponse)
 async def fetch_tweet_quotes(
     request: TweetQuotesRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> TweetQuotesResponse:
     """
     Fetch quote tweets for a specific tweet.
@@ -1721,7 +1791,7 @@ class YouTubeScrapeResponse(BaseModel):
 @router.post("/youtube/scrape", response_model=YouTubeScrapeResponse)
 async def scrape_youtube(
     request: YouTubeScrapeRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> YouTubeScrapeResponse:
     """
     Scrape YouTube channel videos with keyword filtering.
@@ -1948,7 +2018,7 @@ class FacebookSearchPostsResponse(BaseModel):
 @router.post("/facebook/scrape", response_model=FacebookScrapeResponse)
 async def scrape_facebook(
     request: FacebookScrapeRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> FacebookScrapeResponse:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
     from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
@@ -2011,7 +2081,7 @@ async def scrape_facebook(
 @router.post("/facebook/search-posts", response_model=FacebookSearchPostsResponse)
 async def search_facebook_posts(
     request: FacebookSearchPostsRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> FacebookSearchPostsResponse:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
     from trr_backend.socials.facebook import FacebookScraper, FacebookSearchConfig
@@ -2058,7 +2128,7 @@ async def search_facebook_posts(
 
 
 @router.get("/facebook/preview/{page_handle}")
-async def preview_facebook_page(page_handle: str, user: AdminUser) -> dict:
+async def preview_facebook_page(page_handle: str, user: InternalAdminUser) -> dict:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
     from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
 
@@ -2119,7 +2189,7 @@ class FacebookPostScrapeResponse(BaseModel):
 @router.post("/facebook/scrape-post", response_model=FacebookPostScrapeResponse)
 async def scrape_facebook_post(
     request: FacebookPostScrapeRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> FacebookPostScrapeResponse:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
     from trr_backend.socials.facebook import FacebookScraper
@@ -2208,7 +2278,7 @@ class ThreadsScrapeResponse(BaseModel):
 @router.post("/threads/scrape", response_model=ThreadsScrapeResponse)
 async def scrape_threads(
     request: ThreadsScrapeRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> ThreadsScrapeResponse:
     from trr_backend.repositories.social_season_analytics import _load_threads_cookies
     from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
@@ -2286,7 +2356,7 @@ async def scrape_threads(
 
 
 @router.get("/threads/preview/{username}")
-async def preview_threads_profile(username: str, user: AdminUser) -> dict:
+async def preview_threads_profile(username: str, user: InternalAdminUser) -> dict:
     from trr_backend.repositories.social_season_analytics import _load_threads_cookies
     from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
 
@@ -2508,6 +2578,7 @@ class CancelStuckJobsRequest(BaseModel):
 
 class DismissRecentFailuresRequest(BaseModel):
     job_ids: list[UUID] = Field(default_factory=list, max_length=500)
+    dismiss_all_visible: bool = False
 
 
 class ResetSocialIngestHealthRequest(BaseModel):
@@ -2727,7 +2798,7 @@ def _start_reddit_refresh_run_from_serialized_payload(
 async def get_season_targets(
     season_id: UUID,
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_targets
 
@@ -2759,7 +2830,7 @@ async def get_season_targets(
 async def put_season_targets(
     season_id: UUID,
     payload: SeasonSocialTargetsPutRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import put_targets
 
@@ -2784,7 +2855,7 @@ async def ingest_season_social(
     season_id: UUID,
     payload: SeasonSocialIngestRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import (
         SocialIngestValidationError,
@@ -3088,7 +3159,7 @@ async def orchestrate_season_social_ingest(
     season_id: UUID,
     payload: SeasonSocialOrchestrationRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         SocialWorkerUnavailableError,
@@ -3193,7 +3264,7 @@ async def create_season_sync_session(
     season_id: UUID,
     payload: SeasonSocialIngestRequest,
     _: BackgroundTasks,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         SocialWorkerUnavailableError,
@@ -3318,7 +3389,7 @@ async def _build_sync_session_stream_payload(sync_session_id: str) -> dict[str, 
 async def get_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
 
@@ -3344,7 +3415,7 @@ async def stream_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
     request: Request,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> StreamingResponse:
     async def event_stream() -> Any:
         sync_session_token = str(sync_session_id)
@@ -3405,7 +3476,7 @@ async def stream_season_sync_session(
 async def cancel_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import cancel_sync_session
 
@@ -3431,7 +3502,7 @@ async def retry_season_sync_session(
     season_id: UUID,
     sync_session_id: UUID,
     payload: SyncSessionRetryRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_sync_orchestrator import retry_sync_session
 
@@ -3473,7 +3544,7 @@ async def get_season_ingest_schedule_preview(
     runner_b_start_offset_hours: int | None = Query(default=None, ge=0, le=168),
     day_weight_profile: Literal["default", "rhoslc_default"] = Query(default="default"),
     priority_mode: Literal["default", "episode_peak_weighted"] = Query(default="default"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import preview_ingest_schedule
 
@@ -3520,7 +3591,7 @@ def get_shared_account_sources_route(
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
     include_inactive: bool = Query(default=True),
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_shared_account_sources
 
@@ -3540,7 +3611,7 @@ def get_shared_account_sources_route(
 @router.put("/shared/sources")
 def put_shared_account_sources_route(
     payload: SharedAccountSourcesPutRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import put_shared_account_sources
 
@@ -3558,7 +3629,7 @@ def put_shared_account_sources_route(
 def get_social_account_profile_summary_route(
     platform: str,
     account_handle: str,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_summary
 
@@ -3567,28 +3638,26 @@ def get_social_account_profile_summary_route(
         platform=platform,
         account_handle=account_handle,
     )
-    cached_payload = _get_ttl_cached_payload(
-        _ACCOUNT_PROFILE_SUMMARY_CACHE,
-        _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
-        cache_key,
-    )
-    if cached_payload is not None:
-        return cached_payload
     try:
-        payload = get_social_account_profile_summary(platform=platform, account_handle=account_handle)
-        _set_ttl_cached_payload(
-            _ACCOUNT_PROFILE_SUMMARY_CACHE,
-            _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
+        return _resolve_account_profile_singleflight(
             cache_key,
-            payload,
+            lambda: get_social_account_profile_summary(platform=platform, account_handle=account_handle),
+            cache=_ACCOUNT_PROFILE_SUMMARY_CACHE,
+            cache_lock=_ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
             ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
             max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
         )
-        return payload
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account profile summary: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/posts")
@@ -3598,7 +3667,7 @@ def get_social_account_profile_posts_route(
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
     search: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_posts
 
@@ -3643,7 +3712,7 @@ def get_social_account_catalog_posts_route(
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
     assignment_status: Literal["assigned", "unassigned", "ambiguous", "needs_review"] | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_catalog_posts
 
@@ -3666,7 +3735,7 @@ def get_social_account_profile_hashtags_route(
     platform: str,
     account_handle: str,
     window: Literal["all", "30d", "365d"] | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_hashtags
 
@@ -3698,6 +3767,13 @@ def get_social_account_profile_hashtags_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account profile hashtags: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/hashtags/timeline")
@@ -3705,7 +3781,7 @@ def get_social_account_profile_hashtag_timeline_route(
     platform: str,
     account_handle: str,
     window: Literal["all", "30d", "365d"] | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_hashtag_timeline
 
@@ -3747,16 +3823,31 @@ def get_social_account_profile_hashtag_timeline_route(
 def get_social_account_catalog_review_queue_route(
     platform: str,
     account_handle: str,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_catalog_review_queue
 
+    cache_key = _account_profile_cache_key(
+        surface="catalog-review-queue",
+        platform=platform,
+        account_handle=account_handle,
+    )
     try:
-        return get_social_account_catalog_review_queue(platform=platform, account_handle=account_handle)
+        return _resolve_account_profile_singleflight(
+            cache_key,
+            lambda: get_social_account_catalog_review_queue(platform=platform, account_handle=account_handle),
+        )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog review queue: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.put("/profiles/{platform}/{account_handle}/hashtags")
@@ -3764,7 +3855,7 @@ def put_social_account_profile_hashtags_route(
     platform: str,
     account_handle: str,
     payload: SocialAccountProfileHashtagsPutRequest,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import put_social_account_profile_hashtags
 
@@ -3783,13 +3874,342 @@ def put_social_account_profile_hashtags_route(
         raise _lookup_error_to_not_found(exc) from exc
 
 
+@router.get("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/progress")
+def get_social_account_catalog_run_progress_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    recent_log_limit: int = Query(default=20, ge=1, le=100),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_run_progress
+
+    cache_key = _account_profile_cache_key(
+        surface="catalog-run-progress",
+        platform=platform,
+        account_handle=account_handle,
+        extra=(str(run_id), recent_log_limit),
+    )
+    try:
+        return _resolve_account_profile_singleflight(
+            cache_key,
+            lambda: get_social_account_catalog_run_progress(
+                platform=platform,
+                account_handle=account_handle,
+                run_id=str(run_id),
+                recent_log_limit=recent_log_limit,
+            ),
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog run progress: platform=%s account=%s run_id=%s",
+            platform,
+            account_handle,
+            run_id,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/catalog/verification")
+def get_social_account_catalog_verification_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID | None = None,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_verification
+
+    try:
+        return get_social_account_catalog_verification(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id) if run_id else None,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog verification: platform=%s account=%s run_id=%s",
+            platform,
+            account_handle,
+            run_id,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/catalog/gap-analysis")
+def get_social_account_catalog_gap_analysis_route(
+    platform: str,
+    account_handle: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_gap_analysis_status
+
+    cache_key = _account_profile_cache_key(
+        surface="catalog-gap-analysis",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    try:
+        return _resolve_account_profile_singleflight(
+            cache_key,
+            lambda: get_social_account_catalog_gap_analysis_status(
+                platform=platform,
+                account_handle=account_handle,
+            ),
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog gap analysis: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+def _to_optional_request_header_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _start_social_catalog_gap_analysis_operation(
+    *,
+    platform: str,
+    account_handle: str,
+    request: Request,
+) -> dict[str, Any]:
+    from trr_backend.pipeline.admin_operations import ensure_operation_execution
+    from trr_backend.repositories import admin_operations as admin_operations_repo
+    from trr_backend.repositories.social_season_analytics import (
+        SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
+        build_social_account_catalog_gap_analysis_operation_producer,
+    )
+
+    request_payload = {
+        "platform": platform,
+        "account_handle": account_handle,
+    }
+    producer = build_social_account_catalog_gap_analysis_operation_producer(request_payload=request_payload)
+    request_id = _to_optional_request_header_value(request.headers.get("x-trr-request-id"))
+    client_session_id = _to_optional_request_header_value(request.headers.get("x-trr-tab-session-id"))
+    client_workflow_id = _to_optional_request_header_value(request.headers.get("x-trr-flow-key"))
+
+    operation, attached = admin_operations_repo.create_or_attach_operation(
+        operation_type=SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
+        request_payload=request_payload,
+        initiated_by=None,
+        request_id=request_id,
+        client_session_id=client_session_id,
+        client_workflow_id=client_workflow_id,
+        allow_attach=True,
+    )
+    operation_id = str(operation.get("id") or "").strip()
+    if not operation_id:
+        raise RuntimeError("Failed to create social catalog gap-analysis operation")
+    if not attached:
+        ensure_operation_execution(operation_id, producer=producer, request_id=request_id)
+
+    refreshed = admin_operations_repo.get_operation(operation_id) or operation
+    refreshed["attached"] = attached
+    return refreshed
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/gap-analysis/run")
+def post_social_account_catalog_gap_analysis_run_route(
+    platform: str,
+    account_handle: str,
+    request: Request,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_gap_analysis_status
+
+    try:
+        operation = _start_social_catalog_gap_analysis_operation(
+            platform=platform,
+            account_handle=account_handle,
+            request=request,
+        )
+        payload = get_social_account_catalog_gap_analysis_status(
+            platform=platform,
+            account_handle=account_handle,
+        )
+        payload["attached"] = bool(operation.get("attached"))
+        payload["operation_id"] = str(operation.get("id") or payload.get("operation_id") or "").strip() or None
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to start social account catalog gap analysis: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/cancel")
+def post_social_account_catalog_run_cancel_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import cancel_social_account_catalog_run
+
+    try:
+        result = cancel_social_account_catalog_run(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            cancelled_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/dismiss")
+def post_social_account_catalog_run_dismiss_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import dismiss_social_account_catalog_run
+
+    try:
+        result = dismiss_social_account_catalog_run(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            dismissed_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/review-queue/{item_id}/resolve")
+def post_social_account_catalog_review_queue_resolve_route(
+    platform: str,
+    account_handle: str,
+    item_id: UUID,
+    payload: CatalogReviewResolveRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import resolve_social_account_catalog_review_queue_item
+
+    del platform, account_handle
+    try:
+        response = resolve_social_account_catalog_review_queue_item(
+            item_id=str(item_id),
+            resolution_action=payload.resolution_action,
+            show_id=str(payload.show_id) if payload.show_id else None,
+            updated_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return response
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/freshness")
+def post_social_account_catalog_freshness_route(
+    platform: str,
+    account_handle: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_freshness
+
+    cache_key = _account_profile_cache_key(
+        surface="catalog-freshness",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    try:
+        return _resolve_account_profile_singleflight(
+            cache_key,
+            lambda: get_social_account_catalog_freshness(platform=platform, account_handle=account_handle),
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog freshness: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/collaborators-tags")
+def get_social_account_profile_collaborators_tags_route(
+    platform: str,
+    account_handle: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_collaborators_tags
+
+    cache_key = _account_profile_cache_key(
+        surface="collaborators-tags",
+        platform=platform,
+        account_handle=account_handle,
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
+        _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_collaborators_tags(platform=platform, account_handle=account_handle)
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
+            _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
 @router.post("/profiles/{platform}/{account_handle}/catalog/backfill")
 async def post_social_account_catalog_backfill_route(
     platform: str,
     account_handle: str,
     payload: CatalogBackfillRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         SocialIngestConflictError,
@@ -3808,47 +4228,50 @@ async def post_social_account_catalog_backfill_route(
         platform=platform,
         pipeline_ingest_mode="shared_account_catalog_backfill",
     )
+    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
+        allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
+        remote_plane_enforced=remote_plane_enforced,
+    )
     if queue_enabled:
-        try:
-            assert_worker_available_when_queue_enabled(
-                required_execution_backend="modal" if requires_modal_executor else None,
-                platform=platform if requires_modal_executor else None,
-            )
-            if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable(platform)
-        except SocialWorkerUnavailableError as exc:
-            if (
-                payload.allow_inline_dev_fallback
-                and _is_local_or_dev_runtime()
-                and not remote_plane_enforced
-                and not requires_modal_executor
-            ):
-                queue_enabled = False
-                used_inline_fallback = True
-            else:
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "code": (
-                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                            if remote_plane_enforced
-                            else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                            if requires_modal_executor
-                            else "SOCIAL_WORKER_UNAVAILABLE"
-                        ),
-                        "message": (
-                            "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                            "reporting heartbeats."
-                            if remote_plane_enforced
-                            else str(exc)
-                        ),
-                        "execution_mode": canonical_execution_mode(),
-                        "execution_owner": execution_owner_label(),
-                        "worker_health": _worker_health_detail(exc.worker_health),
-                        "required_execution_backend": "modal" if requires_modal_executor else None,
-                    },
-                ) from exc
-    elif remote_plane_enforced or requires_modal_executor:
+        if requires_modal_executor and can_use_local_inline_fallback:
+            queue_enabled = False
+            used_inline_fallback = True
+        else:
+            try:
+                assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal" if requires_modal_executor else None,
+                    platform=platform if requires_modal_executor else None,
+                )
+                if requires_modal_executor:
+                    _raise_if_modal_social_dispatch_unresolvable(platform)
+            except SocialWorkerUnavailableError as exc:
+                if can_use_local_inline_fallback:
+                    queue_enabled = False
+                    used_inline_fallback = True
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": (
+                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                                if remote_plane_enforced
+                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                                if requires_modal_executor
+                                else "SOCIAL_WORKER_UNAVAILABLE"
+                            ),
+                            "message": (
+                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
+                                "reporting heartbeats."
+                                if remote_plane_enforced
+                                else str(exc)
+                            ),
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": _worker_health_detail(exc.worker_health),
+                            "required_execution_backend": "modal" if requires_modal_executor else None,
+                        },
+                    ) from exc
+    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
         raise HTTPException(
             status_code=503,
             detail={
@@ -3866,7 +4289,7 @@ async def post_social_account_catalog_backfill_route(
             },
         )
     else:
-        used_inline_fallback = bool(payload.allow_inline_dev_fallback)
+        used_inline_fallback = can_use_local_inline_fallback
 
     try:
         date_start = payload.date_start if payload.backfill_scope == "bounded_window" else None
@@ -3879,6 +4302,7 @@ async def post_social_account_catalog_backfill_route(
             date_end=date_end,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
+            allow_local_dev_inline_bypass=used_inline_fallback,
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -3928,7 +4352,7 @@ async def post_social_account_catalog_sync_recent_route(
     account_handle: str,
     payload: CatalogSyncRecentRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         SocialIngestConflictError,
@@ -3947,47 +4371,50 @@ async def post_social_account_catalog_sync_recent_route(
         platform=platform,
         pipeline_ingest_mode="shared_account_catalog_backfill",
     )
+    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
+        allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
+        remote_plane_enforced=remote_plane_enforced,
+    )
     if queue_enabled:
-        try:
-            assert_worker_available_when_queue_enabled(
-                required_execution_backend="modal" if requires_modal_executor else None,
-                platform=platform if requires_modal_executor else None,
-            )
-            if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable(platform)
-        except SocialWorkerUnavailableError as exc:
-            if (
-                payload.allow_inline_dev_fallback
-                and _is_local_or_dev_runtime()
-                and not remote_plane_enforced
-                and not requires_modal_executor
-            ):
-                queue_enabled = False
-                used_inline_fallback = True
-            else:
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "code": (
-                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                            if remote_plane_enforced
-                            else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                            if requires_modal_executor
-                            else "SOCIAL_WORKER_UNAVAILABLE"
-                        ),
-                        "message": (
-                            "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                            "reporting heartbeats."
-                            if remote_plane_enforced
-                            else str(exc)
-                        ),
-                        "execution_mode": canonical_execution_mode(),
-                        "execution_owner": execution_owner_label(),
-                        "worker_health": _worker_health_detail(exc.worker_health),
-                        "required_execution_backend": "modal" if requires_modal_executor else None,
-                    },
-                ) from exc
-    elif remote_plane_enforced or requires_modal_executor:
+        if requires_modal_executor and can_use_local_inline_fallback:
+            queue_enabled = False
+            used_inline_fallback = True
+        else:
+            try:
+                assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal" if requires_modal_executor else None,
+                    platform=platform if requires_modal_executor else None,
+                )
+                if requires_modal_executor:
+                    _raise_if_modal_social_dispatch_unresolvable(platform)
+            except SocialWorkerUnavailableError as exc:
+                if can_use_local_inline_fallback:
+                    queue_enabled = False
+                    used_inline_fallback = True
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": (
+                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                                if remote_plane_enforced
+                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                                if requires_modal_executor
+                                else "SOCIAL_WORKER_UNAVAILABLE"
+                            ),
+                            "message": (
+                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
+                                "reporting heartbeats."
+                                if remote_plane_enforced
+                                else str(exc)
+                            ),
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": _worker_health_detail(exc.worker_health),
+                            "required_execution_backend": "modal" if requires_modal_executor else None,
+                        },
+                    ) from exc
+    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
         raise HTTPException(
             status_code=503,
             detail={
@@ -4005,7 +4432,7 @@ async def post_social_account_catalog_sync_recent_route(
             },
         )
     else:
-        used_inline_fallback = bool(payload.allow_inline_dev_fallback)
+        used_inline_fallback = can_use_local_inline_fallback
 
     try:
         result = sync_recent_social_account_catalog(
@@ -4015,6 +4442,7 @@ async def post_social_account_catalog_sync_recent_route(
             lookback_days=payload.lookback_days,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
+            allow_local_dev_inline_bypass=used_inline_fallback,
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -4064,7 +4492,7 @@ async def post_social_account_catalog_sync_newer_route(
     account_handle: str,
     payload: CatalogSyncNewerRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         SocialIngestConflictError,
@@ -4083,47 +4511,50 @@ async def post_social_account_catalog_sync_newer_route(
         platform=platform,
         pipeline_ingest_mode="shared_account_catalog_backfill",
     )
+    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
+        allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
+        remote_plane_enforced=remote_plane_enforced,
+    )
     if queue_enabled:
-        try:
-            assert_worker_available_when_queue_enabled(
-                required_execution_backend="modal" if requires_modal_executor else None,
-                platform=platform if requires_modal_executor else None,
-            )
-            if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable(platform)
-        except SocialWorkerUnavailableError as exc:
-            if (
-                payload.allow_inline_dev_fallback
-                and _is_local_or_dev_runtime()
-                and not remote_plane_enforced
-                and not requires_modal_executor
-            ):
-                queue_enabled = False
-                used_inline_fallback = True
-            else:
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "code": (
-                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                            if remote_plane_enforced
-                            else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                            if requires_modal_executor
-                            else "SOCIAL_WORKER_UNAVAILABLE"
-                        ),
-                        "message": (
-                            "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                            "reporting heartbeats."
-                            if remote_plane_enforced
-                            else str(exc)
-                        ),
-                        "execution_mode": canonical_execution_mode(),
-                        "execution_owner": execution_owner_label(),
-                        "worker_health": _worker_health_detail(exc.worker_health),
-                        "required_execution_backend": "modal" if requires_modal_executor else None,
-                    },
-                ) from exc
-    elif remote_plane_enforced or requires_modal_executor:
+        if requires_modal_executor and can_use_local_inline_fallback:
+            queue_enabled = False
+            used_inline_fallback = True
+        else:
+            try:
+                assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal" if requires_modal_executor else None,
+                    platform=platform if requires_modal_executor else None,
+                )
+                if requires_modal_executor:
+                    _raise_if_modal_social_dispatch_unresolvable(platform)
+            except SocialWorkerUnavailableError as exc:
+                if can_use_local_inline_fallback:
+                    queue_enabled = False
+                    used_inline_fallback = True
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": (
+                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                                if remote_plane_enforced
+                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                                if requires_modal_executor
+                                else "SOCIAL_WORKER_UNAVAILABLE"
+                            ),
+                            "message": (
+                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
+                                "reporting heartbeats."
+                                if remote_plane_enforced
+                                else str(exc)
+                            ),
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": _worker_health_detail(exc.worker_health),
+                            "required_execution_backend": "modal" if requires_modal_executor else None,
+                        },
+                    ) from exc
+    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
         raise HTTPException(
             status_code=503,
             detail={
@@ -4141,7 +4572,7 @@ async def post_social_account_catalog_sync_newer_route(
             },
         )
     else:
-        used_inline_fallback = bool(payload.allow_inline_dev_fallback)
+        used_inline_fallback = can_use_local_inline_fallback
 
     try:
         result = sync_newer_social_account_catalog(
@@ -4150,6 +4581,7 @@ async def post_social_account_catalog_sync_newer_route(
             source_scope=payload.source_scope,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
+            allow_local_dev_inline_bypass=used_inline_fallback,
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -4199,7 +4631,7 @@ async def post_social_account_catalog_resume_tail_route(
     account_handle: str,
     payload: CatalogResumeTailRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         SocialIngestConflictError,
@@ -4218,47 +4650,50 @@ async def post_social_account_catalog_resume_tail_route(
         platform=platform,
         pipeline_ingest_mode="shared_account_catalog_backfill",
     )
+    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
+        allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
+        remote_plane_enforced=remote_plane_enforced,
+    )
     if queue_enabled:
-        try:
-            assert_worker_available_when_queue_enabled(
-                required_execution_backend="modal" if requires_modal_executor else None,
-                platform=platform if requires_modal_executor else None,
-            )
-            if requires_modal_executor:
-                _raise_if_modal_social_dispatch_unresolvable(platform)
-        except SocialWorkerUnavailableError as exc:
-            if (
-                payload.allow_inline_dev_fallback
-                and _is_local_or_dev_runtime()
-                and not remote_plane_enforced
-                and not requires_modal_executor
-            ):
-                queue_enabled = False
-                used_inline_fallback = True
-            else:
-                raise HTTPException(
-                    status_code=503,
-                    detail={
-                        "code": (
-                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                            if remote_plane_enforced
-                            else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                            if requires_modal_executor
-                            else "SOCIAL_WORKER_UNAVAILABLE"
-                        ),
-                        "message": (
-                            "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                            "reporting heartbeats."
-                            if remote_plane_enforced
-                            else str(exc)
-                        ),
-                        "execution_mode": canonical_execution_mode(),
-                        "execution_owner": execution_owner_label(),
-                        "worker_health": _worker_health_detail(exc.worker_health),
-                        "required_execution_backend": "modal" if requires_modal_executor else None,
-                    },
-                ) from exc
-    elif remote_plane_enforced or requires_modal_executor:
+        if requires_modal_executor and can_use_local_inline_fallback:
+            queue_enabled = False
+            used_inline_fallback = True
+        else:
+            try:
+                assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal" if requires_modal_executor else None,
+                    platform=platform if requires_modal_executor else None,
+                )
+                if requires_modal_executor:
+                    _raise_if_modal_social_dispatch_unresolvable(platform)
+            except SocialWorkerUnavailableError as exc:
+                if can_use_local_inline_fallback:
+                    queue_enabled = False
+                    used_inline_fallback = True
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": (
+                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                                if remote_plane_enforced
+                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                                if requires_modal_executor
+                                else "SOCIAL_WORKER_UNAVAILABLE"
+                            ),
+                            "message": (
+                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
+                                "reporting heartbeats."
+                                if remote_plane_enforced
+                                else str(exc)
+                            ),
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": _worker_health_detail(exc.worker_health),
+                            "required_execution_backend": "modal" if requires_modal_executor else None,
+                        },
+                    ) from exc
+    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
         raise HTTPException(
             status_code=503,
             detail={
@@ -4276,7 +4711,7 @@ async def post_social_account_catalog_resume_tail_route(
             },
         )
     else:
-        used_inline_fallback = bool(payload.allow_inline_dev_fallback)
+        used_inline_fallback = can_use_local_inline_fallback
 
     try:
         result = resume_tail_social_account_catalog(
@@ -4285,6 +4720,7 @@ async def post_social_account_catalog_resume_tail_route(
             source_scope=payload.source_scope,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
+            allow_local_dev_inline_bypass=used_inline_fallback,
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -4328,168 +4764,11 @@ async def post_social_account_catalog_resume_tail_route(
     }
 
 
-@router.get("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/progress")
-def get_social_account_catalog_run_progress_route(
-    platform: str,
-    account_handle: str,
-    run_id: UUID,
-    recent_log_limit: int = Query(default=20, ge=1, le=100),
-    _: AdminUser = None,
-) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_run_progress
-
-    try:
-        return get_social_account_catalog_run_progress(
-            platform=platform,
-            account_handle=account_handle,
-            run_id=str(run_id),
-            recent_log_limit=recent_log_limit,
-        )
-    except ValueError as exc:
-        raise _value_error_to_bad_request(exc) from exc
-    except LookupError as exc:
-        raise _lookup_error_to_not_found(exc) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "Failed to fetch social account catalog run progress: platform=%s account=%s run_id=%s",
-            platform,
-            account_handle,
-            run_id,
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@router.get("/profiles/{platform}/{account_handle}/catalog/verification")
-def get_social_account_catalog_verification_route(
-    platform: str,
-    account_handle: str,
-    run_id: UUID | None = None,
-    _: AdminUser = None,
-) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_verification
-
-    try:
-        return get_social_account_catalog_verification(
-            platform=platform,
-            account_handle=account_handle,
-            run_id=str(run_id) if run_id else None,
-        )
-    except ValueError as exc:
-        raise _value_error_to_bad_request(exc) from exc
-    except LookupError as exc:
-        raise _lookup_error_to_not_found(exc) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "Failed to fetch social account catalog verification: platform=%s account=%s run_id=%s",
-            platform,
-            account_handle,
-            run_id,
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/cancel")
-def post_social_account_catalog_run_cancel_route(
-    platform: str,
-    account_handle: str,
-    run_id: UUID,
-    user: AdminUser,
-) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import cancel_social_account_catalog_run
-
-    try:
-        result = cancel_social_account_catalog_run(
-            platform=platform,
-            account_handle=account_handle,
-            run_id=str(run_id),
-            cancelled_by=(user or {}).get("email"),
-        )
-        _clear_account_profile_caches()
-        return result
-    except ValueError as exc:
-        raise _value_error_to_bad_request(exc) from exc
-    except LookupError as exc:
-        raise _lookup_error_to_not_found(exc) from exc
-
-
-@router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/dismiss")
-def post_social_account_catalog_run_dismiss_route(
-    platform: str,
-    account_handle: str,
-    run_id: UUID,
-    user: AdminUser,
-) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import dismiss_social_account_catalog_run
-
-    try:
-        result = dismiss_social_account_catalog_run(
-            platform=platform,
-            account_handle=account_handle,
-            run_id=str(run_id),
-            dismissed_by=(user or {}).get("email"),
-        )
-        _clear_account_profile_caches()
-        return result
-    except ValueError as exc:
-        raise _value_error_to_bad_request(exc) from exc
-    except LookupError as exc:
-        raise _lookup_error_to_not_found(exc) from exc
-
-
-@router.post("/profiles/{platform}/{account_handle}/catalog/review-queue/{item_id}/resolve")
-def post_social_account_catalog_review_queue_resolve_route(
-    platform: str,
-    account_handle: str,
-    item_id: UUID,
-    payload: CatalogReviewResolveRequest,
-    user: AdminUser,
-) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import resolve_social_account_catalog_review_queue_item
-
-    del platform, account_handle
-    try:
-        response = resolve_social_account_catalog_review_queue_item(
-            item_id=str(item_id),
-            resolution_action=payload.resolution_action,
-            show_id=str(payload.show_id) if payload.show_id else None,
-            updated_by=(user or {}).get("email"),
-        )
-        _clear_account_profile_caches()
-        return response
-    except ValueError as exc:
-        raise _value_error_to_bad_request(exc) from exc
-    except LookupError as exc:
-        raise _lookup_error_to_not_found(exc) from exc
-
-
-@router.post("/profiles/{platform}/{account_handle}/catalog/freshness")
-def post_social_account_catalog_freshness_route(
-    platform: str,
-    account_handle: str,
-    _: AdminUser = None,
-) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_freshness
-
-    try:
-        return get_social_account_catalog_freshness(platform=platform, account_handle=account_handle)
-    except ValueError as exc:
-        raise _value_error_to_bad_request(exc) from exc
-    except LookupError as exc:
-        raise _lookup_error_to_not_found(exc) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "Failed to fetch social account catalog freshness: platform=%s account=%s",
-            platform,
-            account_handle,
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
 @router.get("/profiles/{platform}/{account_handle}/collaborators-tags")
 def get_social_account_profile_collaborators_tags_route(
     platform: str,
     account_handle: str,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_collaborators_tags
 
@@ -4526,7 +4805,7 @@ def get_social_account_profile_collaborators_tags_route(
 async def ingest_shared_social_accounts(
     payload: SharedSocialIngestRequest,
     background_tasks: BackgroundTasks,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         SocialIngestValidationError,
@@ -4635,7 +4914,7 @@ def get_shared_ingest_runs(
     status: str | None = Query(default=None),
     source_scope: Literal["bravo", "creator", "community"] | None = Query(default=None),
     run_id: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> list[dict[str, Any]]:
     from trr_backend.repositories.social_season_analytics import list_shared_runs
 
@@ -4645,7 +4924,7 @@ def get_shared_ingest_runs(
 @router.post("/shared/ingest/runs/{run_id}/cancel")
 def cancel_shared_ingest_run(
     run_id: str,
-    user: AdminUser,
+    user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import cancel_shared_run
 
@@ -4660,7 +4939,7 @@ def get_shared_review_queue(
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
     review_status: Literal["open", "resolved", "ignored"] = Query(default="open"),
     limit: int = Query(default=100, ge=1, le=500),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import list_shared_review_queue
 
@@ -4680,7 +4959,7 @@ def get_shared_review_queue(
 def resolve_shared_review_queue(
     item_id: str,
     payload: SharedReviewResolveRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import resolve_shared_review_queue_item
 
@@ -4699,7 +4978,7 @@ def resolve_shared_review_queue(
 def get_season_shared_status_route(
     season_id: UUID,
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_season_shared_status
 
@@ -4713,7 +4992,7 @@ def get_season_shared_status_route(
 
 
 @router.get("/ingest/worker-health")
-def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
+def get_social_ingest_worker_health(_: InternalAdminUser = None) -> dict:
     from trr_backend.repositories.social_season_analytics import get_worker_health, is_queue_enabled
 
     try:
@@ -4725,7 +5004,7 @@ def get_social_ingest_worker_health(_: AdminUser = None) -> dict:
 
 
 @router.get("/ingest/workers/{worker_id}/detail")
-def get_social_ingest_worker_detail(worker_id: str, _: AdminUser = None) -> dict[str, Any]:
+def get_social_ingest_worker_detail(worker_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_worker_detail
 
     try:
@@ -4744,7 +5023,7 @@ def get_social_ingest_worker_detail(worker_id: str, _: AdminUser = None) -> dict
 @router.post("/ingest/workers/purge-inactive")
 def purge_social_ingest_inactive_workers(
     payload: PurgeInactiveWorkersRequest | None = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import purge_inactive_workers
 
@@ -4758,7 +5037,7 @@ def purge_social_ingest_inactive_workers(
 @router.get("/ingest/queue-status")
 def get_social_ingest_queue_status(
     fresh: bool = Query(default=False, description="Bypass queue-status TTL cache when true"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_queue_status
 
@@ -4772,7 +5051,7 @@ def get_social_ingest_queue_status(
 @router.post("/ingest/stuck-jobs/cancel")
 def cancel_social_ingest_stuck_jobs(
     payload: CancelStuckJobsRequest | None = None,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import cancel_stuck_jobs
 
@@ -4792,7 +5071,7 @@ def cancel_social_ingest_stuck_jobs(
 @router.post("/ingest/dispatch-blocked-jobs/cancel")
 def cancel_social_ingest_dispatch_blocked_jobs(
     payload: CancelStuckJobsRequest | None = None,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import cancel_dispatch_blocked_jobs
 
@@ -4811,7 +5090,7 @@ def cancel_social_ingest_dispatch_blocked_jobs(
 
 @router.post("/ingest/active-jobs/cancel")
 def cancel_social_ingest_active_jobs(
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import cancel_active_jobs
 
@@ -4827,7 +5106,7 @@ def cancel_social_ingest_active_jobs(
 @router.post("/ingest/recent-failures/dismiss")
 def dismiss_social_ingest_recent_failures(
     payload: DismissRecentFailuresRequest | None = None,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import dismiss_recent_failures
 
@@ -4835,6 +5114,7 @@ def dismiss_social_ingest_recent_failures(
         job_ids = [str(job_id) for job_id in (payload.job_ids if payload else [])]
         return dismiss_recent_failures(
             job_ids=job_ids,
+            dismiss_all_visible=bool(payload.dismiss_all_visible) if payload else False,
             dismissed_by=(user or {}).get("email"),
         )
     except ValueError as exc:
@@ -4847,7 +5127,7 @@ def dismiss_social_ingest_recent_failures(
 @router.post("/ingest/reset-health")
 def reset_social_ingest_health_route(
     payload: ResetSocialIngestHealthRequest | None = None,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     del payload
     from trr_backend.repositories.social_season_analytics import reset_social_ingest_health
@@ -4865,7 +5145,7 @@ def reset_social_ingest_health_route(
 def debug_social_ingest_job(
     job_id: UUID,
     payload: JobDebugRequest | None = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import debug_ingest_job_with_openai
 
@@ -4890,7 +5170,7 @@ def debug_social_ingest_job(
 
 
 @router.get("/ingest/health-dot")
-def get_social_ingest_health_dot(_: AdminUser = None) -> dict[str, Any]:
+def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_queue_status
 
     try:
@@ -4929,7 +5209,7 @@ def get_social_ingest_health_dot(_: AdminUser = None) -> dict[str, Any]:
 async def start_reddit_refresh_run(
     payload: RedditRefreshRunRequest,
     background_tasks: BackgroundTasks,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         serialized = _serialize_reddit_refresh_payload(payload)
@@ -4955,7 +5235,7 @@ async def start_reddit_refresh_run(
 async def backfill_reddit_refresh_runs(
     payload: RedditRefreshBackfillRequest,
     request: Request,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.pipeline.admin_operations import start_operation_for_stream
     from trr_backend.repositories.reddit_refresh import (
@@ -5003,7 +5283,7 @@ async def list_reddit_refresh_runs(
     period_key: str | None = Query(default=None, min_length=1, max_length=200),
     status: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import list_refresh_runs
 
@@ -5032,7 +5312,7 @@ async def list_reddit_refresh_runs(
 
 
 @router.get("/reddit/runs/{run_id}")
-async def get_reddit_refresh_run(run_id: UUID, _: AdminUser = None) -> dict[str, Any]:
+async def get_reddit_refresh_run(run_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_refresh_run
 
     try:
@@ -5049,7 +5329,7 @@ async def get_reddit_cached_period_payload(
     community_id: UUID = Query(...),
     season_id: UUID = Query(...),
     period_key: str = Query(..., min_length=1, max_length=160),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import (
         get_cached_period_payload,
@@ -5098,7 +5378,7 @@ async def get_reddit_cached_period_payload(
 @router.post("/reddit/cache/bulk")
 async def get_reddit_cached_period_payload_bulk(
     payload: RedditCacheBulkRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import (
         get_cached_period_payload,
@@ -5226,7 +5506,7 @@ async def get_reddit_community_analytics_summary(
     community_id: UUID,
     scope: Literal["season", "all"] = Query(default="season"),
     season_id: UUID | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_analytics_summary
 
@@ -5258,7 +5538,7 @@ async def get_reddit_community_analytics_shows(
     community_id: UUID,
     scope: Literal["season", "all"] = Query(default="season"),
     season_id: UUID | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_show_breakdown
 
@@ -5290,7 +5570,7 @@ async def get_reddit_community_analytics_flairs(
     community_id: UUID,
     scope: Literal["season", "all"] = Query(default="season"),
     season_id: UUID | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_flair_breakdown
 
@@ -5326,7 +5606,7 @@ async def get_reddit_community_analytics_flair_detail(
     container_key: str | None = Query(default=None, max_length=160),
     page: int = Query(default=1, ge=1, le=10_000),
     per_page: int = Query(default=50, ge=1, le=200),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import get_reddit_community_flair_detail
 
@@ -5367,7 +5647,7 @@ async def get_reddit_community_analytics_posts(
     flair_key: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1, le=10_000),
     per_page: int = Query(default=50, ge=1, le=200),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.reddit_refresh import list_reddit_community_posts
 
@@ -5422,7 +5702,7 @@ class AutoCategorizeFlairsResponse(BaseModel):
 async def auto_categorize_community_flairs(
     community_id: UUID,
     body: AutoCategorizeFlairsRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     """Auto-categorize a community's post flairs as 'cast' or 'season' using show data."""
     from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs
@@ -5445,7 +5725,7 @@ async def auto_categorize_community_flairs(
 @router.post("/reddit/auto-categorize-flairs-batch")
 async def auto_categorize_flairs_batch(
     body: AutoCategorizeFlairsRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     """Auto-categorize flairs for ALL communities linked to a show."""
     from trr_backend.repositories.reddit_flair_categorizer import auto_categorize_flairs_batch
@@ -5469,7 +5749,7 @@ async def get_season_ingest_jobs(
     run_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
     platform: Literal["instagram", "tiktok", "twitter", "youtube", "facebook", "threads"] | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_jobs
 
@@ -5516,7 +5796,7 @@ async def get_season_ingest_runs(
     week_index: int | None = Query(default=None, ge=0),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_runs
 
@@ -5584,7 +5864,7 @@ async def get_season_ingest_runs_summary(
     week_index: int | None = Query(default=None, ge=0),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import list_run_summaries
 
@@ -5641,7 +5921,7 @@ async def get_season_ingest_run_progress(
     season_id: UUID,
     run_id: UUID,
     recent_log_limit: int = Query(default=20, ge=1, le=100),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_run_progress_snapshot
 
@@ -5684,7 +5964,7 @@ async def get_season_ingest_run_progress(
 async def cancel_season_ingest_run(
     season_id: UUID,
     run_id: UUID,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import cancel_run
 
@@ -5710,7 +5990,7 @@ async def get_season_analytics_week_live_health(
     source_scope: Literal["bravo", "creator", "community"] = Query(default="bravo"),
     timezone: str = Query(default="America/New_York"),
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_week_live_health_snapshot
 
@@ -5783,7 +6063,7 @@ async def get_season_analytics(
         default=None,
         description="Comma-separated include list: rows,flags,schedule,benchmark",
     ),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_analytics
 
@@ -5873,7 +6153,7 @@ async def get_season_analytics_week_summary(
     max_comments_per_post: int = Query(default=_WEEK_DETAIL_DEFAULT_MAX_COMMENTS_PER_POST, ge=0, le=500),
     sort_field: WeekDetailSortField = Query(default="posted_at"),
     sort_dir: WeekDetailSortDir = Query(default="desc"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_week_detail_summary, get_week_detail_summary_fast
 
@@ -5967,7 +6247,7 @@ async def get_season_analytics_week_detail(
     post_offset: int = Query(default=_WEEK_DETAIL_DEFAULT_POST_OFFSET, ge=0),
     sort_field: WeekDetailSortField = Query(default="posted_at"),
     sort_dir: WeekDetailSortDir = Query(default="desc"),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_week_detail
 
@@ -6129,7 +6409,7 @@ async def get_season_comments_coverage(
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_comments_coverage
 
@@ -6184,7 +6464,7 @@ async def get_season_mirror_coverage(
     platforms: str | None = Query(default=None, description="Comma-separated platform list"),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_mirror_coverage
 
@@ -6236,7 +6516,7 @@ async def get_post_comments(
     season_id: UUID,
     platform: str,
     source_id: str,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import get_post_comments as _get
 
@@ -6263,7 +6543,7 @@ async def get_season_tiktok_overview(
     hashtag: str | None = Query(default=None),
     keyword: str | None = Query(default=None),
     sound_id: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_overview
 
@@ -6290,7 +6570,7 @@ async def get_season_tiktok_cast_members(
     season_id: UUID,
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_cast_members
 
@@ -6312,7 +6592,7 @@ async def get_season_tiktok_hashtags(
     token_type: str = Query(default="hashtag"),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_hashtags
 
@@ -6338,7 +6618,7 @@ async def get_season_tiktok_sounds(
     date_end: datetime | None = Query(default=None),
     search: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=250),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_sounds
 
@@ -6368,7 +6648,7 @@ async def get_season_tiktok_content_health(
     keyword: str | None = Query(default=None),
     sound_id: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=250),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_content_health
 
@@ -6395,7 +6675,7 @@ async def get_season_tiktok_content_health(
 async def get_season_tiktok_sound_detail(
     season_id: UUID,
     sound_id: str,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_sound_detail
 
@@ -6413,7 +6693,7 @@ async def get_season_tiktok_sound_posts(
     season_id: UUID,
     sound_id: str,
     limit: int = Query(default=100, ge=1, le=500),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_sound_posts
 
@@ -6430,7 +6710,7 @@ async def get_season_tiktok_sound_posts(
 async def get_season_tiktok_post_detail(
     season_id: UUID,
     post_id: str,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_post_detail
 
@@ -6448,7 +6728,7 @@ async def get_season_tiktok_sentiment_trends(
     season_id: UUID,
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_tiktok_sentiment_trends
 
@@ -6470,7 +6750,7 @@ async def refresh_post_comments_for_post(
     platform: str,
     source_id: str,
     payload: PostCommentRefreshRequest | None = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import (
         get_post_comments as _get_post_comments,
@@ -6519,7 +6799,7 @@ async def requeue_instagram_mirror_jobs(
     failed_only: bool = Query(default=False),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import requeue_instagram_media_mirror_jobs
 
@@ -6553,7 +6833,7 @@ async def requeue_platform_mirror_jobs(
     failed_only: bool = Query(default=False),
     date_start: datetime | None = Query(default=None),
     date_end: datetime | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict:
     from trr_backend.repositories.social_season_analytics import requeue_media_mirror_jobs
 
@@ -6588,7 +6868,7 @@ async def export_season_analytics_csv(
     timezone: str = Query(default="America/New_York"),
     week: int | None = Query(default=None, ge=0, le=200),
     platforms: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> Response:
     from trr_backend.repositories.social_season_analytics import build_csv, get_analytics
 
@@ -6626,7 +6906,7 @@ async def export_season_analytics_pdf(
     timezone: str = Query(default="America/New_York"),
     week: int | None = Query(default=None, ge=0, le=200),
     platforms: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> Response:
     from trr_backend.repositories.social_season_analytics import (
         build_pdf,

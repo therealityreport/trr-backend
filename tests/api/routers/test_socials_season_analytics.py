@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -22,8 +24,27 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     payload = {
         "sub": subject,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
-        "role": "service_role",
+        "role": "admin",
+        "email": "admin@example.com",
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def _make_internal_admin_token(
+    secret: str,
+    subject: str = "trr-app-internal-admin",
+) -> str:
+    now = datetime.now(tz=UTC)
+    payload = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "iss": "trr-app-internal",
+        "aud": "trr-backend-internal-admin",
+        "scope": "internal_admin",
     }
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -289,6 +310,56 @@ def test_get_social_account_profile_summary(client: TestClient, monkeypatch: pyt
     assert body["total_posts"] == 42
 
 
+def test_get_social_account_profile_summary_returns_503_on_session_pool_saturation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_summary",
+        side_effect=DatabaseServiceUnavailableError(
+            'Database pool initialization failed: connection to server at "aws-1-us-east-1.pooler.supabase.com" '
+            "(18.214.78.123), port 5432 failed: FATAL: MaxClientsInSessionMode: max clients reached",
+            reason="session_pool_capacity",
+        ),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/summary",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert response.json()["detail"]["reason"] == "session_pool_capacity"
+
+
+def test_get_social_account_profile_hashtags_returns_503_on_session_pool_saturation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_hashtags",
+        side_effect=DatabaseServiceUnavailableError(
+            'Database pool initialization failed: connection to server at "aws-1-us-east-1.pooler.supabase.com" '
+            "(18.214.78.123), port 5432 failed: FATAL: MaxClientsInSessionMode: max clients reached",
+            reason="session_pool_capacity",
+        ),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert response.json()["detail"]["reason"] == "session_pool_capacity"
+
+
 def test_get_social_account_profile_posts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -435,6 +506,125 @@ def test_get_social_account_catalog_verification(client: TestClient, monkeypatch
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
     assert mocked.call_args.kwargs["run_id"] == run_id
+
+
+def test_get_social_account_catalog_gap_analysis(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "status": "completed",
+        "operation_id": "gap-op-1",
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "result": {
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "gap_type": "tail_gap",
+            "catalog_posts": 15880,
+            "materialized_posts": 16575,
+            "expected_total_posts": 16575,
+            "live_total_posts_current": 16575,
+            "missing_from_catalog_count": 695,
+            "sample_missing_source_ids": ["ABC123"],
+            "has_resumable_frontier": True,
+            "needs_recent_sync": False,
+            "recommended_action": "resume_tail",
+            "repair_window_start": None,
+            "repair_window_end": None,
+            "catalog_oldest_post_at": "2015-01-02T12:00:00Z",
+            "catalog_newest_post_at": "2026-03-20T14:06:43Z",
+            "latest_catalog_run_status": "completed",
+            "active_run_status": None,
+        },
+        "stale": False,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_gap_analysis_status",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/gap-analysis",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert response.json()["result"]["gap_type"] == "tail_gap"
+    assert response.json()["result"]["recommended_action"] == "resume_tail"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_get_social_account_catalog_gap_analysis_returns_503_on_session_pool_saturation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_gap_analysis_status",
+        side_effect=DatabaseServiceUnavailableError(
+            'Database pool initialization failed: connection to server at "aws-1-us-east-1.pooler.supabase.com" '
+            "(18.214.78.123), port 5432 failed: FATAL: MaxClientsInSessionMode: max clients reached",
+            reason="session_pool_capacity",
+        ),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/gap-analysis",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert response.json()["detail"]["reason"] == "session_pool_capacity"
+
+
+def test_post_social_account_catalog_gap_analysis_run_returns_status_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    started_operation = {
+        "id": "gap-op-queued-1",
+        "status": "pending",
+        "attached": False,
+    }
+    status_payload = {
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "status": "queued",
+        "operation_id": "gap-op-queued-1",
+        "result": None,
+        "stale": False,
+        "last_requested_at": "2026-03-31T12:00:00.000000+00:00",
+        "last_completed_at": None,
+        "last_error": None,
+    }
+
+    with patch("api.routers.socials._start_social_catalog_gap_analysis_operation", return_value=started_operation) as start_mock:
+        with patch(
+            "trr_backend.repositories.social_season_analytics.get_social_account_catalog_gap_analysis_status",
+            return_value=status_payload,
+        ) as status_mock:
+            response = client.post(
+                "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/gap-analysis/run",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "x-trr-tab-session-id": "tab-1",
+                    "x-trr-flow-key": "flow-gap-1",
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert response.json()["operation_id"] == "gap-op-queued-1"
+    assert response.json()["attached"] is False
+    start_mock.assert_called_once()
+    status_mock.assert_called_once_with(platform="instagram", account_handle="bravotv")
 
 
 def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -653,6 +843,48 @@ def test_post_social_account_catalog_backfill_requires_modal_executor(
     assert body["detail"]["required_execution_backend"] == "modal"
 
 
+def test_post_social_account_catalog_backfill_allows_local_inline_fallback_for_instagram(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("APP_ENV", "development")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("api.routers.socials._start_runs_in_background") as mocked_background,
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+        ) as worker_guard,
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+            return_value={
+                "run_id": "catalog-run-inline-1",
+                "status": "pending",
+                "ingest_mode": "shared_account_catalog_backfill",
+            },
+        ) as mocked_start,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history", "allow_inline_dev_fallback": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "catalog-run-inline-1"
+    assert body["status"] == "started"
+    assert body["execution_mode"] == "inline"
+    assert body["execution_mode_canonical"] == "inline_fallback"
+    assert body["execution_mode_legacy"] == "inline_fallback"
+    worker_guard.assert_not_called()
+    mocked_background.assert_called_once()
+    assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
+    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+
+
 def test_post_social_account_catalog_backfill_returns_modal_dispatch_unavailable_when_target_unresolvable(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -842,6 +1074,48 @@ def test_post_social_account_catalog_sync_recent_serializes_worker_health_on_mod
     mocked_start.assert_not_called()
 
 
+def test_post_social_account_catalog_sync_recent_allows_local_inline_fallback_for_instagram(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("APP_ENV", "development")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("api.routers.socials._start_runs_in_background") as mocked_background,
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+        ) as worker_guard,
+        patch(
+            "trr_backend.repositories.social_season_analytics.sync_recent_social_account_catalog",
+            return_value={
+                "run_id": "catalog-run-inline-2",
+                "status": "pending",
+                "ingest_mode": "shared_account_catalog_backfill",
+            },
+        ) as mocked_start,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-recent",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"lookback_days": 1, "allow_inline_dev_fallback": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "catalog-run-inline-2"
+    assert body["status"] == "started"
+    assert body["execution_mode"] == "inline"
+    assert body["execution_mode_canonical"] == "inline_fallback"
+    assert body["execution_mode_legacy"] == "inline_fallback"
+    worker_guard.assert_not_called()
+    mocked_background.assert_called_once()
+    assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
+    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+
+
 def test_post_social_account_catalog_run_cancel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -966,7 +1240,7 @@ def test_put_social_account_profile_hashtags(client: TestClient, monkeypatch: py
 
     assert response.status_code == 200
     assert response.json()["items"][0]["hashtag"] == "rhoslc"
-    assert mocked.call_args.kwargs["updated_by"] is None
+    assert mocked.call_args.kwargs["updated_by"] == "admin@example.com"
 
 
 def test_get_social_account_profile_hashtags_forwards_window(
@@ -1015,6 +1289,31 @@ def test_post_social_account_catalog_freshness(client: TestClient, monkeypatch: 
     assert response.json()["delta_posts"] == 3
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_post_social_account_catalog_freshness_returns_503_on_session_pool_saturation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        side_effect=DatabaseServiceUnavailableError(
+            'Database pool initialization failed: connection to server at "aws-1-us-east-1.pooler.supabase.com" '
+            "(18.214.78.123), port 5432 failed: FATAL: MaxClientsInSessionMode: max clients reached",
+            reason="session_pool_capacity",
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/freshness",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert response.json()["detail"]["reason"] == "session_pool_capacity"
 
 
 def test_get_social_account_profile_collaborators_tags(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1145,6 +1444,45 @@ def test_get_shared_review_queue(client: TestClient, monkeypatch: pytest.MonkeyP
     body = response.json()
     assert body["count"] == 1
     assert body["items"][0]["review_reason"] == "ambiguous_match"
+
+
+def test_shared_social_reads_accept_internal_admin_token_without_supabase_jwt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    token = _make_internal_admin_token("internal-secret-32-bytes-minimum")
+    expected = {
+        "source_scope": "bravo",
+        "include_inactive": True,
+        "sources": [{"id": "source-1", "platform": "instagram", "account_handle": "bravotv"}],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_shared_account_sources", return_value=expected):
+        response = client.get(
+            "/api/v1/admin/socials/shared/sources?source_scope=bravo&include_inactive=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sources"][0]["account_handle"] == "bravotv"
+
+
+def test_shared_social_reads_reject_invalid_internal_admin_token_when_supabase_jwt_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+
+    response = client.get(
+        "/api/v1/admin/socials/shared/sources?source_scope=bravo&include_inactive=true",
+        headers={"Authorization": "Bearer not-a-valid-internal-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Allowlist admin access required"
 
 
 def test_get_season_shared_status_route(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1801,6 +2139,43 @@ def test_post_shared_ingest_starts_inline_when_queue_disabled(
     assert body["execution_mode_canonical"] == "inline"
     assert body["execution_owner"] == "local_api"
     assert execute_mock.called is True
+
+
+def test_post_shared_ingest_accepts_internal_admin_token_without_supabase_jwt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    token = _make_internal_admin_token("internal-secret-32-bytes-minimum")
+    expected = {
+        "run_id": "shared-run-internal",
+        "status": "queued",
+        "source_scope": "bravo",
+        "ingest_mode": "shared_account_async",
+        "shared_scrape_status": {"status": "queued", "job_count": 1},
+        "classification_status": None,
+        "materialization_status": None,
+        "review_queue_count": 0,
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.ingest_shared_accounts",
+            return_value=expected,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+                return_value={"healthy": True, "healthy_workers": 1},
+            ):
+                response = client.post(
+                    "/api/v1/admin/socials/shared/ingest",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"source_scope": "bravo", "platforms": ["instagram"]},
+                )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "shared-run-internal"
 
 
 def test_get_ingest_jobs_supports_run_filters(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3492,7 +3867,7 @@ def test_ingest_keeps_503_when_worker_missing_outside_dev_even_with_fallback_fla
 
     assert response.status_code == 503
     body = response.json()
-    assert body["detail"]["code"] == "SOCIAL_WORKER_UNAVAILABLE"
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_WORKER_REQUIRED"
     assert body["detail"]["worker_health"]["healthy"] is False
     ingest_mock.assert_not_called()
 
@@ -3580,9 +3955,7 @@ def test_purge_inactive_workers_endpoint_returns_counts(
         "reason": None,
     }
 
-    with patch(
-        "trr_backend.repositories.social_season_analytics.purge_inactive_workers", return_value=expected
-    ) as mocked:
+    with patch("trr_backend.repositories.social_season_analytics.purge_inactive_workers", return_value=expected):
         response = client.post(
             "/api/v1/admin/socials/ingest/workers/purge-inactive",
             headers={"Authorization": f"Bearer {token}"},
@@ -3591,7 +3964,118 @@ def test_purge_inactive_workers_endpoint_returns_counts(
 
     assert response.status_code == 200
     assert response.json() == expected
-    assert mocked.call_args.kwargs["stale_after_seconds"] == 180
+
+
+def test_get_social_account_catalog_run_progress_returns_503_on_session_pool_saturation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = str(uuid4())
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_run_progress",
+        side_effect=DatabaseServiceUnavailableError(
+            'Database pool initialization failed: connection to server at "aws-1-us-east-1.pooler.supabase.com" '
+            "(18.214.78.123), port 5432 failed: FATAL: MaxClientsInSessionMode: max clients reached",
+            reason="session_pool_capacity",
+        ),
+    ):
+        response = client.get(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/progress",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert response.json()["detail"]["reason"] == "session_pool_capacity"
+
+
+def test_account_profile_singleflight_collapses_same_key_concurrent_loads() -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    cache_key = socials_router._account_profile_cache_key(
+        surface="summary",
+        platform="instagram",
+        account_handle="bravotv",
+    )
+    loader_started = Event()
+    release_loader = Event()
+    call_count = 0
+
+    def _loader() -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        loader_started.set()
+        assert release_loader.wait(timeout=1), "loader was never released"
+        return {"platform": "instagram", "account_handle": "bravotv"}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            socials_router._resolve_account_profile_singleflight,
+            cache_key,
+            _loader,
+        )
+        assert loader_started.wait(timeout=1), "loader never started"
+        second = executor.submit(
+            socials_router._resolve_account_profile_singleflight,
+            cache_key,
+            _loader,
+        )
+        release_loader.set()
+        assert first.result(timeout=1)["account_handle"] == "bravotv"
+        assert second.result(timeout=1)["account_handle"] == "bravotv"
+
+    assert call_count == 1
+
+
+def test_account_profile_singleflight_does_not_cache_failures() -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    cache_key = socials_router._account_profile_cache_key(
+        surface="summary",
+        platform="instagram",
+        account_handle="bravotv",
+    )
+    attempts = 0
+
+    def _failing_loader() -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        raise DatabaseServiceUnavailableError("pool exhausted", reason="session_pool_capacity")
+
+    with pytest.raises(DatabaseServiceUnavailableError):
+        socials_router._resolve_account_profile_singleflight(cache_key, _failing_loader)
+
+    payload = socials_router._resolve_account_profile_singleflight(
+        cache_key,
+        lambda: {"platform": "instagram", "account_handle": "bravotv"},
+    )
+
+    assert payload["account_handle"] == "bravotv"
+    assert attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        ("/api/v1/admin/socials/profiles/{platform}/{account_handle}/catalog/gap-analysis", "GET"),
+        ("/api/v1/admin/socials/profiles/{platform}/{account_handle}/catalog/gap-analysis/run", "POST"),
+        ("/api/v1/admin/socials/profiles/{platform}/{account_handle}/catalog/freshness", "POST"),
+        ("/api/v1/admin/socials/profiles/{platform}/{account_handle}/catalog/review-queue/{item_id}/resolve", "POST"),
+    ],
+)
+def test_social_account_catalog_routes_are_registered_once(path: str, method: str) -> None:
+    matches = [
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == path and method in getattr(route, "methods", set())
+    ]
+
+    assert len(matches) == 1
 
 
 def test_purge_inactive_workers_endpoint_returns_500_on_unhandled_error(
@@ -4009,7 +4493,7 @@ def test_cancel_sync_session_endpoint_returns_payload(client: TestClient, monkey
 
     assert response.status_code == 200
     assert response.json()["status"] == "cancelling"
-    assert mocked.call_args.kwargs["cancelled_by"] is None
+    assert mocked.call_args.kwargs["cancelled_by"] == "admin@example.com"
 
 
 def test_retry_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4326,6 +4810,36 @@ def test_dismiss_recent_failures_endpoint_returns_payload(
     assert response.status_code == 200
     assert response.json() == expected
     assert mocked.call_args.kwargs["job_ids"] == [job_id]
+    assert mocked.call_args.kwargs["dismiss_all_visible"] is False
+
+
+def test_dismiss_recent_failures_endpoint_supports_dismiss_all_visible(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "requested_job_ids_count": 0,
+        "dismissed_jobs": 4,
+        "dismissed_job_ids": [],
+        "recent_failures_remaining": 0,
+        "dismiss_all_visible": True,
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.dismiss_recent_failures",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/ingest/recent-failures/dismiss",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"dismiss_all_visible": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["dismiss_all_visible"] is True
 
 
 def test_dismiss_recent_failures_endpoint_returns_500_on_unhandled_error(

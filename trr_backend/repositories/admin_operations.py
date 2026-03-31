@@ -176,9 +176,9 @@ def _normalize_operation_health_row(
     normalized = _normalize_operation(row) or {}
     normalized["execution_owner"] = _clean_text(str(normalized.get("execution_owner") or "")) or None
     normalized["execution_mode_canonical"] = _clean_text(str(normalized.get("execution_mode_canonical") or "")) or None
-    normalized["execution_backend_canonical"] = _clean_text(
-        str(normalized.get("execution_backend_canonical") or "")
-    ) or None
+    normalized["execution_backend_canonical"] = (
+        _clean_text(str(normalized.get("execution_backend_canonical") or "")) or None
+    )
     normalized["latest_phase"] = _clean_text(str(normalized.get("latest_phase") or "")) or None
     normalized["age_seconds"] = _coerce_int(normalized.get("age_seconds")) or 0
     normalized["last_update_age_seconds"] = _coerce_int(normalized.get("last_update_age_seconds")) or 0
@@ -312,6 +312,42 @@ def get_operation(operation_id: str) -> dict[str, Any] | None:
         limit 1
         """,
         [operation_id],
+    )
+    return _normalize_operation(row)
+
+
+def get_latest_operation_for_request_payload(
+    *,
+    operation_type: str,
+    request_payload: dict[str, Any] | None = None,
+    statuses: Iterable[str] | None = None,
+) -> dict[str, Any] | None:
+    op_type = str(operation_type or "").strip()
+    if not op_type:
+        raise ValueError("operation_type is required")
+
+    normalized_statuses = [str(status or "").strip().lower() for status in (statuses or []) if str(status or "").strip()]
+    params: list[Any] = [op_type, _to_json(request_payload)]
+    status_clause = ""
+    if normalized_statuses:
+        placeholders = ", ".join(["%s"] * len(normalized_statuses))
+        status_clause = f" and status in ({placeholders})"
+        params.extend(normalized_statuses)
+
+    row = pg.fetch_one(
+        f"""
+        select
+          {_OPERATION_COLUMNS}
+        from core.admin_operations
+        where operation_type = %s
+          and request_payload = %s::jsonb
+          {status_clause}
+        order by
+          coalesce(completed_at, created_at) desc,
+          created_at desc
+        limit 1
+        """,
+        params,
     )
     return _normalize_operation(row)
 
@@ -535,6 +571,50 @@ def request_related_operation_cancels(operation_id: str) -> list[dict[str, Any]]
     return [_normalize_operation(dict(row)) or {} for row in rows]
 
 
+def request_bulk_operation_cancels(
+    *,
+    operation_ids: Iterable[str] | None = None,
+    cancel_all_active: bool = False,
+) -> dict[str, Any]:
+    requested_ids = [str(item).strip() for item in (operation_ids or []) if str(item).strip()]
+    if not requested_ids and not cancel_all_active:
+        raise ValueError("operation_ids or cancel_all_active is required")
+
+    target_ids: list[str]
+    if cancel_all_active:
+        target_ids = [
+            str(row.get("id") or "").strip()
+            for row in list_active_operations(limit=500)
+            if str(row.get("id") or "").strip()
+        ]
+    else:
+        target_ids = requested_ids
+
+    cancelled_rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for operation_id in target_ids:
+        if not operation_id or operation_id in seen:
+            continue
+        seen.add(operation_id)
+        for row in request_related_operation_cancels(operation_id):
+            normalized_id = str(row.get("id") or "").strip()
+            if not normalized_id or normalized_id in {str(item.get("id") or "").strip() for item in cancelled_rows}:
+                continue
+            cancelled_rows.append(row)
+
+    health = get_admin_operations_health(
+        stale_after_seconds=DEFAULT_OPERATION_STALE_AFTER_SECONDS,
+        cancelling_grace_seconds=DEFAULT_OPERATION_CANCELLING_GRACE_SECONDS,
+    )
+    return {
+        "requested_operation_ids_count": len(target_ids),
+        "cancel_requested_operations": len(cancelled_rows),
+        "cancel_requested_operation_ids": [str(row.get("id") or "").strip() for row in cancelled_rows if str(row.get("id") or "").strip()],
+        "active_operations_remaining": len(health["active_operations"]),
+        "updated_at": health["updated_at"],
+    }
+
+
 def list_active_operations(
     *,
     operation_types: Iterable[str] | None = None,
@@ -679,16 +759,12 @@ def force_cancel_stale_operations(
     stale_ids = [str(row.get("id") or "") for row in target_rows]
     reason_by_id = {
         str(row.get("id") or ""): (
-            "force_selected"
-            if force_selected and normalized_ids
-            else str(row.get("stale_reason") or "stale_cleanup")
+            "force_selected" if force_selected and normalized_ids else str(row.get("stale_reason") or "stale_cleanup")
         )
         for row in target_rows
     }
     cancellation_code = (
-        "FORCE_CANCELLED_BY_OPERATOR"
-        if force_selected and normalized_ids
-        else "STALE_OPERATION_CANCELLED"
+        "FORCE_CANCELLED_BY_OPERATOR" if force_selected and normalized_ids else "STALE_OPERATION_CANCELLED"
     )
     cancellation_message = (
         "Admin operation force-cancelled by operator."

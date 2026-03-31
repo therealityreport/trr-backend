@@ -47,6 +47,8 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
                 "cancel_requested_at": None,
                 "started_at": None,
                 "completed_at": None,
+                "created_at": "now",
+                "updated_at": "now",
             }
             operations[op_id] = existing
         operation_events.setdefault(op_id, [])
@@ -91,6 +93,8 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
                 "cancel_requested_at": None,
                 "started_at": None,
                 "completed_at": None,
+                "created_at": "now",
+                "updated_at": "now",
             }
             operations[op_id] = operation
             operation_events[op_id] = []
@@ -99,6 +103,37 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
     def _get_operation(operation_id: str) -> dict[str, Any] | None:
         with lock:
             return _copy_operation(operations.get(operation_id))
+
+    def _get_latest_operation_for_request_payload(
+        *,
+        operation_type: str,
+        request_payload: dict[str, Any] | None = None,
+        statuses: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        with lock:
+            normalized_statuses = {
+                str(status or "").strip().lower() for status in (statuses or []) if str(status or "").strip()
+            }
+            matches = [
+                deepcopy(op)
+                for op in operations.values()
+                if op.get("operation_type") == operation_type
+                and deepcopy(op.get("request_payload") or {}) == deepcopy(request_payload or {})
+                and (
+                    not normalized_statuses
+                    or str(op.get("status") or "").strip().lower() in normalized_statuses
+                )
+            ]
+            if not matches:
+                return None
+            matches.sort(
+                key=lambda op: (
+                    str(op.get("completed_at") or op.get("created_at") or ""),
+                    str(op.get("created_at") or ""),
+                ),
+                reverse=True,
+            )
+            return matches[0]
 
     def _append_operation_event(
         operation_id: str,
@@ -148,18 +183,21 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
                 op["result_payload"] = deepcopy(result_payload)
             if error_payload is not None:
                 op["error_payload"] = deepcopy(error_payload)
+            op["updated_at"] = "now"
             return _copy_operation(op)
 
     def _update_operation_progress(operation_id: str, *, progress_payload: dict[str, Any] | None = None) -> None:
         with lock:
             op = _ensure_operation(operation_id)
             op["progress_payload"] = deepcopy(progress_payload or {})
+            op["updated_at"] = "now"
 
     def _touch_operation_started(operation_id: str) -> None:
         with lock:
             op = _ensure_operation(operation_id)
             if str(op.get("status") or "") == "pending":
                 op["status"] = "running"
+            op["updated_at"] = "now"
 
     def _request_operation_cancel(operation_id: str) -> dict[str, Any] | None:
         with lock:
@@ -169,6 +207,7 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
             if str(op.get("status") or "") in {"pending", "running"}:
                 op["status"] = "cancelling"
             op["cancel_requested_at"] = "now"
+            op["updated_at"] = "now"
             return _copy_operation(op)
 
     def _is_cancel_requested(operation_id: str) -> bool:
@@ -186,6 +225,7 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(admin_ops_repo, "create_or_attach_operation", _create_or_attach_operation)
     monkeypatch.setattr(admin_ops_repo, "get_operation", _get_operation)
+    monkeypatch.setattr(admin_ops_repo, "get_latest_operation_for_request_payload", _get_latest_operation_for_request_payload)
     monkeypatch.setattr(admin_ops_repo, "append_operation_event", _append_operation_event)
     monkeypatch.setattr(admin_ops_repo, "stream_events_after_seq", _stream_events_after_seq)
     monkeypatch.setattr(admin_ops_repo, "update_operation_status", _update_operation_status)
