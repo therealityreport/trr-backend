@@ -532,6 +532,7 @@ def test_build_pool_for_session_mode_supavisor_uses_local_dev_defaults(monkeypat
         captured["dsn"] = kwargs.get("dsn")
         captured["options"] = kwargs.get("options")
         captured["application_name"] = kwargs.get("application_name")
+        captured["connect_timeout"] = kwargs.get("connect_timeout")
         return _FakePool()
 
     monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
@@ -540,7 +541,10 @@ def test_build_pool_for_session_mode_supavisor_uses_local_dev_defaults(monkeypat
 
     assert captured["minconn"] == 1
     assert captured["maxconn"] == 4
-    assert captured["options"] == "-c idle_in_transaction_session_timeout=60000"
+    options = captured["options"]
+    assert "-c idle_in_transaction_session_timeout=60000" in options
+    assert "-c statement_timeout=30000" in options
+    assert captured.get("connect_timeout") == 10
     assert captured["application_name"] == "trr-backend"
 
 
@@ -552,6 +556,7 @@ def test_build_pool_for_non_session_urls_keeps_default_pool_size(monkeypatch: py
         captured["maxconn"] = maxconn
         captured["dsn"] = kwargs.get("dsn")
         captured["options"] = kwargs.get("options")
+        captured["connect_timeout"] = kwargs.get("connect_timeout")
         return _FakePool()
 
     monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
@@ -560,4 +565,7 @@ def test_build_pool_for_non_session_urls_keeps_default_pool_size(monkeypatch: py
 
     assert captured["minconn"] == 2
     assert captured["maxconn"] == 24
-    assert captured["options"] == "-c idle_in_transaction_session_timeout=60000"
+    options = captured["options"]
+    assert "-c idle_in_transaction_session_timeout=60000" in options
+    assert "-c statement_timeout=30000" in options
+    assert captured.get("connect_timeout") == 10

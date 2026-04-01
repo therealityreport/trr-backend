@@ -38,6 +38,8 @@ DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
 DEFAULT_QUERY_TRANSIENT_ATTEMPTS = 3
 DEFAULT_IDLE_IN_TX_TIMEOUT_MS = 60000
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+DEFAULT_STATEMENT_TIMEOUT_MS = 30000
 DEFAULT_DB_APPLICATION_NAME = "trr-backend"
 
 _pool: ThreadedConnectionPool | None = None
@@ -239,13 +241,35 @@ def _build_pool_for_url(url: str) -> ThreadedConnectionPool:
     connect_kwargs["application_name"] = app_name["application_name"]
     if sslmode:
         connect_kwargs["sslmode"] = sslmode
+    # TCP-level connect timeout (seconds) — prevents 2-min OS TCP hangs
+    connect_timeout = _env_int(
+        "TRR_DB_CONNECT_TIMEOUT_SECONDS",
+        DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        minimum=1,
+    )
+    connect_kwargs["connect_timeout"] = connect_timeout
+
+    # Session-level Postgres options
+    option_parts: list[str] = []
+
     idle_in_tx_timeout_ms = _env_int(
         "TRR_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS",
         DEFAULT_IDLE_IN_TX_TIMEOUT_MS,
         minimum=1000,
     )
     if idle_in_tx_timeout_ms > 0:
-        connect_kwargs["options"] = f"-c idle_in_transaction_session_timeout={idle_in_tx_timeout_ms}"
+        option_parts.append(f"idle_in_transaction_session_timeout={idle_in_tx_timeout_ms}")
+
+    statement_timeout_ms = _env_int(
+        "TRR_DB_STATEMENT_TIMEOUT_MS",
+        DEFAULT_STATEMENT_TIMEOUT_MS,
+        minimum=1000,
+    )
+    if statement_timeout_ms > 0:
+        option_parts.append(f"statement_timeout={statement_timeout_ms}")
+
+    if option_parts:
+        connect_kwargs["options"] = " ".join(f"-c {part}" for part in option_parts)
 
     return ThreadedConnectionPool(minconn=minconn, maxconn=maxconn, **connect_kwargs)
 
