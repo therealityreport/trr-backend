@@ -124,3 +124,8 @@ scripts/socials/**/*.csv
 
 # Playwright profiles
 .playwright-profiles/
+
+# Sensitive session data
+data/instagram_cookies.json
+data/social-browser-sessions/
+data/twitter_cookies.json

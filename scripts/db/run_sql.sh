@@ -10,10 +10,11 @@
 #   ./scripts/db/run_sql.sh -c "SELECT count(*) FROM core.shows;"
 #
 # Environment variables (checked in order):
-#   SUPABASE_DB_URL - Explicit Supabase database URL (recommended for prod)
-#   DATABASE_URL    - Standard Postgres connection string
-#   TRR_DB_URL      - Legacy alias
-#   (fallback)      - Local Supabase via `supabase status`
+#   TRR_DB_URL          - Canonical runtime database URL
+#   TRR_DB_FALLBACK_URL - Explicit fallback only
+#   DATABASE_URL        - Tooling-only compatibility input
+#   SUPABASE_DB_URL     - Deprecated compatibility input
+#   (fallback)          - Local Supabase via `supabase status`
 # =============================================================================
 
 set -euo pipefail
@@ -39,25 +40,31 @@ info() {
 
 # Resolve database URL
 resolve_db_url() {
-    # Priority 1: Explicit Supabase DB URL
-    if [[ -n "${SUPABASE_DB_URL:-}" ]]; then
-        echo "$SUPABASE_DB_URL"
-        return 0
-    fi
-
-    # Priority 2: Standard DATABASE_URL
-    if [[ -n "${DATABASE_URL:-}" ]]; then
-        echo "$DATABASE_URL"
-        return 0
-    fi
-
-    # Priority 3: Legacy TRR_DB_URL
+    # Priority 1: Canonical runtime DB URL
     if [[ -n "${TRR_DB_URL:-}" ]]; then
         echo "$TRR_DB_URL"
         return 0
     fi
 
-    # Priority 4: Local Supabase fallback
+    # Priority 2: Explicit runtime fallback
+    if [[ -n "${TRR_DB_FALLBACK_URL:-}" ]]; then
+        echo "$TRR_DB_FALLBACK_URL"
+        return 0
+    fi
+
+    # Priority 3: Tooling-only compatibility input
+    if [[ -n "${DATABASE_URL:-}" ]]; then
+        echo "$DATABASE_URL"
+        return 0
+    fi
+
+    # Priority 4: Deprecated compatibility input
+    if [[ -n "${SUPABASE_DB_URL:-}" ]]; then
+        echo "$SUPABASE_DB_URL"
+        return 0
+    fi
+
+    # Priority 5: Local Supabase fallback
     if command -v supabase &>/dev/null; then
         local status_output
         if status_output=$(supabase status --output env 2>/dev/null); then
@@ -75,12 +82,14 @@ resolve_db_url() {
 
 # Get source of resolved URL for display
 get_url_source() {
-    if [[ -n "${SUPABASE_DB_URL:-}" ]]; then
-        echo "SUPABASE_DB_URL"
+    if [[ -n "${TRR_DB_URL:-}" ]]; then
+        echo "TRR_DB_URL"
+    elif [[ -n "${TRR_DB_FALLBACK_URL:-}" ]]; then
+        echo "TRR_DB_FALLBACK_URL"
     elif [[ -n "${DATABASE_URL:-}" ]]; then
         echo "DATABASE_URL"
-    elif [[ -n "${TRR_DB_URL:-}" ]]; then
-        echo "TRR_DB_URL"
+    elif [[ -n "${SUPABASE_DB_URL:-}" ]]; then
+        echo "SUPABASE_DB_URL"
     else
         echo "supabase status (local)"
     fi
@@ -111,10 +120,11 @@ main() {
         echo "  $0 -c 'SELECT count(*) FROM core.shows;'"
         echo ""
         echo "Environment variables (checked in order):"
-        echo "  SUPABASE_DB_URL - Explicit Supabase database URL"
-        echo "  DATABASE_URL    - Standard Postgres connection string"
-        echo "  TRR_DB_URL      - Legacy alias"
-        echo "  (fallback)      - Local Supabase via 'supabase status'"
+        echo "  TRR_DB_URL          - Canonical runtime database URL"
+        echo "  TRR_DB_FALLBACK_URL - Explicit fallback only"
+        echo "  DATABASE_URL        - Tooling-only compatibility input"
+        echo "  SUPABASE_DB_URL     - Deprecated compatibility input"
+        echo "  (fallback)          - Local Supabase via 'supabase status'"
         exit 1
     fi
 
@@ -124,12 +134,12 @@ main() {
         error "No database URL configured.
 
 For remote/production:
-  Set SUPABASE_DB_URL to your Supabase direct connection string.
-  Example: export SUPABASE_DB_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
+  Set TRR_DB_URL to your Supabase session-pooler or direct connection string.
+  Example: export TRR_DB_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
 
 For local development:
   Start local Supabase: supabase start
-  Or set DATABASE_URL to your local Postgres connection string."
+  Or set DATABASE_URL only for tooling-specific local flows."
     fi
 
     local url_source

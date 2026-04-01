@@ -18,7 +18,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from api.routers import admin_person_images, admin_show_bravo, admin_show_links
 from scripts.sync import sync_episode_appearances, sync_show_cast
@@ -39,6 +39,12 @@ router = APIRouter(prefix="/admin/person", tags=["admin-person"])
 class RefreshProfileRequest(BaseModel):
     refresh_links: bool = True
     refresh_credits: bool = True
+
+
+class ProfileSourceSkippedError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _iso_utc_now() -> str:
@@ -278,10 +284,10 @@ def _refresh_tmdb_profile(
 ) -> tuple[int, int]:
     tmdb_person_id = admin_person_images._get_tmdb_id(db, str(person["id"]), _coerce_record(person.get("external_ids")))
     if not tmdb_person_id:
-        return 0, 0
+        raise ProfileSourceSkippedError("No TMDb person id available.")
     person_full = fetch_tmdb_person_full(int(tmdb_person_id))
     if not person_full:
-        return 0, 0
+        raise ProfileSourceSkippedError("TMDb profile unavailable.")
     tmdb_row = person_full.to_cast_tmdb_row(str(person["id"]))
     upsert_cast_tmdb(db, tmdb_row)
     patch = _tmdb_profile_patch(person, tmdb_row=tmdb_row)
@@ -402,10 +408,16 @@ def _refresh_imdb_profile(
         match = re.search(r"/name/(nm\d+)", imdb_url or "")
         imdb_id = match.group(1) if match else ""
     if not imdb_id:
-        return 0, 0
-    profile = _fetch_imdb_person_profile(imdb_id)
+        raise ProfileSourceSkippedError("No IMDb profile link available.")
+    try:
+        profile = _fetch_imdb_person_profile(imdb_id)
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code == 404:
+            raise ProfileSourceSkippedError("IMDb profile not found.") from exc
+        raise
     if not profile:
-        return 0, 0
+        raise ProfileSourceSkippedError("IMDb profile unavailable.")
     patch: dict[str, Any] = {}
     for field_name, profile_key in (
         ("birthday", "birthday"),
@@ -438,7 +450,7 @@ def _refresh_fandom_profile(
 ) -> tuple[int, int]:
     fandom_url = _first_link_url(approved_links, "fandom") or _first_link_url(approved_links, "wikia")
     if not fandom_url:
-        return 0, 0
+        raise ProfileSourceSkippedError("No Fandom profile link available.")
     html, resolved_url = fetch_fandom_person_html(fandom_url)
     cast_fandom, _photos = parse_fandom_person_html(html, source_url=resolved_url)
     cast_fandom["person_id"] = str(person["id"])
@@ -503,12 +515,17 @@ def _refresh_wikipedia_profile(
 ) -> tuple[int, int]:
     wikipedia_url = _first_link_url(approved_links, "wikipedia")
     if not wikipedia_url:
-        return 0, 0
+        raise ProfileSourceSkippedError("No Wikipedia profile link available.")
     response = requests.get(wikipedia_url, timeout=20, headers={"user-agent": "Mozilla/5.0"})
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        if response.status_code == 404:
+            raise ProfileSourceSkippedError("Wikipedia profile not found.") from exc
+        raise
     profile = _extract_wikipedia_profile_from_html(html=response.text, page_url=str(response.url))
     if not profile:
-        return 0, 0
+        raise ProfileSourceSkippedError("Wikipedia profile unavailable.")
     patch: dict[str, Any] = {}
     for field_name in ("biography", "birthday", "place_of_birth"):
         merged = _merge_source_value(person.get(field_name), source="wikipedia", value=profile.get(field_name))
@@ -534,7 +551,7 @@ def _refresh_bravo_profile(
     }
     bravo_url = _first_link_url(approved_links, "bravo_profile")
     if not bravo_url:
-        return 0, 0
+        raise ProfileSourceSkippedError("No BravoTV profile link available.")
     parsed = parse_person_page(bravo_url)
     bio = parsed.get("bio") if isinstance(parsed.get("bio"), str) else None
     hero_image_url = parsed.get("hero_image_url") if isinstance(parsed.get("hero_image_url"), str) else None
@@ -574,9 +591,7 @@ def _refresh_bravo_profile(
             )
     refreshed = _load_person(db, person_id=str(person["id"]))
     person.update(refreshed)
-    changed_fields = sum(
-        1 for key, before_value in before_refresh.items() if refreshed.get(key) != before_value
-    )
+    changed_fields = sum(1 for key, before_value in before_refresh.items() if refreshed.get(key) != before_value)
     return changed_fields, 0
 
 
@@ -653,6 +668,7 @@ def _run_person_profile_refresh(
     field_changes = 0
     aliases_added = 0
     source_failures: list[str] = []
+    source_skips: list[str] = []
 
     for stage, label, runner in (
         ("profile_tmdb", "Refreshing TMDb profile...", _refresh_tmdb_profile),
@@ -675,12 +691,18 @@ def _run_person_profile_refresh(
                 )
             else:
                 changed, added = runner(db, person=person, approved_links=approved_links)
+        except ProfileSourceSkippedError as exc:
+            logger.info("person profile source skipped person_id=%s stage=%s reason=%s", person_id, stage, exc.reason)
+            source_skips.append(f"{stage}:{exc.reason}")
+            emit(stage, exc.reason, status="skipped", skip_reason=exc.reason)
+            continue
         except Exception as exc:  # noqa: BLE001
             logger.warning("person profile source refresh failed person_id=%s stage=%s error=%s", person_id, stage, exc)
             source_failures.append(f"{stage}:{exc}")
             continue
         field_changes += changed
         aliases_added += added
+        emit(stage, label, status="completed", changes=changed, aliases_added=added)
 
     credits_processed = 0
     credit_failures: list[str] = []
@@ -688,11 +710,7 @@ def _run_person_profile_refresh(
     if payload.refresh_credits:
         emit("credits_refresh", "Refreshing show credits from related shows...", current=0, total=len(related_shows))
         credits_processed, credit_failures = _refresh_credits_for_related_shows(related_shows)
-        failed_shows = {
-            str(item).split(":", 1)[0]
-            for item in credit_failures
-            if isinstance(item, str) and ":" in item
-        }
+        failed_shows = {str(item).split(":", 1)[0] for item in credit_failures if isinstance(item, str) and ":" in item}
         credits_updated = max(credits_processed - len(failed_shows), 0)
 
     finished_at = _iso_utc_now()
@@ -706,7 +724,7 @@ def _run_person_profile_refresh(
         "shows_processed": len(related_shows),
         "credits_updated": credits_updated,
         "failures": source_failures + credit_failures,
-        "skips": [],
+        "skips": source_skips,
         "status": "ok" if not (source_failures or credit_failures) else "partial",
     }
 
@@ -804,7 +822,7 @@ def refresh_person_profile_stream(
     person_id: UUID,
     payload: RefreshProfileRequest = Body(default_factory=RefreshProfileRequest),
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
     request: Request = None,
 ) -> StreamingResponse:
     person_id_str = str(person_id)

@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.getty_replacement import (
     apply_media_asset_replacement,
@@ -116,7 +116,7 @@ def mirror_media_asset(
     asset_id: UUID,
     payload: MirrorMediaAssetRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> MirrorMediaAssetResponse:
     asset_id_str = str(asset_id)
     payload = payload or MirrorMediaAssetRequest()
@@ -248,7 +248,7 @@ def generate_variants_for_media_asset(
     asset_id: UUID,
     payload: GenerateMediaAssetVariantsRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> GenerateMediaAssetVariantsResponse:
     asset_id_str = str(asset_id)
     payload = payload or GenerateMediaAssetVariantsRequest()
@@ -288,7 +288,7 @@ def generate_variants_for_media_asset(
 def delete_media_asset(
     asset_id: UUID,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> DeleteMediaAssetResponse:
     """
     Delete a media asset from the unified media_assets/media_links model.
@@ -358,7 +358,7 @@ def detect_text_overlay_media_asset(
     asset_id: UUID,
     force: bool = Query(default=False),
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> DetectTextOverlayResponse:
     """
     Detect whether a media asset contains overlaid text and persist results to core.media_assets.metadata.
@@ -414,7 +414,7 @@ def detect_text_overlay_media_asset(
 def reverse_image_search(
     asset_id: UUID,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> ReverseImageSearchResponse:
     asset_id_str = str(asset_id)
     response = (
@@ -468,7 +468,7 @@ def replace_from_url(
     asset_id: UUID,
     payload: ReplaceFromUrlRequest,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> ReplaceFromUrlResponse:
     asset_id_str = str(asset_id)
     response = (

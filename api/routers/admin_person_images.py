@@ -31,7 +31,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser, FacebankSeedAdminUser
+from api.auth import FacebankSeedAdminUser, InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.face_crops import generate_and_upload_face_crops
 from trr_backend.media.getty_replacement import (
@@ -1347,9 +1347,7 @@ def _normalize_operational_refresh_sources(
 ) -> list[SourceType]:
     normalized: list[SourceType] = [source for source in sources if source != "getty"]
     requested_sources = {
-        str(source or "").strip().lower()
-        for source in (request.sources or [])
-        if str(source or "").strip()
+        str(source or "").strip().lower() for source in (request.sources or []) if str(source or "").strip()
     }
     wants_getty_pipeline = (
         "nbcumv" in requested_sources
@@ -4263,9 +4261,7 @@ def _import_nbcumv_person_media(
 
     combined_assets = _dedupe_scoped_getty_assets(
         scoped_assets + broad_event_assets,
-        dedupe_on_object_name=not (
-            getty_only_direct_import_mode or existing_nbcumv_prefetched_enrichment_mode
-        ),
+        dedupe_on_object_name=not (getty_only_direct_import_mode or existing_nbcumv_prefetched_enrichment_mode),
     )
     repair_asset_tuples = list(combined_assets)
     result["getty_discovered_total"] = len(getty_assets)
@@ -4424,9 +4420,9 @@ def _import_nbcumv_person_media(
             if getty_row is None:
                 if discovery_prefetch_mode and editorial_id:
                     deferred_prefetched_editorial_ids.add(editorial_id)
-                    result["getty_deferred_resolution_total"] = int(
-                        result.get("getty_deferred_resolution_total") or 0
-                    ) + 1
+                    result["getty_deferred_resolution_total"] = (
+                        int(result.get("getty_deferred_resolution_total") or 0) + 1
+                    )
                     _mark_event_inventory_resolution(
                         event_inventory_by_editorial_id,
                         asset,
@@ -4937,9 +4933,11 @@ def _import_nbcumv_person_media(
         result["getty_only_existing"] = max(0, len(upserted_rows) - int(result["getty_only_imported"]))
         result["getty_existing_getty_total"] = int(result.get("getty_only_existing") or 0)
         result["getty_skipped_existing_total"] = existing_shared_count + int(result["getty_only_existing"] or 0)
-        result["covered_existing"] = int(result.get("covered_existing") or 0) + int(
-            result.get("getty_only_existing") or 0
-        ) + existing_shared_count
+        result["covered_existing"] = (
+            int(result.get("covered_existing") or 0)
+            + int(result.get("getty_only_existing") or 0)
+            + existing_shared_count
+        )
         imported_getty_count = int(result["getty_only_imported"])
         existing_getty_count = int(result.get("getty_only_existing") or 0)
         _emit_getty_progress(
@@ -7102,7 +7100,10 @@ def _recenter_person_gallery_images(
                 )
                 raw_refs = owner_reference_profile.get("used")
                 if isinstance(raw_refs, list):
-                    resolved_owner_reference_images = cast(list[dict[str, object]], [entry for entry in raw_refs if isinstance(entry, dict)])
+                    resolved_owner_reference_images = cast(
+                        list[dict[str, object]],
+                        [entry for entry in raw_refs if isinstance(entry, dict)],
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Centering owner reference profile unavailable person_id=%s error=%s",
@@ -8586,11 +8587,19 @@ def _resize_person_gallery_images(
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="person-variant")
             if origin == "cast_photos":
                 future = executor.submit(
-                    generate_cast_photo_variants, db, photo_id=target_id, crop=crop_payload, force=force,
+                    generate_cast_photo_variants,
+                    db,
+                    photo_id=target_id,
+                    crop=crop_payload,
+                    force=force,
                 )
             else:
                 future = executor.submit(
-                    generate_media_asset_variants, db, asset_id=target_id, crop=crop_payload, force=force,
+                    generate_media_asset_variants,
+                    db,
+                    asset_id=target_id,
+                    crop=crop_payload,
+                    force=force,
                 )
             timed_out = False
             try:
@@ -10820,7 +10829,7 @@ def refresh_person_images(
     person_id: UUID,
     request: RefreshImagesRequest | None = None,
     db: SupabaseAdminClient = None,  # type: ignore[assignment]
-    _: AdminUser = None,  # type: ignore[assignment]
+    _: InternalAdminUser = None,  # type: ignore[assignment]
 ) -> RefreshImagesResponse:
     """
     Refresh images for a person from external sources.
@@ -11246,13 +11255,19 @@ def refresh_person_images(
             )
             raw_refs = owner_reference_profile.get("used")
             if isinstance(raw_refs, list):
-                owner_reference_images = cast(list[dict[str, Any]], [entry for entry in raw_refs if isinstance(entry, dict)])
+                owner_reference_images = cast(
+                    list[dict[str, Any]],
+                    [entry for entry in raw_refs if isinstance(entry, dict)],
+                )
             if owner_reference_images:
-                owner_reference_images = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
-                    db,
-                    person_id_str,
-                    used_references=owner_reference_images,
-                ))
+                owner_reference_images = cast(
+                    list[dict[str, Any]],
+                    sync_owner_tagging_reference_usage(
+                        db,
+                        person_id_str,
+                        used_references=owner_reference_images,
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to build owner tagging references for %s: %s", person_id_str, exc)
             owner_reference_images = []
@@ -11261,11 +11276,14 @@ def refresh_person_images(
             nonlocal owner_reference_images, owner_reference_synced
             if owner_reference_synced:
                 return
-            owner_reference_images = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
-                db,
-                person_id_str,
-                used_references=used_references,
-            ))
+            owner_reference_images = cast(
+                list[dict[str, Any]],
+                sync_owner_tagging_reference_usage(
+                    db,
+                    person_id_str,
+                    used_references=used_references,
+                ),
+            )
             owner_reference_synced = True
 
         auto_counts_attempted_cast, auto_counts_succeeded_cast, auto_counts_failed_cast = _auto_count_cast_photos(
@@ -11456,9 +11474,7 @@ def refresh_person_images(
         getty_search_degraded=bool(nbcumv_result.get("getty_search_degraded")),
         getty_unavailable_reason=str(nbcumv_result.get("getty_unavailable_reason") or "").strip() or None,
         getty_failure_stage=str(nbcumv_result.get("getty_failure_stage") or "").strip() or None,
-        getty_http_status=(
-            _ghs if isinstance((_ghs := nbcumv_result.get("getty_http_status")), int) else None
-        ),
+        getty_http_status=(_ghs if isinstance((_ghs := nbcumv_result.get("getty_http_status")), int) else None),
         getty_page_classification=str(nbcumv_result.get("getty_page_classification") or "").strip() or None,
         matched_via_image_search=int(nbcumv_result.get("matched_via_image_search") or 0),
         getty_snapshot_saved=getty_snapshot_saved,
@@ -11543,7 +11559,7 @@ def refresh_person_images_getty_enrichment(
     person_id: UUID,
     request: GettyEnrichmentRequest | None = None,
     db: SupabaseAdminClient = None,  # type: ignore[assignment]
-    _: AdminUser = None,  # type: ignore[assignment]
+    _: InternalAdminUser = None,  # type: ignore[assignment]
 ) -> GettyEnrichmentResponse:
     request = request or GettyEnrichmentRequest()
     person_id_str = str(person_id)
@@ -11664,7 +11680,7 @@ async def refresh_person_images_stream(
     connection: Request,
     request: RefreshImagesRequest | None = None,
     db: SupabaseAdminClient = None,  # type: ignore[assignment]
-    admin_user: AdminUser = None,  # type: ignore[assignment]
+    admin_user: InternalAdminUser = None,  # type: ignore[assignment]
 ) -> StreamingResponse:
     """Refresh images with SSE streaming progress."""
     from trr_backend.ingestion.cast_photo_sources import (
@@ -14261,14 +14277,20 @@ async def refresh_person_images_stream(
                             )
                             raw_refs = owner_reference_profile.get("used")
                             if isinstance(raw_refs, list):
-                                owner_reference_images = cast(list[dict[str, Any]], [entry for entry in raw_refs if isinstance(entry, dict)])
+                                owner_reference_images = cast(
+                                    list[dict[str, Any]],
+                                    [entry for entry in raw_refs if isinstance(entry, dict)],
+                                )
                             if owner_reference_images:
-                                owner_reference_images = cast(list[dict[str, Any]], await asyncio.to_thread(
-                                    sync_owner_tagging_reference_usage,
-                                    db,
-                                    person_id_str,
-                                    used_references=owner_reference_images,
-                                ))
+                                owner_reference_images = cast(
+                                    list[dict[str, Any]],
+                                    await asyncio.to_thread(
+                                        sync_owner_tagging_reference_usage,
+                                        db,
+                                        person_id_str,
+                                        used_references=owner_reference_images,
+                                    ),
+                                )
                         except Exception as exc:  # noqa: BLE001
                             logger.warning(
                                 "Failed to build owner tagging references for stream person_id=%s error=%s",
@@ -15530,7 +15552,7 @@ async def reprocess_person_images_stream(
     connection: Request,
     request: ReprocessImagesRequest = Body(default_factory=ReprocessImagesRequest),
     db: SupabaseAdminClient = None,  # type: ignore[assignment]
-    admin_user: AdminUser = None,  # type: ignore[assignment]
+    admin_user: InternalAdminUser = None,  # type: ignore[assignment]
 ) -> StreamingResponse:
     """Re-run metadata repair, counting, text-ID, centering, and resize on existing photos (no sync/mirror)."""
     person_id_str = str(person_id)
@@ -15901,14 +15923,20 @@ async def reprocess_person_images_stream(
                     )
                     raw_refs = owner_reference_profile.get("used")
                     if isinstance(raw_refs, list):
-                        owner_reference_images = cast(list[dict[str, Any]], [entry for entry in raw_refs if isinstance(entry, dict)])
+                        owner_reference_images = cast(
+                            list[dict[str, Any]],
+                            [entry for entry in raw_refs if isinstance(entry, dict)],
+                        )
                     if owner_reference_images:
-                        owner_reference_images = cast(list[dict[str, Any]], await asyncio.to_thread(
-                            sync_owner_tagging_reference_usage,
-                            db,
-                            person_id_str,
-                            used_references=owner_reference_images,
-                        ))
+                        owner_reference_images = cast(
+                            list[dict[str, Any]],
+                            await asyncio.to_thread(
+                                sync_owner_tagging_reference_usage,
+                                db,
+                                person_id_str,
+                                used_references=owner_reference_images,
+                            ),
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Failed to build owner tagging references for reprocess stream person_id=%s error=%s",
@@ -15922,11 +15950,14 @@ async def reprocess_person_images_stream(
                     if owner_reference_synced:
                         return
                     try:
-                        owner_reference_images = cast(list[dict[str, Any]], sync_owner_tagging_reference_usage(
-                            db,
-                            person_id_str,
-                            used_references=used_references,
-                        ))
+                        owner_reference_images = cast(
+                            list[dict[str, Any]],
+                            sync_owner_tagging_reference_usage(
+                                db,
+                                person_id_str,
+                                used_references=used_references,
+                            ),
+                        )
                         owner_reference_synced = True
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(

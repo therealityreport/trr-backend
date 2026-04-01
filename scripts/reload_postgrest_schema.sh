@@ -11,7 +11,7 @@ set -euo pipefail
 #   ./scripts/reload_postgrest_schema.sh
 #
 # Prerequisites:
-#   - SUPABASE_DB_URL must be set in .env or environment
+#   - TRR_DB_URL or TRR_DB_FALLBACK_URL must be set in .env or environment
 #   - psql must be installed
 #
 # See: docs/runbooks/postgrest_schema_cache.md
@@ -49,12 +49,13 @@ PY
     rm -f "$tmp_env_exports"
 fi
 
-# Check if SUPABASE_DB_URL is set
-if [ -z "${SUPABASE_DB_URL:-}" ]; then
-    echo "ERROR: SUPABASE_DB_URL is not set"
+# Check if runtime DB URL is set
+db_url="${TRR_DB_URL:-${TRR_DB_FALLBACK_URL:-}}"
+if [ -z "${db_url}" ]; then
+    echo "ERROR: TRR_DB_URL or TRR_DB_FALLBACK_URL is not set"
     echo ""
     echo "Set it in .env or export it:"
-    echo "  export SUPABASE_DB_URL='postgresql://postgres:password@db.project.supabase.co:5432/postgres'"
+    echo "  export TRR_DB_URL='postgresql://postgres:password@aws-1-us-east-1.pooler.supabase.com:5432/postgres'"
     exit 1
 fi
 
@@ -69,7 +70,7 @@ if ! command -v psql &> /dev/null; then
 fi
 
 echo "Reloading PostgREST schema cache..."
-psql "$SUPABASE_DB_URL" -f scripts/reload_postgrest_schema.sql
+psql "$db_url" -f scripts/reload_postgrest_schema.sql
 
 echo "✅ PostgREST schema cache reloaded successfully"
 echo ""

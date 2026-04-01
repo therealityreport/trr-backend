@@ -5,11 +5,11 @@ Last updated: 2026-03-23
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
+  include: false
+  state: archived
   last_updated: 2026-03-23
-  current_phase: "backend consolidation complete on main"
-  next_action: "Use backend main as the source of truth and monitor downstream screenalytics/TRR-APP smoke coverage only if regressions appear"
+  current_phase: "archived continuity note"
+  next_action: "Refer to newer status notes if Twitter search provenance work resumes."
   detail: self
 ```
 

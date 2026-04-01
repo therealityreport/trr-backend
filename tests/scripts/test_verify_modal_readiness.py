@@ -57,6 +57,7 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
     assert summary["missing_secrets"] == []
     assert summary["missing_functions"] == []
     assert summary["app_found"] is True
+    assert summary["app_lookup_error"] is None
     assert summary["api_web_url"] == "https://workspace--trr-backend-api.modal.run"
     assert summary["missing_web_endpoints"] == []
 
@@ -110,6 +111,7 @@ def test_verify_modal_readiness_handles_missing_modal_helpers(
 
     assert summary["ok"] is False
     assert summary["app_found"] is True
+    assert summary["app_lookup_error"] == "Modal experimental helpers are unavailable"
     assert summary["missing_functions"] == ["serve_backend_api"]
 
 
@@ -141,6 +143,7 @@ def test_main_emits_json_and_returns_nonzero_when_not_ready(
             "app_name": kwargs["app_name"],
             "modal_environment": kwargs["modal_environment"],
             "app_found": True,
+            "app_lookup_error": None,
             "runtime_secret_name": kwargs["runtime_secret_name"],
             "social_secret_name": kwargs["social_secret_name"],
             "missing_secrets": ["trr-social-auth"],

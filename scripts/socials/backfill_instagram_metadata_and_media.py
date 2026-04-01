@@ -50,6 +50,9 @@ class _BackfillPost:
         self.metadata_source = row.get("metadata_source")
         self.metadata_scraped_at = row.get("metadata_scraped_at")
         self.metadata_error = row.get("metadata_error")
+        self.metadata_last_attempted_at = row.get("metadata_last_attempted_at")
+        self.metadata_last_failed_at = row.get("metadata_last_failed_at")
+        self.metadata_consecutive_failures = row.get("metadata_consecutive_failures")
         self.hosted_thumbnail_url = row.get("hosted_thumbnail_url")
         self.hosted_media_urls = social_repo._as_text_list(row.get("hosted_media_urls"))  # noqa: SLF001
         self.media_mirror_status = row.get("media_mirror_status")
@@ -114,6 +117,9 @@ def _load_candidate_rows(*, weeks: int, limit: int | None) -> list[dict[str, Any
           p.metadata_source,
           p.metadata_scraped_at,
           p.metadata_error,
+          p.metadata_last_attempted_at,
+          p.metadata_last_failed_at,
+          p.metadata_consecutive_failures,
           p.hosted_thumbnail_url,
           p.hosted_media_urls,
           p.media_mirror_status,
@@ -132,6 +138,13 @@ def _metadata_is_missing_or_stale(row: dict[str, Any], *, stale_before: datetime
     metadata_source = str(row.get("metadata_source") or "").strip()
     post_format = str(row.get("post_format") or "").strip()
     if not metadata_scraped_at or not metadata_source or not post_format:
+        return True
+    if social_repo._instagram_metadata_retry_eligible(  # noqa: SLF001
+        metadata_error=row.get("metadata_error"),
+        metadata_last_attempted_at=row.get("metadata_last_attempted_at"),
+        metadata_consecutive_failures=row.get("metadata_consecutive_failures"),
+        now_utc=datetime.now(tz=UTC),
+    ):
         return True
     return metadata_scraped_at < stale_before
 
@@ -155,6 +168,13 @@ def _mirror_is_missing(row: dict[str, Any]) -> bool:
     if source_count > 0 and hosted_count >= source_count:
         return False
     return mirror_status != "mirrored"
+
+
+def _preserve_existing_reel_classification(*, row: dict[str, Any], post: _BackfillPost) -> None:
+    existing_post_format = str(row.get("post_format") or "").strip().lower()
+    refreshed_post_format = str(getattr(post, "post_format", "") or "").strip().lower()
+    if existing_post_format == "reel" and refreshed_post_format in {"", "post"}:
+        post.post_format = "reel"
 
 
 def main() -> int:
@@ -211,9 +231,11 @@ def main() -> int:
 
         if needs_metadata:
             social_repo._enrich_instagram_post_from_permalink(post=post, scraper=scraper, now_utc=now_utc)  # noqa: SLF001
+            _preserve_existing_reel_classification(row=row, post=post)
             if not post.metadata_error and post.metadata_source:
                 counters.enriched += 1
 
+        upserted_row: dict[str, Any] | None = None
         if needs_mirror:
             week_index: int | None = None
             post_ts = social_repo._coerce_dt(post.taken_at)  # noqa: SLF001
@@ -231,6 +253,15 @@ def main() -> int:
                 counters.mirror_jobs_enqueued += 1
                 counters.mirrored += 1
             else:
+                upserted_row = social_repo._upsert_instagram_post(  # noqa: SLF001
+                    context,
+                    job_id="backfill-instagram-metadata-media",
+                    account=str(row.get("source_account") or row.get("username") or ""),
+                    post=post,
+                )
+                if not upserted_row:
+                    counters.partial += 1
+                    continue
                 try:
                     mirror_job_id = social_repo._enqueue_platform_media_mirror_job(  # noqa: SLF001
                         context,
@@ -238,7 +269,7 @@ def main() -> int:
                         run_id=None,
                         source_scope=args.source_scope,
                         account=str(row.get("source_account") or row.get("username") or ""),
-                        post_row=row,
+                        post_row=upserted_row,
                         week_index=week_index,
                         parent_job_id="backfill-instagram-metadata-media",
                         conn=None,
@@ -255,12 +286,13 @@ def main() -> int:
         if args.dry_run:
             continue
 
-        social_repo._upsert_instagram_post(  # noqa: SLF001
-            context,
-            job_id="backfill-instagram-metadata-media",
-            account=str(row.get("source_account") or row.get("username") or ""),
-            post=post,
-        )
+        if upserted_row is None:
+            social_repo._upsert_instagram_post(  # noqa: SLF001
+                context,
+                job_id="backfill-instagram-metadata-media",
+                account=str(row.get("source_account") or row.get("username") or ""),
+                post=post,
+            )
 
     print(
         json.dumps(

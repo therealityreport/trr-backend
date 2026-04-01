@@ -86,7 +86,7 @@ def _fetch_all_getty(person_name: str) -> dict:
     from trr_backend.integrations.getty_local_prefetch import fetch_person_getty_prefetch_payload
 
     result = fetch_person_getty_prefetch_payload(person_name)
-    print(f"\n[getty-prefetch] ═══ SUMMARY ═══")
+    print("\n[getty-prefetch] ═══ SUMMARY ═══")
     print(
         f"  Images: {int(result.get('merged_total') or 0)} unique"
         f" | Events: {int(result.get('merged_events_total') or 0)} unique"
@@ -104,14 +104,16 @@ def _load_from_file(path: str) -> dict:
     if "merged" not in data:
         seen: set[str] = set()
         merged = _dedup_assets(
-            data.get("bravo_assets", []) + data.get("broad_assets", []), seen,
+            data.get("bravo_assets", []) + data.get("broad_assets", []),
+            seen,
         )
         data["merged"] = merged
         data["merged_total"] = len(merged)
     if "merged_events" not in data:
         seen_ev: set[str] = set()
         merged_ev = _dedup_events(
-            data.get("bravo_events", []) + data.get("broad_events", []), seen_ev,
+            data.get("bravo_events", []) + data.get("broad_events", []),
+            seen_ev,
         )
         data["merged_events"] = merged_ev
         data["merged_events_total"] = len(merged_ev)
@@ -153,7 +155,7 @@ def _send_to_pipeline(
     headers["x-trr-flow-key"] = f"getty-prefetch-{_uuid.uuid4().hex[:12]}"
     headers["x-trr-tab-session-id"] = f"cli-prefetch-{_uuid.uuid4().hex[:8]}"
 
-    print(f"\n[getty-prefetch] Sending to pipeline:")
+    print("\n[getty-prefetch] Sending to pipeline:")
     print(f"  URL: {url}")
     print(f"  Assets: {len(assets)}")
     print(f"  Events: {len(events)}")
@@ -190,8 +192,9 @@ def main() -> None:
     if args.load:
         print(f"[getty-prefetch] Loading from {args.load}")
         data = _load_from_file(args.load)
-        print(f"[getty-prefetch] Loaded {data.get('merged_total', 0)} images, "
-              f"{data.get('merged_events_total', 0)} events")
+        print(
+            f"[getty-prefetch] Loaded {data.get('merged_total', 0)} images, {data.get('merged_events_total', 0)} events"
+        )
     else:
         data = _fetch_all_getty(args.person_name)
 
@@ -220,9 +223,9 @@ def main() -> None:
 
     if not args.save and not args.api_url:
         # Just print summary — no pipeline target specified
-        print(f"\nTo send to pipeline, add:")
-        print(f"  --person-id <uuid> --api-url <url> --auth-token <key>")
-        print(f"\nTo save for inspection:")
+        print("\nTo send to pipeline, add:")
+        print("  --person-id <uuid> --api-url <url> --auth-token <key>")
+        print("\nTo save for inspection:")
         print(f"  --save /tmp/getty-{args.person_name.lower().replace(' ', '-')}.json")
 
 

@@ -59,6 +59,7 @@ def _build_modal_stub_module():
 
         def function(self, *_args, **_kwargs):
             def _decorator(func):
+                func.local = func
                 return func
 
             return _decorator
@@ -468,7 +469,7 @@ def sweep_social_dispatch_queue() -> dict[str, object]:
 )
 def heartbeat_remote_executors() -> dict[str, object]:
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
-    from trr_backend.repositories.social_season_analytics import is_queue_enabled
+    from trr_backend.repositories.social_season_analytics import get_worker_auth_capabilities, is_queue_enabled
 
     metadata = {
         "dispatch_enabled": True,
@@ -491,13 +492,22 @@ def heartbeat_remote_executors() -> dict[str, object]:
         metadata_updates=metadata,
     )
     if is_queue_enabled():
+        social_metadata = {
+            **metadata,
+            "auth_capabilities": get_worker_auth_capabilities(),
+        }
         _record_dispatcher_heartbeat(
             dispatcher_name="social",
             status="idle",
-            metadata_updates=metadata,
+            metadata_updates=social_metadata,
             supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
         )
-    return {"ok": True}
+    else:
+        social_metadata = None
+    return {
+        "ok": True,
+        "social_auth_capabilities": social_metadata.get("auth_capabilities") if social_metadata else None,
+    }
 
 
 @app.function(

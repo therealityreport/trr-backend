@@ -25,6 +25,7 @@ pip install -r requirements.txt
 
 cp .env.example .env
 # edit .env with SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, TMDB_API_KEY, IMDB_API_KEY
+# add TRR_DB_URL only if this host also runs direct SQL helpers or migration verification
 ```
 
 ## Step 4: Run a Sync Job (3 minutes)

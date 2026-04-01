@@ -14,6 +14,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
 
+from trr_backend.security.internal_admin import verify_internal_admin_token
 from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,17 @@ def get_bearer_token(request: Request) -> str | None:
     return parts[1]
 
 
+def _build_internal_admin_identity(payload: dict[str, Any], token: str) -> dict[str, Any]:
+    return {
+        "id": str(payload.get("sub") or "internal-admin"),
+        "email": None,
+        "role": "internal_admin",
+        "token": token,
+        "issuer": payload.get("iss"),
+        "scope": payload.get("scope"),
+    }
+
+
 async def get_current_user(request: Request) -> dict | None:
     """
     Get the current user from the JWT token payload.
@@ -50,7 +62,7 @@ async def get_current_user(request: Request) -> dict | None:
     try:
         payload = verify_jwt_token(token)
     except InvalidTokenError as e:
-        logger.debug(f"JWT verification failed: {e}")
+        logger.debug("JWT verification failed: %s", e)
         return None
     except RuntimeError as exc:
         logger.exception("JWT verification runtime failure")
@@ -121,7 +133,7 @@ def _admin_email_allowlist() -> set[str]:
 
 async def require_admin(user: CurrentUser) -> dict:
     role = (user.get("role") or "").lower()
-    if role in ("service_role", "admin"):
+    if role in ("admin", "internal_admin", "service_role"):
         return user
     allowlist = _admin_email_allowlist()
     email = (user.get("email") or "").lower()
@@ -133,46 +145,102 @@ async def require_admin(user: CurrentUser) -> dict:
 AdminUser = Annotated[dict, Depends(require_admin)]
 
 
-async def require_internal_admin(request: Request, user: CurrentUser) -> dict:
-    """
-    Require an allowlisted/admin user, or a trusted internal service-role caller.
-
-    App-side admin proxy routes authenticate the human admin in TRR-APP and then
-    call backend routes with a service-role token plus the internal shared secret.
-    """
+def _allowlist_match(user: dict | None) -> dict | None:
+    if not user:
+        return None
     role = (user.get("role") or "").lower()
     if role == "admin":
         return user
-
     allowlist = _admin_email_allowlist()
     email = (user.get("email") or "").lower()
     if allowlist and email in allowlist:
         return user
+    return None
 
-    shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
-    supplied_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
-    if (
-        role == "service_role"
-        and shared_secret
-        and supplied_secret
-        and hmac.compare_digest(supplied_secret, shared_secret)
-    ):
-        return user
 
-    raise HTTPException(status_code=403, detail="Allowlist admin access required")
+async def require_internal_admin(request: Request) -> dict:
+    """
+    Require an allowlisted/admin user, or a trusted internal service JWT caller.
+
+    App-side admin proxy routes authenticate the human admin in TRR-APP and then
+    call backend routes with a signed internal admin JWT.
+    """
+    try:
+        current_user = await get_current_user(request)
+        matched_user = _allowlist_match(current_user)
+    except HTTPException as exc:
+        if exc.status_code == 500 and exc.headers.get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE":
+            current_user = None
+            matched_user = None
+        else:
+            raise
+    if matched_user:
+        return matched_user
+
+    role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
+    if role == "service_role":
+        return current_user
+
+    token = get_bearer_token(request)
+    internal_admin_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
+    attempted_internal_admin_verification = False
+    if token and internal_admin_secret:
+        attempted_internal_admin_verification = True
+        try:
+            return _build_internal_admin_identity(verify_internal_admin_token(token), token)
+        except InvalidTokenError:
+            pass
+        except RuntimeError as exc:
+            logger.exception("Internal admin verification runtime failure")
+            raise HTTPException(
+                status_code=500,
+                detail="Authentication service unavailable",
+                headers={"x-error-code": "AUTH_SERVICE_UNAVAILABLE"},
+            ) from exc
+
+    if current_user:
+        raise HTTPException(status_code=403, detail="Allowlist admin access required")
+    if attempted_internal_admin_verification:
+        raise HTTPException(status_code=403, detail="Allowlist admin access required")
+
+    raise HTTPException(
+        status_code=401,
+        detail="Authentication required. Please provide a valid access token.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 InternalAdminUser = Annotated[dict, Depends(require_internal_admin)]
 
 
-async def require_cast_screentime_admin(request: Request, user: CurrentUser) -> dict:
+async def require_cast_screentime_admin(request: Request) -> dict:
     """
-    Require an allowlisted/admin user, or a trusted internal service-role caller.
+    Require an allowlisted/admin user, or a trusted internal service caller.
 
     Cast screentime app proxies intentionally authenticate the human admin in TRR-APP
-    and then call backend routes with a service-role token plus the internal shared secret.
+    and then call backend routes with a signed internal admin JWT.
     """
-    return await require_internal_admin(request, user)
+    try:
+        current_user = await get_current_user(request)
+    except HTTPException as exc:
+        if exc.status_code == 500 and exc.headers.get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE":
+            current_user = None
+        else:
+            raise
+
+    allowlisted_user = _allowlist_match(current_user)
+    if allowlisted_user:
+        return allowlisted_user
+
+    secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
+    header_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
+    role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
+    if role == "service_role":
+        if secret and header_secret and hmac.compare_digest(header_secret, secret):
+            return current_user
+        raise HTTPException(status_code=403, detail="Allowlist admin access required")
+
+    return await require_internal_admin(request)
 
 
 CastScreentimeAdminUser = Annotated[dict, Depends(require_cast_screentime_admin)]
@@ -189,25 +257,29 @@ async def require_allowlist_admin(user: CurrentUser) -> dict:
 AllowlistAdminUser = Annotated[dict, Depends(require_allowlist_admin)]
 
 
-async def require_facebank_seed_admin(request: Request, user: CurrentUser) -> dict:
-    """Require allowlist admin, or internal service role with shared secret."""
-    allowlist = _admin_email_allowlist()
-    email = (user.get("email") or "").lower()
-    if allowlist and email in allowlist:
-        return user
+async def require_facebank_seed_admin(request: Request) -> dict:
+    """Require allowlist admin, or a signed internal admin caller with secret header."""
+    try:
+        current_user = await get_current_user(request)
+    except HTTPException as exc:
+        if exc.status_code == 500 and exc.headers.get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE":
+            current_user = None
+        else:
+            raise
 
-    role = (user.get("role") or "").lower()
-    shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
-    supplied_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
-    if (
-        role == "service_role"
-        and shared_secret
-        and supplied_secret
-        and hmac.compare_digest(supplied_secret, shared_secret)
-    ):
-        return user
+    allowlisted_user = _allowlist_match(current_user)
+    if allowlisted_user:
+        return allowlisted_user
 
-    raise HTTPException(status_code=403, detail="Allowlist admin access required")
+    secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
+    header_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
+    role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
+    if role == "service_role":
+        if secret and header_secret and hmac.compare_digest(header_secret, secret):
+            return current_user
+        raise HTTPException(status_code=403, detail="Allowlist admin access required")
+
+    return await require_internal_admin(request)
 
 
 FacebankSeedAdminUser = Annotated[dict, Depends(require_facebank_seed_admin)]

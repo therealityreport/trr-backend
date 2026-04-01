@@ -116,14 +116,7 @@ def _chunked(values: Iterable[str], size: int) -> list[list[str]]:
 
 
 def _fetch_person_imdb_id(db: Any, person_id: str) -> str | None:
-    response = (
-        db.schema("core")
-        .table("people")
-        .select("imdb_id")
-        .eq("id", person_id)
-        .limit(1)
-        .execute()
-    )
+    response = db.schema("core").table("people").select("imdb_id").eq("id", person_id).limit(1).execute()
     rows = response.data or []
     if not isinstance(rows, list) or not rows:
         return None

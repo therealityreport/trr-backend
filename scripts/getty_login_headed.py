@@ -87,7 +87,7 @@ def main() -> None:
         if "/sign-in" not in final_url:
             print(f"✓ Login successful! Profile saved at: {PROFILE_DIR}")
         else:
-            print(f"✗ Still on sign-in page. You may need to try again.")
+            print("✗ Still on sign-in page. You may need to try again.")
 
         ctx.close()
 

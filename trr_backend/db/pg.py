@@ -534,13 +534,17 @@ def _run_with_transient_retry(operation: Callable[[], T]) -> T:
         DEFAULT_QUERY_TRANSIENT_ATTEMPTS,
         minimum=1,
     )
+    last_error: Exception | None = None
     for attempt in range(max_attempts):
         try:
             return operation()
         except Exception as error:
+            last_error = error
             if not _should_retry_query(error, attempt=attempt):
                 raise
             reset_pool()
+    if last_error is not None:
+        raise last_error
     raise RuntimeError("unreachable")
 
 
@@ -595,6 +599,8 @@ def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, c
         else:
             if last_error is not None:
                 raise last_error
+    if last_error is not None:
+        raise last_error
     raise RuntimeError("unreachable")
 
 

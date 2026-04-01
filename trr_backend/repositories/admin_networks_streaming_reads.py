@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any
 
 from trr_backend.db import pg
@@ -480,6 +481,7 @@ def _to_string_array(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
+@lru_cache(maxsize=16)
 def _table_exists(table_name: str) -> bool:
     row = pg.fetch_one("select to_regclass(%s) is not null as exists", [table_name]) or {}
     return bool(row.get("exists"))
@@ -687,7 +689,10 @@ def get_networks_streaming_detail(
         ),
         shows_with_slug AS (
           SELECT
-            s.*,
+            s.id,
+            s.name,
+            s.slug,
+            s.primary_poster_image_id,
             {_SHOW_SLUG_SQL} AS computed_slug,
             COUNT(*) OVER (PARTITION BY {_SHOW_SLUG_SQL}) AS slug_collision_count
           FROM core.shows AS s

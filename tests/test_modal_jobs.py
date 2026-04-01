@@ -273,6 +273,42 @@ def test_run_social_job_uses_browser_capable_image_binding() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"] is modal_jobs._browser_image
 
 
+def test_heartbeat_remote_executors_reports_social_auth_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[dict[str, object]] = []
+
+    def _fake_record_dispatcher_heartbeat(**kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "trr_backend.modal_dispatch",
+        types.SimpleNamespace(_record_dispatcher_heartbeat=_fake_record_dispatcher_heartbeat),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "trr_backend.repositories.social_season_analytics",
+        types.SimpleNamespace(
+            is_queue_enabled=lambda: True,
+            get_worker_auth_capabilities=lambda: {"instagram_authenticated": True, "twitter_authenticated": False},
+        ),
+    )
+
+    payload = modal_jobs.heartbeat_remote_executors.local()
+
+    assert payload == {
+        "ok": True,
+        "social_auth_capabilities": {"instagram_authenticated": True, "twitter_authenticated": False},
+    }
+    social_call = next(call for call in recorded if call["dispatcher_name"] == "social")
+    assert social_call["metadata_updates"]["auth_capabilities"] == {
+        "instagram_authenticated": True,
+        "twitter_authenticated": False,
+    }
+    assert social_call["supported_platforms"] == list(modal_jobs.SOCIAL_SUPPORTED_PLATFORMS)
+
+
 def test_reload_falls_back_to_stub_when_modal_module_is_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

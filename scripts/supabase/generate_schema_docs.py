@@ -14,6 +14,14 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from scripts._db_url import resolve_db_url
+except ModuleNotFoundError:  # pragma: no cover - repo root not on sys.path (CI / direct invocation)
+    _repo_root = str(Path(__file__).resolve().parents[2])
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    from scripts._db_url import resolve_db_url
+
+try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
 except ImportError as exc:  # pragma: no cover - depends on local environment
@@ -22,8 +30,10 @@ except ImportError as exc:  # pragma: no cover - depends on local environment
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional in lightweight CI environments
+
     def load_dotenv(*_args: Any, **_kwargs: Any) -> bool:
         return False
+
 
 _OUTPUT_DIR = Path("supabase/schema_docs")
 _DIAGRAM_DIR = _OUTPUT_DIR / "diagrams"
@@ -51,10 +61,14 @@ class ColumnInfo:
 
 def _resolve_db_url() -> str:
     _load_repo_env()
-    for key in ("SUPABASE_DB_URL", "TRR_DB_URL"):
-        value = (os.getenv(key) or "").strip()
-        if value:
-            return value
+    try:
+        return resolve_db_url(
+            allow_database_url=True,
+            allow_deprecated_supabase_db_url=True,
+            allow_local_supabase_status=False,
+        ).value
+    except RuntimeError:
+        pass
 
     env = {
         "host": os.getenv("PGHOST"),
@@ -75,8 +89,8 @@ def _resolve_db_url() -> str:
         return supabase_db_url
 
     raise RuntimeError(
-        "Database connection env vars not set. Start Supabase or export SUPABASE_DB_URL "
-        "(preferred: run `make schema-docs`)."
+        "Database connection env vars not set. Start Supabase or export TRR_DB_URL "
+        "(preferred: run `make schema-docs`). DATABASE_URL remains tooling-only."
     )
 
 
@@ -107,7 +121,7 @@ def _connect() -> psycopg2.extensions.connection:
         return psycopg2.connect(_resolve_db_url(), cursor_factory=RealDictCursor)
     except psycopg2.OperationalError as exc:
         raise RuntimeError(
-            "Failed to connect to database. Start Supabase or export SUPABASE_DB_URL then run `make schema-docs`."
+            "Failed to connect to database. Start Supabase or export TRR_DB_URL then run `make schema-docs`."
         ) from exc
 
 

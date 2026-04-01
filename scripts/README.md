@@ -33,7 +33,8 @@ Legacy Google Sheets tooling is preserved in `scripts/legacy/` for reference onl
   - `TVDB_API_KEY` (for TVDB calls where configured)
   - `IMDB_API_KEY` (for IMDb calls)
 - Optional:
-  - `SUPABASE_DB_URL` / `TRR_DB_URL` for SQL helpers
+  - `TRR_DB_URL` / `TRR_DB_FALLBACK_URL` for runtime SQL helpers
+  - `DATABASE_URL` only when a standalone third-party tool requires that exact variable name
   - AWS creds for S3 mirroring
 
 ## Core Workflows

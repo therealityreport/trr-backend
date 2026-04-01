@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from scripts.modal import prepare_named_secrets as cli
 
 
@@ -87,3 +89,32 @@ def test_apply_runtime_overrides_requires_canonical_trr_db_url() -> None:
         assert "TRR_DB_URL" in str(exc)
     else:
         raise AssertionError("Expected KeyError when TRR_DB_URL is missing")
+
+
+def test_split_env_materializes_file_backed_social_auth(tmp_path) -> None:
+    cookie_file = tmp_path / "instagram-cookies.json"
+    cookie_file.write_text('{\n  "sessionid": "abc123"\n}\n', encoding="utf-8")
+
+    runtime_values, social_values = cli._split_env(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "SOCIAL_INSTAGRAM_COOKIES_FILE": str(cookie_file),
+            "SOCIALBLADE_EMAIL": "ops@example.com",
+        }
+    )
+
+    assert runtime_values == {"TRR_DB_URL": "postgresql://example"}
+    assert social_values == {
+        "SOCIAL_INSTAGRAM_COOKIES_JSON": '{"sessionid":"abc123"}',
+        "SOCIALBLADE_EMAIL": "ops@example.com",
+    }
+
+
+def test_split_env_raises_for_missing_file_backed_social_auth() -> None:
+    with pytest.raises(FileNotFoundError, match="SOCIAL_INSTAGRAM_COOKIES_FILE"):
+        cli._split_env(
+            {
+                "TRR_DB_URL": "postgresql://example",
+                "SOCIAL_INSTAGRAM_COOKIES_FILE": "/tmp/does-not-exist-instagram-cookies.json",
+            }
+        )

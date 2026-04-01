@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.getty_replacement import is_bravo_network_name, resolve_best_public_replacement
 
@@ -522,7 +522,7 @@ async def get_show_images_stream(
     connection: Request,
     request: ShowGetImagesRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> StreamingResponse:
     """Fetch Getty+NBCUMV images for a show with SSE streaming progress."""
     request = request or ShowGetImagesRequest()

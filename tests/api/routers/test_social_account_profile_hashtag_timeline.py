@@ -17,6 +17,7 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     payload = {
         "sub": subject,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "service_role",
     }
@@ -75,7 +76,14 @@ def test_get_social_account_profile_hashtag_timeline_forwards_window(
 
     with patch(
         "trr_backend.repositories.social_season_analytics.get_social_account_profile_hashtag_timeline",
-        return_value={"platform": "instagram", "account_handle": "bravotv", "years": [], "series": [], "top_rank_limit": 10, "off_chart_rank": 11},
+        return_value={
+            "platform": "instagram",
+            "account_handle": "bravotv",
+            "years": [],
+            "series": [],
+            "top_rank_limit": 10,
+            "off_chart_rank": 11,
+        },
     ) as mocked:
         response = client.get(
             "/api/v1/admin/socials/profiles/instagram/bravotv/hashtags/timeline?window=365d",

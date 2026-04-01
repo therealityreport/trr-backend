@@ -31,7 +31,9 @@ def test_compute_people_count_fast_pass_skips_reference_centroid_builders(
             "mode": "faces_then_yolo",
             "owner_person_id": "person-1",
             "owner_reference_images": [{"url": "https://example.com/ref.jpg"}],
-            "person_reference_images": [{"person_id": "person-2", "references": [{"url": "https://example.com/2.jpg"}]}],
+            "person_reference_images": [
+                {"person_id": "person-2", "references": [{"url": "https://example.com/2.jpg"}]}
+            ],
             "prefer_fast_pass": True,
         }
     )

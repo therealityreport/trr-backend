@@ -21,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.db import pg
 from trr_backend.ingestion.show_cast_matrix_scraper import (
@@ -5670,7 +5670,7 @@ def _promote_pending_links_to_approved(show_id: str, *, include_people: bool) ->
 
 
 @fandom_router.get("/allowlist")
-def get_fandom_allowlist(_: AdminUser) -> dict[str, Any]:
+def get_fandom_allowlist(_: InternalAdminUser) -> dict[str, Any]:
     domains, source = load_fandom_community_allowlist_with_source()
     return {
         "domains": list(domains),
@@ -5680,7 +5680,7 @@ def get_fandom_allowlist(_: AdminUser) -> dict[str, Any]:
 
 
 @fandom_router.put("/allowlist")
-def put_fandom_allowlist(payload: FandomAllowlistUpdateRequest, admin: AdminUser) -> dict[str, Any]:
+def put_fandom_allowlist(payload: FandomAllowlistUpdateRequest, admin: InternalAdminUser) -> dict[str, Any]:
     actor = str(admin.get("email") or admin.get("id") or "admin")
     normalized_domains: list[str] = []
     for raw_domain in payload.domains:
@@ -6232,7 +6232,7 @@ def discover_show_links(
     show_id: UUID,
     payload: LinkDiscoverRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(show_id_str):
@@ -6255,7 +6255,7 @@ def discover_show_links_stream(
     show_id: UUID,
     payload: LinkDiscoverRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
     request: Request,
 ) -> StreamingResponse:
     show_id_str = str(show_id)
@@ -6517,7 +6517,7 @@ def add_show_links(
     show_id: UUID,
     payload: LinkBulkAddRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(show_id_str):
@@ -6616,7 +6616,7 @@ def add_show_links(
 @router.get("/{show_id}/links")
 def list_show_links(
     show_id: UUID,
-    _: AdminUser,
+    _: InternalAdminUser,
     status: Literal["all", "pending", "approved", "rejected"] = Query(default="all"),
     entity_type: EntityType | Literal["all"] = Query(default="all"),
     view: Literal["all", "active"] = Query(default="all"),
@@ -6682,7 +6682,7 @@ def create_show_link(
     show_id: UUID,
     payload: LinkCreateRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(show_id_str):
@@ -6714,7 +6714,7 @@ def patch_show_link(
     link_id: UUID,
     payload: LinkPatchRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     actor = str(admin.get("email") or admin.get("id") or "admin")
@@ -6789,7 +6789,7 @@ def delete_show_link(
     show_id: UUID,
     link_id: UUID,
     db: SupabaseAdminClient,
-    _: AdminUser,
+    _: InternalAdminUser,
 ) -> dict[str, Any]:
     response = (
         db.schema("core").table("entity_links").delete().eq("id", str(link_id)).eq("show_id", str(show_id)).execute()

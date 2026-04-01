@@ -395,8 +395,7 @@ def _cloudsearch_hit_to_image(hit: dict[str, Any]) -> dict[str, Any] | None:
         "lbx_episodeNumber": _coerce_cloudsearch_text(fields.get("episode_number")),
         "lbx_season": _coerce_cloudsearch_text(fields.get("season")),
         "lbx_seasonNumber": (
-            _parse_optional_int(fields.get("season_number"))
-            or _parse_optional_int(fields.get("season"))
+            _parse_optional_int(fields.get("season_number")) or _parse_optional_int(fields.get("season"))
         ),
         "lbx_type": _coerce_cloudsearch_text(fields.get("meta_type")) or (meta_types[0] if meta_types else None),
         "lbx_keywords": _coerce_cloudsearch_text(fields.get("keywords")),
@@ -590,8 +589,7 @@ def _apply_cloudsearch_post_filters(images: list[dict[str, Any]], filters: Searc
         if filters.meta_type:
             meta_types = [str(item).strip() for item in image.get("metaTypes") or [] if str(item).strip()]
             if meta_types and not any(
-                str(filters.meta_type).strip().casefold() == item.casefold()
-                for item in meta_types
+                str(filters.meta_type).strip().casefold() == item.casefold() for item in meta_types
             ):
                 continue
         if filters.network:
@@ -730,8 +728,7 @@ def search_person_show_catalog(
 def search_images(filters: SearchFilters, *, session: Session | None = None) -> list[dict[str, Any]]:
     items = search_cloudsearch_images(filters, session=session)
     if filters.lbx_id and not any(
-        str(item.get("lbx_id") or "").strip() == str(filters.lbx_id).strip()
-        for item in items
+        str(item.get("lbx_id") or "").strip() == str(filters.lbx_id).strip() for item in items
     ):
         matched = _scan_for_lbx_id(str(filters.lbx_id).strip(), session=session)
         if matched is not None:

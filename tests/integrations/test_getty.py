@@ -1105,10 +1105,7 @@ def test_build_query_plan_deduplicates_phrases() -> None:
     assert len(signatures) == len(set(signatures))
     # "bravo" (lowercase dup) should not generate an additional plain query
     plain_bravo_count = sum(
-        1
-        for entry in plan
-        if entry["phrase"].casefold() == "teresa giudice bravo"
-        and not entry.get("query_params")
+        1 for entry in plan if entry["phrase"].casefold() == "teresa giudice bravo" and not entry.get("query_params")
     )
     assert plain_bravo_count == 1
 

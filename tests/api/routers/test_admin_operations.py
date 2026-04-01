@@ -22,6 +22,7 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     payload = {
         "sub": subject,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "service_role",
     }
@@ -244,6 +245,37 @@ def test_cancel_operation_requests_cancellation_and_emits_event(
     assert kwargs["event_type"] == "progress"
     assert kwargs["event_payload"]["operation_id"] in {operation_id, related_operation_id}
     assert kwargs["event_payload"]["cancel_requested"] is True
+
+
+def test_bulk_cancel_operations_endpoint_requests_active_cancellations(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    operation_id = str(uuid4())
+    related_operation_id = str(uuid4())
+
+    expected = {
+        "requested_operation_ids_count": 1,
+        "cancel_requested_operations": 2,
+        "cancel_requested_operation_ids": [operation_id, related_operation_id],
+        "active_operations_remaining": 3,
+    }
+
+    with patch(
+        "api.routers.admin_operations.admin_operations.request_bulk_operation_cancels",
+        return_value=expected,
+    ) as mocked:
+        response = client.post(
+            "/api/v1/admin/operations/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"cancel_all_active": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert mocked.call_args.kwargs["cancel_all_active"] is True
 
 
 def test_get_admin_operations_health_returns_health_payload(

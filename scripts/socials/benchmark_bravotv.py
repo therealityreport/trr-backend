@@ -4,6 +4,7 @@
 Usage:
     .venv/bin/python scripts/socials/benchmark_bravotv.py [--platform PLATFORM]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -12,7 +13,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # ── bootstrap ──────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -31,7 +32,7 @@ BRAVO_HANDLES = {
 }
 
 # Date window: last 7 days
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 DATE_END = NOW
 DATE_START = NOW - timedelta(days=7)
 
@@ -56,8 +57,9 @@ def _fmt_duration(seconds: float) -> str:
 
 # ── Platform benchmarks ──────────────────────────────────────────────
 
+
 def benchmark_facebook():
-    from trr_backend.socials.facebook import FacebookScraper, FacebookScrapeConfig
+    from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
 
     cookies = _load_cookies("facebook")
 
@@ -108,7 +110,7 @@ def benchmark_facebook():
 
 
 def benchmark_youtube():
-    from trr_backend.socials.youtube import YouTubeScraper, YouTubeScrapeConfig
+    from trr_backend.socials.youtube import YouTubeScrapeConfig, YouTubeScraper
 
     scraper = YouTubeScraper()
     config = YouTubeScrapeConfig(
@@ -204,7 +206,7 @@ def benchmark_instagram():
 
 
 def benchmark_tiktok():
-    from trr_backend.socials.tiktok import TikTokScraper, TikTokScrapeConfig
+    from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
     cookies = _load_cookies("tiktok")
     scraper = TikTokScraper(cookies=cookies)
@@ -249,7 +251,7 @@ def benchmark_tiktok():
 
 
 def benchmark_twitter():
-    from trr_backend.socials.twitter import TwitterScraper, TwitterScrapeConfig
+    from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
     cookies = _load_cookies("twitter")
     bearer = os.environ.get("SOCIAL_TWITTER_BEARER_TOKEN", "")
@@ -295,7 +297,7 @@ def benchmark_twitter():
 
 
 def benchmark_threads():
-    from trr_backend.socials.threads import ThreadsScraper, ThreadsScrapeConfig
+    from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
 
     cookies = _load_cookies("threads")
     scraper = ThreadsScraper(cookies=cookies or {})
@@ -356,7 +358,7 @@ def main():
 
     platforms = list(BENCHMARKS) if args.platform == "all" else [args.platform]
 
-    print(f"═══ TRR Scraper Benchmark — BravoTV ═══")
+    print("═══ TRR Scraper Benchmark — BravoTV ═══")
     print(f"Date window: {DATE_START.strftime('%Y-%m-%d %H:%M')} → {DATE_END.strftime('%Y-%m-%d %H:%M')}")
     print()
 
@@ -371,9 +373,7 @@ def main():
         if status == "skip":
             print(f"  SKIPPED: {result['reason']}")
         elif status == "ok":
-            count_key = next(
-                (k for k in ("posts", "videos", "tweets") if k in result), "items"
-            )
+            count_key = next((k for k in ("posts", "videos", "tweets") if k in result), "items")
             count = result.get(count_key, 0)
             print(f"  OK: {count} {count_key} in {result['duration']}")
             for s in result.get("sample", []):
@@ -387,8 +387,7 @@ def main():
         if result.get("meta") and isinstance(result["meta"], dict):
             # Print all scalar meta values (skip large nested objects like raw payloads)
             meta_summary = {
-                k: v for k, v in result["meta"].items()
-                if isinstance(v, (str, int, float, bool, type(None)))
+                k: v for k, v in result["meta"].items() if isinstance(v, (str, int, float, bool, type(None)))
             }
             if meta_summary:
                 print(f"  meta: {json.dumps(meta_summary, default=str)}")
@@ -400,9 +399,7 @@ def main():
     for p in platforms:
         r = results[p]
         s = r["status"]
-        count_key = next(
-            (k for k in ("posts", "videos", "tweets") if k in r), "items"
-        )
+        count_key = next((k for k in ("posts", "videos", "tweets") if k in r), "items")
         count = r.get(count_key, "-")
         dur = r.get("duration", "-")
         err = r.get("error", "")[:60] if s == "error" else ""
@@ -412,7 +409,12 @@ def main():
     # JSON output
     output_path = args.output
     if output_path is None:
-        output_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "docs", "ai", "benchmarks")
+        output_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "docs",
+            "ai",
+            "benchmarks",
+        )
         os.makedirs(output_dir, exist_ok=True)
         ts = NOW.strftime("%Y%m%dT%H%M%SZ")
         output_path = os.path.join(output_dir, f"bravotv_benchmark_{ts}.json")

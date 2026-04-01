@@ -52,6 +52,7 @@ from trr_backend.modal_dispatch import (
     resolve_modal_function,
 )
 from trr_backend.observability import get_trace_id
+from trr_backend.read_path_diagnostics import log_read_path
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
@@ -4764,43 +4765,6 @@ async def post_social_account_catalog_resume_tail_route(
     }
 
 
-@router.get("/profiles/{platform}/{account_handle}/collaborators-tags")
-def get_social_account_profile_collaborators_tags_route(
-    platform: str,
-    account_handle: str,
-    _: InternalAdminUser = None,
-) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_social_account_profile_collaborators_tags
-
-    cache_key = _account_profile_cache_key(
-        surface="collaborators-tags",
-        platform=platform,
-        account_handle=account_handle,
-    )
-    cached_payload = _get_ttl_cached_payload(
-        _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
-        _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
-        cache_key,
-    )
-    if cached_payload is not None:
-        return cached_payload
-    try:
-        payload = get_social_account_profile_collaborators_tags(platform=platform, account_handle=account_handle)
-        _set_ttl_cached_payload(
-            _ACCOUNT_PROFILE_COLLABORATORS_CACHE,
-            _ACCOUNT_PROFILE_COLLABORATORS_CACHE_LOCK,
-            cache_key,
-            payload,
-            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
-            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
-        )
-        return payload
-    except ValueError as exc:
-        raise _value_error_to_bad_request(exc) from exc
-    except LookupError as exc:
-        raise _lookup_error_to_not_found(exc) from exc
-
-
 @router.post("/shared/ingest")
 async def ingest_shared_social_accounts(
     payload: SharedSocialIngestRequest,
@@ -4982,8 +4946,19 @@ def get_season_shared_status_route(
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_season_shared_status
 
+    started_at = perf_counter()
     try:
-        return get_season_shared_status(str(season_id), source_scope=source_scope)
+        payload = get_season_shared_status(str(season_id), source_scope=source_scope)
+        log_read_path(
+            "season-social-shared-status",
+            latency_ms=(perf_counter() - started_at) * 1000,
+            payload=payload,
+            extra={
+                "source_scope": source_scope,
+                "season_id": season_id,
+            },
+        )
+        return payload
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except Exception as exc:  # noqa: BLE001
@@ -4995,9 +4970,16 @@ def get_season_shared_status_route(
 def get_social_ingest_worker_health(_: InternalAdminUser = None) -> dict:
     from trr_backend.repositories.social_season_analytics import get_worker_health, is_queue_enabled
 
+    started_at = perf_counter()
     try:
         health = get_worker_health()
-        return {"queue_enabled": is_queue_enabled(), **health}
+        payload = {"queue_enabled": is_queue_enabled(), **health}
+        log_read_path(
+            "season-social-worker-health",
+            latency_ms=(perf_counter() - started_at) * 1000,
+            payload=payload,
+        )
+        return payload
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest worker health")
         raise _to_social_read_http_exception(exc) from exc
@@ -6095,6 +6077,17 @@ async def get_season_analytics(
             cache_key,
         )
         if cached_payload is not None:
+            log_read_path(
+                "season-social-analytics",
+                latency_ms=(perf_counter() - started_at) * 1000,
+                payload=cached_payload,
+                extra={
+                    "cache": "hit",
+                    "source_scope": source_scope,
+                    "week": week,
+                    "platforms": ",".join(parsed_platforms) if parsed_platforms else "all",
+                },
+            )
             return cached_payload
         payload = await run_in_threadpool(
             get_analytics,
@@ -6125,6 +6118,17 @@ async def get_season_analytics(
             week,
             ",".join(parsed_platforms) if parsed_platforms else "all",
             duration_ms,
+        )
+        log_read_path(
+            "season-social-analytics",
+            latency_ms=(perf_counter() - started_at) * 1000,
+            payload=payload,
+            extra={
+                "cache": "miss",
+                "source_scope": source_scope,
+                "week": week,
+                "platforms": ",".join(parsed_platforms) if parsed_platforms else "all",
+            },
         )
         return payload
     except ValueError as exc:

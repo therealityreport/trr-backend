@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +16,7 @@ except ImportError as exc:  # pragma: no cover - depends on local environment
     raise SystemExit("Missing psycopg2; install deps (e.g., `pip install -r requirements.txt`).") from exc
 
 try:
+    from scripts._db_url import resolve_db_url
     from trr_backend.media.s3_mirror import get_cdn_base_url
     from trr_backend.repositories import social_season_analytics as social_repo
     from trr_backend.utils.env import load_env
@@ -24,6 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
+    from scripts._db_url import resolve_db_url
     from trr_backend.media.s3_mirror import get_cdn_base_url
     from trr_backend.repositories import social_season_analytics as social_repo
     from trr_backend.utils.env import load_env
@@ -41,10 +42,7 @@ class RepairStats:
 
 
 def _resolve_db_url() -> str:
-    url = (os.getenv("SUPABASE_DB_URL") or "").strip()
-    if not url:
-        raise RuntimeError("SUPABASE_DB_URL is required for repair_social_hosted_urls.")
-    return url
+    return resolve_db_url(allow_database_url=True).value
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

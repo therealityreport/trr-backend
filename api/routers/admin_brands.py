@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient, get_supabase_admin_client
 from trr_backend.db import pg
 from trr_backend.integrations.free_logo_sources import (
@@ -3259,7 +3259,7 @@ def _to_http_exception(error: Exception) -> HTTPException:
 def get_shows_franchises(
     q: str = Query(default=""),
     limit: int = Query(default=300, ge=1, le=1000),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return brands_franchises.list_shows_franchises(q=q, limit=limit)
@@ -3268,7 +3268,7 @@ def get_shows_franchises(
 
 
 @router.get("/franchise-rules")
-def get_franchise_rules(_: AdminUser = None) -> dict[str, Any]:
+def get_franchise_rules(_: InternalAdminUser = None) -> dict[str, Any]:
     try:
         return brands_franchises.list_franchise_rules()
     except Exception as error:  # noqa: BLE001
@@ -3279,7 +3279,7 @@ def get_franchise_rules(_: AdminUser = None) -> dict[str, Any]:
 def put_franchise_rule(
     franchise_key: str,
     payload: UpdateFranchiseRuleRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3296,7 +3296,7 @@ def put_franchise_rule(
 def post_apply_franchise_rule(
     franchise_key: str,
     payload: ApplyFranchiseRuleRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3313,7 +3313,7 @@ def post_apply_franchise_rule(
 @router.get("/families")
 def get_brand_families(
     active_only: bool = Query(default=True),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return brand_families.list_families(active_only=active_only)
@@ -3324,7 +3324,7 @@ def get_brand_families(
 @router.post("/families")
 def post_brand_family(
     payload: CreateBrandFamilyRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3337,7 +3337,7 @@ def post_brand_family(
 def patch_brand_family(
     family_id: str,
     payload: PatchBrandFamilyRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3354,7 +3354,7 @@ def patch_brand_family(
 def post_brand_family_member(
     family_id: str,
     payload: AddBrandFamilyMemberRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3367,7 +3367,7 @@ def post_brand_family_member(
 def delete_brand_family_member(
     family_id: str,
     member_id: str,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return brand_families.delete_family_member(family_id=family_id, member_id=member_id)
@@ -3376,7 +3376,7 @@ def delete_brand_family_member(
 
 
 @router.get("/families/suggestions")
-def get_brand_family_suggestions(_: AdminUser = None) -> dict[str, Any]:
+def get_brand_family_suggestions(_: InternalAdminUser = None) -> dict[str, Any]:
     try:
         return brand_families.list_family_suggestions()
     except Exception as error:  # noqa: BLE001
@@ -3387,7 +3387,7 @@ def get_brand_family_suggestions(_: AdminUser = None) -> dict[str, Any]:
 def get_brand_family_by_entity(
     entity_type: Literal["network", "streaming"] = Query(...),
     entity_key: str = Query(...),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         family = brand_families.get_family_by_entity(entity_type=entity_type, entity_key=entity_key)
@@ -3416,7 +3416,7 @@ def get_brand_family_by_entity(
 def get_brand_family_links(
     family_id: str,
     active_only: bool = Query(default=False),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return brand_families.list_family_links(family_id=family_id, active_only=active_only)
@@ -3428,7 +3428,7 @@ def get_brand_family_links(
 def post_brand_family_link(
     family_id: str,
     payload: CreateBrandFamilyLinkRuleRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3442,7 +3442,7 @@ def patch_brand_family_link(
     family_id: str,
     rule_id: str,
     payload: PatchBrandFamilyLinkRuleRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3460,7 +3460,7 @@ def patch_brand_family_link(
 def post_brand_family_links_apply(
     family_id: str,
     payload: ApplyBrandFamilyLinksRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3478,7 +3478,7 @@ def post_brand_family_links_apply(
 def post_brand_family_wikipedia_import(
     family_id: str,
     payload: ImportBrandFamilyWikipediaLinksRequest,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
@@ -3500,7 +3500,7 @@ def post_brand_family_wikipedia_import(
 def get_brand_family_wikipedia_show_urls(
     family_id: str,
     limit: int = Query(default=500, ge=1, le=5000),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return brand_families.list_family_wikipedia_show_links(family_id=family_id, limit=limit)
@@ -3520,7 +3520,7 @@ def get_brand_logos(
     source_provider: str | None = Query(default=None),
     include_related: bool = Query(default=False),
     show_id: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _list_brand_logos(
@@ -3545,7 +3545,7 @@ def get_brand_logo_targets(
     q: str = Query(default=""),
     limit: int = Query(default=50, ge=1, le=200),
     show_id: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _list_logo_targets(target_type=target_type, q=q, limit=limit, show_id=show_id)
@@ -3560,7 +3560,7 @@ def get_brand_logo_option_sources(
     target_label: str | None = Query(default=None),
     logo_role: BrandLogoRole = Query(...),
     include_related: bool = Query(default=True),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _list_logo_option_sources(
@@ -3580,7 +3580,7 @@ def get_brand_logo_option_modal(
     target_key: str = Query(...),
     target_label: str | None = Query(default=None),
     include_related: bool = Query(default=True),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _list_combined_logo_modal_state(
@@ -3600,7 +3600,7 @@ def get_brand_logo_option_source_suggestions(
     target_label: str | None = Query(default=None),
     logo_role: BrandLogoRole = Query(...),
     source_provider: str = Query(...),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _list_logo_source_suggestions(
@@ -3617,7 +3617,7 @@ def get_brand_logo_option_source_suggestions(
 @router.post("/logos/options/discover")
 def post_brand_logo_option_discover(
     payload: BrandLogosOptionDiscoverRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _discover_logo_candidates_by_source(payload)
@@ -3628,7 +3628,7 @@ def post_brand_logo_option_discover(
 @router.post("/logos/options/source-query")
 def post_brand_logo_option_source_query(
     payload: BrandLogosSourceQueryRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _save_logo_source_query(payload)
@@ -3639,7 +3639,7 @@ def post_brand_logo_option_source_query(
 @router.post("/logos/options/select")
 def post_brand_logo_option_select(
     payload: BrandLogosOptionSelectRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _select_logo_option(payload=payload)
@@ -3650,7 +3650,7 @@ def post_brand_logo_option_select(
 @router.post("/logos/options/assign")
 def post_brand_logo_option_assign(
     payload: BrandLogosOptionAssignRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _select_logo_option(
@@ -3674,7 +3674,7 @@ def delete_brand_logo_saved_option(
     target_type: BrandLogoTargetType = Query(...),
     target_key: str = Query(...),
     target_label: str | None = Query(default=None),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _delete_saved_logo_option(
@@ -3691,7 +3691,7 @@ def delete_brand_logo_saved_option(
 @router.post("/logos/sync")
 def post_brand_logos_sync(
     payload: BrandLogosSyncRequest,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return _sync_brand_logos(payload=payload)

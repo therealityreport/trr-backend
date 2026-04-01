@@ -1859,8 +1859,7 @@ def set_suggestion_decision(
         }
     )
     decision_effect_summary = (
-        "Decision stored for future eligibility only; rerun required for official metrics "
-        "to change."
+        "Decision stored for future eligibility only; rerun required for official metrics to change."
     )
     return {
         "run_id": str(run_id),
@@ -1909,8 +1908,7 @@ def set_unknown_review_decision(
         }
     )
     decision_effect_summary = (
-        "Decision stored for future eligibility only; rerun required for official metrics "
-        "to change."
+        "Decision stored for future eligibility only; rerun required for official metrics to change."
     )
     return {
         "run_id": str(run_id),

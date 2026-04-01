@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
-from threading import Thread
+from threading import Lock, Thread, current_thread
 from typing import Any, Literal
 from uuid import UUID
 
@@ -38,9 +38,16 @@ import scripts.sync.sync_show_logos as sync_show_logos
 import scripts.sync.sync_shows as sync_shows
 import scripts.sync.sync_tmdb_show_entities as sync_tmdb_show_entities
 import scripts.sync.sync_tmdb_watch_providers as sync_tmdb_watch_providers
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
-from api.routers import admin_person_images, admin_show_bravo, admin_show_links, admin_show_news, admin_show_roles
+from api.routers import (
+    admin_person_images,
+    admin_person_profile,
+    admin_show_bravo,
+    admin_show_links,
+    admin_show_news,
+    admin_show_roles,
+)
 from trr_backend.db import pg
 from trr_backend.ingestion.show_importer import (
     collect_candidates_from_lists,
@@ -61,6 +68,7 @@ from trr_backend.media.s3_mirror import (
     upload_bytes_to_s3,
 )
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
+from trr_backend.repositories import admin_operations as admin_operations_repo
 from trr_backend.repositories import brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
 from trr_backend.repositories.web_scrape_images import (
@@ -529,7 +537,7 @@ class LogoImportResponse(BaseModel):
 def sync_from_lists(
     payload: SyncFromListsRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> SyncFromListsResponse:
     """
     Sync shows from IMDb/TMDb lists (Stage 1) + enrich show metadata (Stage 2).
@@ -1401,7 +1409,7 @@ def _run_brand_family_wikipedia_import_step(*, dry_run: bool) -> SyncNetworksStr
 def sync_networks_streaming(
     payload: SyncNetworksStreamingRequest | None = None,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> SyncNetworksStreamingResponse:
     payload = payload or SyncNetworksStreamingRequest()
 
@@ -1664,7 +1672,7 @@ def list_networks_streaming_overrides(
     entity_type: Literal["network", "streaming", "production"] | None = None,
     active_only: bool = True,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> list[NetworksStreamingOverride]:
     query = db.schema("admin").table("network_streaming_overrides").select("*").order("updated_at", desc=True)
     if entity_type:
@@ -1682,7 +1690,7 @@ def list_networks_streaming_overrides(
 def create_networks_streaming_override(
     payload: UpsertNetworksStreamingOverrideRequest,
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
 ) -> NetworksStreamingOverride:
     raw = payload.model_dump()
     raw["updated_by"] = str(getattr(admin, "email", "") or "")
@@ -1712,7 +1720,7 @@ def patch_networks_streaming_override(
     override_id: UUID,
     payload: PatchNetworksStreamingOverrideRequest,
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
 ) -> NetworksStreamingOverride:
     patch = _sanitize_override_payload(payload.model_dump(exclude_unset=True), partial=True)
     patch["updated_by"] = str(getattr(admin, "email", "") or "")
@@ -1732,7 +1740,7 @@ def patch_networks_streaming_override(
 def delete_networks_streaming_override(
     override_id: UUID,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, str]:
     response = db.schema("admin").table("network_streaming_overrides").delete().eq("id", str(override_id)).execute()
     if hasattr(response, "error") and response.error:
@@ -1746,7 +1754,7 @@ def delete_networks_streaming_override(
 def import_logo_url(
     payload: LogoImportUrlRequest,
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
 ) -> LogoImportResponse:
     source_url = _text(payload.source_url)
     if not source_url.startswith("http://") and not source_url.startswith("https://"):
@@ -1951,7 +1959,7 @@ async def import_logo_file(
     entity_key: str | None = Form(None),
     file: UploadFile = File(...),
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
 ) -> LogoImportResponse:
     filename = _text(file.filename) or "upload"
     content_type = _text(file.content_type) or "application/octet-stream"
@@ -2110,7 +2118,7 @@ async def import_logo_file(
 def set_logo_primary(
     payload: LogoSetPrimaryRequest,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> LogoImportResponse:
     if payload.target_type == "show":
         show_id = str(payload.show_id) if payload.show_id else ""
@@ -2216,6 +2224,7 @@ ShowRefreshTarget = Literal[
     "seasons_episodes",
     "photos",
     "cast_credits",
+    "credits_pipeline",
     "videos",
     "news",
     "social_setup",
@@ -2241,6 +2250,7 @@ class RefreshStepResult(BaseModel):
     exit_code: int | None = None
     error: str | None = None
     skip_reason: str | None = None
+    output: str | None = None
 
 
 class ShowRefreshResponse(BaseModel):
@@ -2296,27 +2306,101 @@ class RefreshStepSkippedError(RuntimeError):
         self.reason = str(reason or "").strip() or "Skipped"
 
 
+class _ProgressLineTee(io.TextIOBase):
+    def __init__(self, buffer: io.StringIO, on_line: Callable[[str], None] | None = None) -> None:
+        self._buffer = buffer
+        self._on_line = on_line
+        self._pending = ""
+
+    def write(self, text: str) -> int:
+        chunk = str(text or "")
+        self._buffer.write(chunk)
+        if not chunk or self._on_line is None:
+            return len(chunk)
+        self._pending += chunk
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            cleaned = line.strip()
+            if cleaned:
+                self._on_line(cleaned)
+        return len(chunk)
+
+    def flush(self) -> None:
+        self._buffer.flush()
+        if self._on_line is None:
+            self._pending = ""
+            return
+        cleaned = self._pending.strip()
+        if cleaned:
+            self._on_line(cleaned)
+        self._pending = ""
+
+
+_LIVE_SCRIPT_OUTPUTS: dict[int, str] = {}
+_LIVE_SCRIPT_OUTPUTS_LOCK = Lock()
+
+
+def _set_live_script_output(line: str) -> None:
+    thread_id = current_thread().ident
+    cleaned = str(line or "").strip()
+    if thread_id is None or not cleaned:
+        return
+    with _LIVE_SCRIPT_OUTPUTS_LOCK:
+        _LIVE_SCRIPT_OUTPUTS[thread_id] = cleaned
+
+
+def _get_live_script_output(thread_id: int | None) -> str | None:
+    if thread_id is None:
+        return None
+    with _LIVE_SCRIPT_OUTPUTS_LOCK:
+        return _LIVE_SCRIPT_OUTPUTS.get(thread_id)
+
+
+def _clear_live_script_output(thread_id: int | None) -> None:
+    if thread_id is None:
+        return
+    with _LIVE_SCRIPT_OUTPUTS_LOCK:
+        _LIVE_SCRIPT_OUTPUTS.pop(thread_id, None)
+
+
 def _run_script_step(
     name: str,
     fn: Callable[[list[str] | None], int],
     argv: list[str],
+    *,
+    on_output_line: Callable[[str], None] | None = None,
 ) -> RefreshStepResult:
     started = time.perf_counter()
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+
+    def _handle_output_line(line: str) -> None:
+        _set_live_script_output(line)
+        if on_output_line is not None:
+            on_output_line(line)
+
     try:
-        code = fn(list(argv))
+        with (
+            redirect_stdout(_ProgressLineTee(stdout_buffer, _handle_output_line)),
+            redirect_stderr(_ProgressLineTee(stderr_buffer, _handle_output_line)),
+        ):
+            code = fn(list(argv))
     except Exception as exc:  # noqa: BLE001
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.exception("admin show refresh step failed: %s", name)
-        return RefreshStepResult(status="failed", duration_ms=duration_ms, error=str(exc))
+        output = "\n".join([stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]).strip() or None
+        return RefreshStepResult(status="failed", duration_ms=duration_ms, error=str(exc), output=output)
 
     duration_ms = int((time.perf_counter() - started) * 1000)
+    output = "\n".join([stdout_buffer.getvalue().strip(), stderr_buffer.getvalue().strip()]).strip() or None
     if int(code) == 0:
-        return RefreshStepResult(status="success", duration_ms=duration_ms, exit_code=0)
+        return RefreshStepResult(status="success", duration_ms=duration_ms, exit_code=0, output=output)
     return RefreshStepResult(
         status="failed",
         duration_ms=duration_ms,
         exit_code=int(code),
         error=f"non-zero exit code: {code}",
+        output=output,
     )
 
 
@@ -2358,6 +2442,37 @@ def _run_inline_step(
         duration_ms=duration_ms,
         exit_code=normalized_code,
         error=f"non-zero exit code: {normalized_code}",
+    )
+
+
+def _skipped_step_result(reason: str) -> RefreshStepResult:
+    message = str(reason or "").strip() or "Skipped"
+    return RefreshStepResult(
+        status="skipped",
+        duration_ms=0,
+        exit_code=0,
+        skip_reason=message,
+        error=message,
+    )
+
+
+def _run_seasons_episodes_reconcile_step(
+    *,
+    show_id: str,
+    db: SupabaseAdminClient,
+    verbose: bool,
+    step_name: str,
+) -> RefreshStepResult:
+    return _run_inline_step(
+        step_name,
+        lambda: (
+            sync_seasons_episodes.reconcile_show_seasons_episodes(
+                db,
+                show_ids=[show_id],
+                verbose=bool(verbose),
+            ),
+            0,
+        )[1],
     )
 
 
@@ -2524,7 +2639,7 @@ def _refresh_show_videos_target(
     show_id: str,
     show_row: dict[str, Any] | None,
     db: SupabaseAdminClient,
-    admin_user: AdminUser | dict[str, Any] | None,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> int:
     official_page_url = _resolve_show_official_page_url(show_id, show_row=show_row)
     if not official_page_url:
@@ -2543,7 +2658,7 @@ def _refresh_show_news_target(
     *,
     show_id: str,
     db: SupabaseAdminClient,
-    admin_user: AdminUser | dict[str, Any] | None,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> int:
     admin_show_news._run_google_news_sync_impl(
         show_id_str=show_id,
@@ -2559,7 +2674,7 @@ def _refresh_show_social_setup_target(
     show_id: str,
     show_row: dict[str, Any] | None,
     db: SupabaseAdminClient,
-    admin_user: AdminUser | dict[str, Any] | None,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> int:
     if _show_is_bravo(show_row):
         _seed_show_social_targets(show_id, show_row=show_row)
@@ -2570,7 +2685,7 @@ def _refresh_show_links_target(
     *,
     show_id: str,
     db: SupabaseAdminClient,
-    admin_user: AdminUser | dict[str, Any] | None,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> dict[str, Any]:
     actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
     return admin_show_links._run_show_link_discovery(
@@ -2608,7 +2723,7 @@ def _run_cast_person_refresh_stage(
     show_id: str,
     show_row: dict[str, Any] | None,
     db: SupabaseAdminClient,
-    admin_user: AdminUser | dict[str, Any] | None,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
     mode: Literal["profile_only", "media_only"],
 ) -> RefreshStepResult:
     started = time.perf_counter()
@@ -2690,12 +2805,310 @@ def _run_cast_person_refresh_stage(
     return RefreshStepResult(status="success", duration_ms=duration_ms, exit_code=0)
 
 
+CreditsPipelinePhase = Literal[
+    "credits_sync",
+    "profile_links_sync",
+    "bio_sync",
+    "network_augmentation",
+    "media_ingest",
+]
+
+_CREDITS_PIPELINE_PHASES: tuple[CreditsPipelinePhase, ...] = (
+    "credits_sync",
+    "profile_links_sync",
+    "bio_sync",
+    "network_augmentation",
+    "media_ingest",
+)
+
+
+def _sse_event(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+def _credits_pipeline_cancel_requested(operation_id: str | None) -> bool:
+    normalized = str(operation_id or "").strip()
+    return bool(normalized) and admin_operations_repo.is_cancel_requested(normalized)
+
+
+def _raise_if_credits_pipeline_cancelled(operation_id: str | None) -> None:
+    if _credits_pipeline_cancel_requested(operation_id):
+        raise RuntimeError("Credits refresh canceled.")
+
+
+def _infer_profile_refresh_outcome(result: dict[str, Any]) -> Literal["updated", "skipped", "failed"]:
+    failures = result.get("failures")
+    skips = result.get("skips")
+    has_failures = isinstance(failures, list) and len(failures) > 0
+    has_skips = isinstance(skips, list) and len(skips) > 0
+    if has_failures:
+        return "failed"
+
+    changed_counts = (
+        int(result.get("links_refreshed") or 0),
+        int(result.get("aliases_added") or 0),
+        int(result.get("profile_fields_changed") or 0),
+        int(result.get("credits_updated") or 0),
+    )
+    if has_skips and sum(changed_counts) == 0:
+        return "skipped"
+    return "updated"
+
+
+def _run_credits_sync_phase(
+    *,
+    show_id_str: str,
+    payload: ShowRefreshRequest,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[RefreshStepResult, dict[str, RefreshStepResult]]:
+    argv = ["--show-id", show_id_str, "--force"]
+    if payload.verbose:
+        argv.append("--verbose")
+
+    show_cast = _run_script_step(
+        "credits_fullcredits_sync",
+        sync_show_cast.main,
+        list(argv),
+        on_output_line=progress_callback,
+    )
+    appearances = _run_script_step(
+        "credits_episode_appearances_sync",
+        sync_episode_appearances.main,
+        list(argv),
+        on_output_line=progress_callback,
+    )
+    combined = _combine_step_results(
+        [
+            ("show_cast", show_cast),
+            ("episode_appearances", appearances),
+        ]
+    )
+    return combined, {
+        "credits_fullcredits_sync": show_cast,
+        "credits_episode_appearances_sync": appearances,
+    }
+
+
+def _run_profile_links_sync_phase(
+    *,
+    show_id_str: str,
+    db: SupabaseAdminClient,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
+) -> RefreshStepResult:
+    return _run_inline_step(
+        "profile_links_sync",
+        lambda: (
+            admin_show_roles.sync_cast_matrix_for_show(
+                show_id=show_id_str,
+                payload=admin_show_roles.CastMatrixSyncRequest(
+                    include_relationship_roles=True,
+                    include_bravo_links=False,
+                    include_bravo_images=False,
+                ),
+                db=db,
+                admin_user=admin_user or {"id": "admin"},
+            )
+            and 0
+        ),
+    )
+
+
+def _run_bio_sync_phase(
+    *,
+    show_id_str: str,
+    db: SupabaseAdminClient,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
+    operation_id: str | None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> tuple[RefreshStepResult, list[dict[str, str]]]:
+    started = time.perf_counter()
+    members = _list_refresh_cast_members(show_id=show_id_str, db=db)
+    if not members:
+        return (
+            RefreshStepResult(
+                status="skipped",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                exit_code=0,
+                skip_reason="Cast has no eligible members.",
+                error="Cast has no eligible members.",
+            ),
+            [],
+        )
+
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    updated_count = 0
+    skipped_count = 0
+    failures: list[str] = []
+
+    total = len(members)
+    for index, member in enumerate(members, start=1):
+        _raise_if_credits_pipeline_cancelled(operation_id)
+        person_id = str(member.get("person_id") or "").strip()
+        person_name = str(member.get("person_name") or person_id).strip() or person_id
+        if progress_callback is not None:
+            progress_callback(index - 1, total, f"Refreshing bio sources for {person_name}...")
+        result = admin_person_profile._run_person_profile_refresh(
+            person_id=person_id,
+            payload=admin_person_profile.RefreshProfileRequest(refresh_links=False, refresh_credits=False),
+            db=db,
+            actor=actor,
+        )
+        outcome = _infer_profile_refresh_outcome(result)
+        if outcome == "failed":
+            failures.extend(
+                [str(item) for item in result.get("failures") or []] or [f"{person_name}: profile refresh failed"]
+            )
+        elif outcome == "skipped":
+            skipped_count += 1
+        else:
+            updated_count += 1
+        if progress_callback is not None:
+            in_flight = max(0, total - index)
+            progress_callback(
+                index,
+                total,
+                f"Bios: {updated_count} complete, {skipped_count} skipped, {in_flight} in flight",
+            )
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    if failures:
+        return (
+            RefreshStepResult(
+                status="failed",
+                duration_ms=duration_ms,
+                exit_code=1,
+                error="; ".join(failures[:10]),
+            ),
+            members,
+        )
+    if skipped_count == total:
+        return (
+            RefreshStepResult(
+                status="skipped",
+                duration_ms=duration_ms,
+                exit_code=0,
+                skip_reason="No bio sources found for this cast roster.",
+                error="No bio sources found for this cast roster.",
+            ),
+            members,
+        )
+    return (
+        RefreshStepResult(status="success", duration_ms=duration_ms, exit_code=0),
+        members,
+    )
+
+
+def _run_network_augmentation_phase(
+    *,
+    show_id_str: str,
+    show_row: dict[str, Any] | None,
+    db: SupabaseAdminClient,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
+) -> RefreshStepResult:
+    if not _show_is_bravo(show_row):
+        return RefreshStepResult(
+            status="skipped",
+            duration_ms=0,
+            exit_code=0,
+            skip_reason="Skipped: no Bravo network augmentation required.",
+            error="Skipped: no Bravo network augmentation required.",
+        )
+    return _run_inline_step(
+        "network_augmentation",
+        lambda: (
+            admin_show_roles.sync_cast_matrix_for_show(
+                show_id=show_id_str,
+                payload=admin_show_roles.CastMatrixSyncRequest(
+                    include_relationship_roles=False,
+                    include_bravo_links=True,
+                    include_bravo_images=True,
+                ),
+                db=db,
+                admin_user=admin_user or {"id": "admin"},
+            )
+            and 0
+        ),
+    )
+
+
+def _run_media_ingest_phase(
+    *,
+    show_id_str: str,
+    show_row: dict[str, Any] | None,
+    db: SupabaseAdminClient,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
+    operation_id: str | None,
+    members: list[dict[str, str]] | None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> RefreshStepResult:
+    started = time.perf_counter()
+    selected_members = members or _list_refresh_cast_members(show_id=show_id_str, db=db)
+    if not selected_members:
+        return RefreshStepResult(
+            status="skipped",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            exit_code=0,
+            skip_reason="Cast has no eligible members.",
+            error="Cast has no eligible members.",
+        )
+
+    failures: list[str] = []
+    total = len(selected_members)
+    show_name = str((show_row or {}).get("name") or "").strip() or None
+    for index, member in enumerate(selected_members, start=1):
+        _raise_if_credits_pipeline_cancelled(operation_id)
+        person_id = str(member.get("person_id") or "").strip()
+        person_name = str(member.get("person_name") or person_id).strip() or person_id
+        if progress_callback is not None:
+            progress_callback(index - 1, total, f"Ingesting media for {person_name}...")
+        try:
+            admin_person_images.refresh_person_images(
+                UUID(person_id),
+                request=admin_person_images.RefreshImagesRequest(
+                    sources=["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"],
+                    limit_per_source=25,
+                    skip_mirror=False,
+                    skip_prune=False,
+                    skip_auto_count=False,
+                    skip_word_detection=False,
+                    skip_centering=False,
+                    skip_resize=False,
+                    show_id=UUID(show_id_str),
+                    show_name=show_name,
+                ),
+                db=db,
+                _=admin_user,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("credits_pipeline media ingest failed for person_id=%s: %s", person_id, exc)
+            failures.append(f"{person_name}: {exc}")
+        if progress_callback is not None:
+            progress_callback(
+                index,
+                total,
+                (
+                    f"Media ingest: {index - len(failures)} complete, "
+                    f"{len(failures)} failed, {max(0, total - index)} in flight"
+                ),
+            )
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    if failures:
+        return RefreshStepResult(
+            status="failed",
+            duration_ms=duration_ms,
+            exit_code=1,
+            error="; ".join(failures[:10]),
+        )
+    return RefreshStepResult(status="success", duration_ms=duration_ms, exit_code=0)
+
+
 def _refresh_show_bravo_target(
     *,
     show_id: str,
     show_row: dict[str, Any] | None,
     db: SupabaseAdminClient,
-    admin_user: AdminUser | dict[str, Any] | None,
+    admin_user: InternalAdminUser | dict[str, Any] | None,
 ) -> int:
     if not _show_is_bravo(show_row):
         raise RefreshStepSkippedError("Show is not Bravo-eligible.")
@@ -2726,7 +3139,7 @@ def refresh_show(
     show_id: UUID,
     payload: ShowRefreshRequest,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> ShowRefreshResponse:
     """
     Refresh a single show for one or more target areas by invoking existing sync scripts.
@@ -2757,7 +3170,7 @@ def refresh_show(
         seen.add(target)
         ordered.append(target)
 
-    if any(target in {"cast_credits", "show_core"} for target in ordered):
+    if any(target in {"cast_credits", "show_core", "credits_pipeline"} for target in ordered):
         _ensure_cast_refresh_imdb_id(show_row, show_id_str)
 
     results: dict[str, RefreshStepResult] = {}
@@ -2805,22 +3218,72 @@ def refresh_show(
             argv = ["--show-id", show_id_str, "--force"]
             if payload.verbose:
                 argv.append("--verbose")
-            show_cast = _run_script_step("cast_credits_show_cast", sync_show_cast.main, argv)
+            show_cast = _run_script_step("credits_fullcredits_sync", sync_show_cast.main, argv)
             step_results.append(("show_cast", show_cast))
-            results["cast_credits_show_cast"] = show_cast
+            results["credits_fullcredits_sync"] = show_cast
 
             argv2 = ["--show-id", show_id_str, "--force"]
             if payload.verbose:
                 argv2.append("--verbose")
             occurrences = _run_script_step(
-                "cast_credits_episode_appearances",
+                "credits_episode_appearances_sync",
                 sync_episode_appearances.main,
                 argv2,
             )
             step_results.append(("episode_appearances", occurrences))
-            results["cast_credits_episode_appearances"] = occurrences
+            results["credits_episode_appearances_sync"] = occurrences
 
             results["cast_credits"] = _combine_step_results(step_results)
+            continue
+
+        if target == "credits_pipeline":
+            phase_results: list[tuple[str, RefreshStepResult]] = []
+            credits_result, credits_details = _run_credits_sync_phase(
+                show_id_str=show_id_str,
+                payload=payload,
+            )
+            results.update(credits_details)
+            results["credits_sync"] = credits_result
+            phase_results.append(("credits_sync", credits_result))
+
+            profile_links_result = _run_profile_links_sync_phase(
+                show_id_str=show_id_str,
+                db=db,
+                admin_user=_,
+            )
+            results["profile_links_sync"] = profile_links_result
+            phase_results.append(("profile_links_sync", profile_links_result))
+
+            bio_result, bio_members = _run_bio_sync_phase(
+                show_id_str=show_id_str,
+                db=db,
+                admin_user=_,
+                operation_id=None,
+            )
+            results["bio_sync"] = bio_result
+            phase_results.append(("bio_sync", bio_result))
+
+            network_result = _run_network_augmentation_phase(
+                show_id_str=show_id_str,
+                show_row=show_row,
+                db=db,
+                admin_user=_,
+            )
+            results["network_augmentation"] = network_result
+            phase_results.append(("network_augmentation", network_result))
+
+            media_result = _run_media_ingest_phase(
+                show_id_str=show_id_str,
+                show_row=show_row,
+                db=db,
+                admin_user=_,
+                operation_id=None,
+                members=bio_members,
+            )
+            results["media_ingest"] = media_result
+            phase_results.append(("media_ingest", media_result))
+
+            results["credits_pipeline"] = _combine_step_results(phase_results)
             continue
 
         if target == "videos":
@@ -2864,14 +3327,27 @@ def refresh_show(
             argv_cast = ["--show-id", show_id_str, "--force"]
             if payload.verbose:
                 argv_cast.append("--verbose")
-            show_cast = _run_script_step("cast_credits_show_cast", sync_show_cast.main, list(argv_cast))
+            show_cast = _run_script_step("credits_fullcredits_sync", sync_show_cast.main, list(argv_cast))
             appearances = _run_script_step(
-                "cast_credits_episode_appearances",
+                "credits_episode_appearances_sync",
                 sync_episode_appearances.main,
                 list(argv_cast),
             )
-            results["cast_credits_show_cast"] = show_cast
-            results["cast_credits_episode_appearances"] = appearances
+            results["credits_fullcredits_sync"] = show_cast
+            results["credits_episode_appearances_sync"] = appearances
+
+            if episodes.status == "success" and seasons.status == "success":
+                reconcile_result = _run_seasons_episodes_reconcile_step(
+                    show_id=show_id_str,
+                    db=db,
+                    verbose=bool(payload.verbose),
+                    step_name="show_core_reconcile",
+                )
+            else:
+                reconcile_result = _skipped_step_result(
+                    "Skipped because seasons or episodes sync did not complete successfully."
+                )
+            results["show_core_reconcile"] = reconcile_result
 
             social_result = _run_inline_step(
                 "social_setup_seed",
@@ -2883,6 +3359,7 @@ def refresh_show(
                     ("details", results["details"]),
                     ("episodes", episodes),
                     ("seasons", seasons),
+                    ("reconcile", reconcile_result),
                     ("show_cast", show_cast),
                     ("episode_appearances", appearances),
                     ("social_setup", social_result),
@@ -2950,7 +3427,7 @@ def refresh_show_stream(
     payload: ShowRefreshRequest,
     request: Request,
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
 ) -> StreamingResponse:
     """
     Stream refresh progress for one or more targets as SSE.
@@ -2982,12 +3459,14 @@ def refresh_show_stream(
         seen.add(target)
         ordered.append(target)
 
-    if any(target in {"cast_credits", "show_core"} for target in ordered):
+    if any(target in {"cast_credits", "show_core", "credits_pipeline"} for target in ordered):
         _ensure_cast_refresh_imdb_id(show_row, show_id_str)
 
     # Expand targets into concrete steps so the progress bar can update while work runs.
     # Keys are stored in results to match the non-stream endpoint's structure where possible.
     steps: list[tuple[str, str, Callable[[], RefreshStepResult], str | None, str | None, str]] = []
+    credits_pipeline_context: dict[str, Any] = {"members": None}
+    credits_pipeline_step_details: dict[str, RefreshStepResult] = {}
     for target in ordered:
         if target == "details":
             common = ["--show-id", show_id_str, "--force"]
@@ -3066,6 +3545,21 @@ def refresh_show_stream(
                     "seasons_episodes",
                 )
             )
+            steps.append(
+                (
+                    "seasons_episodes",
+                    "seasons_episodes_reconcile",
+                    lambda sid=show_id_str, local_db=db, verbose=payload.verbose: _run_seasons_episodes_reconcile_step(
+                        show_id=sid,
+                        db=local_db,
+                        verbose=bool(verbose),
+                        step_name="seasons_episodes_reconcile",
+                    ),
+                    "shows",
+                    "mixed",
+                    "seasons_episodes",
+                )
+            )
             continue
 
         if target == "show_core":
@@ -3136,17 +3630,34 @@ def refresh_show_stream(
                     ),
                     (
                         "show_core",
-                        "cast_credits_show_cast",
-                        lambda argv=list(common): _run_script_step("cast_credits_show_cast", sync_show_cast.main, argv),
+                        "show_core_reconcile",
+                        lambda sid=show_id_str, local_db=db, verbose=payload.verbose: (
+                            _run_seasons_episodes_reconcile_step(
+                                show_id=sid,
+                                db=local_db,
+                                verbose=bool(verbose),
+                                step_name="show_core_reconcile",
+                            )
+                        ),
+                        "show_core",
+                        "mixed",
+                        "show_core",
+                    ),
+                    (
+                        "show_core",
+                        "credits_fullcredits_sync",
+                        lambda argv=list(common): _run_script_step(
+                            "credits_fullcredits_sync", sync_show_cast.main, argv
+                        ),
                         "show_core",
                         "imdb",
                         "show_core",
                     ),
                     (
                         "show_core",
-                        "cast_credits_episode_appearances",
+                        "credits_episode_appearances_sync",
                         lambda argv=list(common): _run_script_step(
-                            "cast_credits_episode_appearances",
+                            "credits_episode_appearances_sync",
                             sync_episode_appearances.main,
                             argv,
                         ),
@@ -3219,8 +3730,8 @@ def refresh_show_stream(
             steps.append(
                 (
                     "cast_credits",
-                    "cast_credits_show_cast",
-                    lambda args=list(argv): _run_script_step("cast_credits_show_cast", sync_show_cast.main, args),
+                    "credits_fullcredits_sync",
+                    lambda args=list(argv): _run_script_step("credits_fullcredits_sync", sync_show_cast.main, args),
                     "people",
                     "imdb",
                     "cast_credits",
@@ -3233,9 +3744,9 @@ def refresh_show_stream(
             steps.append(
                 (
                     "cast_credits",
-                    "cast_credits_episode_appearances",
+                    "credits_episode_appearances_sync",
                     lambda args=argv2: _run_script_step(
-                        "cast_credits_episode_appearances",
+                        "credits_episode_appearances_sync",
                         sync_episode_appearances.main,
                         args,
                     ),
@@ -3243,6 +3754,105 @@ def refresh_show_stream(
                     "imdb",
                     "cast_credits",
                 )
+            )
+            continue
+
+        if target == "credits_pipeline":
+            steps.extend(
+                [
+                    (
+                        "credits_pipeline",
+                        "credits_sync",
+                        lambda sid=show_id_str, local_payload=payload: (
+                            lambda result_and_details: (
+                                credits_pipeline_step_details.update(result_and_details[1]),
+                                result_and_details[0],
+                            )[1]
+                        )(
+                            _run_credits_sync_phase(
+                                show_id_str=sid,
+                                payload=local_payload,
+                                progress_callback=_set_live_script_output,
+                            )
+                        ),
+                        "people",
+                        "imdb",
+                        "credits_sync",
+                    ),
+                    (
+                        "credits_pipeline",
+                        "profile_links_sync",
+                        lambda sid=show_id_str, local_db=db, local_admin=admin: _run_profile_links_sync_phase(
+                            show_id_str=sid,
+                            db=local_db,
+                            admin_user=local_admin,
+                        ),
+                        "people",
+                        "mixed",
+                        "profile_links_sync",
+                    ),
+                    (
+                        "credits_pipeline",
+                        "bio_sync",
+                        lambda sid=show_id_str,
+                        local_db=db,
+                        local_admin=admin,
+                        operation_id=(str(request.headers.get("x-trr-admin-operation-id") or "").strip() or None): (
+                            lambda result_and_members: (
+                                credits_pipeline_context.update({"members": result_and_members[1]}),
+                                result_and_members[0],
+                            )[1]
+                        )(
+                            _run_bio_sync_phase(
+                                show_id_str=sid,
+                                db=local_db,
+                                admin_user=local_admin,
+                                operation_id=operation_id,
+                                progress_callback=lambda current, total, message: _set_live_script_output(message),
+                            )
+                        ),
+                        "people",
+                        "mixed",
+                        "bio_sync",
+                    ),
+                    (
+                        "credits_pipeline",
+                        "network_augmentation",
+                        lambda sid=show_id_str, row=show_row, local_db=db, local_admin=admin: (
+                            _run_network_augmentation_phase(
+                                show_id_str=sid,
+                                show_row=row,
+                                db=local_db,
+                                admin_user=local_admin,
+                            )
+                        ),
+                        "people",
+                        "bravo",
+                        "network_augmentation",
+                    ),
+                    (
+                        "credits_pipeline",
+                        "media_ingest",
+                        lambda sid=show_id_str,
+                        row=show_row,
+                        local_db=db,
+                        local_admin=admin,
+                        operation_id=(
+                            str(request.headers.get("x-trr-admin-operation-id") or "").strip() or None
+                        ): _run_media_ingest_phase(
+                            show_id_str=sid,
+                            show_row=row,
+                            db=local_db,
+                            admin_user=local_admin,
+                            operation_id=operation_id,
+                            members=credits_pipeline_context.get("members"),
+                            progress_callback=lambda current, total, message: _set_live_script_output(message),
+                        ),
+                        "media",
+                        "mixed",
+                        "media_ingest",
+                    ),
+                ]
             )
             continue
 
@@ -3437,6 +4047,7 @@ def refresh_show_stream(
                 current_target = target
                 current_step_key = step_key
                 step_started_at = time.perf_counter()
+
                 yield _yield_event(
                     "progress",
                     _with_request_id(
@@ -3456,6 +4067,45 @@ def refresh_show_stream(
                         }
                     ),
                 )
+
+                skip_reason: str | None = None
+                if step_key == "seasons_episodes_reconcile":
+                    prerequisite_keys = ("seasons_episodes_episodes", "seasons_episodes_seasons")
+                    if any(results.get(key) is None or results[key].status != "success" for key in prerequisite_keys):
+                        skip_reason = "Skipped because seasons or episodes sync did not complete successfully."
+                elif step_key == "show_core_reconcile":
+                    prerequisite_keys = ("seasons_episodes_episodes", "seasons_episodes_seasons")
+                    if any(results.get(key) is None or results[key].status != "success" for key in prerequisite_keys):
+                        skip_reason = "Skipped because seasons or episodes sync did not complete successfully."
+
+                if skip_reason:
+                    step_result = _skipped_step_result(skip_reason)
+                    results[step_key] = step_result
+                    current += 1
+                    payload_data: dict[str, object] = {
+                        "show_id": show_id_str,
+                        "target": target,
+                        "step": step_key,
+                        "stage": pipeline_stage,
+                        "stage_key": step_key,
+                        "pipeline_stage": pipeline_stage,
+                        "pipeline_status": step_result.status,
+                        "current": current,
+                        "total": total_steps,
+                        "step_status": step_result.status,
+                        "message": skip_reason,
+                        "elapsed_ms": 0,
+                    }
+                    if topic:
+                        payload_data["topic"] = topic
+                    if provider:
+                        payload_data["provider"] = provider
+                    if step_result.error:
+                        payload_data["error"] = step_result.error
+                    if step_result.skip_reason:
+                        payload_data["skip_reason"] = step_result.skip_reason
+                    yield _yield_event("progress", _with_request_id(payload_data))
+                    continue
 
                 step_result_holder: dict[str, RefreshStepResult | None] = {"result": None}
                 step_error_holder: dict[str, Exception | None] = {"error": None}
@@ -3480,9 +4130,11 @@ def refresh_show_stream(
                     daemon=True,
                 )
                 step_thread.start()
+                step_thread_id = step_thread.ident
                 while step_thread.is_alive():
                     step_thread.join(timeout=STREAM_HEARTBEAT_INTERVAL_SECONDS)
                     if step_thread.is_alive():
+                        live_message = _get_live_script_output(step_thread_id)
                         yield _yield_event(
                             "progress",
                             _with_request_id(
@@ -3497,7 +4149,7 @@ def refresh_show_stream(
                                     "current": current,
                                     "total": total_steps,
                                     "step_status": "running",
-                                    "message": f"{step_key.replace('_', ' ')}: running",
+                                    "message": live_message or f"{step_key.replace('_', ' ')}: running",
                                     "heartbeat": True,
                                     "elapsed_ms": int((time.perf_counter() - step_started_at) * 1000),
                                 }
@@ -3505,11 +4157,13 @@ def refresh_show_stream(
                         )
                 step_thread.join()
                 if step_error_holder["error"] is not None:
+                    _clear_live_script_output(step_thread_id)
                     raise RuntimeError(f"Step {step_key} failed: {step_error_holder['error']}") from step_error_holder[
                         "error"
                     ]
                 step_result = step_result_holder["result"]
                 if step_result is None:
+                    _clear_live_script_output(step_thread_id)
                     raise RuntimeError(f"Step {step_key} returned no result")
 
                 results[step_key] = step_result
@@ -3526,7 +4180,9 @@ def refresh_show_stream(
                     "current": current,
                     "total": total_steps,
                     "step_status": step_result.status,
-                    "message": f"{step_key.replace('_', ' ')}: {step_result.status}",
+                    "message": _get_live_script_output(step_thread_id)
+                    or step_result.output
+                    or f"{step_key.replace('_', ' ')}: {step_result.status}",
                     "elapsed_ms": int((time.perf_counter() - step_started_at) * 1000),
                 }
                 if topic:
@@ -3539,6 +4195,7 @@ def refresh_show_stream(
                     payload_data["skip_reason"] = step_result.skip_reason
 
                 yield _yield_event("progress", _with_request_id(payload_data))
+                _clear_live_script_output(step_thread_id)
 
             # Combine step results into target-level results to match the non-stream endpoint's shape.
             for target in ordered:
@@ -3557,6 +4214,7 @@ def refresh_show_stream(
                         [
                             ("seasons", results["seasons_episodes_seasons"]),
                             ("episodes", results["seasons_episodes_episodes"]),
+                            ("reconcile", results["seasons_episodes_reconcile"]),
                         ]
                     )
                     continue
@@ -3573,8 +4231,21 @@ def refresh_show_stream(
                 if target == "cast_credits":
                     results["cast_credits"] = _combine_step_results(
                         [
-                            ("show_cast", results["cast_credits_show_cast"]),
-                            ("episode_appearances", results["cast_credits_episode_appearances"]),
+                            ("show_cast", results["credits_fullcredits_sync"]),
+                            ("episode_appearances", results["credits_episode_appearances_sync"]),
+                        ]
+                    )
+                    continue
+
+                if target == "credits_pipeline":
+                    results.update(credits_pipeline_step_details)
+                    results["credits_pipeline"] = _combine_step_results(
+                        [
+                            ("credits_sync", results["credits_sync"]),
+                            ("profile_links_sync", results["profile_links_sync"]),
+                            ("bio_sync", results["bio_sync"]),
+                            ("network_augmentation", results["network_augmentation"]),
+                            ("media_ingest", results["media_ingest"]),
                         ]
                     )
                     continue
@@ -3599,8 +4270,9 @@ def refresh_show_stream(
                             ("details_tmdb_watch_providers", results["details_tmdb_watch_providers"]),
                             ("seasons_episodes_episodes", results["seasons_episodes_episodes"]),
                             ("seasons_episodes_seasons", results["seasons_episodes_seasons"]),
-                            ("cast_credits_show_cast", results["cast_credits_show_cast"]),
-                            ("cast_credits_episode_appearances", results["cast_credits_episode_appearances"]),
+                            ("show_core_reconcile", results["show_core_reconcile"]),
+                            ("credits_fullcredits_sync", results["credits_fullcredits_sync"]),
+                            ("credits_episode_appearances_sync", results["credits_episode_appearances_sync"]),
                             ("social_setup_seed", results["social_setup_seed"]),
                         ]
                     )
@@ -3654,6 +4326,7 @@ def refresh_show_stream(
 def build_show_refresh_operation_producer(
     *,
     request_payload: dict[str, Any],
+    operation_id: str | None = None,
     db: SupabaseAdminClient | None = None,
 ):
     from trr_backend.db.admin import create_supabase_admin_client
@@ -3667,10 +4340,12 @@ def build_show_refresh_operation_producer(
     request_id = str(request_payload.get("request_id") or "").strip() or None
 
     class _InternalRequest:
-        def __init__(self, *, current_request_id: str | None) -> None:
+        def __init__(self, *, current_request_id: str | None, current_operation_id: str | None) -> None:
             self.headers: dict[str, str] = {"x-trr-internal-raw-stream": "1"}
             if current_request_id:
                 self.headers["x-trr-request-id"] = current_request_id
+            if current_operation_id:
+                self.headers["x-trr-admin-operation-id"] = current_operation_id
 
         async def is_disconnected(self) -> bool:
             return False
@@ -3680,7 +4355,7 @@ def build_show_refresh_operation_producer(
         stream_response = refresh_show_stream(
             show_id=UUID(show_id_str),
             payload=payload,
-            request=_InternalRequest(current_request_id=request_id),
+            request=_InternalRequest(current_request_id=request_id, current_operation_id=operation_id),
             db=local_db,
             admin={"id": initiated_by},
         )
@@ -3698,7 +4373,7 @@ def refresh_show_photos_stream(
     request: Request,
     payload: RefreshShowPhotosRequest | None = None,
     db: SupabaseAdminClient = None,
-    admin_user: AdminUser = None,
+    admin_user: InternalAdminUser = None,
 ) -> StreamingResponse:
     """
     High-fidelity gallery refresh for a show with live SSE progress updates.
@@ -4379,7 +5054,11 @@ def refresh_show_photos_stream(
                     chunk = person_ids[i : i + 200]
                     try:
                         resp = (
-                            db.schema("core").table("people").select("id,full_name,external_ids").in_("id", chunk).execute()
+                            db.schema("core")
+                            .table("people")
+                            .select("id,full_name,external_ids")
+                            .in_("id", chunk)
+                            .execute()
                         )
                     except Exception:  # noqa: BLE001
                         errors.append("People lookup: query failed")
@@ -4494,11 +5173,13 @@ def refresh_show_photos_stream(
                                         "mirrored_count": mirrored_count,
                                     }
                                 )
+                                already_mirrored_message = (
+                                    f"Skipping IMDb cast photos ({pid}): "
+                                    f"already mirrored {mirrored_count}/{source_total}."
+                                )
                                 yield progress(
                                     stage="sync_imdb",
-                                    message=(
-                                        f"Skipping IMDb cast photos ({pid}): already mirrored {mirrored_count}/{source_total}."
-                                    ),
+                                    message=already_mirrored_message,
                                     stage_current=stage_done,
                                     stage_total=fetch_units,
                                     extra={

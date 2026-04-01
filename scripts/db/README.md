@@ -28,9 +28,9 @@ This directory contains scripts for database maintenance, verification, and migr
 
 The tools in this directory resolve the database URL in this order:
 
-1. **`SUPABASE_DB_URL`** - Explicit Supabase database URL (recommended for production)
-2. **`DATABASE_URL`** - Standard Postgres connection string
-3. **`TRR_DB_URL`** - Legacy alias
+1. **`TRR_DB_URL`** - Canonical runtime Postgres URL
+2. **`TRR_DB_FALLBACK_URL`** - Explicit break-glass fallback
+3. **`SUPABASE_DB_URL` / `DATABASE_URL`** - Deprecated compatibility inputs only
 4. **`supabase status`** - Falls back to local Supabase instance (dev only)
 
 ### For Local Development
@@ -45,16 +45,16 @@ supabase start
 Or export explicitly:
 
 ```bash
-export DATABASE_URL=$(supabase status --output env | grep DB_URL | cut -d= -f2)
+export TRR_DB_URL="$(supabase status --output env | grep '^DB_URL=' | cut -d= -f2-)"
 ```
 
 ### For Remote/Production
 
-Set `SUPABASE_DB_URL` explicitly:
+Set `TRR_DB_URL` explicitly:
 
 ```bash
 # From Supabase Dashboard → Settings → Database → Connection string (URI)
-export SUPABASE_DB_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
+export TRR_DB_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
 
 ./scripts/db/run_sql.sh scripts/db/verify_pre_0033_cleanup.sql
 ```
@@ -90,7 +90,7 @@ ERROR:
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  You are connected to the WRONG database.                            ║
 ║  Check your environment:                                             ║
-║    - SUPABASE_DB_URL should point to your Supabase project          ║
+║    - TRR_DB_URL should point to your runtime Postgres database      ║
 ║    - For local dev: run `supabase start` first                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
@@ -209,9 +209,10 @@ except DatabasePreflightError as e:
 
 | Variable | Purpose | When to Use |
 |----------|---------|-------------|
-| `SUPABASE_DB_URL` | Direct Postgres connection to Supabase | Production migrations |
-| `DATABASE_URL` | Standard Postgres connection | General purpose |
-| `TRR_DB_URL` | Legacy alias for DATABASE_URL | Backward compatibility |
+| `TRR_DB_URL` | Canonical runtime Postgres connection | Runtime SQL helpers and local workspace runs |
+| `TRR_DB_FALLBACK_URL` | Explicit break-glass fallback URL | Emergency fallback only |
+| `SUPABASE_DB_URL` | Deprecated compatibility alias | Transitional fallback only |
+| `DATABASE_URL` | Tooling-only Postgres connection | Third-party tools that explicitly require this name |
 | `SUPABASE_URL` | Supabase REST API URL | Python SDK, not psql |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role key (bypasses RLS) | Python SDK admin ops |
 
@@ -222,7 +223,7 @@ except DatabasePreflightError as e:
 supabase start
 
 # For psql/migrations (auto-detected by run_sql.sh)
-export DATABASE_URL=$(supabase status --output env | grep DB_URL | cut -d= -f2)
+export TRR_DB_URL="$(supabase status --output env | grep '^DB_URL=' | cut -d= -f2-)"
 
 # For Python SDK
 export SUPABASE_URL=http://localhost:54321
@@ -233,7 +234,10 @@ export SUPABASE_SERVICE_ROLE_KEY=$(supabase status -o json | jq -r '.DB.SERVICE_
 
 ```bash
 # From Supabase Dashboard → Settings → Database → Connection string
-export SUPABASE_DB_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
+export TRR_DB_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
+
+# Only for tooling that explicitly requires DATABASE_URL
+export DATABASE_URL="$TRR_DB_URL"
 
 # From Supabase Dashboard → Settings → API
 export SUPABASE_URL='https://<project>.supabase.co'

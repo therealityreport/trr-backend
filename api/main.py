@@ -20,8 +20,8 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from api.realtime.broker import init_broker, shutdown_broker
 from trr_backend.db import pg
@@ -41,12 +41,30 @@ configure_runtime_observability(service_name="trr-backend-api")
 
 logger = logging.getLogger(__name__)
 
+_LOCAL_RUNTIME_MARKERS = frozenset({"local", "dev", "development", "test"})
+
 
 def _env_flag(name: str, default: bool) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
         return default
     return raw not in {"0", "false", "no", "off"}
+
+
+def _is_local_or_dev_runtime() -> bool:
+    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
+        return True
+    values = {
+        str(os.getenv("APP_ENV") or "").strip().lower(),
+        str(os.getenv("ENVIRONMENT") or "").strip().lower(),
+        str(os.getenv("TRR_ENV") or "").strip().lower(),
+        str(os.getenv("TRR_ENVIRONMENT") or "").strip().lower(),
+        str(os.getenv("PYTHON_ENV") or "").strip().lower(),
+    }
+    if values & _LOCAL_RUNTIME_MARKERS:
+        return True
+    raw_local = str(os.getenv("TRR_LOCAL_DEV") or "").strip().lower()
+    return raw_local in {"1", "true", "yes", "on"}
 
 
 def _cast_screentime_stale_sweeper_enabled() -> bool:
@@ -89,6 +107,7 @@ def _validate_startup_config() -> None:
     screenalytics_api_url = (os.getenv("SCREENALYTICS_API_URL") or "").strip()
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     service_token = (os.getenv("SCREENALYTICS_SERVICE_TOKEN") or "").strip()
+    supabase_jwt_secret = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
     log_database_resolution_summary()
     winner = next(iter(resolve_database_url_candidate_details()), None)
 
@@ -97,7 +116,8 @@ def _validate_startup_config() -> None:
         winner_connection_class = str(winner.get("connection_class") or "")
         if winner_source in {"SUPABASE_DB_URL", "DATABASE_URL"}:
             logger.warning(
-                "[startup-config] legacy_runtime_db_env_in_use source=%s; set TRR_DB_URL and optional TRR_DB_FALLBACK_URL instead",
+                "[startup-config] legacy_runtime_db_env_in_use source=%s; "
+                "set TRR_DB_URL and optional TRR_DB_FALLBACK_URL instead",
                 winner_source,
             )
         if winner_connection_class == "session":
@@ -113,13 +133,16 @@ def _validate_startup_config() -> None:
                 maxconn = None
             if (minconn is not None and minconn > 1) or (maxconn is not None and maxconn > 2):
                 logger.warning(
-                    "[startup-config] oversized_session_pool_override detected for Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",
+                    "[startup-config] oversized_session_pool_override detected for "
+                    "Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",
                     raw_minconn or "<unset>",
                     raw_maxconn or "<unset>",
                 )
             if _env_flag("SOCIAL_QUEUE_ENABLED", False):
                 logger.warning(
-                    "[startup-config] session_pooler_with_social_queue_enabled; keep local worker lanes and DB pool sizing conservative when using pooler.supabase.com:5432"
+                    "[startup-config] session_pooler_with_social_queue_enabled; keep "
+                    "local worker lanes and DB pool sizing conservative when using "
+                    "pooler.supabase.com:5432"
                 )
 
     if screenalytics_api_url:
@@ -136,13 +159,21 @@ def _validate_startup_config() -> None:
             "disabled. Admin image-analysis stays on the backend-owned vision runtime."
         )
 
+    missing_required: list[str] = []
     if not admin_shared_secret:
-        logger.warning("[startup-config] TRR_INTERNAL_ADMIN_SHARED_SECRET missing; admin proxy auth may fail")
+        missing_required.append("TRR_INTERNAL_ADMIN_SHARED_SECRET")
     if not service_token:
+        missing_required.append("SCREENALYTICS_SERVICE_TOKEN")
+    if not supabase_jwt_secret:
+        missing_required.append("SUPABASE_JWT_SECRET")
+
+    if missing_required and _is_local_or_dev_runtime():
         logger.warning(
-            "[startup-config] SCREENALYTICS_SERVICE_TOKEN missing; only /api/v1/screenalytics auth-protected "
-            "requests are affected and backend startup continues normally"
+            "[startup-config] local/dev runtime missing auth env(s): %s",
+            ", ".join(missing_required),
         )
+    elif missing_required:
+        raise RuntimeError("Missing required auth env(s) for deployed runtime: " + ", ".join(missing_required))
 
 
 def _prewarm_database_pool() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from collections import Counter
 from typing import Any
@@ -12,6 +13,7 @@ from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.utils.env import load_env
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+JOB_PAGE_SIZE = 250
 
 
 def _parse_args() -> argparse.Namespace:
@@ -88,7 +90,16 @@ def _run_status(*, season_id: str, run_id: str) -> str:
 
 
 def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
-    jobs = social_repo.list_jobs(season_id, run_id=run_id, limit=250)
+    jobs: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = social_repo.list_jobs(season_id, run_id=run_id, limit=JOB_PAGE_SIZE, offset=offset)
+        if not page:
+            break
+        jobs.extend(page)
+        if len(page) < JOB_PAGE_SIZE:
+            break
+        offset += JOB_PAGE_SIZE
     diagnostics: dict[str, Any] = {
         "run_id": run_id,
         "job_count": len(jobs),
@@ -96,6 +107,7 @@ def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
         "views_updated": 0,
         "views_preserved_missing": 0,
         "details_refresh_errors": 0,
+        "detail_fetch_skipped_limit": 0,
         "job_status_counts": {},
         "views_sources": {},
         "failures_by_reason": {},
@@ -117,6 +129,9 @@ def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
             retrieval_meta.get("details_refresh_views_preserved_missing") or 0
         )
         diagnostics["details_refresh_errors"] += int(retrieval_meta.get("details_refresh_errors") or 0)
+        diagnostics["detail_fetch_skipped_limit"] += int(
+            retrieval_meta.get("details_refresh_detail_fetch_skipped_limit") or 0
+        )
         details_sources = (
             retrieval_meta.get("details_refresh_views_sources")
             if isinstance(retrieval_meta.get("details_refresh_views_sources"), dict)
@@ -125,11 +140,13 @@ def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
         for source, count in details_sources.items():
             source_key = str(source or "").strip() or "unknown"
             views_sources[source_key] += int(count or 0)
-        fail_reasons = (
-            retrieval_meta.get("comment_fetch_failures_by_reason")
-            if isinstance(retrieval_meta.get("comment_fetch_failures_by_reason"), dict)
-            else {}
-        )
+        fail_reasons = retrieval_meta.get("details_refresh_errors_by_reason")
+        if not isinstance(fail_reasons, dict):
+            fail_reasons = (
+                retrieval_meta.get("comment_fetch_failures_by_reason")
+                if isinstance(retrieval_meta.get("comment_fetch_failures_by_reason"), dict)
+                else {}
+            )
         for reason, count in fail_reasons.items():
             reason_key = str(reason or "").strip() or "unknown"
             failures_by_reason[reason_key] += int(count or 0)
@@ -143,6 +160,17 @@ def _collect_run_diagnostics(*, season_id: str, run_id: str) -> dict[str, Any]:
 def main() -> int:
     load_env()
     args = _parse_args()
+    instagram_cookies = social_repo._load_instagram_cookies()  # noqa: SLF001
+    if not instagram_cookies.get("sessionid"):
+        raise SystemExit(
+            "Instagram auth preflight failed: missing sessionid cookie for full-history reel view backfill."
+        )
+    max_detail_fetches = int(str(os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_MAX_DETAIL_FETCHES") or "0").strip() or 0)
+    if max_detail_fetches <= 0:
+        raise SystemExit(
+            "Instagram detail-fetch cap is disabled. "
+            "Set SOCIAL_INSTAGRAM_DETAILS_REFRESH_MAX_DETAIL_FETCHES to a positive value."
+        )
     season_ids = [str(item or "").strip() for item in (args.season_id or []) if str(item or "").strip()]
     if not season_ids:
         season_ids = _discover_active_seasons(source_scope=args.source_scope)
@@ -198,7 +226,17 @@ def main() -> int:
             )
 
     if not args.wait:
-        print(json.dumps({"launched": launched_runs}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "launched": launched_runs,
+                    "auth_preflight": {"sessionid_present": True},
+                    "detail_fetch_cap": max_detail_fetches,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
 
     completed: list[dict[str, Any]] = []
@@ -227,7 +265,17 @@ def main() -> int:
         diagnostics["timed_out"] = timed_out
         completed.append(diagnostics)
 
-    print(json.dumps({"completed_runs": completed}, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "completed_runs": completed,
+                "auth_preflight": {"sessionid_present": True},
+                "detail_fetch_cap": max_detail_fetches,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

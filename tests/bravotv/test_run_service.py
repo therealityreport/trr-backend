@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from trr_backend.bravotv import run_service
 
 
@@ -41,6 +43,58 @@ def test_build_asset_payload_marks_preview_records_for_replacement() -> None:
     assert payload["metadata"]["run_id"] == "run-1"
     assert payload["metadata"]["replacement_pending"] is True
     assert payload["metadata"]["google_reverse_image_search_url"].startswith("https://www.google.com/searchbyimage")
+
+
+def test_build_asset_payload_preserves_getty_large_and_thumb_metadata() -> None:
+    record = {
+        **_sample_getty_record(acquisition_status="uploaded"),
+        "per_source": {
+            "getty": {
+                "source_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=2048x2048&w=gi&k=20&c=full",
+                "preview_image_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=1024x1024&w=gi&k=20&c=preview",
+                "thumb_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=612x612&w=0&k=20&c=thumb",
+                "source_page_url": "https://www.gettyimages.com/detail/news-photo/example/1435767826",
+                "getty_original_image_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=2048x2048&w=gi&k=20&c=full",
+                "getty_thumb_clean_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=612x612&w=0&k=20&c=thumb",
+                "getty_preview_image_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=1024x1024&w=gi&k=20&c=preview",
+            }
+        },
+        "acquisition": {
+            "status": "uploaded",
+            "hosted_url": "https://cdn.example.com/full.jpg",
+            "hosted_key": "shared-media/full.jpg",
+            "hosted_sha256": "sha-full",
+            "hosted_content_type": "image/jpeg",
+            "hosted_bytes": 1234,
+            "hosted_thumb_url": "https://cdn.example.com/thumb.jpg",
+            "hosted_thumb_key": "shared-media/thumb.jpg",
+            "hosted_thumb_sha256": "sha-thumb",
+        },
+    }
+
+    payload, preview_only = run_service._build_asset_payload(record, run_id="run-1")
+
+    assert preview_only is False
+    assert payload["hosted_url"] == "https://cdn.example.com/full.jpg"
+    assert payload["metadata"]["getty_original_image_url"].endswith("c=full")
+    assert payload["metadata"]["getty_thumb_clean_url"].endswith("c=thumb")
+    assert payload["metadata"]["hosted_thumb_url"] == "https://cdn.example.com/thumb.jpg"
+
+
+def test_execute_bravotv_image_run_requires_local_getty_prefetch_for_remote_modal(monkeypatch) -> None:
+    monkeypatch.setattr(run_service, "execution_backend_canonical", lambda: "modal")
+    monkeypatch.setattr(run_service, "_fetch_person_row", lambda _person_id: {"id": "person-1", "name": "Jane Doe"})
+    create_run_mock = MagicMock()
+    monkeypatch.setattr(run_service, "create_run", create_run_mock)
+
+    with pytest.raises(RuntimeError, match="local Getty prefetch"):
+        run_service.execute_bravotv_image_run(
+            mode="person",
+            person_id="person-1",
+            sources=["getty"],
+        )
+
+    create_run_mock.assert_not_called()
 
 
 def test_import_catalog_person_mode_skips_non_deterministic_person_links() -> None:

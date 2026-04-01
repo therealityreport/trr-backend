@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
 from trr_backend.ingestion.show_cast_matrix_scraper import is_missing_fandom_page
@@ -2211,7 +2211,7 @@ def _video_item_needs_thumbnail_sync(item: dict[str, Any]) -> bool:
 def _sync_bravo_video_thumbnails(
     *,
     db: SupabaseAdminClient,
-    admin_user: AdminUser,
+    admin_user: InternalAdminUser,
     show_id: str,
     normalized: dict[str, Any],
     force: bool = False,
@@ -2820,7 +2820,7 @@ def preview_bravo_import(
     show_id: UUID,
     payload: BravoPreviewRequest,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -2939,7 +2939,7 @@ def preview_bravo_import_stream(
     payload: BravoPreviewRequest,
     request: Request,
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
 ) -> StreamingResponse:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -3548,7 +3548,7 @@ def commit_bravo_import(
     show_id: UUID,
     payload: BravoCommitRequest,
     db: SupabaseAdminClient = None,
-    admin_user: AdminUser = None,
+    admin_user: InternalAdminUser = None,
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -4211,7 +4211,7 @@ def sync_bravo_video_thumbnails(
     show_id: UUID,
     payload: BravoVideoThumbnailSyncRequest,
     db: SupabaseAdminClient = None,
-    admin_user: AdminUser = None,
+    admin_user: InternalAdminUser = None,
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -4263,7 +4263,7 @@ def get_bravo_videos(
     person_id: UUID | None = Query(default=None),
     merge_person_sources: bool = Query(default=True),
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -4311,7 +4311,7 @@ def get_bravo_news(
     show_id: UUID,
     person_id: UUID | None = Query(default=None),
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ):
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):

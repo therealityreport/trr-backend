@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 
 
@@ -304,6 +307,60 @@ class TestReadSwitchGating:
         finally:
             if original is not None:
                 os.environ["ENABLE_CREDITS_V2_READ"] = original
+
+
+class TestCreditsInsertFallback:
+    def test_insert_credits_ignore_conflicts_replays_chunk_when_bulk_response_is_short(self) -> None:
+        from trr_backend.repositories.credits import insert_credits_ignore_conflicts
+
+        rows = [
+            {
+                "show_id": "show-1",
+                "person_id": "person-1",
+                "credit_category": "Self",
+                "source_type": "fullcredits_html",
+            },
+            {
+                "show_id": "show-1",
+                "person_id": "person-2",
+                "credit_category": "Self",
+                "source_type": "fullcredits_html",
+            },
+            {
+                "show_id": "show-1",
+                "person_id": "person-3",
+                "credit_category": "Self",
+                "source_type": "fullcredits_html",
+            },
+        ]
+
+        table = MagicMock()
+        upsert_calls: list[list[dict[str, object]]] = []
+
+        def fake_upsert(payload, ignore_duplicates=True):  # noqa: ANN001
+            upsert_calls.append(payload)
+            execute = MagicMock()
+            if len(payload) == 3:
+                execute.execute.return_value = SimpleNamespace(
+                    data=[rows[0]],
+                    error=None,
+                )
+            elif payload == [rows[0]]:
+                execute.execute.return_value = SimpleNamespace(data=[], error=None)
+            elif payload == [rows[1]]:
+                execute.execute.return_value = SimpleNamespace(data=[rows[1]], error=None)
+            else:
+                execute.execute.return_value = SimpleNamespace(data=[rows[2]], error=None)
+            return execute
+
+        table.upsert.side_effect = fake_upsert
+        db = MagicMock()
+        db.schema.return_value.table.return_value = table
+
+        inserted = insert_credits_ignore_conflicts(db, rows)
+
+        assert inserted == [rows[0], rows[1], rows[2]]
+        assert upsert_calls == [rows, [rows[0]], [rows[1]], [rows[2]]]
 
 
 @pytest.mark.skip(reason="Integration test - requires Supabase with credits tables")

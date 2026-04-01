@@ -5,7 +5,7 @@
 -- to reload when functions are added/changed.
 --
 -- Usage:
---   psql "$SUPABASE_DB_URL" -f scripts/reload_postgrest_schema.sql
+--   ./scripts/db/run_sql.sh scripts/reload_postgrest_schema.sql
 --
 -- Or use the convenience wrapper:
 --   ./scripts/reload_postgrest_schema.sh

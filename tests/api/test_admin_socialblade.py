@@ -3,15 +3,18 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from api.auth import require_admin
+from api.auth import require_internal_admin
 from api.main import app
 
 
 @pytest.fixture(autouse=True)
 def override_admin():
-    app.dependency_overrides[require_admin] = lambda: {"id": "service_role:test", "role": "service_role"}
+    app.dependency_overrides[require_internal_admin] = lambda: {
+        "id": "internal-admin:test",
+        "role": "internal_admin",
+    }
     yield
-    app.dependency_overrides.pop(require_admin, None)
+    app.dependency_overrides.pop(require_internal_admin, None)
 
 
 def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:

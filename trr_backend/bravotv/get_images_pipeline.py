@@ -361,16 +361,28 @@ def _normalize_getty_record(asset: dict[str, Any], *, known_people: Sequence[str
         people_names = _extract_people_from_text(asset.get("caption"), known_people=known_people)
     keywords = [str(value).strip() for value in (asset.get("keyword_texts") or []) if str(value).strip()]
     detail_url = _best_text(asset.get("detail_url"))
-    preview_url = _best_text(
-        asset.get("preview_image_url"),
-        asset.get("downloadableCompUrl"),
-        asset.get("galleryHighResCompUrl"),
-        asset.get("highResCompUrl"),
-        asset.get("galleryComp1024Url"),
-        asset.get("compUrl"),
-        asset.get("thumb_url"),
-        asset.get("thumbUrl"),
+    image_urls = getty._extract_best_image_urls(asset)
+    max_file_size = _best_text(asset.get("max_file_size"), asset.get("maxFileSize"))
+    original_url = _best_text(
+        asset.get("getty_original_image_url"), asset.get("original_image_url")
+    ) or getty._select_best_original_image_url(image_urls, max_file_size=max_file_size)
+    preview_url = (
+        _best_text(asset.get("getty_preview_image_url"), asset.get("preview_image_url"))
+        or getty._select_best_preview_image_url(image_urls)
+        or original_url
     )
+    variant_seed_url = original_url or preview_url or _best_text(asset.get("thumb_url"), asset.get("thumbUrl"))
+    getty_variants = getty.build_getty_url_variants(variant_seed_url)
+    fallback_large_url = getty_variants.get("full_res")
+    canonical_large_url = original_url or fallback_large_url or preview_url
+    thumb_clean_url = (
+        _best_text(asset.get("getty_thumb_clean_url"), asset.get("thumb_url"))
+        or getty_variants.get("thumb_clean")
+        or preview_url
+        or canonical_large_url
+    )
+    full_res_clean_url = getty_variants.get("full_res_clean")
+    full_res_url = getty_variants.get("full_res") or canonical_large_url
     season_number = None
     for keyword in keywords:
         season_number = _parse_season_from_text(keyword)
@@ -395,7 +407,14 @@ def _normalize_getty_record(asset: dict[str, Any], *, known_people: Sequence[str
         "episode_title": None,
         "air_date": _parse_iso_date(_best_text(asset.get("date_created"), asset.get("event_date"))),
         "keywords": keywords,
-        "source_url": preview_url,
+        "source_url": canonical_large_url,
+        "preview_image_url": preview_url,
+        "thumb_url": thumb_clean_url,
+        "getty_original_image_url": original_url or canonical_large_url,
+        "getty_full_res_url": full_res_url,
+        "getty_full_res_clean_url": full_res_clean_url,
+        "getty_thumb_clean_url": thumb_clean_url,
+        "getty_preview_image_url": preview_url,
         "source_page_url": detail_url,
         "width": dimensions.get("width"),
         "height": dimensions.get("height"),
@@ -775,13 +794,45 @@ def acquire_best_image(record: dict[str, Any]) -> dict[str, Any]:
 
     getty_record = per_source.get("getty") if isinstance(per_source, dict) else None
     if isinstance(getty_record, dict):
-        preview_url = str(getty_record.get("source_url") or "").strip() or None
+        source_url = str(getty_record.get("source_url") or "").strip() or None
+        preview_url = str(getty_record.get("preview_image_url") or "").strip() or source_url
+        thumb_url = str(getty_record.get("thumb_url") or "").strip() or None
+        source_page_url = getty_record.get("source_page_url")
+        if source_url:
+            result = mirror_url_to_s3(source_url)
+            if result.status != "failed" and result.hosted_url:
+                acquisition: dict[str, Any] = {
+                    "status": "uploaded",
+                    "source": "getty",
+                    "watermarked": "w=gi" in source_url,
+                    "source_url": source_url,
+                    "preview_source_url": preview_url,
+                    "source_page_url": source_page_url,
+                    "hosted_url": result.hosted_url,
+                    "hosted_key": result.hosted_key,
+                    "hosted_sha256": result.sha256,
+                    "hosted_content_type": result.content_type,
+                    "hosted_bytes": result.size_bytes,
+                }
+                if thumb_url:
+                    thumb_result = mirror_url_to_s3(thumb_url)
+                    if thumb_result.status != "failed" and thumb_result.hosted_url:
+                        acquisition.update(
+                            {
+                                "hosted_thumb_url": thumb_result.hosted_url,
+                                "hosted_thumb_key": thumb_result.hosted_key,
+                                "hosted_thumb_sha256": thumb_result.sha256,
+                                "hosted_thumb_content_type": thumb_result.content_type,
+                                "hosted_thumb_bytes": thumb_result.size_bytes,
+                            }
+                        )
+                return acquisition
         return {
             "status": "referenced_only",
             "source": "getty_preview",
             "watermarked": True,
             "source_url": preview_url,
-            "source_page_url": getty_record.get("source_page_url"),
+            "source_page_url": source_page_url,
             "google_reverse_image_search_url": _build_google_reverse_image_search_url(preview_url),
         }
 
@@ -1106,6 +1157,12 @@ def run_get_images_pipeline(
     imdb_id: str | None = None,
     tmdb_id: int | None = None,
     force_all: bool = False,
+    getty_prefetched_assets: list[dict[str, Any]] | None = None,
+    getty_prefetched_events: list[dict[str, Any]] | None = None,
+    getty_prefetched_queries: list[dict[str, Any]] | None = None,
+    getty_prefetch_mode: str | None = None,
+    getty_prefetch_auth_mode: str | None = None,
+    getty_prefetch_auth_warning: str | None = None,
     progress_cb: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     mode = "person" if person_name else "show"
@@ -1138,6 +1195,11 @@ def run_get_images_pipeline(
         "counts": {},
         "notes": [],
     }
+    normalized_getty_prefetch_mode = str(getty_prefetch_mode or "").strip().lower() or None
+    if getty_prefetch_auth_mode:
+        manifest["getty_prefetch_auth_mode"] = getty_prefetch_auth_mode
+    if getty_prefetch_auth_warning:
+        manifest["getty_prefetch_auth_warning"] = getty_prefetch_auth_warning
 
     raw_payloads: dict[str, Any] = {}
 
@@ -1157,8 +1219,22 @@ def run_get_images_pipeline(
         return payload
 
     if "getty" in selected_families:
+        if isinstance(getty_prefetched_events, list):
+            _write_json(raw_dir / "getty_prefetched_events.json", getty_prefetched_events)
+            manifest["counts"]["getty_prefetched_events"] = len(getty_prefetched_events)
+        if isinstance(getty_prefetched_queries, list):
+            _write_json(raw_dir / "getty_prefetched_queries.json", getty_prefetched_queries)
+            manifest["counts"]["getty_prefetched_queries"] = len(getty_prefetched_queries)
         if mode == "person":
-            _load_or_collect("getty", lambda: _collect_getty_person(person_name or "", limit=getty_limit))
+            if isinstance(getty_prefetched_assets, list):
+                prefetch_mode_label = normalized_getty_prefetch_mode or "full"
+                manifest["notes"].append(
+                    "getty_prefetched_assets supplied; "
+                    f"skipping live Getty search ({prefetch_mode_label})."
+                )
+                _load_or_collect("getty", lambda: list(getty_prefetched_assets))
+            else:
+                _load_or_collect("getty", lambda: _collect_getty_person(person_name or "", limit=getty_limit))
             _load_or_collect(
                 "nbcumv",
                 lambda: _collect_nbcumv_person(person_name or "", show_name=show_name, limit=nbcumv_limit),
@@ -1168,10 +1244,18 @@ def run_get_images_pipeline(
                 lambda: _collect_bravo_person(person_name or "", limit=bravo_limit, show_name=show_name),
             )
         else:
-            _load_or_collect(
-                "getty",
-                lambda: _collect_getty_show(show_name or "", season=season, episode=episode, limit=getty_limit),
-            )
+            if isinstance(getty_prefetched_assets, list):
+                prefetch_mode_label = normalized_getty_prefetch_mode or "full"
+                manifest["notes"].append(
+                    "getty_prefetched_assets supplied; "
+                    f"skipping live Getty search ({prefetch_mode_label})."
+                )
+                _load_or_collect("getty", lambda: list(getty_prefetched_assets))
+            else:
+                _load_or_collect(
+                    "getty",
+                    lambda: _collect_getty_show(show_name or "", season=season, episode=episode, limit=getty_limit),
+                )
             _load_or_collect(
                 "nbcumv",
                 lambda: _collect_nbcumv_show(show_name or "", season=season, episode=episode, limit=nbcumv_limit),

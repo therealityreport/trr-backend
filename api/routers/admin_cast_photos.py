@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.image_variants import generate_cast_photo_variants
 from trr_backend.media.s3_mirror import mirror_cast_photo_row
@@ -62,7 +62,7 @@ class GenerateCastPhotoVariantsResponse(BaseModel):
 def mirror_cast_photo(
     photo_id: UUID,
     db: SupabaseAdminClient,
-    _: AdminUser,
+    _: InternalAdminUser,
     force: bool = Query(default=False),
 ) -> MirrorCastPhotoResponse:
     response = (
@@ -106,7 +106,7 @@ def mirror_cast_photo(
 def detect_text_overlay_cast_photo(
     photo_id: UUID,
     db: SupabaseAdminClient,
-    _: AdminUser,
+    _: InternalAdminUser,
     force: bool = Query(default=False),
 ) -> DetectTextOverlayResponse:
     """
@@ -168,7 +168,7 @@ def detect_text_overlay_cast_photo(
 def generate_variants_for_cast_photo(
     photo_id: UUID,
     db: SupabaseAdminClient,
-    _: AdminUser,
+    _: InternalAdminUser,
     payload: GenerateCastPhotoVariantsRequest | None = None,
 ) -> GenerateCastPhotoVariantsResponse:
     photo_id_str = str(photo_id)

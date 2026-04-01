@@ -9,7 +9,7 @@
 --   -- Your script continues here...
 --
 -- Or concatenate in shell:
---   cat scripts/db/guard_core_schema.sql your_script.sql | psql "$DATABASE_URL"
+--   cat scripts/db/guard_core_schema.sql your_script.sql | psql "${TRR_DB_URL:-${TRR_DB_FALLBACK_URL:-$DATABASE_URL}}"
 -- =============================================================================
 
 -- Fail fast if core schema doesn't exist
@@ -27,7 +27,7 @@ begin
       '║  This script requires a Supabase database with the TRR schema.       ║\n'
       '║                                                                       ║\n'
       '║  Check your environment:                                             ║\n'
-      '║    - SUPABASE_DB_URL should point to your Supabase project          ║\n'
+      '║    - TRR_DB_URL should point to your runtime Postgres database     ║\n'
       '║    - For local dev: run `supabase start` first                      ║\n'
       '║                                                                       ║\n'
       '║  Aborting to prevent damage to wrong database.                       ║\n'

@@ -58,8 +58,8 @@ def assert_core_schema_exists(db: DbSession) -> None:
             raise DatabasePreflightError(
                 "Database preflight failed: schema `core` does not exist.\n"
                 "This likely means you're connected to the wrong database.\n"
-                "Check TRR_DB_URL / TRR_DB_FALLBACK_URL / SUPABASE_URL environment variables.\n"
-                "For Supabase, ensure the `core` schema is exposed in API settings."
+                "Check TRR_DB_URL / TRR_DB_FALLBACK_URL environment variables.\n"
+                "Runtime paths use direct Postgres access; do not troubleshoot this through PostgREST exposed schemas."
             ) from exc
         if _is_missing_table_error(msg):
             raise DatabasePreflightError(
@@ -83,8 +83,8 @@ def assert_core_schema_exists(db: DbSession) -> None:
         raise DatabasePreflightError(
             "Database preflight failed: schema `core` does not exist.\n"
             "This likely means you're connected to the wrong database.\n"
-            "Check TRR_DB_URL / TRR_DB_FALLBACK_URL / SUPABASE_URL environment variables.\n"
-            "For Supabase, ensure the `core` schema is exposed in API settings."
+            "Check TRR_DB_URL / TRR_DB_FALLBACK_URL environment variables.\n"
+            "Runtime paths use direct Postgres access; do not troubleshoot this through PostgREST exposed schemas."
         )
     if _is_missing_table_error(combined):
         raise DatabasePreflightError(
@@ -106,9 +106,7 @@ def assert_migration_safe(*, require_core_schema: bool = True) -> None:
                              doesn't have the core schema (heuristic based on URL).
     """
     db_url = (os.getenv("TRR_DB_URL") or os.getenv("TRR_DB_FALLBACK_URL") or os.getenv("DATABASE_URL") or "").strip()
-    supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
-
-    if not db_url and not supabase_url:
+    if not db_url:
         raise DatabasePreflightError(
             "No database URL configured.\n"
             "Set TRR_DB_URL for runtime use, optionally TRR_DB_FALLBACK_URL for an explicit fallback, "
@@ -120,5 +118,6 @@ def assert_migration_safe(*, require_core_schema: bool = True) -> None:
         if "localhost" in db_url or "127.0.0.1" in db_url:
             if "supabase" not in db_url.lower():
                 print(
-                    "WARNING: runtime DB URL points to localhost. Ensure `core` schema exists before running migrations."
+                    "WARNING: runtime DB URL points to localhost. "
+                    "Ensure `core` schema exists before running migrations."
                 )

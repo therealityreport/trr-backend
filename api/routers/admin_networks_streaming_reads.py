@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
@@ -8,10 +7,10 @@ from threading import Event, Lock
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from api.auth import InternalAdminUser
+from trr_backend.read_path_diagnostics import log_read_path
 from trr_backend.repositories import admin_networks_streaming_reads as networks_streaming_reads_repo
 from trr_backend.repositories import brand_families
 
@@ -113,18 +112,13 @@ def invalidate_networks_streaming_summary_cache() -> None:
         _INFLIGHT.clear()
 
 
-def _payload_size_bytes(payload: dict[str, Any]) -> int:
-    return len(json.dumps(jsonable_encoder(payload), separators=(",", ":"), default=str).encode("utf-8"))
-
-
 def _log_read(route: str, *, query_count: int, payload: dict[str, Any], cache_status: str, started_at: float) -> None:
-    logger.info(
-        "[admin-networks-streaming-read] route=%s latency_ms=%.1f payload_bytes=%s query_count=%s cache=%s",
-        route,
-        (time.perf_counter() - started_at) * 1000.0,
-        _payload_size_bytes(payload),
-        query_count,
-        cache_status,
+    log_read_path(
+        f"admin-networks-streaming.{route}",
+        latency_ms=(time.perf_counter() - started_at) * 1000.0,
+        query_count=query_count,
+        payload=payload,
+        extra={"cache": cache_status},
     )
 
 

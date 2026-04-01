@@ -29,6 +29,7 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     payload = {
         "sub": subject,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "service_role",
     }
@@ -42,6 +43,7 @@ def _make_allowlist_user_token(secret: str, email: str, subject: str = "user-1")
         "sub": subject,
         "email": email,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "authenticated",
     }
@@ -5583,7 +5585,9 @@ class TestRefreshPersonImages:
         payload = response.text.replace("\r\n", "\n")
         assert "Searching Getty for 'Lisa Barlow' on Getty (Bravo)..." in payload
         assert "Matching Getty asset 2/4: NUP_123.JPG" in payload
-        assert "Summary: 2 shared via NBCUMV, 0 NBCUMV-only, 1 Getty-only, 0 covered existing, 0 skipped, 0 failed." in payload
+        assert (
+            "Summary: 2 shared via NBCUMV, 0 NBCUMV-only, 1 Getty-only, 0 covered existing, 0 skipped, 0 failed."
+        ) in payload
 
     def test_stream_uses_nbcumv_stage_totals_when_getty_candidates_are_zero(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")

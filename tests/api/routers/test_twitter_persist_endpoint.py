@@ -22,6 +22,7 @@ def _make_admin_token(secret: str = "test-secret-32-bytes-minimum-abcdef") -> st
     payload = {
         "sub": "admin-twitter-persist",
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "service_role",
     }

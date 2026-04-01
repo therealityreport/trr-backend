@@ -7,10 +7,11 @@ import logging
 import os
 import re
 import threading
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 from trr_backend.socials.browser_cookie_refresh import cookie_payload, launch_browser, write_cookie_file
 
@@ -134,7 +135,10 @@ class AccountBrowserSessionManager:
         payload = dict(cookies_or_storage_state or {})
         cookies_payload: dict[str, str]
         if isinstance(payload.get("cookies"), list):
-            storage_state = {"cookies": list(payload.get("cookies") or []), "origins": list(payload.get("origins") or [])}
+            storage_state = {
+                "cookies": list(payload.get("cookies") or []),
+                "origins": list(payload.get("origins") or []),
+            }
             cookies_payload = cookie_payload(storage_state["cookies"], domains=self.cookie_domains)
         else:
             cookies_payload = {
@@ -157,7 +161,10 @@ class AccountBrowserSessionManager:
             }
         with self._lock_for(paths.account_id):
             paths.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
-            paths.storage_state_path.write_text(json.dumps(storage_state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            paths.storage_state_path.write_text(
+                json.dumps(storage_state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
             write_cookie_file(paths.cookie_file_path, cookies_payload)
         return paths
 
@@ -167,13 +174,14 @@ class AccountBrowserSessionManager:
         platform: str | None = None,
     ) -> BrowserAccountSessionPaths:
         del platform
-        paths = self.session_paths(account_id)
+        self.session_paths(account_id)
         try:
             __import__("notte")
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("Notte integration is not installed or configured for this worker") from exc
         raise RuntimeError(
-            "Notte auth bootstrap is not configured in TRR yet; import an external storage state via import_bootstrapped_session()."
+            "Notte auth bootstrap is not configured in TRR yet; "
+            "import an external storage state via import_bootstrapped_session()."
         )
 
     @contextmanager
@@ -217,7 +225,12 @@ class AccountBrowserSessionManager:
                         try:
                             context.add_cookies(cookies)
                         except Exception:  # noqa: BLE001
-                            logger.debug("Failed seeding browser cookies for %s/%s", self.platform, paths.account_id, exc_info=True)
+                            logger.debug(
+                                "Failed seeding browser cookies for %s/%s",
+                                self.platform,
+                                paths.account_id,
+                                exc_info=True,
+                            )
                 yield BrowserAccountSessionHandle(
                     platform=self.platform,
                     account_id=paths.account_id,

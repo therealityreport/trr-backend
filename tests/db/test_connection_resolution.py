@@ -101,7 +101,10 @@ def test_resolve_database_url_returns_first_candidate(
     monkeypatch.setenv("TRR_DB_URL", "postgresql://primary:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
     monkeypatch.setenv("TRR_DB_FALLBACK_URL", "postgresql://secondary:secret@db2.example.com:5432/postgres")
 
-    assert connection.resolve_database_url() == "postgresql://primary:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    assert (
+        connection.resolve_database_url()
+        == "postgresql://primary:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    )
 
 
 def test_resolve_database_url_candidates_accepts_legacy_runtime_envs_as_lower_priority(

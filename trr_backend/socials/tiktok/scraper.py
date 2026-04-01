@@ -69,7 +69,8 @@ class TikTokScrapeConfig:
                 self.delay_seconds = 0.5
             logger.info(
                 "TikTokScrapeConfig fast_mode enabled: delay=%.2fs, scrape_mode=%s",
-                self.delay_seconds, self.scrape_mode,
+                self.delay_seconds,
+                self.scrape_mode,
             )
 
     @property
@@ -1043,11 +1044,7 @@ class TikTokScraper:
         user = user_info.get("user") if isinstance(user_info.get("user"), dict) else {}
         stats = user_info.get("stats") if isinstance(user_info.get("stats"), dict) else {}
         resolved_username = str(
-            user.get("uniqueId")
-            or user.get("unique_id")
-            or user.get("uniqueIdModifyTime")
-            or username
-            or ""
+            user.get("uniqueId") or user.get("unique_id") or user.get("uniqueIdModifyTime") or username or ""
         ).strip()
         if "@" in resolved_username:
             resolved_username = resolved_username.split("@")[-1].strip()
@@ -1084,7 +1081,9 @@ class TikTokScraper:
             return {}
         default_scope = data.get("__DEFAULT_SCOPE__", {}) if isinstance(data.get("__DEFAULT_SCOPE__"), dict) else {}
         webapp_detail = (
-            default_scope.get("webapp.user-detail", {}) if isinstance(default_scope.get("webapp.user-detail"), dict) else {}
+            default_scope.get("webapp.user-detail", {})
+            if isinstance(default_scope.get("webapp.user-detail"), dict)
+            else {}
         )
         user_info = webapp_detail.get("userInfo", {}) if isinstance(webapp_detail.get("userInfo"), dict) else {}
         user = user_info.get("user", {}) if isinstance(user_info.get("user"), dict) else {}
@@ -1110,7 +1109,9 @@ class TikTokScraper:
                 or ""
             ).strip()
             or None,
-            "bio": str(user.get("signature") or user.get("bio") or user_fallback.get("signature") or "").strip() or None,
+            "bio": (
+                str(user.get("signature") or user.get("bio") or user_fallback.get("signature") or "").strip() or None
+            ),
             "avatar_url": self._pick_best_avatar_url(
                 user.get("avatarLarger"),
                 user.get("avatar_larger"),
@@ -1222,7 +1223,15 @@ class TikTokScraper:
             self._last_api_fail_reason = "request_error"
             return None
 
-    def fetch_posts(self, username: str, sec_uid: str, cursor: int = 0, delay: float = 2.0, *, fast_mode: bool = False) -> dict | None:
+    def fetch_posts(
+        self,
+        username: str,
+        sec_uid: str,
+        cursor: int = 0,
+        delay: float = 2.0,
+        *,
+        fast_mode: bool = False,
+    ) -> dict | None:
         """Fetch posts from user's profile."""
         self._rate_limit(delay, fast_mode=fast_mode)
 
@@ -1312,11 +1321,13 @@ class TikTokScraper:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
             logger.error("Playwright not available for browser_intercept mode: %s", exc)
-            self.last_retrieval_meta.update({
-                "retrieval_mode": "browser_intercept",
-                "error_code": "playwright_unavailable",
-                "error_class": type(exc).__name__,
-            })
+            self.last_retrieval_meta.update(
+                {
+                    "retrieval_mode": "browser_intercept",
+                    "error_code": "playwright_unavailable",
+                    "error_class": type(exc).__name__,
+                }
+            )
             return []
 
         from trr_backend.socials.browser_cookie_refresh import launch_browser
@@ -1363,11 +1374,10 @@ class TikTokScraper:
                     user_data = self.fetch_user_detail(config.username, 0)
                     if user_data:
                         snapshot = self.build_profile_snapshot(
-                            config.username, user_data=user_data,
+                            config.username,
+                            user_data=user_data,
                         )
-                        profile_avatar_url = (
-                            str(snapshot.get("avatar_url") or "").strip() or None
-                        )
+                        profile_avatar_url = str(snapshot.get("avatar_url") or "").strip() or None
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -1386,21 +1396,13 @@ class TikTokScraper:
 
                         new_posts_this_batch = 0
                         for item in items:
-                            video_id = str(
-                                item.get("id")
-                                or item.get("aweme_id")
-                                or item.get("videoId")
-                                or ""
-                            )
+                            video_id = str(item.get("id") or item.get("aweme_id") or item.get("videoId") or "")
                             if not video_id or video_id in seen_ids:
                                 continue
                             seen_ids.add(video_id)
 
                             # Check date range
-                            create_time = self._coerce_timestamp(
-                                item.get("createTime")
-                                or item.get("createTimeISO")
-                            )
+                            create_time = self._coerce_timestamp(item.get("createTime") or item.get("createTimeISO"))
                             if create_time <= 0:
                                 continue
                             in_range = config.is_in_date_range(create_time)
@@ -1411,9 +1413,7 @@ class TikTokScraper:
                                 continue
 
                             # Check hashtag filter
-                            description = str(
-                                item.get("desc") or item.get("text") or ""
-                            )
+                            description = str(item.get("desc") or item.get("text") or "")
                             if config.matches_hashtags(description):
                                 post = self._parse_post_item(item, config)
                                 if profile_avatar_url and not post.user_avatar_url:
@@ -1425,7 +1425,8 @@ class TikTokScraper:
                             no_new_data_scrolls = 0
                             logger.info(
                                 "browser_intercept: +%d posts (total: %d)",
-                                new_posts_this_batch, len(posts),
+                                new_posts_this_batch,
+                                len(posts),
                             )
                             self._emit_progress(
                                 progress_cb,
@@ -1441,13 +1442,11 @@ class TikTokScraper:
 
                 # Auto-scroll loop
                 scroll_interval_ms = 800
-                while (
-                    not reached_date_limit
-                    and no_new_data_scrolls < max_no_new_data_scrolls
-                ):
+                while not reached_date_limit and no_new_data_scrolls < max_no_new_data_scrolls:
                     if len(posts) >= max_posts:
                         logger.info(
-                            "browser_intercept: reached max posts (%d)", max_posts,
+                            "browser_intercept: reached max posts (%d)",
+                            max_posts,
                         )
                         break
 
@@ -1465,31 +1464,42 @@ class TikTokScraper:
                     if scroll_count % 20 == 0:
                         logger.info(
                             "browser_intercept: scrolled %d times, %d posts collected",
-                            scroll_count, len(posts),
+                            scroll_count,
+                            len(posts),
                         )
 
             except Exception as exc:
                 logger.error(
-                    "browser_intercept failed for @%s: %s", config.username, exc,
+                    "browser_intercept failed for @%s: %s",
+                    config.username,
+                    exc,
                 )
-                self.last_retrieval_meta.update({
-                    "retrieval_mode": "browser_intercept",
-                    "error_code": "browser_intercept_error",
-                    "error_class": type(exc).__name__,
-                    "error_message": str(exc),
-                })
+                self.last_retrieval_meta.update(
+                    {
+                        "retrieval_mode": "browser_intercept",
+                        "error_code": "browser_intercept_error",
+                        "error_class": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
             finally:
                 browser.close()
 
         stop_reason = (
-            "date_start_reached" if reached_date_limit
-            else "max_posts_reached" if len(posts) >= max_posts
-            else "no_new_data" if no_new_data_scrolls >= max_no_new_data_scrolls
+            "date_start_reached"
+            if reached_date_limit
+            else "max_posts_reached"
+            if len(posts) >= max_posts
+            else "no_new_data"
+            if no_new_data_scrolls >= max_no_new_data_scrolls
             else "unknown"
         )
         logger.info(
             "browser_intercept complete for @%s: %d posts in %d scrolls (stop: %s)",
-            config.username, len(posts), scroll_count, stop_reason,
+            config.username,
+            len(posts),
+            scroll_count,
+            stop_reason,
         )
         self.last_retrieval_meta = {
             "retrieval_mode": "browser_intercept",
@@ -1537,12 +1547,13 @@ class TikTokScraper:
             if len(api_posts) >= 5:
                 return api_posts
             logger.info(
-                "auto mode: API returned only %d posts for @%s; "
-                "falling back to browser_intercept",
-                len(api_posts), config.username,
+                "auto mode: API returned only %d posts for @%s; falling back to browser_intercept",
+                len(api_posts),
+                config.username,
             )
             intercept_posts = self._scrape_browser_intercept(
-                config, progress_cb=progress_cb,
+                config,
+                progress_cb=progress_cb,
             )
             # Merge, preferring the larger result set and deduplicating
             if len(intercept_posts) > len(api_posts):
@@ -1560,9 +1571,9 @@ class TikTokScraper:
             if len(api_posts) >= 5 or not self._has_ytdlp():
                 return api_posts
             logger.info(
-                "auto mode: API + browser_intercept returned only %d posts for @%s; "
-                "falling back to yt-dlp",
-                len(api_posts), config.username,
+                "auto mode: API + browser_intercept returned only %d posts for @%s; falling back to yt-dlp",
+                len(api_posts),
+                config.username,
             )
             combined_posts_before_ytdlp = len(api_posts)
             ytdlp_posts = self._scrape_via_ytdlp(
@@ -1694,7 +1705,13 @@ class TikTokScraper:
                     break
 
                 logger.info(f"Fetching API page {page_num}...")
-                data = self.fetch_posts(config.username, sec_uid, cursor, config.delay_seconds, fast_mode=config.fast_mode)
+                data = self.fetch_posts(
+                    config.username,
+                    sec_uid,
+                    cursor,
+                    config.delay_seconds,
+                    fast_mode=config.fast_mode,
+                )
                 if not data:
                     break
 
@@ -1897,7 +1914,10 @@ class TikTokScraper:
                 # Fetch replies if requested and comment has replies
                 if fetch_replies and comment.reply_count > 0:
                     replies = self._fetch_comment_replies(
-                        video_id, comment.comment_id, post_url, delay,
+                        video_id,
+                        comment.comment_id,
+                        post_url,
+                        delay,
                         fast_mode=fast_mode,
                     )
                     comment.replies = replies
@@ -2023,8 +2043,12 @@ class TikTokScraper:
             result: dict[str, list[TikTokComment]] = {}
             for vid, uname in video_ids:
                 result[vid] = self.fetch_comments(
-                    vid, username=uname, max_comments=max_comments,
-                    fetch_replies=fetch_replies, delay=delay, fast_mode=fast_mode,
+                    vid,
+                    username=uname,
+                    max_comments=max_comments,
+                    fetch_replies=fetch_replies,
+                    delay=delay,
+                    fast_mode=fast_mode,
                 )
             return result
 
@@ -2039,8 +2063,12 @@ class TikTokScraper:
             self._rate_limit = _synchronized_rate_limit  # type: ignore[assignment]
             try:
                 comments = self.fetch_comments(
-                    vid, username=uname, max_comments=max_comments,
-                    fetch_replies=fetch_replies, delay=delay, fast_mode=fast_mode,
+                    vid,
+                    username=uname,
+                    max_comments=max_comments,
+                    fetch_replies=fetch_replies,
+                    delay=delay,
+                    fast_mode=fast_mode,
                 )
                 return vid, comments
             except Exception as exc:
@@ -2049,7 +2077,9 @@ class TikTokScraper:
 
         logger.info(
             "Fetching TikTok comments for %d videos concurrently (workers=%d, fast=%s)",
-            len(video_ids), max_workers, fast_mode,
+            len(video_ids),
+            max_workers,
+            fast_mode,
         )
         results: dict[str, list[TikTokComment]] = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -2065,7 +2095,8 @@ class TikTokScraper:
         self._rate_limit = original_rate_limit  # type: ignore[assignment]
         logger.info(
             "TikTok concurrent comment fetch complete: %d videos, %d total comments",
-            len(results), sum(len(v) for v in results.values()),
+            len(results),
+            sum(len(v) for v in results.values()),
         )
         return results
 

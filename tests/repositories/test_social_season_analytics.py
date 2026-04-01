@@ -22514,7 +22514,12 @@ def test_get_social_account_catalog_gap_analysis_status_returns_idle_when_no_ope
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda platform, account_handle: None)
     import trr_backend.repositories.admin_operations as admin_operations_repo
 
-    def _fake_get_latest_operation_for_request_payload(*, operation_type: str, request_payload: dict[str, Any], statuses=None):
+    def _fake_get_latest_operation_for_request_payload(
+        *,
+        operation_type: str,
+        request_payload: dict[str, Any],
+        statuses=None,
+    ):
         assert operation_type == social_repo.SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE
         assert request_payload == {"platform": "instagram", "account_handle": "bravotv"}
         assert statuses in (None, ["completed"])
@@ -22572,7 +22577,12 @@ def test_get_social_account_catalog_gap_analysis_status_returns_stale_completed_
         "error_payload": None,
     }
 
-    def _fake_get_latest_operation_for_request_payload(*, operation_type: str, request_payload: dict[str, Any], statuses=None):
+    def _fake_get_latest_operation_for_request_payload(
+        *,
+        operation_type: str,
+        request_payload: dict[str, Any],
+        statuses=None,
+    ):
         assert operation_type == social_repo.SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE
         assert request_payload == {"platform": "instagram", "account_handle": "bravotv"}
         if statuses == ["completed"]:

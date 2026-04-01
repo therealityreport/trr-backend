@@ -24,7 +24,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.scraping.url_image_scraper import (
@@ -773,7 +773,7 @@ def _ensure_show_logo_variants_on_media_asset(
 @router.post("/preview", response_model=ScrapePreviewResponse)
 def preview_scrape(
     request: ScrapePreviewRequest,
-    _: AdminUser,
+    _: InternalAdminUser,
 ) -> ScrapePreviewResponse:
     """
     Scrape a URL and return image candidates for preview.
@@ -819,7 +819,7 @@ def preview_scrape(
 def import_images(
     request: ImportRequest,
     db: SupabaseAdminClient,
-    _: AdminUser,
+    _: InternalAdminUser,
 ) -> ImportResponse:
     """
     Import selected images to S3 and save metadata to database.
@@ -1521,7 +1521,7 @@ async def import_images_stream(
     request: ImportRequest,
     connection: Request,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> StreamingResponse:
     """
     Import images with SSE streaming progress updates.

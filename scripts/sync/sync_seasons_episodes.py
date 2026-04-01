@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 from scripts._sync_common import add_show_filter_args, fetch_show_rows, load_env_and_db
@@ -76,6 +77,18 @@ def _fetch_episode_rows(db, show_id: str) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+def _fetch_show_rows_for_ids(db, show_ids: Sequence[str]) -> list[dict[str, Any]]:
+    normalized_ids = [str(show_id or "").strip() for show_id in show_ids if str(show_id or "").strip()]
+    if not normalized_ids:
+        return []
+
+    response = db.schema("core").table("shows").select("id,most_recent_episode").in_("id", normalized_ids).execute()
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Supabase error listing shows: {response.error}")
+    data = response.data or []
+    return data if isinstance(data, list) else []
+
+
 def _pick_most_recent_episode(episodes: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not episodes:
         return None
@@ -97,29 +110,8 @@ def _pick_most_recent_episode(episodes: list[dict[str, Any]]) -> dict[str, Any] 
     return max(episodes, key=lambda ep: (_as_int(ep.get("season_number")) or 0, _as_int(ep.get("episode_number")) or 0))
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv or sys.argv[1:])
-    if args.skip_db:
-        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
-        return 2
-    db = load_env_and_db(skip_db=args.skip_db)
-
-    common_args = _build_common_args(args)
-
-    print("SEASONS+EPISODES: starting episodes sync", file=sys.stderr)
-    code = sync_episodes.main(list(common_args))
-    if code != 0:
-        return code
-
-    print("SEASONS+EPISODES: starting seasons sync", file=sys.stderr)
-    code = sync_seasons.main(list(common_args))
-    if code != 0:
-        return code
-
-    if args.dry_run:
-        return 0
-
-    show_rows = fetch_show_rows(db, args)
+def reconcile_show_seasons_episodes(db, *, show_ids: Sequence[str], verbose: bool = False) -> int:
+    show_rows = _fetch_show_rows_for_ids(db, show_ids)
     if not show_rows:
         return 0
 
@@ -161,8 +153,40 @@ def main(argv: list[str] | None = None) -> int:
         update_show(db, show_id, patch)
         updated += 1
 
-    if args.verbose:
+    if verbose:
         print(f"UPDATED shows={updated}")
+
+    return updated
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv or sys.argv[1:])
+    if args.skip_db:
+        print("ERROR: --skip-db is not supported for this script (database access required).", file=sys.stderr)
+        return 2
+    db = load_env_and_db(skip_db=args.skip_db)
+
+    common_args = _build_common_args(args)
+
+    print("SEASONS+EPISODES: starting episodes sync", file=sys.stderr)
+    code = sync_episodes.main(list(common_args))
+    if code != 0:
+        return code
+
+    print("SEASONS+EPISODES: starting seasons sync", file=sys.stderr)
+    code = sync_seasons.main(list(common_args))
+    if code != 0:
+        return code
+
+    if args.dry_run:
+        return 0
+
+    show_rows = fetch_show_rows(db, args)
+    if not show_rows:
+        return 0
+
+    show_ids = [str(show.get("id") or "").strip() for show in show_rows if str(show.get("id") or "").strip()]
+    reconcile_show_seasons_episodes(db, show_ids=show_ids, verbose=bool(args.verbose))
 
     return 0
 

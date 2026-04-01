@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.client import Config
 from botocore.exceptions import ProfileNotFound
 
 from trr_backend.media import s3_mirror
@@ -171,6 +172,7 @@ def test_get_s3_client_falls_back_to_env_creds_when_profile_missing(monkeypatch:
     monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
     monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
     monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setenv("OBJECT_STORAGE_ENDPOINT_URL", "https://example-account.r2.cloudflarestorage.com")
     monkeypatch.setenv("OBJECT_STORAGE_PROFILE", "trr")
     monkeypatch.setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "key")
     monkeypatch.setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "secret")
@@ -189,13 +191,13 @@ def test_get_s3_client_falls_back_to_env_creds_when_profile_missing(monkeypatch:
     client = s3_mirror.get_s3_client()
 
     assert session_calls == [{"region_name": "us-east-1"}]
-    assert client == {
-        "service_name": "s3",
-        "region_name": "us-east-1",
-        "aws_access_key_id": "key",
-        "aws_secret_access_key": "secret",
-        "aws_session_token": "token",
-    }
+    assert client["service_name"] == "s3"
+    assert client["region_name"] == "us-east-1"
+    assert client["endpoint_url"] == "https://example-account.r2.cloudflarestorage.com"
+    assert client["aws_access_key_id"] == "key"
+    assert client["aws_secret_access_key"] == "secret"
+    assert client["aws_session_token"] == "token"
+    assert isinstance(client["config"], Config)
 
 
 def test_object_storage_env_aliases_override_aws_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -657,6 +659,55 @@ def test_mirror_media_asset_prefers_getty_original_url_from_metadata(monkeypatch
     assert result is not None
     assert seen_urls == [original_url]
     assert result["metadata"]["mirrored_from"] == original_url
+
+
+def test_mirror_media_asset_row_persists_getty_hosted_thumb_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    fake_s3 = MagicMock()
+    monkeypatch.setattr(s3_mirror, "_head_object", lambda *args, **kwargs: None)
+
+    seen_urls: list[str] = []
+
+    def fake_download_and_hash(url, referer=None):  # noqa: ANN001
+        del referer
+        seen_urls.append(url)
+        return b"\x89PNG\r\n\x1a\nrest", f"sha-{len(seen_urls)}", "image/png"
+
+    def fake_download(url, source=None, referer=None, headers=None):  # noqa: ANN001
+        del source, referer, headers
+        seen_urls.append(url)
+        return b"\x89PNG\r\n\x1a\nthumb", "image/png"
+
+    monkeypatch.setattr(
+        "trr_backend.scraping.url_image_scraper.download_and_hash_image",
+        fake_download_and_hash,
+    )
+    monkeypatch.setattr(s3_mirror, "download_image", fake_download)
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", lambda *args, **kwargs: ("etag", 10))
+
+    original_url = "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=2048x2048&w=gi&k=20&c=full"
+    thumb_url = "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=612x612&w=0&k=20&c=thumb"
+    row = {
+        "media_asset_id": "asset-1",
+        "source": "getty",
+        "source_url": "https://media.gettyimages.com/id/1435767826/photo/example.jpg?s=594x594&w=gi&k=20&c=preview",
+        "metadata": {
+            "getty_original_image_url": original_url,
+            "getty_thumb_clean_url": thumb_url,
+            "source_page_url": "https://www.gettyimages.com/detail/news-photo/example/1435767826",
+        },
+    }
+
+    result = s3_mirror.mirror_media_asset_row(row, force=True, s3_client=fake_s3)
+
+    assert result is not None
+    assert seen_urls == [original_url, thumb_url]
+    assert result["metadata"]["hosted_thumb_url"].startswith("https://cdn.example.com/")
+    assert result["metadata"]["hosted_thumb_key"].startswith("media/")
+    assert len(result["metadata"]["hosted_thumb_sha256"]) == 64
 
 
 def test_mirror_tmdb_logo_skips_upload_if_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:

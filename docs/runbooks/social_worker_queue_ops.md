@@ -115,6 +115,39 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 ./.venv/bin/python -m modal deploy -m trr_backend.modal_jobs
 ```
 
+Do not treat local cookie files as proof that remote Instagram backfills are
+ready. Full shared-account Instagram backfill is only considered ready when all
+of the following are true:
+
+- `scripts/modal/verify_modal_readiness.py --json` returns `ok: true`
+- `GET /api/v1/admin/socials/ingest/worker-health` reports:
+  - `dispatcher_readiness.resolved = true`
+  - `dispatcher_heartbeat_fresh = true`
+  - `remote_auth_capabilities.instagram.ready = true`
+  - `shared_account_backfill_readiness.ready = true`
+- a bounded canary (`Sync Recent` first, then `Resume Tail` if needed) succeeds
+  before a full-history `Backfill Posts` run is launched
+
+Preferred shared Instagram canary order:
+
+1. `Sync Recent`
+2. `Resume Tail` if the run has a resumable frontier
+3. `Backfill Posts` only after the first two checks are green
+
+If `shared_account_backfill_readiness.ready` is false, read the reason in this
+order:
+
+- `dispatcher_readiness.reason` or `last_dispatch_blocked_reason`
+- `dispatcher_heartbeat_fresh = false`
+- `remote_auth_capabilities.instagram.reason`
+
+Use those fields to distinguish:
+
+- Modal app/function deployment missing
+- dispatcher heartbeat missing or stale
+- remote Instagram auth missing in the worker plane
+- queue backlog or stale-running recovery issues after dispatch has already succeeded
+
 After deploy, capture the public backend URL from the readiness output and point
 the deployed TRR-APP runtime at the Render service URL before running admin
 smoke checks. Keep the Modal API URL available only as the rollback target
@@ -180,6 +213,32 @@ SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS=200 \
 SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS=50 \
 ./scripts/socials/start_worker_pool.sh
 ```
+
+## n8n Control Plane
+
+`n8n` may trigger and poll catalog runs, but it is not the browser/runtime
+owner. Keep Playwright session ownership inside TRR workers and use `n8n` only
+for launch, polling, retry, and notification control.
+
+Before calling the backend from `n8n`:
+
+- use the credential workflow variants in `docs/automation/`
+- authenticate with a bearer token minted from `TRR_INTERNAL_ADMIN_SHARED_SECRET`
+  rather than sending the raw secret itself
+- point `baseUrl` at the canonical backend admin host
+- preserve backend response details for `SOCIAL_MODAL_DISPATCH_UNAVAILABLE`,
+  `SOCIAL_MODAL_EXECUTOR_REQUIRED`, `SOCIAL_WORKER_UNAVAILABLE`, and auth
+  preflight failures instead of masking them as generic workflow errors
+
+Current repo-owned `n8n` status:
+
+- checked-in templates exist and are reviewed as `launches-backfill`
+  control-plane workflows
+- they are not the browser/runtime owner and do not change Modal worker-plane
+  readiness
+- no live external `n8n` workflow instance is tracked in-repo, so a real `n8n`
+  environment still needs a separate operational audit before it can be called
+  ready
 
 ## Post Author Avatar Mirroring Guarantee
 

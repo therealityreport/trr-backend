@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
+
+from scripts._db_url import resolve_db_url
 
 try:
     import psycopg2
@@ -14,10 +15,7 @@ from trr_backend.utils.env import load_env
 
 
 def _resolve_db_url() -> str:
-    url = (os.getenv("SUPABASE_DB_URL") or "").strip()
-    if not url:
-        raise RuntimeError("SUPABASE_DB_URL is required for verify_schema.")
-    return url
+    return resolve_db_url(allow_database_url=True).value
 
 
 def _fetch_relkind(cur: RealDictCursor, schema: str, name: str) -> str | None:

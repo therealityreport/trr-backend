@@ -33,6 +33,17 @@ SHOW_FALLBACK_WARNING = (
 SEASON_FALLBACK_WARNING = (
     "Season episode evidence is missing or stale. Showing approximate show-level cast until cast/credits sync succeeds."
 )
+IMDB_CREW_CREDIT_CATEGORIES = (
+    "Producers",
+    "Editors",
+    "Casting Director",
+    "Casting Department",
+    "Visual Effects",
+    "Production Design",
+    "Editorial Department",
+    "Production Department",
+)
+IMDB_CREW_CREDIT_CATEGORY_ORDER = {value: index for index, value in enumerate(IMDB_CREW_CREDIT_CATEGORIES)}
 SHOW_SLUG_SQL = """
 lower(
   trim(
@@ -2268,6 +2279,218 @@ def get_show_cast(
         roster_mode=roster_mode,
     )
     return payload, query_count
+
+
+def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
+    cast_roster_rows = _fetch_all_rows(
+        """
+        SELECT
+          c.show_id::text AS show_id,
+          c.person_id::text AS person_id,
+          COALESCE(po.full_name_override, c.person_name) AS person_name,
+          c.total_episodes,
+          c.archive_episodes,
+          c.seasons_appeared,
+          c.season_numbers,
+          c.latest_season,
+          c.roles,
+          cp.display_url AS photo_url
+        FROM core.v_show_cast_roles_enriched AS c
+        LEFT JOIN core.people_overrides AS po
+          ON po.person_id = c.person_id
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(ph.hosted_url, ph.image_url, ph.url, ph.thumb_url) AS display_url
+          FROM core.cast_photos AS ph
+          WHERE ph.person_id = c.person_id
+          ORDER BY ph.gallery_index ASC NULLS LAST
+          LIMIT 1
+        ) AS cp ON true
+        WHERE c.show_id = %s::uuid
+        ORDER BY
+          c.total_episodes DESC NULLS LAST,
+          c.latest_season DESC NULLS LAST,
+          COALESCE(po.full_name_override, c.person_name) ASC NULLS LAST,
+          c.person_id ASC
+        """,
+        [show_id],
+    )
+    role_rows = _fetch_all_rows(
+        """
+        SELECT
+          sra.person_id::text AS person_id,
+          array_remove(array_agg(DISTINCT rc.name), NULL) AS role_names
+        FROM core.show_cast_role_assignments AS sra
+        JOIN core.show_role_catalog AS rc
+          ON rc.id = sra.role_id
+        WHERE sra.show_id = %s::uuid
+          AND rc.is_active = true
+        GROUP BY sra.person_id
+        """,
+        [show_id],
+    )
+    self_credit_metadata_rows = _fetch_all_rows(
+        """
+        SELECT
+          c.person_id::text AS person_id,
+          c.metadata
+        FROM core.credits AS c
+        WHERE c.show_id = %s::uuid
+          AND c.credit_category = 'Self'
+        ORDER BY
+          COALESCE(NULLIF(c.metadata->>'episode_count', '')::int, 0) DESC,
+          c.billing_order ASC NULLS LAST,
+          c.id ASC
+        """,
+        [show_id],
+    )
+
+    crew_rows = _fetch_all_rows(
+        """
+        SELECT
+          c.id::text AS credit_id,
+          c.show_id::text AS show_id,
+          c.person_id::text AS person_id,
+          COALESCE(po.full_name_override, p.full_name) AS person_name,
+          c.credit_category,
+          c.role,
+          c.billing_order,
+          c.source_type,
+          c.metadata,
+          c.updated_at,
+          s.imdb_id
+        FROM core.credits AS c
+        JOIN core.people AS p
+          ON p.id = c.person_id
+        LEFT JOIN core.people_overrides AS po
+          ON po.person_id = c.person_id
+        JOIN core.shows AS s
+          ON s.id = c.show_id
+        WHERE c.show_id = %s::uuid
+          AND c.credit_category = ANY(%s::text[])
+        ORDER BY
+          array_position(%s::text[], c.credit_category),
+          COALESCE(NULLIF(c.metadata->>'display_order', '')::int, c.billing_order, 2147483647),
+          COALESCE(po.full_name_override, p.full_name) ASC NULLS LAST,
+          c.id ASC
+        """,
+        [show_id, list(IMDB_CREW_CREDIT_CATEGORIES), list(IMDB_CREW_CREDIT_CATEGORIES)],
+    )
+
+    role_map: dict[str, list[str]] = {}
+    for row in role_rows:
+        person_id = str(row.get("person_id") or "").strip()
+        if not person_id:
+            continue
+        role_names = sorted(
+            {
+                str(value).strip()
+                for value in (row.get("role_names") or [])
+                if isinstance(value, str) and str(value).strip()
+            }
+        )
+        if role_names:
+            role_map[person_id] = role_names
+
+    has_curated_roles = bool(role_map)
+    self_credit_metadata_by_person: dict[str, dict[str, Any]] = {}
+    for row in self_credit_metadata_rows:
+        person_id = str(row.get("person_id") or "").strip()
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if person_id and person_id not in self_credit_metadata_by_person:
+            self_credit_metadata_by_person[person_id] = metadata
+
+    cast_roster = []
+    for row in cast_roster_rows:
+        person_id = str(row.get("person_id") or "").strip()
+        if has_curated_roles:
+            selected_roles = role_map.get(person_id, [])
+            if not selected_roles:
+                continue
+        else:
+            selected_roles = sorted(
+                {
+                    str(value).strip()
+                    for value in (row.get("roles") or [])
+                    if isinstance(value, str) and str(value).strip()
+                }
+            )
+        if not selected_roles and has_curated_roles:
+            continue
+        fallback_metadata = self_credit_metadata_by_person.get(person_id, {})
+        total_episodes = _normalize_int(row.get("total_episodes"))
+        if not total_episodes:
+            total_episodes = _read_people_count(fallback_metadata.get("episode_count"))
+        cast_roster.append(
+            {
+                "show_id": str(row.get("show_id") or show_id),
+                "person_id": person_id,
+                "person_name": row.get("person_name"),
+                "photo_url": row.get("photo_url"),
+                "total_episodes": total_episodes,
+                "archive_episodes": _normalize_int(row.get("archive_episodes")),
+                "seasons_appeared": _normalize_int(row.get("seasons_appeared")),
+                "season_numbers": [value for value in (row.get("season_numbers") or []) if isinstance(value, int)],
+                "latest_season": _normalize_int(row.get("latest_season")) or None,
+                "roles": selected_roles,
+            }
+        )
+
+    crew_sections_by_category: dict[str, list[dict[str, Any]]] = {}
+    latest_updated_at: str | None = None
+    source_page_url: str | None = None
+    show_imdb_id: str | None = None
+    for row in crew_rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        credit_category = str(row.get("credit_category") or "").strip()
+        if not credit_category:
+            continue
+        updated_at_value = _normalize_json_safe_value(row.get("updated_at"))
+        latest_updated_at = max(
+            [value for value in [latest_updated_at, updated_at_value] if isinstance(value, str)],
+            default=latest_updated_at,
+        )
+        source_page_url = source_page_url or _metadata_text(metadata, "source_page_url")
+        show_imdb_id = show_imdb_id or (str(row.get("imdb_id") or "").strip() or None)
+        crew_sections_by_category.setdefault(credit_category, []).append(
+            {
+                "credit_id": str(row.get("credit_id") or ""),
+                "person_id": str(row.get("person_id") or ""),
+                "person_name": row.get("person_name"),
+                "role": row.get("role"),
+                "billing_order": _normalize_int(row.get("billing_order")) or None,
+                "source_type": row.get("source_type"),
+                "episode_count": _read_people_count(metadata.get("episode_count")),
+                "episodes_label": _metadata_text(metadata, "episodes_label"),
+                "years_label": _metadata_text(metadata, "years_label"),
+                "imdb_name_id": _metadata_text(metadata, "imdb_name_id"),
+                "display_order": _read_people_count(metadata.get("display_order")),
+            }
+        )
+
+    crew_sections = [
+        {
+            "title": category,
+            "rows": rows,
+        }
+        for category, rows in sorted(
+            crew_sections_by_category.items(),
+            key=lambda item: IMDB_CREW_CREDIT_CATEGORY_ORDER.get(item[0], 9999),
+        )
+    ]
+
+    payload = {
+        "cast_roster": cast_roster,
+        "crew_sections": crew_sections,
+        "source_metadata": {
+            "source_page_url": source_page_url
+            or (f"https://www.imdb.com/title/{show_imdb_id}/fullcredits/" if show_imdb_id else None),
+            "show_imdb_id": show_imdb_id,
+            "last_synced_at": latest_updated_at,
+            "crew_categories": list(IMDB_CREW_CREDIT_CATEGORIES),
+        },
+    }
+    return payload, 4
 
 
 def _fetch_season_cast_base_rows(

@@ -235,8 +235,30 @@ def insert_credits_ignore_conflicts(
             if hasattr(response, "error") and response.error:
                 raise CreditsRepositoryError(f"Supabase error inserting credits rows: {response.error}")
             data = response.data or []
-            if isinstance(data, list):
-                results.extend(data)
+            inserted_rows = data if isinstance(data, list) else []
+            results.extend(inserted_rows)
+
+            # Some PostgREST/Supabase bulk upserts under-report inserted rows when the unique
+            # constraint is expression-based (credits_unique_idx uses COALESCE(role, '')).
+            # If the bulk response comes back short, replay the chunk one row at a time so the
+            # remaining non-duplicate rows are still persisted.
+            if len(chunk) > 1 and len(inserted_rows) < len(chunk):
+                chunks_with_fallback += 1
+                rows_in_fallback += len(chunk)
+                for row in chunk:
+                    try:
+                        row_response = (
+                            db.schema("core").table("credits").upsert([row], ignore_duplicates=True).execute()
+                        )
+                        if row_response.data:
+                            results.extend(row_response.data)
+                        else:
+                            duplicates_skipped += 1
+                    except Exception as row_e:
+                        row_error_str = str(row_e)
+                        if "23505" not in row_error_str and "duplicate key" not in row_error_str.lower():
+                            raise
+                        duplicates_skipped += 1
         except Exception as e:
             # Handle duplicate key violation (23505) gracefully - this can happen with
             # expression-based unique indexes where PostgREST's ignore_duplicates fails

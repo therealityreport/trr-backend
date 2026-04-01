@@ -15,11 +15,11 @@ This runbook uses the new admin endpoints added in the Show Admin overhaul.
 
 1. Backend is running (`http://127.0.0.1:8000`).
 2. You have an admin bearer token.
-3. `SUPABASE_DB_URL` is set for verification queries.
+3. `TRR_DB_URL` is set for verification queries (or `TRR_DB_FALLBACK_URL` for an explicit fallback).
 
 ```bash
 export TRR_BACKEND_URL="http://127.0.0.1:8000"
-export ADMIN_BEARER_TOKEN="${SUPABASE_SERVICE_ROLE_KEY}"
+export ADMIN_BEARER_TOKEN="<allowlisted user JWT or internal admin JWT>"
 export SHOW_SLUG_URL="https://www.bravotv.com/the-real-housewives-of-salt-lake-city"
 ```
 
@@ -32,7 +32,7 @@ AUTH=(-H "Authorization: Bearer ${ADMIN_BEARER_TOKEN}" -H "Content-Type: applica
 ## 1) Resolve RHOSLC show id + seasons
 
 ```bash
-export RHOSLC_SHOW_ID="$(psql "$SUPABASE_DB_URL" -Atc "
+export RHOSLC_SHOW_ID="$(psql "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}" -Atc "
   select id
   from core.shows
   where lower(name) = 'the real housewives of salt lake city'
@@ -41,7 +41,7 @@ export RHOSLC_SHOW_ID="$(psql "$SUPABASE_DB_URL" -Atc "
 
 echo "RHOSLC show id: ${RHOSLC_SHOW_ID}"
 
-psql "$SUPABASE_DB_URL" -c "
+psql "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}" -c "
   select season_number, id
   from core.seasons
   where show_id = '${RHOSLC_SHOW_ID}'::uuid
@@ -133,7 +133,7 @@ curl -sS "${TRR_BACKEND_URL}/api/v1/admin/shows/${RHOSLC_SHOW_ID}/cast-role-memb
 DB checks:
 
 ```bash
-psql "$SUPABASE_DB_URL" -c "
+psql "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}" -c "
   select
     sra.season_number,
     rc.name as role_name,
@@ -146,7 +146,7 @@ psql "$SUPABASE_DB_URL" -c "
   order by sra.season_number desc, rc.name;
 "
 
-psql "$SUPABASE_DB_URL" -c "
+psql "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}" -c "
   select
     status,
     link_group,
@@ -164,4 +164,3 @@ psql "$SUPABASE_DB_URL" -c "
 - `discovered_links` and `role_suggestions` counts are non-zero where expected.
 - Pending links reviewed (`approved` / `rejected`) by admin.
 - `show_cast_role_assignments` contain `bravo_cast_announcement` rows.
-

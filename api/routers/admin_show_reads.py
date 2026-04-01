@@ -30,6 +30,7 @@ _SHOW_SEASONS_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_SHOW_SEASONS_BACK
 _SHOW_ASSETS_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_SHOW_ASSETS_BACKEND_CACHE_TTL_SECONDS", "30")), 1)
 _SEASON_EPISODES_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_SEASON_EPISODES_BACKEND_CACHE_TTL_SECONDS", "30")), 1)
 _SHOW_CAST_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_SHOW_CAST_BACKEND_CACHE_TTL_SECONDS", "45")), 1)
+_SHOW_CREDITS_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_SHOW_CREDITS_BACKEND_CACHE_TTL_SECONDS", "45")), 1)
 _SEASON_CAST_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_SEASON_CAST_BACKEND_CACHE_TTL_SECONDS", "45")), 1)
 _SEASON_ASSETS_CACHE_TTL_SECONDS = max(int(os.getenv("TRR_ADMIN_SEASON_ASSETS_BACKEND_CACHE_TTL_SECONDS", "30")), 1)
 _SEASON_BACKDROPS_CACHE_TTL_SECONDS = max(
@@ -535,6 +536,28 @@ def get_admin_show_cast(
         ),
     )
     _log_read("show-cast", query_count=query_count, payload=payload, cache_status=cache_status, started_at=started_at)
+    return payload
+
+
+@router.get("/shows/{show_id}/credits")
+def get_admin_show_credits(
+    show_id: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    cache_key = f"show-credits:{show_id}"
+    payload, query_count, cache_status = _get_or_build_cached_payload(
+        cache_key,
+        ttl_seconds=_SHOW_CREDITS_CACHE_TTL_SECONDS,
+        builder=lambda: show_reads_repo.get_show_credits(show_id),
+    )
+    _log_read(
+        "show-credits",
+        query_count=query_count,
+        payload=payload,
+        cache_status=cache_status,
+        started_at=started_at,
+    )
     return payload
 
 

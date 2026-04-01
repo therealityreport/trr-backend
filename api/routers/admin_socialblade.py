@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class SocialBladeBatchRefreshRequest(BaseModel):
 @router.get("/{person_id}/socialblade")
 async def get_socialblade_data(
     person_id: str,
-    _admin: AdminUser,
+    _admin: InternalAdminUser,
     handle: str = Query(..., description="Instagram handle"),
 ) -> dict[str, Any]:
     """Retrieve stored SocialBlade growth data for a person."""
@@ -84,7 +84,7 @@ async def get_socialblade_data(
 async def refresh_socialblade_data(
     person_id: str,
     body: SocialBladeRefreshRequest,
-    _admin: AdminUser,
+    _admin: InternalAdminUser,
 ) -> dict[str, Any]:
     """Trigger a fresh SocialBlade scrape, preferring the local shared-browser path."""
     from trr_backend.socials.socialblade.service import (
@@ -112,7 +112,7 @@ async def refresh_socialblade_data(
 @router.post("/socialblade/refresh-batch")
 async def refresh_socialblade_data_batch(
     body: SocialBladeBatchRefreshRequest,
-    _admin: AdminUser,
+    _admin: InternalAdminUser,
 ) -> dict[str, Any]:
     """Refresh SocialBlade rows for multiple cast members."""
     from trr_backend.modal_dispatch import dispatch_socialblade_scrape
