@@ -52,6 +52,8 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 def _is_local_or_dev_runtime() -> bool:
+    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
+        return True
     values = {
         str(os.getenv("APP_ENV") or "").strip().lower(),
         str(os.getenv("ENVIRONMENT") or "").strip().lower(),
