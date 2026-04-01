@@ -111,32 +111,80 @@ def _validate_startup_config() -> None:
     log_database_resolution_summary()
     winner = next(iter(resolve_database_url_candidate_details()), None)
 
-    if winner:
-        winner_connection_class = str(winner.get("connection_class") or "")
-        if winner_connection_class == "session":
-            raw_minconn = (os.getenv("TRR_DB_POOL_MINCONN") or "").strip()
-            raw_maxconn = (os.getenv("TRR_DB_POOL_MAXCONN") or "").strip()
-            try:
-                minconn = int(raw_minconn) if raw_minconn else None
-            except ValueError:
-                minconn = None
-            try:
-                maxconn = int(raw_maxconn) if raw_maxconn else None
-            except ValueError:
-                maxconn = None
-            if (minconn is not None and minconn > 1) or (maxconn is not None and maxconn > 2):
-                logger.warning(
-                    "[startup-config] oversized_session_pool_override detected for "
-                    "Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",
-                    raw_minconn or "<unset>",
-                    raw_maxconn or "<unset>",
-                )
-            if _env_flag("SOCIAL_QUEUE_ENABLED", False):
-                logger.warning(
-                    "[startup-config] session_pooler_with_social_queue_enabled; keep "
-                    "local worker lanes and DB pool sizing conservative when using "
-                    "pooler.supabase.com:5432"
-                )
+    if not winner:
+        raise RuntimeError(
+            "No database URL candidates available.\n"
+            "Set TRR_DB_URL to your Supabase session-pooler connection string.\n"
+            "Optionally set TRR_DB_FALLBACK_URL for controlled failover."
+        )
+
+    winner_connection_class = str(winner.get("connection_class") or "")
+    winner_source = str(winner.get("source") or "")
+    is_local = _is_local_or_dev_runtime()
+
+    # Log structured startup fields
+    logger.info(
+        "[startup-config] db_winner source=%s connection_class=%s is_local=%s",
+        winner_source,
+        winner_connection_class,
+        is_local,
+    )
+
+    # Fail-fast for invalid runtime lanes
+    # warn-only in local/dev until local pooler lands
+    transitional_local_lanes = {"direct", "unknown", "other", "pooler"}
+
+    # Transaction mode always hard-fails — even locally it cannot support
+    # session-level timeout controls or persistent connections, so there
+    # is no transitional grace period.
+    if winner_connection_class == "transaction":
+        raise RuntimeError(
+            f"Invalid runtime connection lane: {winner_connection_class}\n"
+            f"Transaction-mode pooler (:6543) is not supported for persistent runtime.\n"
+            f"Use session-mode pooler (:5432) via TRR_DB_URL.\n"
+            f"Winner source: {winner_source}"
+        )
+
+    if winner_connection_class in transitional_local_lanes:
+        if is_local:
+            logger.warning(
+                "[startup-config] transitional_local_direct_lane connection_class=%s "
+                "source=%s; will hard-fail after local pooler is enabled",
+                winner_connection_class,
+                winner_source,
+            )
+        else:
+            raise RuntimeError(
+                f"Invalid runtime connection lane: {winner_connection_class}\n"
+                f"Direct-host and unknown Supabase DSNs are not supported for persistent runtime.\n"
+                f"Use session-mode pooler (:5432) via TRR_DB_URL.\n"
+                f"Winner source: {winner_source}"
+            )
+
+    if winner_connection_class == "session":
+        raw_minconn = (os.getenv("TRR_DB_POOL_MINCONN") or "").strip()
+        raw_maxconn = (os.getenv("TRR_DB_POOL_MAXCONN") or "").strip()
+        try:
+            minconn = int(raw_minconn) if raw_minconn else None
+        except ValueError:
+            minconn = None
+        try:
+            maxconn = int(raw_maxconn) if raw_maxconn else None
+        except ValueError:
+            maxconn = None
+        if (minconn is not None and minconn > 1) or (maxconn is not None and maxconn > 2):
+            logger.warning(
+                "[startup-config] oversized_session_pool_override detected for "
+                "Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",
+                raw_minconn or "<unset>",
+                raw_maxconn or "<unset>",
+            )
+        if _env_flag("SOCIAL_QUEUE_ENABLED", False):
+            logger.warning(
+                "[startup-config] session_pooler_with_social_queue_enabled; keep "
+                "local worker lanes and DB pool sizing conservative when using "
+                "pooler.supabase.com:5432"
+            )
 
     if screenalytics_api_url:
         parsed = urlparse(screenalytics_api_url)
