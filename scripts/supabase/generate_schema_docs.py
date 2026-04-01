@@ -13,7 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from scripts._db_url import resolve_db_url
+try:
+    from scripts._db_url import resolve_db_url
+except ModuleNotFoundError:  # pragma: no cover - repo root not on sys.path (CI / direct invocation)
+    _repo_root = str(Path(__file__).resolve().parents[2])
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    from scripts._db_url import resolve_db_url
 
 try:
     import psycopg2
