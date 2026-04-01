@@ -177,10 +177,6 @@ async def require_internal_admin(request: Request) -> dict:
     if matched_user:
         return matched_user
 
-    role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
-    if role == "service_role":
-        return current_user
-
     token = get_bearer_token(request)
     internal_admin_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     attempted_internal_admin_verification = False
