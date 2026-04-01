@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 CANONICAL_DB_ENV = "TRR_DB_URL"
 FALLBACK_DB_ENV = "TRR_DB_FALLBACK_URL"
 DIRECT_FALLBACK_OVERRIDE_ENV = "TRR_DB_ENABLE_DIRECT_FALLBACK"
-LEGACY_RUNTIME_DB_ENVS = ("SUPABASE_DB_URL", "DATABASE_URL")
 
 
 class DatabaseConnectionError(RuntimeError):
@@ -120,19 +119,14 @@ def describe_database_url_target(url: str, *, source: str) -> dict[str, str | in
 
 
 @lru_cache(maxsize=1)
-def resolve_database_url_candidate_details(
-    *,
-    allow_local_fallback: bool = True,
-) -> tuple[dict[str, str | int | None], ...]:
+def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None], ...]:
     """
     Resolve candidate database URLs in priority order.
 
     Priority order:
     1. TRR_DB_URL
     2. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
-    3. Legacy runtime envs (compatibility-only): SUPABASE_DB_URL, DATABASE_URL
-    4. (Optional) Auto-derived Supabase direct host fallback when explicitly enabled
-    5. (Local only) `supabase status --output env` DB_URL
+    3. (Optional) Auto-derived Supabase direct host fallback when explicitly enabled
     """
 
     def _append_candidate(
@@ -184,8 +178,6 @@ def resolve_database_url_candidate_details(
 
     _append_candidate_with_optional_direct_fallback(os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
     _append_candidate_with_optional_direct_fallback(os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
-    for legacy_env in LEGACY_RUNTIME_DB_ENVS:
-        _append_candidate_with_optional_direct_fallback(os.getenv(legacy_env), source=legacy_env)
 
     if _env_flag(DIRECT_FALLBACK_OVERRIDE_ENV, False):
         for source, direct_fallback in direct_fallbacks:
@@ -196,24 +188,18 @@ def resolve_database_url_candidate_details(
                 source=f"{source}:derived_direct",
             )
 
-    if allow_local_fallback:
-        _append_candidate(candidates, seen, _get_local_supabase_db_url(), source="supabase status (local)")
-
     return tuple(candidates)
 
 
 @lru_cache(maxsize=1)
-def resolve_database_url_candidates(*, allow_local_fallback: bool = True) -> tuple[str, ...]:
+def resolve_database_url_candidates() -> tuple[str, ...]:
     """Resolve candidate database URLs in priority order."""
-    return tuple(
-        str(candidate["url"])
-        for candidate in resolve_database_url_candidate_details(allow_local_fallback=allow_local_fallback)
-    )
+    return tuple(str(candidate["url"]) for candidate in resolve_database_url_candidate_details())
 
 
-def log_database_resolution_summary(*, allow_local_fallback: bool = True) -> None:
+def log_database_resolution_summary() -> None:
     """Log the configured database target order without exposing credentials."""
-    candidates = resolve_database_url_candidate_details(allow_local_fallback=allow_local_fallback)
+    candidates = resolve_database_url_candidate_details()
     if not candidates:
         logger.warning("[db-resolution] no database URL candidates available")
         return
@@ -261,7 +247,7 @@ def log_database_resolution_summary(*, allow_local_fallback: bool = True) -> Non
 
 
 @lru_cache(maxsize=1)
-def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
+def resolve_database_url() -> str:
     """
     Resolve the database URL using a prioritized lookup.
 
@@ -269,11 +255,6 @@ def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
     1. TRR_DB_URL - Canonical runtime database URL
     2. TRR_DB_FALLBACK_URL - Optional operator-provided fallback
     3. (Optional) derived direct-host fallback when TRR_DB_ENABLE_DIRECT_FALLBACK=1
-    4. (Local only) `supabase status --output env` DB_URL - Local Supabase instance
-
-    Args:
-        allow_local_fallback: If True, try to resolve from local Supabase instance
-                              when env vars are not set. Set to False for production.
 
     Returns:
         Database connection URL string.
@@ -281,7 +262,7 @@ def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
     Raises:
         DatabaseConnectionError: If no valid database URL can be resolved.
     """
-    candidates = resolve_database_url_candidates(allow_local_fallback=allow_local_fallback)
+    candidates = resolve_database_url_candidates()
     if candidates:
         return candidates[0]
 
@@ -292,8 +273,7 @@ def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
         "  Optionally set TRR_DB_FALLBACK_URL for controlled failover.\n"
         "  Example: postgresql://postgres.<project>:<password>@<host>:5432/postgres\n\n"
         "For local development:\n"
-        "  Start local Supabase: supabase start\n"
-        "  Or set TRR_DB_URL to your local Postgres connection string.\n\n"
+        "  Set TRR_DB_URL to your local Postgres connection string.\n\n"
         "Available environment variables (checked in order):\n"
         "  - TRR_DB_URL (canonical runtime env)\n"
         "  - TRR_DB_FALLBACK_URL (optional runtime fallback)\n"

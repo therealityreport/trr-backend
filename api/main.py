@@ -112,14 +112,7 @@ def _validate_startup_config() -> None:
     winner = next(iter(resolve_database_url_candidate_details()), None)
 
     if winner:
-        winner_source = str(winner.get("source") or "")
         winner_connection_class = str(winner.get("connection_class") or "")
-        if winner_source in {"SUPABASE_DB_URL", "DATABASE_URL"}:
-            logger.warning(
-                "[startup-config] legacy_runtime_db_env_in_use source=%s; "
-                "set TRR_DB_URL and optional TRR_DB_FALLBACK_URL instead",
-                winner_source,
-            )
         if winner_connection_class == "session":
             raw_minconn = (os.getenv("TRR_DB_POOL_MINCONN") or "").strip()
             raw_maxconn = (os.getenv("TRR_DB_POOL_MAXCONN") or "").strip()

@@ -259,7 +259,7 @@ def test_pool_init_falls_back_after_transient_dns_failure(monkeypatch: pytest.Mo
         lambda: (
             {
                 "url": primary,
-                "source": "SUPABASE_DB_URL",
+                "source": "TRR_DB_URL",
                 "host_class": "pooler",
                 "connection_class": "transaction",
                 "host": "aws-1-us-east-1.pooler.supabase.com",
