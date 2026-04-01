@@ -59,7 +59,7 @@ id
 
 ## RLS Enabled
 
-true
+false
 
 ## Example Row
 
