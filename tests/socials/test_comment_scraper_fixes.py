@@ -858,7 +858,13 @@ def test_facebook_scrape_retries_shell_candidates_with_playwright(
         del delay_seconds, referer
         return "<html><body>shell</body></html>"
 
-    def _fake_fetch_html_with_playwright(url: str, *, delay_seconds: float, referer: str | None = None, **_kw: object) -> str:
+    def _fake_fetch_html_with_playwright(
+        url: str,
+        *,
+        delay_seconds: float,
+        referer: str | None = None,
+        **_kw: object,
+    ) -> str:
         del delay_seconds, referer
         playwright_calls.append(url)
         return (
@@ -3620,7 +3626,11 @@ def test_youtube_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch)
     scraper = YouTubeScraper()
     events: list[dict[str, int | str]] = []
 
-    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda handle, delay=0, surface="videos", **_kw: {"contents": {}})
+    monkeypatch.setattr(
+        scraper,
+        "fetch_channel_videos",
+        lambda handle, delay=0, surface="videos", **_kw: {"contents": {}},
+    )
     monkeypatch.setattr(scraper, "_process_video_data", lambda data, cfg, **kwargs: [])
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda data: None)
     monkeypatch.setattr(scraper, "_search_via_ytdlp", lambda cfg, **kwargs: [])

@@ -362,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
             season_sources_used: set[str] = {"episodes_index"} if season_numbers_from_episodes else set()
             show_occurrences_skipped_missing_episode = 0
 
+            print(f"Fetching IMDb Full Credits cast rows for {imdb_series_id}...", flush=True)
             cast_rows, source_type, _person_images = fetch_fullcredits_cast_with_fallback(
                 imdb_series_id,
                 extra_headers=extra_headers,
@@ -374,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             cast_rows_self += len(self_rows)
             if args.limit_cast is not None:
                 self_rows = self_rows[: max(0, int(args.limit_cast))]
+            print(f"Parsed IMDb Self credits: {len(self_rows)} cast rows.", flush=True)
 
             # Ensure people exist.
             name_ids = [row.name_id.strip().lower() for row in self_rows if row.name_id]
@@ -464,11 +466,17 @@ def main(argv: list[str] | None = None) -> int:
                         "role": row.raw_role_text,
                         "billing_order": row.billing_order,
                         "source_type": source_type,
-                        "metadata": {},
+                        "metadata": {
+                            "imdb_name_id": row.name_id,
+                            "episode_count": row.episode_count,
+                            "episodes_label": row.episodes_label,
+                            "years_label": row.years_label,
+                        },
                     }
                 )
 
             if credit_rows and not args.dry_run:
+                print(f"Writing cast membership credits for {show_id}: {len(credit_rows)} rows.", flush=True)
                 delete_resp = (
                     db.schema("core")
                     .table("credits")
@@ -514,6 +522,11 @@ def main(argv: list[str] | None = None) -> int:
             failed_cast_fetches = 0
             successful_cast_fetches = 0
 
+            print(
+                "Syncing episode appearances for "
+                f"{imdb_series_id}: {len(self_rows)} cast rows at concurrency {concurrency}.",
+                flush=True,
+            )
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 futures = {
                     pool.submit(
@@ -665,6 +678,11 @@ def main(argv: list[str] | None = None) -> int:
                     show_id=show_id,
                     last_seen_most_recent_episode=extract_most_recent_episode(show),
                 )
+            print(
+                f"Saved episode appearances for {imdb_series_id}: {len(occurrence_rows)} occurrences "
+                f"({show_occurrences_skipped_missing_episode} skipped missing episode rows).",
+                flush=True,
+            )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{imdb_series_id}: {exc}")
             if not args.dry_run:

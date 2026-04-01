@@ -121,7 +121,8 @@ def with_schema_cache_retry(
                 hint = (
                     "\n\nPostgREST schema cache may still be stale after retry. "
                     "Wait 30-60s and try again, or run:\n"
-                    '  psql "${TRR_DB_URL:-${TRR_DB_FALLBACK_URL:-$DATABASE_URL}}" -f scripts/db/reload_postgrest_schema.sql'
+                    '  psql "${TRR_DB_URL:-${TRR_DB_FALLBACK_URL:-$DATABASE_URL}}" '
+                    "-f scripts/db/reload_postgrest_schema.sql"
                 )
                 raise type(e)(f"{e}{hint}") from e
 

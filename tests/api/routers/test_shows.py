@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api import deps
 from api.main import app
+from api.routers import shows as shows_router
 
 
 @dataclass
@@ -192,3 +194,123 @@ def test_get_show_uses_watch_provider_lookup_without_nested_selects() -> None:
             ],
         }
     ]
+
+
+def test_list_show_cast_uses_joined_sql_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    show_id = uuid4()
+    cast_id = uuid4()
+    person_id = uuid4()
+
+    monkeypatch.setattr(
+        shows_router.pg,
+        "fetch_all",
+        lambda query, params: [
+            {
+                "id": str(cast_id),
+                "show_id": str(show_id),
+                "season_id": None,
+                "person_id": str(person_id),
+                "role": "Self",
+                "credit_category": "cast",
+                "billing_order": 1,
+                "notes": None,
+                "total_count": 2,
+                "person": {
+                    "id": str(person_id),
+                    "full_name": "Phaedra Parks",
+                    "known_for": None,
+                    "external_ids": {},
+                    "birthday": None,
+                    "gender": None,
+                    "biography": None,
+                    "place_of_birth": None,
+                    "homepage": None,
+                    "profile_image_url": None,
+                },
+            }
+        ],
+    )
+
+    client = _client_with_dataset({})
+    try:
+        response = client.get(f"/api/v1/shows/{show_id}/cast?limit=1&offset=0")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "count": 1,
+        "total_count": 2,
+        "has_more": True,
+        "cast": [
+            {
+                "id": str(cast_id),
+                "show_id": str(show_id),
+                "season_id": None,
+                "person_id": str(person_id),
+                "role": "Self",
+                "credit_category": "cast",
+                "billing_order": 1,
+                "notes": None,
+                "person": {
+                    "id": str(person_id),
+                    "full_name": "Phaedra Parks",
+                    "known_for": None,
+                    "external_ids": {},
+                    "birthday": None,
+                    "gender": None,
+                    "biography": None,
+                    "place_of_birth": None,
+                    "homepage": None,
+                    "profile_image_url": None,
+                },
+            }
+        ],
+    }
+
+
+def test_list_show_cast_uses_single_sql_hydration(monkeypatch) -> None:
+    show_id = uuid4()
+    monkeypatch.setattr(
+        shows_router.pg,
+        "fetch_all",
+        lambda query, params: [
+            {
+                "id": str(uuid4()),
+                "show_id": str(show_id),
+                "season_id": None,
+                "person_id": str(uuid4()),
+                "role": "Self",
+                "credit_category": "cast",
+                "billing_order": 1,
+                "notes": None,
+                "total_count": 1,
+                "person": {
+                    "id": str(uuid4()),
+                    "full_name": "Sample Cast Member",
+                    "known_for": None,
+                    "external_ids": {},
+                    "birthday": None,
+                    "gender": None,
+                    "biography": None,
+                    "place_of_birth": None,
+                    "homepage": None,
+                    "profile_image_url": None,
+                },
+            }
+        ],
+    )
+
+    client = _client_with_dataset({})
+    try:
+        response = client.get(f"/api/v1/shows/{show_id}/cast")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["total_count"] == 1
+    assert payload["has_more"] is False
+    assert payload["cast"][0]["person"]["full_name"] == "Sample Cast Member"
+    assert "total_count" not in payload["cast"][0]

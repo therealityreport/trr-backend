@@ -22,6 +22,7 @@ _SUPPORTED_ADMIN_OPERATION_TYPES = frozenset(
         "admin_show_bravo_preview",
         "admin_show_refresh",
         "admin_show_refresh_photos",
+        "admin_bravotv_image_run",
         "admin_person_refresh_images",
         "admin_person_refresh_profile",
         "admin_person_reprocess_images",
@@ -281,9 +282,7 @@ def _normalize_reddit_runtime_health_payload(raw: Any) -> dict[str, Any]:
         "missing_env": [str(item).strip() for item in missing_env if str(item).strip()]
         if isinstance(missing_env, list)
         else [],
-        "warnings": [str(item).strip() for item in warnings if str(item).strip()]
-        if isinstance(warnings, list)
-        else [],
+        "warnings": [str(item).strip() for item in warnings if str(item).strip()] if isinstance(warnings, list) else [],
         "supports_oauth": bool(payload.get("supports_oauth")),
         "user_agent_configured": bool(payload.get("user_agent_configured")),
         "uses_default_user_agent": bool(payload.get("uses_default_user_agent")),
@@ -456,7 +455,8 @@ def _spawn_named_modal_function(
             dispatcher_name=dispatcher_name,
             status="idle",
             metadata_updates={
-                "dispatch_enabled": reason_code not in {
+                "dispatch_enabled": reason_code
+                not in {
                     "modal_sdk_unavailable",
                     "modal_app_not_found",
                     "modal_function_not_found",

@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from api.routers import admin_show_bravo
 from trr_backend.db import pg
@@ -1015,7 +1015,7 @@ def _mirror_retry_after_iso(*, now: datetime) -> str:
 def _sync_google_news_featured_images(
     *,
     db: SupabaseAdminClient,
-    admin_user: AdminUser,
+    admin_user: InternalAdminUser,
     show_id: str,
     items: list[dict[str, Any]],
     heartbeat_cb: Callable[[], None] | None = None,
@@ -1521,7 +1521,7 @@ def _run_google_news_sync_impl(
     show_id_str: str,
     force: bool,
     db: SupabaseAdminClient,
-    admin_user: AdminUser,
+    admin_user: InternalAdminUser,
     heartbeat_cb: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
@@ -1707,7 +1707,7 @@ def sync_google_news(
     payload: GoogleNewsSyncRequest,
     background_tasks: BackgroundTasks,
     db: SupabaseAdminClient = None,
-    admin_user: AdminUser = None,
+    admin_user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -1771,7 +1771,7 @@ def get_google_news_sync_job_status(
     show_id: UUID,
     job_id: UUID,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):
@@ -1798,7 +1798,7 @@ def get_show_news(
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(db, show_id_str):

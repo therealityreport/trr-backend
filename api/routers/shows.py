@@ -4,6 +4,7 @@ Core browse endpoints for shows, seasons, episodes, and cast.
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 from typing import Any
 from uuid import UUID
@@ -17,9 +18,54 @@ from api.deps import (
     get_list_result,
     require_single_result,
 )
+from trr_backend.db import pg
 from trr_backend.db.show_images import ShowImagesError, list_tmdb_show_images
+from trr_backend.read_path_diagnostics import log_read_path
 
 router = APIRouter(prefix="/shows", tags=["shows"])
+
+SHOW_SELECT_FIELDS = (
+    "id,name,description,premiere_date,tmdb_id,imdb_id,tvdb_id,tvrage_id,wikidata_id,"
+    "genres,keywords,tags,networks,streaming_providers,listed_on,tmdb_network_ids,tmdb_production_company_ids"
+)
+SEASON_SELECT_FIELDS = (
+    "id,show_id,season_number,title,premiere_date,external_ids,show_name,imdb_episode_ids,tmdb_episode_ids"
+)
+EPISODE_SELECT_FIELDS = "id,season_id,episode_number,title,air_date,synopsis,external_ids,show_name"
+PERSON_SELECT_FIELDS = (
+    "id,full_name,known_for,external_ids,birthday,gender,biography,place_of_birth,homepage,profile_image_url"
+)
+SHOW_CAST_SQL = """
+SELECT
+  cast_rows.id::text AS id,
+  cast_rows.show_id::text AS show_id,
+  cast_rows.season_id::text AS season_id,
+  cast_rows.person_id::text AS person_id,
+  cast_rows.role,
+  cast_rows.credit_category,
+  cast_rows.billing_order,
+  cast_rows.notes,
+  count(*) OVER()::int AS total_count,
+  jsonb_build_object(
+    'id', p.id::text,
+    'full_name', p.full_name,
+    'known_for', p.known_for,
+    'external_ids', p.external_ids,
+    'birthday', p.birthday,
+    'gender', p.gender,
+    'biography', p.biography,
+    'place_of_birth', p.place_of_birth,
+    'homepage', p.homepage,
+    'profile_image_url', p.profile_image_url
+  ) AS person
+FROM core.v_show_cast AS cast_rows
+LEFT JOIN core.people AS p
+  ON p.id = cast_rows.person_id
+WHERE cast_rows.show_id = %s::uuid
+ORDER BY cast_rows.billing_order NULLS LAST, cast_rows.id ASC
+LIMIT %s
+OFFSET %s
+"""
 
 
 # --- Pydantic models ---
@@ -31,6 +77,12 @@ class Show(BaseModel):
     description: str | None
     premiere_date: str | None
     external_ids: dict[str, Any]
+
+
+class ShowListItem(BaseModel):
+    id: UUID
+    name: str
+    alternative_names: list[str] | None = None
 
 
 class TmdbNetwork(BaseModel):
@@ -285,7 +337,14 @@ def list_shows(
     offset: int = Query(default=0, ge=0),
 ) -> list[dict]:
     """List all shows with pagination."""
-    response = db.schema("core").table("shows").select("*").order("name").range(offset, offset + limit - 1).execute()
+    response = (
+        db.schema("core")
+        .table("shows")
+        .select(SHOW_SELECT_FIELDS)
+        .order("name")
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
     rows = get_list_result(response, "listing shows")
     for row in rows:
         _normalize_temporal_fields(row, "premiere_date")
@@ -293,10 +352,23 @@ def list_shows(
     return rows
 
 
+@router.get("/list", response_model=list[ShowListItem])
+def list_shows_with_alternative_names() -> list[dict[str, Any]]:
+    """List shows with alternative names for lightweight app-side selection UIs."""
+    rows = pg.fetch_all(
+        """
+        SELECT id::text AS id, name, COALESCE(alternative_names, ARRAY[]::text[]) AS alternative_names
+        FROM core.shows
+        ORDER BY name ASC
+        """
+    )
+    return rows
+
+
 @router.get("/{show_id}", response_model=ShowDetail)
 def get_show(db: SupabaseClient, show_id: UUID) -> dict:
     """Get a specific show by ID."""
-    response = db.schema("core").table("shows").select("*").eq("id", str(show_id)).single().execute()
+    response = db.schema("core").table("shows").select(SHOW_SELECT_FIELDS).eq("id", str(show_id)).single().execute()
     show = require_single_result(response, "Show")
     _normalize_temporal_fields(show, "premiere_date")
     show["external_ids"] = _build_show_external_ids(show)
@@ -395,7 +467,7 @@ def list_seasons(
     response = (
         db.schema("core")
         .table("seasons")
-        .select("*")
+        .select(SEASON_SELECT_FIELDS)
         .eq("show_id", str(show_id))
         .order("season_number")
         .range(offset, offset + limit - 1)
@@ -417,7 +489,7 @@ def get_season(
     response = (
         db.schema("core")
         .table("seasons")
-        .select("*")
+        .select(SEASON_SELECT_FIELDS)
         .eq("show_id", str(show_id))
         .eq("season_number", season_number)
         .single()
@@ -454,7 +526,7 @@ def list_episodes(
     response = (
         db.schema("core")
         .table("episodes")
-        .select("*")
+        .select(EPISODE_SELECT_FIELDS)
         .eq("season_id", season_id)
         .order("episode_number")
         .range(offset, offset + limit - 1)
@@ -478,44 +550,26 @@ def list_show_cast(
 
     Reads from credits-backed views (core.v_show_cast).
     """
-    response = (
-        db.schema("core")
-        .table("v_show_cast")
-        .select("*", count="exact")
-        .eq("show_id", str(show_id))
-        .order("billing_order", nullsfirst=False)
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
-    cast_rows = get_list_result(response, "listing cast")
-    person_ids = [str(r.get("person_id") or "") for r in cast_rows if r.get("person_id")]
-    person_ids = [pid for pid in person_ids if pid]
-
-    people_by_id: dict[str, dict[str, Any]] = {}
-    if person_ids:
-        people_resp = db.schema("core").table("people").select("*").in_("id", person_ids).execute()
-        people_rows = get_list_result(people_resp, "listing cast people")
-        people_by_id = {str(p.get("id") or ""): p for p in people_rows if p.get("id")}
-
-    rows: list[dict[str, Any]] = []
-    for r in cast_rows:
-        pid = str(r.get("person_id") or "")
-        rows.append({**r, "person": people_by_id.get(pid)})
-    total_count = getattr(response, "count", None)
-    if isinstance(total_count, int):
-        total_count = total_count
-    elif isinstance(total_count, float):
-        total_count = int(total_count)
-    elif isinstance(total_count, str) and total_count.isdigit():
-        total_count = int(total_count)
-    else:
-        total_count = len(cast_rows)
+    started_at = time.perf_counter()
+    rows = pg.fetch_all(SHOW_CAST_SQL, [str(show_id), limit, offset])
+    total_count = int(rows[0].get("total_count") or len(rows)) if rows else 0
     has_more = offset + limit < total_count
-    return {"count": len(rows), "total_count": total_count, "has_more": has_more, "cast": rows}
+    cast_rows = [{key: value for key, value in row.items() if key != "total_count"} for row in rows]
+    payload = {"count": len(cast_rows), "total_count": total_count, "has_more": has_more, "cast": cast_rows}
+    log_read_path(
+        "shows.cast",
+        latency_ms=(time.perf_counter() - started_at) * 1000.0,
+        query_count=1,
+        payload=payload,
+        extra={"limit": limit, "offset": offset, "show_id": show_id},
+    )
+    return payload
 
 
 @router.get("/people/{person_id}", response_model=Person)
 def get_person(db: SupabaseClient, person_id: UUID) -> dict:
     """Get a specific person by ID."""
-    response = db.schema("core").table("people").select("*").eq("id", str(person_id)).single().execute()
+    response = (
+        db.schema("core").table("people").select(PERSON_SELECT_FIELDS).eq("id", str(person_id)).single().execute()
+    )
     return require_single_result(response, "Person")

@@ -16,15 +16,15 @@ erDiagram
         TIMESTAMP_WITH_TIME_ZONE fetched_at
         INTEGER tmdb_id
         TEXT url_original
+        TEXT caption
         TEXT source_image_id
+        TEXT image_type
+        INTEGER position
         TEXT url
         TEXT url_path
-        TEXT caption
-        INTEGER position
         JSONB metadata
-        TEXT image_type
-        TIMESTAMP_WITH_TIME_ZONE created_at
         TIMESTAMP_WITH_TIME_ZONE updated_at
+        TIMESTAMP_WITH_TIME_ZONE created_at
         TEXT fetch_method
         TEXT fetched_from_url
         TEXT hosted_bucket

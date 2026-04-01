@@ -16,23 +16,23 @@ def _timeout_help_message(exc: Exception, url: str) -> str:
     """Generate helpful error message for timeout failures."""
     import os
 
-    timeout_sec = os.getenv("SUPABASE_POSTGREST_TIMEOUT_SEC", "15")
+    timeout_sec = os.getenv("TRR_DB_CONNECT_TIMEOUT_SEC", "15")
 
     return (
-        f"Supabase connection timeout during core.sync_state preflight check.\n"
+        f"Postgres connection timeout during core.sync_state preflight check.\n"
         f"  URL: {url}\n"
-        f"  Timeout: {timeout_sec}s (SUPABASE_POSTGREST_TIMEOUT_SEC)\n"
+        f"  Timeout: {timeout_sec}s (TRR_DB_CONNECT_TIMEOUT_SEC)\n"
         f"  Error: {exc}\n\n"
         f"Possible causes:\n"
         f"  1. Network connectivity issues (check internet connection)\n"
         f"  2. Supabase project is paused or unreachable\n"
         f"  3. Firewall blocking connections\n"
-        f"  4. PostgREST service is overloaded or hung\n\n"
+        f"  4. Pooler or database is overloaded or hung\n\n"
         f"Troubleshooting:\n"
         f"  - Verify Supabase project status in dashboard\n"
-        f"  - Check SUPABASE_URL in .env: {url}\n"
-        f"  - Increase timeout: SUPABASE_POSTGREST_TIMEOUT_SEC=30\n"
-        f"  - Test connection: curl -I {url}\n"
+        f"  - Check TRR_DB_URL / TRR_DB_FALLBACK_URL in your env\n"
+        f"  - Increase timeout: TRR_DB_CONNECT_TIMEOUT_SEC=30\n"
+        f"  - Test connection with psql against the runtime DB URL\n"
         f"  - Use --skip-db flag for local debugging without database"
     )
 
@@ -70,9 +70,8 @@ def assert_core_sync_state_table_exists(db: DbSession) -> None:
 
     def schema_help_message() -> str:
         return (
-            "Supabase API does not expose schema `core`, so the sync job cannot access `core.sync_state`. "
-            "Add `core` to `supabase/config.toml` under `[api].schemas` and run `supabase config push` "
-            "(or enable `core` in Supabase Dashboard -> Settings -> API -> Exposed schemas), then re-run the sync job."
+            "Database relation `core.sync_state` is not reachable from the runtime Postgres lane. "
+            "Verify migrations have been applied to the database behind TRR_DB_URL, then re-run the sync job."
         )
 
     try:
@@ -82,7 +81,7 @@ def assert_core_sync_state_table_exists(db: DbSession) -> None:
         if is_timeout_error(exc):
             import os
 
-            url = os.getenv("SUPABASE_URL", "unknown")
+            url = os.getenv("TRR_DB_URL") or os.getenv("TRR_DB_FALLBACK_URL") or "unknown"
             raise SyncStateRepositoryError(_timeout_help_message(exc, url)) from exc
 
         # Check for schema/relation errors
@@ -92,7 +91,7 @@ def assert_core_sync_state_table_exists(db: DbSession) -> None:
             raise SyncStateRepositoryError(help_message()) from exc
 
         # Generic error with hint
-        raise SyncStateRepositoryError(f"Supabase error during core.sync_state preflight: {exc}") from exc
+        raise SyncStateRepositoryError(f"Database error during core.sync_state preflight: {exc}") from exc
 
     error = getattr(response, "error", None)
     if not error:
@@ -110,7 +109,7 @@ def assert_core_sync_state_table_exists(db: DbSession) -> None:
         raise SyncStateRepositoryError(schema_help_message())
     if is_missing_relation(combined):
         raise SyncStateRepositoryError(help_message())
-    raise SyncStateRepositoryError(f"Supabase error during core.sync_state preflight: {combined}")
+    raise SyncStateRepositoryError(f"Database error during core.sync_state preflight: {combined}")
 
 
 def _normalize_table_name(value: str) -> str:
@@ -154,7 +153,7 @@ def fetch_sync_state_map(
             .execute()
         )
         if hasattr(response, "error") and response.error:
-            raise SyncStateRepositoryError(f"Supabase error listing sync_state rows for {table_name}: {response.error}")
+            raise SyncStateRepositoryError(f"Database error listing sync_state rows for {table_name}: {response.error}")
         data = response.data or []
         if not isinstance(data, list):
             continue
@@ -192,7 +191,7 @@ def _upsert_sync_state(
     response = db.schema("core").table("sync_state").upsert(payload, on_conflict="table_name,show_id").execute()
     if hasattr(response, "error") and response.error:
         raise SyncStateRepositoryError(
-            f"Supabase error upserting sync_state for {table_name} show_id={show_id}: {response.error}"
+            f"Database error upserting sync_state for {table_name} show_id={show_id}: {response.error}"
         )
 
 

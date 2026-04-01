@@ -43,8 +43,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _require_supabase_db_url() -> None:
-    if not (os.getenv("SUPABASE_DB_URL") or "").strip():
-        raise RuntimeError("SUPABASE_DB_URL must be set for TMDb entity sync scripts.")
+    if not (os.getenv("TRR_DB_URL") or os.getenv("TRR_DB_FALLBACK_URL") or "").strip():
+        raise RuntimeError("TRR_DB_URL must be set for TMDb entity sync scripts.")
 
 
 def _now_utc_iso() -> str:

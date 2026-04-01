@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from trr_backend.pipeline.admin_operations import operation_stream_response
 from trr_backend.repositories import admin_operations
 
@@ -24,6 +24,11 @@ class ForceCancelStaleOperationsRequest(BaseModel):
     force_selected: bool = False
 
 
+class BulkCancelOperationsRequest(BaseModel):
+    operation_ids: list[UUID] = Field(default_factory=list)
+    cancel_all_active: bool = False
+
+
 @router.get("/health")
 def get_admin_operations_health(
     stale_after_seconds: int = Query(
@@ -37,7 +42,7 @@ def get_admin_operations_health(
         le=86_400,
     ),
     limit: int = Query(default=200, ge=1, le=500),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return admin_operations.get_admin_operations_health(
@@ -53,7 +58,7 @@ def get_admin_operations_health(
 @router.post("/stale/cancel")
 def force_cancel_stale_admin_operations(
     payload: ForceCancelStaleOperationsRequest | None = None,
-    user: AdminUser = None,
+    user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     try:
         return admin_operations.force_cancel_stale_operations(
@@ -78,10 +83,27 @@ def force_cancel_stale_admin_operations(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/cancel")
+def cancel_admin_operations(
+    payload: BulkCancelOperationsRequest | None = None,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    try:
+        return admin_operations.request_bulk_operation_cancels(
+            operation_ids=[str(operation_id) for operation_id in (payload.operation_ids if payload else [])],
+            cancel_all_active=bool(payload.cancel_all_active) if payload else False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to cancel admin operations")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/{operation_id}")
 def get_admin_operation(
     operation_id: UUID,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     operation = admin_operations.get_operation(str(operation_id))
     if not operation:
@@ -102,7 +124,7 @@ def stream_admin_operation(
     operation_id: UUID,
     request: Request,
     after_seq: int = Query(default=0, ge=0),
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> StreamingResponse:
     operation = admin_operations.get_operation(str(operation_id))
     if not operation:
@@ -114,7 +136,7 @@ def stream_admin_operation(
 def cancel_admin_operation(
     operation_id: UUID,
     request: Request,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     request_id = (request.headers.get("x-trr-request-id") or "").strip() or None
     prior_operation = admin_operations.get_operation(str(operation_id))

@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.db import pg
 from trr_backend.ingestion.show_cast_matrix_scraper import (
@@ -332,7 +332,7 @@ def _person_has_bravo_profile_image(person_id: str) -> bool:
 def _import_missing_bravo_profile_images(
     *,
     db: SupabaseAdminClient,
-    admin_user: AdminUser,
+    admin_user: InternalAdminUser,
     show_id: str,
     person_ids: set[str],
     person_names_by_id: dict[str, str],
@@ -714,7 +714,7 @@ def sync_cast_matrix_for_show(
     show_id: str,
     payload: CastMatrixSyncRequest,
     db: SupabaseAdminClient,
-    admin_user: AdminUser,
+    admin_user: InternalAdminUser,
 ) -> dict[str, Any]:
     show = _show_metadata(show_id)
     show_name = str(show.get("name") or "").strip()
@@ -895,7 +895,7 @@ def sync_cast_matrix_for_show(
 @router.get("/{show_id}/roles")
 def list_show_roles(
     show_id: UUID,
-    _: AdminUser,
+    _: InternalAdminUser,
     include_inactive: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     show_id_str = str(show_id)
@@ -924,7 +924,7 @@ def create_show_role(
     show_id: UUID,
     payload: RoleCreateRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(show_id_str):
@@ -956,7 +956,7 @@ def patch_show_role(
     role_id: UUID,
     payload: RolePatchRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
@@ -988,7 +988,7 @@ def replace_cast_roles(
     person_id: UUID,
     payload: CastRoleAssignRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     person_id_str = str(person_id)
@@ -1074,7 +1074,7 @@ def sync_cast_matrix(
     show_id: UUID,
     payload: CastMatrixSyncRequest,
     db: SupabaseAdminClient,
-    admin: AdminUser,
+    admin: InternalAdminUser,
 ) -> dict[str, Any]:
     show_id_str = str(show_id)
     if not _show_exists(show_id_str):
@@ -1085,7 +1085,7 @@ def sync_cast_matrix(
 @router.get("/{show_id}/cast-role-members")
 def list_cast_with_roles(
     show_id: UUID,
-    _: AdminUser,
+    _: InternalAdminUser,
     sort_by: str = Query(default="episodes"),
     order: str = Query(default="desc"),
     seasons: str | None = Query(default=None),
@@ -1201,13 +1201,22 @@ def list_cast_with_roles(
         if assignment_seasons:
             role_season_map[person_id] = assignment_seasons
 
+    has_curated_roles = bool(role_map)
     filtered: list[dict[str, Any]] = []
     for row in rows:
         person_id = str(row.get("person_id") or "")
-        fallback_roles = [
-            str(value).strip() for value in (row.get("roles") or []) if isinstance(value, str) and str(value).strip()
-        ]
-        selected_roles = sorted(role_map.get(person_id, set())) if person_id in role_map else fallback_roles
+        if has_curated_roles:
+            selected_roles = sorted(role_map.get(person_id, set()))
+            if not selected_roles:
+                continue
+        else:
+            selected_roles = sorted(
+                {
+                    str(value).strip()
+                    for value in (row.get("roles") or [])
+                    if isinstance(value, str) and str(value).strip()
+                }
+            )
         row["roles"] = selected_roles
 
         row_roles_lc = [value.lower() for value in selected_roles]

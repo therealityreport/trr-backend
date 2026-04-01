@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from trr_backend.bravotv.run_service import (
     attach_operation,
     execute_bravotv_image_run_from_request_payload,
@@ -33,6 +33,12 @@ class BravotvImageRunRequest(BaseModel):
     bravo_limit: int = Field(default=300, ge=1, le=1000)
     supplemental_limit: int = Field(default=100, ge=1, le=500)
     force_all: bool = False
+    getty_prefetched_assets: list[dict[str, Any]] | None = None
+    getty_prefetched_events: list[dict[str, Any]] | None = None
+    getty_prefetched_queries: list[dict[str, Any]] | None = None
+    getty_prefetch_mode: str | None = None
+    getty_prefetch_auth_mode: str | None = None
+    getty_prefetch_auth_warning: str | None = None
 
 
 def _sse_event(event_type: str, payload: dict[str, Any]) -> str:
@@ -62,7 +68,7 @@ def build_bravotv_image_operation_producer(*, request_payload: dict[str, Any]):
 def start_bravotv_image_run(
     request: Request,
     payload: BravotvImageRunRequest = Body(...),
-    admin_user: AdminUser = None,
+    admin_user: InternalAdminUser = None,
 ) -> StreamingResponse:
     actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
     request_payload = {
@@ -101,7 +107,7 @@ def start_bravotv_show_run(
     show_id: UUID,
     request: Request,
     payload: BravotvImageRunRequest | None = None,
-    admin_user: AdminUser = None,
+    admin_user: InternalAdminUser = None,
 ) -> StreamingResponse:
     body = payload or BravotvImageRunRequest(mode="show", show_id=show_id, sources=["getty"])
     body.show_id = show_id
@@ -114,7 +120,7 @@ def start_bravotv_person_run(
     person_id: UUID,
     request: Request,
     payload: BravotvImageRunRequest | None = None,
-    admin_user: AdminUser = None,
+    admin_user: InternalAdminUser = None,
 ) -> StreamingResponse:
     body = payload or BravotvImageRunRequest(mode="person", person_id=person_id, sources=["all"])
     body.person_id = person_id
@@ -123,7 +129,7 @@ def start_bravotv_person_run(
 
 
 @router.get("/runs/{run_id}")
-def get_run_detail(run_id: UUID, _: AdminUser = None) -> dict[str, Any]:
+def get_run_detail(run_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
     row = get_bravotv_run(str(run_id))
     if not row:
         raise HTTPException(status_code=404, detail="BRAVOTV image run not found")
@@ -131,7 +137,7 @@ def get_run_detail(run_id: UUID, _: AdminUser = None) -> dict[str, Any]:
 
 
 @router.get("/shows/{show_id}/latest")
-def get_latest_show_run(show_id: UUID, _: AdminUser = None) -> dict[str, Any]:
+def get_latest_show_run(show_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
     row = get_latest_bravotv_run(mode="show", show_id=str(show_id))
     if not row:
         return {"run": None}
@@ -139,7 +145,7 @@ def get_latest_show_run(show_id: UUID, _: AdminUser = None) -> dict[str, Any]:
 
 
 @router.get("/people/{person_id}/latest")
-def get_latest_person_run(person_id: UUID, _: AdminUser = None) -> dict[str, Any]:
+def get_latest_person_run(person_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
     row = get_latest_bravotv_run(mode="person", person_id=str(person_id))
     if not row:
         return {"run": None}
@@ -152,7 +158,7 @@ def get_run_artifact_preview(
     artifact_name: str,
     offset: int = 0,
     limit: int = 25,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     row = get_bravotv_run(str(run_id))
     if not row:

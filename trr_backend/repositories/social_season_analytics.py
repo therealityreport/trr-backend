@@ -47454,9 +47454,11 @@ def _social_account_catalog_missing_gap_stats(
     *,
     sample_limit: int = 10,
 ) -> dict[str, Any]:
-    materialized_table, materialized_source_id_column, materialized_posted_at_column = _social_account_profile_base_query_parts(
-        platform
-    )
+    (
+        materialized_table,
+        materialized_source_id_column,
+        materialized_posted_at_column,
+    ) = _social_account_profile_base_query_parts(platform)
     catalog_table, catalog_source_id_column, catalog_posted_at_column = _shared_catalog_base_query_parts(platform)
     owner_match_clause = _social_account_profile_owner_match_sql(platform, alias="p")
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -47656,7 +47658,10 @@ def get_social_account_catalog_gap_analysis(platform: str, account_handle: str) 
         "stage_timings": stage_timings,
     }
     logger.info(
-        "[social-catalog-gap-analysis] platform=%s account=%s gap_type=%s missing_count=%s duration_ms=%s stage_timings=%s",
+        (
+            "[social-catalog-gap-analysis] platform=%s account=%s gap_type=%s "
+            "missing_count=%s duration_ms=%s stage_timings=%s"
+        ),
         normalized_platform,
         normalized_account,
         gap_type,
@@ -47761,7 +47766,9 @@ def get_social_account_catalog_gap_analysis_status(platform: str, account_handle
         current_result = completed_result
         stale = True
 
-    result_payload = latest_operation.get("result_payload") if isinstance(latest_operation.get("result_payload"), dict) else {}
+    result_payload = (
+        latest_operation.get("result_payload") if isinstance(latest_operation.get("result_payload"), dict) else {}
+    )
     completed_payload = (
         latest_completed_operation.get("result_payload")
         if isinstance((latest_completed_operation or {}).get("result_payload"), dict)
@@ -47778,12 +47785,16 @@ def get_social_account_catalog_gap_analysis_status(platform: str, account_handle
         "duration_ms": (
             result_payload.get("duration_ms")
             if normalized_status == "completed"
-            else completed_payload.get("duration_ms") if stale else None
+            else completed_payload.get("duration_ms")
+            if stale
+            else None
         ),
         "stage_timings": (
             result_payload.get("stage_timings")
             if normalized_status == "completed"
-            else completed_payload.get("stage_timings") if stale else None
+            else completed_payload.get("stage_timings")
+            if stale
+            else None
         ),
         "last_requested_at": latest_operation.get("created_at"),
         "last_completed_at": (

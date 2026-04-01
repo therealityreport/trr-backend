@@ -66,9 +66,7 @@ def test_refresh_credits_for_related_shows_fans_out_per_show(monkeypatch: pytest
         lambda argv=None: episode_calls.append(list(argv or [])) or 0,
     )
 
-    processed, failures = mod._refresh_credits_for_related_shows(
-        [{"show_id": "show-1"}, {"show_id": "show-2"}]
-    )
+    processed, failures = mod._refresh_credits_for_related_shows([{"show_id": "show-1"}, {"show_id": "show-2"}])
 
     assert processed == 2
     assert failures == []
@@ -173,6 +171,76 @@ def test_run_person_profile_refresh_counts_only_successful_credit_updates(
 
     assert result["shows_processed"] == 2
     assert result["credits_updated"] == 1
+
+
+def test_run_person_profile_refresh_reports_missing_sources_as_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    person_id = str(uuid4())
+    monkeypatch.setattr(
+        mod,
+        "_load_person",
+        lambda db, *, person_id: {
+            "id": person_id,
+            "full_name": "Andy Cohen",
+            "external_ids": {},
+            "birthday": {},
+            "gender": {},
+            "biography": {},
+            "place_of_birth": {},
+            "homepage": {},
+            "profile_image_url": {},
+            "alternative_names": {},
+        },
+    )
+    monkeypatch.setattr(mod, "_load_related_shows_for_person", lambda _person_id: [{"show_id": "show-1"}])
+    monkeypatch.setattr(mod, "_discover_and_persist_person_links", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(mod, "_load_approved_person_links", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        mod,
+        "_refresh_tmdb_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(mod.ProfileSourceSkippedError("No TMDb person id available.")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_refresh_imdb_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(mod.ProfileSourceSkippedError("No IMDb profile link available.")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_refresh_fandom_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            mod.ProfileSourceSkippedError("No Fandom profile link available.")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_refresh_wikipedia_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            mod.ProfileSourceSkippedError("No Wikipedia profile link available.")
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_refresh_bravo_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            mod.ProfileSourceSkippedError("No BravoTV profile link available.")
+        ),
+    )
+    monkeypatch.setattr(mod, "_refresh_credits_for_related_shows", lambda related_shows: (len(related_shows), []))
+
+    result = mod._run_person_profile_refresh(
+        person_id=person_id,
+        payload=mod.RefreshProfileRequest(refresh_links=False, refresh_credits=False),
+        db=None,
+        actor="admin@example.com",
+    )
+
+    assert result["status"] == "ok"
+    assert result["failures"] == []
+    assert len(result["skips"]) == 5
+    assert any(str(item).startswith("profile_tmdb:") for item in result["skips"])
+    assert any(str(item).startswith("profile_imdb:") for item in result["skips"])
 
 
 def test_build_refresh_profile_event_stream_emits_progress_and_complete(monkeypatch: pytest.MonkeyPatch) -> None:

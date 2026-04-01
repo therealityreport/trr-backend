@@ -172,6 +172,7 @@ def verify_modal_readiness(
     secret_names = list_secret_names(modal_environment=modal_environment)
     app_descriptions = list_app_descriptions(modal_environment=modal_environment)
     app_function_handles: dict[str, Any] = {}
+    app_lookup_error: str | None = None
     missing_secrets = [
         secret_name
         for secret_name in (runtime_secret_name, social_secret_name)
@@ -184,8 +185,9 @@ def verify_modal_readiness(
                 app_name=app_name,
                 modal_environment=modal_environment,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             app_function_handles = {}
+            app_lookup_error = str(exc)
 
     function_results: list[dict[str, Any]] = []
     missing_functions: list[str] = []
@@ -221,6 +223,7 @@ def verify_modal_readiness(
         "modal_environment": modal_environment or None,
         "app_name": app_name,
         "app_found": app_found,
+        "app_lookup_error": app_lookup_error,
         "runtime_secret_name": runtime_secret_name,
         "social_secret_name": social_secret_name,
         "missing_secrets": missing_secrets,
@@ -237,6 +240,8 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
     print(f"  App: {summary['app_name']}")
     print(f"  Environment: {summary['modal_environment'] or 'default'}")
     print(f"  App deployed: {'yes' if summary['app_found'] else 'no'}")
+    if summary.get("app_lookup_error"):
+        print(f"  App lookup error: {summary['app_lookup_error']}")
     print(f"  Named secrets: {summary['runtime_secret_name']}, {summary['social_secret_name']}")
     if summary["missing_secrets"]:
         print("  Missing secrets: " + ", ".join(summary["missing_secrets"]))

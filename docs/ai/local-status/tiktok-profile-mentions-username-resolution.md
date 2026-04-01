@@ -7,11 +7,11 @@
 ## Handoff Snapshot
 ```yaml
 handoff:
-  include: true
-  state: recent
+  include: false
+  state: archived
   last_updated: 2026-03-23
-  current_phase: "TikTok mention normalization fix complete"
-  next_action: "Monitor other TikTok shared-catalog aliases and add exact-username resolution only where the dataset provides a provable handle mapping"
+  current_phase: "archived continuity note"
+  next_action: "Refer to newer status notes if TikTok mention normalization work resumes."
   detail: self
 ```
 

@@ -25,8 +25,27 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     payload = {
         "sub": subject,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
-        "role": "service_role",
+        "role": "admin",
+        "email": "admin@example.com",
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def _make_internal_admin_token(
+    secret: str,
+    subject: str = "trr-app-internal-admin",
+) -> str:
+    now = datetime.now(tz=UTC)
+    payload = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "iss": "trr-app-internal",
+        "aud": "trr-backend-internal-admin",
+        "scope": "internal_admin",
     }
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -88,6 +107,192 @@ def test_cast_matrix_sync_route_returns_service_payload(
     payload = response.json()
     assert payload["show_id"] == show_id
     assert payload["counts"]["season_role_assignments_upserted"] == 3
+
+
+def test_list_show_roles_accepts_internal_admin_token_without_supabase_jwt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    token = _make_internal_admin_token("internal-secret-32-bytes-minimum")
+    show_id = str(uuid4())
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch(
+            "api.routers.admin_show_roles.pg.fetch_all",
+            return_value=[{"id": str(uuid4()), "name": "Housewife", "is_active": True, "sort_order": 0}],
+        ):
+            response = client.get(
+                f"/api/v1/admin/shows/{show_id}/roles",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()[0]["name"] == "Housewife"
+
+
+def test_list_cast_role_members_accepts_internal_admin_token_without_supabase_jwt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    token = _make_internal_admin_token("internal-secret-32-bytes-minimum")
+    show_id = str(uuid4())
+
+    base_rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-heather",
+            "person_name": "Heather Gay",
+            "total_episodes": 80,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/heather.jpg",
+        }
+    ]
+    role_rows = [
+        {
+            "person_id": "person-heather",
+            "role_names": ["Housewife"],
+            "assignment_seasons": [1, 4],
+        }
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[base_rows, role_rows]):
+            response = client.get(
+                f"/api/v1/admin/shows/{show_id}/cast-role-members",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()[0]["person_name"] == "Heather Gay"
+
+
+def test_list_cast_role_members_excludes_people_without_active_role_assignments(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    token = _make_internal_admin_token("internal-secret-32-bytes-minimum")
+    show_id = str(uuid4())
+
+    base_rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-heather",
+            "person_name": "Heather Gay",
+            "total_episodes": 80,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/heather.jpg",
+        },
+        {
+            "show_id": show_id,
+            "person_id": "person-andy",
+            "person_name": "Andy Cohen",
+            "total_episodes": 31,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": [],
+            "photo_url": "https://cdn.example/andy.jpg",
+        },
+    ]
+    role_rows = [
+        {
+            "person_id": "person-heather",
+            "role_names": ["Housewife"],
+            "assignment_seasons": [1, 4],
+        }
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[base_rows, role_rows]):
+            response = client.get(
+                f"/api/v1/admin/shows/{show_id}/cast-role-members",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["person_name"] for row in payload] == ["Heather Gay"]
+    assert payload[0]["roles"] == ["Housewife"]
+
+
+def test_list_cast_role_members_falls_back_to_base_roles_when_no_curated_assignments_exist(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    token = _make_internal_admin_token("internal-secret-32-bytes-minimum")
+    show_id = str(uuid4())
+
+    base_rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-heather",
+            "person_name": "Heather Gay",
+            "total_episodes": 80,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/heather.jpg",
+        },
+        {
+            "show_id": show_id,
+            "person_id": "person-meredith",
+            "person_name": "Meredith Marks",
+            "total_episodes": 75,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/meredith.jpg",
+        },
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[base_rows, []]):
+            response = client.get(
+                f"/api/v1/admin/shows/{show_id}/cast-role-members",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["person_name"] for row in payload] == ["Heather Gay", "Meredith Marks"]
+    assert payload[0]["roles"] == ["Housewife"]
+
+
+def test_show_role_routes_reject_invalid_internal_admin_token_when_supabase_jwt_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+
+    response = client.get(
+        f"/api/v1/admin/shows/{uuid4()}/roles",
+        headers={"Authorization": "Bearer not-a-valid-internal-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Allowlist admin access required"
 
 
 def test_sync_cast_matrix_for_show_replaces_auto_sources_and_preserves_manual_sources() -> None:

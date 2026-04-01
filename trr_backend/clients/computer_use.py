@@ -42,6 +42,7 @@ COMPUTER_USE_EXECUTION_ERROR = "Computer use task failed."
 # Request / Response models
 # ---------------------------------------------------------------------------
 
+
 class ComputerUseRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="Task for Claude to perform via computer use")
     model: str = Field(default="claude-opus-4-6")
@@ -61,6 +62,7 @@ class ComputerUseConfigurationError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @router.post("/run", response_model=ComputerUseResponse)
 async def run_task(req: ComputerUseRequest, _: InternalAdminUser = None):
@@ -85,6 +87,7 @@ async def run_task(req: ComputerUseRequest, _: InternalAdminUser = None):
 # ---------------------------------------------------------------------------
 # Programmatic helper
 # ---------------------------------------------------------------------------
+
 
 async def run_computer_task(
     prompt: str,

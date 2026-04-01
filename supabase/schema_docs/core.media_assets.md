@@ -53,7 +53,6 @@ id
 ## Indexes
 
 - idx_media_assets_archived (non-unique): archived_at) WHERE (archived_at IS NOT NULL
-- idx_media_assets_id_source_hosted (non-unique): id, source, hosted_url
 - media_assets_hosted_url_idx (non-unique): hosted_url) WHERE (hosted_url IS NOT NULL
 - media_assets_ingest_next_retry_idx (non-unique): ingest_next_retry_at) WHERE ((ingest_status = 'failed'::text) AND (ingest_next_retry_at IS NOT NULL)
 - media_assets_ingest_pending_failed_idx (non-unique): source, ingest_status) WHERE (ingest_status = ANY (ARRAY['pending'::text, 'failed'::text])

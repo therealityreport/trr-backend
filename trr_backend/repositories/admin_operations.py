@@ -326,7 +326,9 @@ def get_latest_operation_for_request_payload(
     if not op_type:
         raise ValueError("operation_type is required")
 
-    normalized_statuses = [str(status or "").strip().lower() for status in (statuses or []) if str(status or "").strip()]
+    normalized_statuses = [
+        str(status or "").strip().lower() for status in (statuses or []) if str(status or "").strip()
+    ]
     params: list[Any] = [op_type, _to_json(request_payload)]
     status_clause = ""
     if normalized_statuses:
@@ -609,7 +611,9 @@ def request_bulk_operation_cancels(
     return {
         "requested_operation_ids_count": len(target_ids),
         "cancel_requested_operations": len(cancelled_rows),
-        "cancel_requested_operation_ids": [str(row.get("id") or "").strip() for row in cancelled_rows if str(row.get("id") or "").strip()],
+        "cancel_requested_operation_ids": [
+            str(row.get("id") or "").strip() for row in cancelled_rows if str(row.get("id") or "").strip()
+        ],
         "active_operations_remaining": len(health["active_operations"]),
         "updated_at": health["updated_at"],
     }

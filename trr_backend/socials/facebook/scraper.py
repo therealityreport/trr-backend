@@ -83,7 +83,7 @@ _FB_VIDEO_VIEW_COUNT_REDUCED_RE = re.compile(r'"video_view_count_reduced"\s*:\s*
 _FB_PLAY_COUNT_RE = re.compile(r'"play_count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_PLAY_COUNT_REDUCED_RE = re.compile(r'"play_count_reduced"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 # 2026-03: Facebook SPA renders view counts in og:title as "69K views · 8.5K reactions | ..."
-_FB_OG_TITLE_VIEWS_RE = re.compile(r'([\d,.]+[KkMmBb]?)\s*views', re.IGNORECASE)
+_FB_OG_TITLE_VIEWS_RE = re.compile(r"([\d,.]+[KkMmBb]?)\s*views", re.IGNORECASE)
 _FB_SHARE_COUNT_RE = re.compile(r'"share_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_RESHARE_COUNT_RE = re.compile(r'"reshare_count"\s*:\s*\{\s*"count"\s*:\s*"?([0-9]+(?:\.[0-9]+)?[KkMmBb]?)"?')
 _FB_SHARE_COUNT_REDUCED_RE = re.compile(
@@ -1810,7 +1810,9 @@ class FacebookScraper:
                 if (
                     post.views == 0
                     and post.likes > 0
-                    and ("/reel/" in candidate_url or "/videos/" in candidate_url or post.post_type in ("reel", "video"))
+                    and (
+                        "/reel/" in candidate_url or "/videos/" in candidate_url or post.post_type in ("reel", "video")
+                    )
                     and self._playwright_fallback_enabled()
                 ):
                     try:
@@ -1930,7 +1932,9 @@ class FacebookScraper:
                 if (
                     post.views == 0
                     and post.likes > 0
-                    and ("/reel/" in candidate_url or "/videos/" in candidate_url or post.post_type in ("reel", "video"))
+                    and (
+                        "/reel/" in candidate_url or "/videos/" in candidate_url or post.post_type in ("reel", "video")
+                    )
                     and self._playwright_fallback_enabled()
                 ):
                     try:

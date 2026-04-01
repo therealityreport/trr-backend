@@ -11,7 +11,7 @@ Example failure:
 
 ## Symptoms
 
-1. `supabase db push --db-url "$SUPABASE_DB_URL"` fails even though SQL changes are additive.
+1. `supabase db push --db-url "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}"` fails even though SQL changes are additive.
 2. Remote migration history (`supabase_migrations.schema_migrations`) contains versions absent from `supabase/migrations/`.
 3. Teams are forced to apply SQL manually with `psql` to unblock urgent rollout work.
 
@@ -31,7 +31,7 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 set -a && source .env && set +a
 
 ls -1 supabase/migrations | sed 's/_.*//' > /tmp/local_migrations.txt
-psql "$SUPABASE_DB_URL" -Atc \
+psql "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}" -Atc \
   "select version from supabase_migrations.schema_migrations order by version" \
   > /tmp/remote_migrations.txt
 
@@ -52,7 +52,7 @@ comm -13 /tmp/local_migrations.txt /tmp/remote_migrations.txt || true
 Use Supabase repair commands to align remote history with intentional repo state:
 
 ```bash
-supabase migration repair --status reverted <remote_only_version> --db-url "$SUPABASE_DB_URL"
+supabase migration repair --status reverted <remote_only_version> --db-url "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}"
 ```
 
 If repair fails with prepared-statement errors on pooled connections (for example
@@ -62,7 +62,8 @@ If repair fails with prepared-statement errors on pooled connections (for exampl
 ```bash
 ALT_DB_URL="$(python - <<'PY'
 import os, urllib.parse
-u = urllib.parse.urlparse(os.environ["SUPABASE_DB_URL"])
+base_url = os.environ.get("TRR_DB_URL") or os.environ["TRR_DB_FALLBACK_URL"]
+u = urllib.parse.urlparse(base_url)
 user = urllib.parse.quote(urllib.parse.unquote(u.username or ""), safe="")
 pwd = urllib.parse.quote(urllib.parse.unquote(u.password or ""), safe="")
 print(f"postgresql://{user}:{pwd}@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
@@ -75,14 +76,14 @@ supabase migration repair --status reverted <remote_only_version> --db-url "$ALT
 If needed, mark a known-applied local migration as applied:
 
 ```bash
-supabase migration repair --status applied <local_version> --db-url "$SUPABASE_DB_URL"
+supabase migration repair --status applied <local_version> --db-url "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}"
 ```
 
 ### 4) Re-validate CLI migration operations
 
 ```bash
-supabase migration list --db-url "$SUPABASE_DB_URL"
-supabase db push --db-url "$SUPABASE_DB_URL"
+supabase migration list --db-url "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}"
+supabase db push --db-url "${TRR_DB_URL:-$TRR_DB_FALLBACK_URL}"
 ```
 
 Expected: both commands complete without remote/local mismatch errors.

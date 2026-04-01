@@ -17,6 +17,7 @@ def _make_admin_token(secret: str, subject: str = "admin-twitter") -> str:
     payload = {
         "sub": subject,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "service_role",
     }

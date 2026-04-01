@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 
 from api import deps
 from api.main import app
+from api.routers import shows as shows_router
+from api.routers import surveys as surveys_router
 
 
 # Mock Supabase client for testing without database connection
@@ -66,7 +68,16 @@ def client(mock_supabase):
     """Create a test client with mocked Supabase dependencies."""
     app.dependency_overrides[deps.get_supabase_client] = lambda: mock_supabase
     app.dependency_overrides[deps.get_supabase_admin_client] = lambda: mock_supabase
+    original_show_fetch_all = shows_router.pg.fetch_all
+    original_survey_fetch_all = surveys_router.pg.fetch_all
+    original_survey_execute_values_no_return = surveys_router.pg.execute_values_no_return
+    shows_router.pg.fetch_all = lambda *args, **kwargs: []
+    surveys_router.pg.fetch_all = lambda *args, **kwargs: []
+    surveys_router.pg.execute_values_no_return = lambda *args, **kwargs: None
     yield TestClient(app)
+    shows_router.pg.fetch_all = original_show_fetch_all
+    surveys_router.pg.fetch_all = original_survey_fetch_all
+    surveys_router.pg.execute_values_no_return = original_survey_execute_values_no_return
     app.dependency_overrides.clear()
 
 
@@ -95,6 +106,12 @@ class TestShowsEndpoints:
     def test_list_shows_returns_empty_list(self, client: TestClient):
         """List shows endpoint returns empty list when no data."""
         response = client.get("/api/v1/shows")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_list_shows_with_alternative_names_returns_empty_list(self, client: TestClient):
+        """Lightweight show list endpoint returns empty list when no data."""
+        response = client.get("/api/v1/shows/list")
         assert response.status_code == 200
         assert response.json() == []
 

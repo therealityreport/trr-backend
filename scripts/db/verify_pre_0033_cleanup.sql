@@ -8,9 +8,6 @@
 -- Usage:
 --   ./scripts/db/run_sql.sh scripts/db/verify_pre_0033_cleanup.sql
 --
--- Or manually:
---   psql "$SUPABASE_DB_URL" -f scripts/db/verify_pre_0033_cleanup.sql
---
 -- All queries should return 0 rows before proceeding.
 -- =============================================================================
 

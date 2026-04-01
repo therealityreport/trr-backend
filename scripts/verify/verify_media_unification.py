@@ -153,9 +153,13 @@ def main() -> int:
     load_env()
     sql_path = _resolve_sql_path()
 
-    env_url = (os.getenv("SUPABASE_DB_URL") or "").strip()
+    env_url = (
+        (os.getenv("TRR_DB_URL") or "").strip()
+        or (os.getenv("TRR_DB_FALLBACK_URL") or "").strip()
+        or (os.getenv("SUPABASE_DB_URL") or "").strip()
+    )
     if env_url and _is_local_db_url(env_url):
-        print(f"Using local SUPABASE_DB_URL: {env_url}")
+        print(f"Using local runtime DB URL from env: {env_url}")
         if _run_psql(env_url, sql_path):
             return 0 if _run_scoped_grep() else 1
 
@@ -170,10 +174,10 @@ def main() -> int:
         return 0 if _run_scoped_grep() else 1
 
     if env_url and not args.allow_remote:
-        raise SystemExit("Refusing to run against non-local SUPABASE_DB_URL. Use --allow-remote to override.")
+        raise SystemExit("Refusing to run against non-local runtime DB URL. Use --allow-remote to override.")
 
     if env_url:
-        print(f"Using remote SUPABASE_DB_URL: {env_url}")
+        print(f"Using remote runtime DB URL from env: {env_url}")
         if _run_psql(env_url, sql_path):
             return 0 if _run_scoped_grep() else 1
 

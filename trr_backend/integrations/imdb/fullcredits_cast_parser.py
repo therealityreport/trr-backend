@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import shutil
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -18,10 +19,28 @@ import requests
 from bs4 import BeautifulSoup
 
 from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF
+from trr_backend.utils.playwright_runtime import (
+    create_seeded_profile_dir,
+    exclusive_runtime_lock,
+    launch_persistent_context,
+    playwright_ready,
+)
 
 _IMDB_NAME_ID_RE = re.compile(r"(nm\d+)", re.IGNORECASE)
 _IMDB_TITLE_ID_RE = re.compile(r"^tt\d+$", re.IGNORECASE)
 _IMDB_CAST_GROUP_ID_RE = re.compile(r"amzn1\.imdb\.concept\.name_credit_group\.[a-z0-9\-]+", re.IGNORECASE)
+_IMDB_ALLOWED_CREW_SECTIONS = {
+    "producers": "Producers",
+    "editors": "Editors",
+    "casting director": "Casting Director",
+    "casting department": "Casting Department",
+    "visual effects": "Visual Effects",
+    "production design": "Production Design",
+    "editorial department": "Editorial Department",
+    "production department": "Production Department",
+}
+_DEFAULT_IMDB_BROWSER_PROFILE_DIR = Path.home() / ".chrome-profiles" / "codex-agent"
+_BROWSER_RUNTIME_LOCK_NAME = "imdb-fullcredits-playwright"
 
 
 class ImdbFullCreditsError(RuntimeError):
@@ -46,6 +65,27 @@ class CastRow:
     billing_order: int | None
     raw_role_text: str | None
     job_category_id: str | None
+    episode_count: int | None = None
+    episodes_label: str | None = None
+    years_label: str | None = None
+
+
+@dataclass(frozen=True)
+class CrewRow:
+    name_id: str
+    name: str
+    credit_category: str
+    role: str | None
+    episode_count: int | None
+    episodes_label: str | None
+    years_label: str | None
+    display_order: int
+
+
+@dataclass(frozen=True)
+class FullCreditsParseResult:
+    cast_rows: list[CastRow]
+    crew_rows: list[CrewRow]
 
 
 class HttpImdbFullCreditsClient:
@@ -130,6 +170,15 @@ class HttpImdbFullCreditsClient:
                 time.sleep(delay + jitter)
                 continue
 
+            if is_blocked:
+                browser_html = _fetch_fullcredits_page_via_browser(
+                    imdb_series_id,
+                    timeout_seconds=self._timeout_seconds,
+                    verbose=verbose,
+                )
+                if browser_html:
+                    return browser_html
+
             # Exhausted retries or non-retryable error
             # Save debug artifact ONCE (on final blocked attempt)
             if verbose and is_blocked:
@@ -162,7 +211,16 @@ class HttpImdbFullCreditsClient:
         Uses Path.cwd() for testability (tests can monkeypatch.chdir).
         """
         debug_dir = Path.cwd() / "debug_html"
-        debug_dir.mkdir(exist_ok=True)
+        if debug_dir.is_symlink():
+            target_dir = debug_dir.resolve(strict=False)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            debug_dir = target_dir
+        elif debug_dir.exists():
+            if not debug_dir.is_dir():
+                print(f"Warning: Failed to save debug HTML: {debug_dir} is not a directory")
+                return
+        else:
+            debug_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"imdb_fullcredits_{imdb_series_id}_{timestamp}_http{resp.status_code}.html"
@@ -173,6 +231,112 @@ class HttpImdbFullCreditsClient:
             print(f"Debug HTML saved: {filepath}")
         except Exception as exc:
             print(f"Warning: Failed to save debug HTML: {exc}")
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _resolve_browser_seed_profile_dir() -> Path | None:
+    raw = str(
+        os.getenv("IMDB_FULLCREDITS_BROWSER_PROFILE_DIR")
+        or os.getenv("IMDB_BROWSER_SEED_PROFILE_DIR")
+        or ""
+    ).strip()
+    if raw:
+        path = Path(raw).expanduser()
+    else:
+        path = _DEFAULT_IMDB_BROWSER_PROFILE_DIR
+    return path if path.exists() else None
+
+
+def _resolve_browser_modes() -> list[bool]:
+    mode = str(os.getenv("IMDB_FULLCREDITS_BROWSER_MODE") or "auto").strip().lower()
+    if mode == "headless":
+        return [True]
+    if mode == "headful":
+        return [False]
+    return [True, False]
+
+
+def _looks_like_fullcredits_html(html: str) -> bool:
+    normalized = html or ""
+    return "full-credits-page-container" in normalized or 'data-testid="name-credits-list-item"' in normalized
+
+
+def _fetch_fullcredits_page_via_browser(
+    imdb_series_id: str,
+    *,
+    timeout_seconds: float,
+    verbose: bool,
+) -> str | None:
+    if not _env_flag("IMDB_FULLCREDITS_BROWSER_FALLBACK_ENABLED", default=True):
+        return None
+    if not playwright_ready():
+        return None
+
+    seed_profile_dir = _resolve_browser_seed_profile_dir()
+    if seed_profile_dir is None:
+        return None
+
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return None
+
+    wait_ms = int(os.getenv("IMDB_FULLCREDITS_BROWSER_WAIT_MS", "12000"))
+    timeout_ms = max(int(timeout_seconds * 1000), 30_000)
+    url = f"https://www.imdb.com/title/{imdb_series_id}/fullcredits/"
+
+    try:
+        with exclusive_runtime_lock(_BROWSER_RUNTIME_LOCK_NAME):
+            for headless in _resolve_browser_modes():
+                runtime_dir: Path | None = None
+                try:
+                    runtime_dir = create_seeded_profile_dir(seed_profile_dir, prefix="trr-imdb-profile-")
+                    with sync_playwright() as playwright:
+                        context = launch_persistent_context(
+                            playwright,
+                            user_data_dir=str(runtime_dir),
+                            headless=headless,
+                        )
+                        try:
+                            page = context.new_page()
+                            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                            try:
+                                page.wait_for_selector(
+                                    "[data-testid^='sub-section-'], .full-credits-page-container",
+                                    timeout=wait_ms,
+                                )
+                            except PlaywrightTimeoutError:
+                                page.wait_for_timeout(wait_ms)
+                            html = page.content()
+                            if _looks_like_fullcredits_html(html):
+                                return html
+                            if verbose:
+                                status = getattr(response, "status", None)
+                                print(
+                                    "IMDb fullcredits browser fallback did not load credits "
+                                    f"(status={status}, headless={headless})."
+                                )
+                        finally:
+                            context.close()
+                except Exception as exc:
+                    if verbose:
+                        print(f"IMDb fullcredits browser fallback failed (headless={headless}): {exc}")
+                finally:
+                    if runtime_dir is not None:
+                        shutil.rmtree(runtime_dir, ignore_errors=True)
+    except RuntimeError as exc:
+        if verbose and not str(exc).startswith("browser_runtime_locked:"):
+            print(f"IMDb fullcredits browser fallback lock failed: {exc}")
+        return None
+
+    return None
 
 
 def _extract_imdb_name_id(value: str | None) -> str | None:
@@ -275,6 +439,115 @@ def _build_role_text(role_anchor) -> str | None:
     return base_text
 
 
+def _normalize_whitespace(value: str | None) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def _normalize_crew_section_title(value: str | None) -> str | None:
+    normalized = _normalize_whitespace(value).casefold()
+    if not normalized:
+        return None
+    return _IMDB_ALLOWED_CREW_SECTIONS.get(normalized)
+
+
+def _extract_heading_text(section) -> str | None:
+    heading = section.find("h3")
+    if heading is None:
+        return None
+    span = heading.find("span")
+    if span is not None:
+        text = _normalize_whitespace(span.get_text(" ", strip=True))
+        if text:
+            return text
+    return _normalize_whitespace(heading.get_text(" ", strip=True))
+
+
+def _parse_episode_count(value: str | None) -> int | None:
+    text = _normalize_whitespace(value)
+    match = re.search(r"(\d+)\s+episodes?\b", text, re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _parse_optional_int_like(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+    return None
+
+
+def _parse_years_label(value: str | None) -> str | None:
+    text = _normalize_whitespace(value)
+    match = re.search(r"(\d{4}(?:[–-]\d{4})?)\s*$", text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _extract_crew_role_text(metadata_container, *, name: str) -> str | None:
+    if metadata_container is None:
+        return None
+    name_folded = _normalize_whitespace(name).casefold()
+    for span in metadata_container.find_all("span"):
+        text = _normalize_whitespace(span.get_text(" ", strip=True))
+        if not text:
+            continue
+        folded = text.casefold()
+        if folded == name_folded:
+            continue
+        if "episode" in folded:
+            continue
+        if re.search(r"\b\d{4}\b", text):
+            continue
+        return text
+    return None
+
+
+def _parse_crew_items_from_section(section, *, credit_category: str) -> list[CrewRow]:
+    rows: list[CrewRow] = []
+    items = section.find_all("li", attrs={"data-testid": "name-credits-list-item"})
+    for idx, item in enumerate(items, start=1):
+        name_anchor = None
+        name = ""
+        for candidate in item.find_all("a", href=re.compile(r"/name/nm\d+", re.IGNORECASE)):
+            candidate_name = _normalize_whitespace(candidate.get_text(" ", strip=True))
+            if candidate_name:
+                name_anchor = candidate
+                name = candidate_name
+                break
+        if not name_anchor or not name:
+            continue
+
+        name_id = _extract_imdb_name_id(name_anchor.get("href"))
+        if not name_id:
+            continue
+
+        metadata_container = item.select_one(".name-credits--crew-metadata")
+        if metadata_container is None:
+            metadata_container = item
+        episodes_button = metadata_container.find("button")
+        episodes_label = _normalize_whitespace(episodes_button.get_text(" ", strip=True)) if episodes_button else None
+        metadata_text = _normalize_whitespace(metadata_container.get_text(" ", strip=True))
+        rows.append(
+            CrewRow(
+                name_id=name_id,
+                name=name,
+                credit_category=credit_category,
+                role=_extract_crew_role_text(metadata_container, name=name),
+                episode_count=_parse_episode_count(episodes_label or metadata_text),
+                episodes_label=episodes_label,
+                years_label=_parse_years_label(metadata_text),
+                display_order=idx,
+            )
+        )
+
+    return rows
+
+
 def _parse_cast_items_from_section(section, *, series_id: str | None, job_category_id: str | None) -> list[CastRow]:
     rows: list[CastRow] = []
     items = section.find_all("li", attrs={"data-testid": "name-credits-list-item"})
@@ -303,6 +576,9 @@ def _parse_cast_items_from_section(section, *, series_id: str | None, job_catego
             role_anchor = item.find("a", href=re.compile(r"/characters/", re.IGNORECASE))
 
         raw_role_text = _build_role_text(role_anchor)
+        metadata_text = _normalize_whitespace(item.get_text(" ", strip=True))
+        episodes_button = item.find("button")
+        episodes_label = _normalize_whitespace(episodes_button.get_text(" ", strip=True)) if episodes_button else None
 
         rows.append(
             CastRow(
@@ -311,6 +587,9 @@ def _parse_cast_items_from_section(section, *, series_id: str | None, job_catego
                 billing_order=idx,
                 raw_role_text=raw_role_text,
                 job_category_id=job_category_id,
+                episode_count=_parse_episode_count(episodes_label or metadata_text),
+                episodes_label=episodes_label,
+                years_label=_parse_years_label(metadata_text),
             )
         )
     return rows
@@ -352,6 +631,14 @@ def _parse_cast_items_from_legacy_table(
 
 
 def parse_fullcredits_cast_html(html: str, *, series_id: str | None = None) -> list[CastRow]:
+    return parse_fullcredits_html(html, series_id=series_id).cast_rows
+
+
+def parse_fullcredits_crew_html(html: str) -> list[CrewRow]:
+    return parse_fullcredits_html(html).crew_rows
+
+
+def parse_fullcredits_html(html: str, *, series_id: str | None = None) -> FullCreditsParseResult:
     soup = BeautifulSoup(html, "html.parser")
 
     job_category_id = _extract_cast_group_id_from_soup(soup)
@@ -366,20 +653,25 @@ def parse_fullcredits_cast_html(html: str, *, series_id: str | None = None) -> l
     if job_category_id:
         cast_section = soup.find(attrs={"data-testid": f"sub-section-{job_category_id}"})
 
+    cast_rows: list[CastRow] = []
     if cast_section is not None:
-        rows = _parse_cast_items_from_section(
+        cast_rows = _parse_cast_items_from_section(
             cast_section,
             series_id=series_id,
             job_category_id=job_category_id,
         )
-        if rows:
-            return rows
 
-    legacy_rows = _parse_cast_items_from_legacy_table(soup, job_category_id=job_category_id)
-    if legacy_rows:
-        return legacy_rows
+    if not cast_rows:
+        cast_rows = _parse_cast_items_from_legacy_table(soup, job_category_id=job_category_id)
 
-    return []
+    crew_rows: list[CrewRow] = []
+    for section in soup.find_all("section"):
+        credit_category = _normalize_crew_section_title(_extract_heading_text(section))
+        if not credit_category:
+            continue
+        crew_rows.extend(_parse_crew_items_from_section(section, credit_category=credit_category))
+
+    return FullCreditsParseResult(cast_rows=cast_rows, crew_rows=crew_rows)
 
 
 def fetch_fullcredits_cast(
@@ -625,6 +917,10 @@ def normalize_graphql_credits_to_cast_rows(
                     role_parts.append(str(char_name))
 
         raw_role_text = ", ".join(role_parts) if role_parts else None
+        episode_count_raw = (node.get("episodeCredits") or {}).get("total")
+        episode_count = episode_count_raw if isinstance(episode_count_raw, int) else _parse_optional_int_like(
+            episode_count_raw
+        )
 
         # IMPORTANT: The GraphQL query (fetch_title_credits_paginated_v2) already filters
         # by category_id=IMDB_JOB_CATEGORY_SELF, so ALL credits returned are self roles.
@@ -640,6 +936,12 @@ def normalize_graphql_credits_to_cast_rows(
                 billing_order=idx,
                 raw_role_text=raw_role_text,
                 job_category_id=job_category_id,
+                episode_count=episode_count if isinstance(episode_count, int) else None,
+                episodes_label=(
+                    f"{int(episode_count)} episode" if episode_count == 1 else f"{int(episode_count)} episodes"
+                )
+                if isinstance(episode_count, int)
+                else None,
             )
         )
 

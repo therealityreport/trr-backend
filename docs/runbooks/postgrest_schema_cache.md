@@ -27,7 +27,7 @@ The official Supabase solution is to send a PostgreSQL `NOTIFY` signal:
 
 **Using psql:**
 ```bash
-psql "$SUPABASE_DB_URL" -c "NOTIFY pgrst, 'reload schema';"
+./scripts/db/run_sql.sh -c "NOTIFY pgrst, 'reload schema';"
 ```
 
 **Using Supabase SQL Editor (hosted Supabase):**
@@ -128,7 +128,7 @@ The helper automatically catches PGRST202 and prints the reload command.
 
 1. **Verify the function exists in PostgreSQL:**
    ```bash
-   psql "$SUPABASE_DB_URL" -c "\\df+ core.your_function"
+   ./scripts/db/run_sql.sh -c "\\df+ core.your_function"
    ```
 
 2. **Check function grants (service_role needs access):**

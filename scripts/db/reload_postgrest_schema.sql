@@ -5,7 +5,7 @@
 -- This avoids PGRST204 errors ("Could not find column X in the schema cache").
 --
 -- Usage:
---   psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql
+--   ./scripts/db/run_sql.sh scripts/db/reload_postgrest_schema.sql
 -- =============================================================================
 
 \echo 'Reloading PostgREST schema cache...'

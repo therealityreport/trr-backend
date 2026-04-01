@@ -5,21 +5,11 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
-from functools import lru_cache
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException
 
 from trr_backend.db.session import DbSession, get_db_session
-
-# Load environment variables if running standalone
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -53,34 +43,6 @@ def _looks_like_service_role(key: str) -> bool:
 
 def _looks_like_anon_key(key: str) -> bool:
     return key.startswith("sb_publishable_") or _jwt_role(key) == "anon"
-
-
-@lru_cache
-def get_supabase_url() -> str:
-    url = os.getenv("SUPABASE_URL")
-    if not url:
-        raise RuntimeError("SUPABASE_URL environment variable is not set")
-    return url
-
-
-@lru_cache
-def get_supabase_anon_key() -> str:
-    key = os.getenv("SUPABASE_ANON_KEY")
-    if not key:
-        raise RuntimeError("SUPABASE_ANON_KEY environment variable is not set")
-    if _looks_like_service_role(key):
-        raise RuntimeError("SUPABASE_ANON_KEY appears to be a service role key; use the anon key instead")
-    return key
-
-
-@lru_cache
-def get_supabase_service_key() -> str:
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    if not key:
-        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY environment variable is not set")
-    if _looks_like_anon_key(key):
-        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY appears to be an anon key; use the service role key instead")
-    return key
 
 
 def get_supabase_client() -> Client:

@@ -33,10 +33,12 @@ from trr_backend.ingestion.shows_from_lists import (
 from trr_backend.ingestion.tmdb_show_backfill import resolve_tmdb_id_from_find_payload
 from trr_backend.integrations.imdb.episodic_client import IMDB_JOB_CATEGORY_SELF, HttpImdbEpisodicClient
 from trr_backend.integrations.imdb.fullcredits_cast_parser import (
+    HttpImdbFullCreditsClient,
     extract_person_images_from_graphql,
     fetch_fullcredits_cast_with_fallback,
     filter_self_cast_rows,
     normalize_graphql_credits_to_cast_rows,
+    parse_fullcredits_html,
 )
 from trr_backend.integrations.imdb.graphql_operations import (
     fetch_title_credits_paginated_v2,
@@ -117,6 +119,16 @@ _IMDB_NAME_ID_RE = re.compile(r"(nm[0-9]+)", re.IGNORECASE)
 _IMDB_TITLE_ID_RE = re.compile(r"^tt[0-9]+$", re.IGNORECASE)
 _SHOW_TYPED_EXTERNAL_ID_KEYS = ("tvdb_id", "tvrage_id", "wikidata_id")
 _SHOW_SOCIAL_EXTERNAL_ID_KEYS = ("facebook_id", "instagram_id", "twitter_id")
+_IMDB_ALLOWLISTED_CREW_CATEGORIES = (
+    "Producers",
+    "Editors",
+    "Casting Director",
+    "Casting Department",
+    "Visual Effects",
+    "Production Design",
+    "Editorial Department",
+    "Production Department",
+)
 
 
 def _dedupe_preserve_order(values: Sequence[str]) -> list[str]:
@@ -395,27 +407,11 @@ def _ingest_imdb_cast(
         if override and override.min_episodes is not None:
             min_episodes = int(override.min_episodes)
 
-        if refresh_cast:
-            # Remove non-manual scraped credits so this run is authoritative.
-            # Keep any manual credits intact.
-            try:
-                delete_resp = (
-                    db.schema("core")
-                    .table("credits")
-                    .delete()
-                    .eq("show_id", show_id)
-                    .eq("credit_category", "Self")
-                    .not_.eq("source_type", "manual")
-                    .execute()
-                )
-                if hasattr(delete_resp, "error") and delete_resp.error:
-                    raise RuntimeError(str(delete_resp.error))
-            except Exception as exc:  # noqa: BLE001
-                print(f"IMDb cast: WARNING failed to delete existing credits show_id={show_id} error={exc}")
-
         cast_rows = []
         source_type = "fullcredits_html"
         person_images: list[dict[str, Any]] = []
+        crew_rows: list[Any] = []
+        html_fullcredits_loaded = False
         try:
             if imdb_sleep_ms:
                 time.sleep(imdb_sleep_ms / 1000.0)
@@ -450,6 +446,22 @@ def _ingest_imdb_cast(
                 )
                 continue
 
+        try:
+            html_client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+            html = html_client.fetch_fullcredits_page(imdb_id, verbose=False)
+            parsed_fullcredits = parse_fullcredits_html(html, series_id=imdb_id)
+            html_self_rows = filter_self_cast_rows(parsed_fullcredits.cast_rows)
+            if html_self_rows:
+                cast_rows = html_self_rows
+                source_type = "fullcredits_html"
+            crew_rows = parsed_fullcredits.crew_rows
+            html_fullcredits_loaded = True
+        except Exception as html_exc:  # noqa: BLE001
+            print(
+                f"IMDb cast: fullcredits HTML unavailable imdb_id={imdb_id} error={html_exc}",
+                file=sys.stderr,
+            )
+
         if not cast_rows:
             failed_credits += 1
             print(
@@ -467,7 +479,8 @@ def _ingest_imdb_cast(
             )
             continue
 
-        missing_ids = [row.name_id for row in cast_rows if row.name_id not in people_cache]
+        credit_people_rows = [*cast_rows, *crew_rows]
+        missing_ids = [row.name_id for row in credit_people_rows if row.name_id not in people_cache]
         if missing_ids:
             existing_people = fetch_people_by_imdb_ids(db, missing_ids)
             existing_updates: list[tuple[str, dict[str, Any]]] = []
@@ -503,7 +516,7 @@ def _ingest_imdb_cast(
                     )
 
         new_people_rows: list[dict[str, Any]] = []
-        for row in cast_rows:
+        for row in credit_people_rows:
             imdb_person_id = row.name_id.strip().lower()
             if not imdb_person_id or imdb_person_id in people_cache:
                 continue
@@ -550,13 +563,85 @@ def _ingest_imdb_cast(
                     "role": row.raw_role_text,
                     "credit_category": "Self",
                     "source_type": source_type,
-                    "metadata": {},
+                    "metadata": {
+                        "imdb_name_id": row.name_id,
+                        "episode_count": row.episode_count,
+                        "episodes_label": row.episodes_label,
+                        "years_label": row.years_label,
+                    },
                 }
             )
 
         if credit_rows:
+            if refresh_cast:
+                try:
+                    delete_resp = (
+                        db.schema("core")
+                        .table("credits")
+                        .delete()
+                        .eq("show_id", show_id)
+                        .eq("credit_category", "Self")
+                        .not_.eq("source_type", "manual")
+                        .execute()
+                    )
+                    if hasattr(delete_resp, "error") and delete_resp.error:
+                        raise RuntimeError(str(delete_resp.error))
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"IMDb cast: WARNING failed to delete existing self credits show_id={show_id} error={exc}",
+                        file=sys.stderr,
+                    )
             insert_credits_ignore_conflicts(db, credit_rows)
             total_memberships += len(credit_rows)
+
+        if html_fullcredits_loaded:
+            crew_credit_rows: list[dict[str, Any]] = []
+            for row in crew_rows:
+                if row.credit_category not in _IMDB_ALLOWLISTED_CREW_CATEGORIES:
+                    continue
+                person_id = people_cache.get(row.name_id.strip().lower())
+                if not person_id:
+                    continue
+                crew_credit_rows.append(
+                    {
+                        "show_id": show_id,
+                        "person_id": person_id,
+                        "billing_order": row.display_order,
+                        "role": row.role,
+                        "credit_category": row.credit_category,
+                        "source_type": "fullcredits_html",
+                        "metadata": {
+                            "imdb_name_id": row.name_id,
+                            "episode_count": row.episode_count,
+                            "episodes_label": row.episodes_label,
+                            "years_label": row.years_label,
+                            "source_page_url": f"https://www.imdb.com/title/{imdb_id}/fullcredits/",
+                            "display_order": row.display_order,
+                        },
+                    }
+                )
+
+            if refresh_cast:
+                try:
+                    delete_resp = (
+                        db.schema("core")
+                        .table("credits")
+                        .delete()
+                        .eq("show_id", show_id)
+                        .in_("credit_category", list(_IMDB_ALLOWLISTED_CREW_CATEGORIES))
+                        .not_.eq("source_type", "manual")
+                        .execute()
+                    )
+                    if hasattr(delete_resp, "error") and delete_resp.error:
+                        raise RuntimeError(str(delete_resp.error))
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"IMDb cast: WARNING failed to delete existing crew credits show_id={show_id} error={exc}",
+                        file=sys.stderr,
+                    )
+
+            if crew_credit_rows:
+                insert_credits_ignore_conflicts(db, crew_credit_rows)
 
         if person_images:
             try:

@@ -11,6 +11,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
+from api.auth import require_admin
 from api.main import app
 from api.routers import admin_asset_batch_jobs
 
@@ -20,6 +21,7 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     payload = {
         "sub": subject,
         "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "service_role",
     }
@@ -29,6 +31,17 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def override_admin_dependency():
+    app.dependency_overrides[require_admin] = lambda: {
+        "id": "service_role:test",
+        "role": "service_role",
+        "email": None,
+    }
+    yield
+    app.dependency_overrides.pop(require_admin, None)
 
 
 class TestAssetBatchJobsStream:

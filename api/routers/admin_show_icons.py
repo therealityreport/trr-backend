@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.db import pg
 from trr_backend.media.s3_mirror import (
@@ -172,7 +172,7 @@ async def upload_show_icon(
     show_key: str,
     file: UploadFile = File(...),
     db: SupabaseAdminClient = None,
-    admin: AdminUser = None,
+    admin: InternalAdminUser = None,
 ) -> ShowIconRecord:
     normalized_show_key = _validate_show_key(show_key)
     content_type = _validate_content_type(file.content_type)
@@ -219,7 +219,7 @@ async def upload_show_icon(
 def list_show_icons(
     show_key: str,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> ListShowIconsResponse:
     normalized_show_key = _validate_show_key(show_key)
     rows = _list_icon_records(db, normalized_show_key)
@@ -231,7 +231,7 @@ def delete_show_icon(
     show_key: str,
     icon_id: UUID,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> DeleteShowIconResponse:
     normalized_show_key = _validate_show_key(show_key)
     icon_id_str = str(icon_id)

@@ -20,11 +20,11 @@ def _normalize_api_base_url(raw: str) -> str:
 
 
 def _database_url() -> str:
-    for key in ("SUPABASE_DB_URL", "DATABASE_URL", "TRR_DB_URL"):
+    for key in ("TRR_DB_URL", "TRR_DB_FALLBACK_URL", "DATABASE_URL", "SUPABASE_DB_URL"):
         value = (os.getenv(key) or "").strip()
         if value:
             return value
-    raise ValueError("SUPABASE_DB_URL, DATABASE_URL, or TRR_DB_URL is required")
+    raise ValueError("TRR_DB_URL, optional TRR_DB_FALLBACK_URL, or DATABASE_URL is required")
 
 
 def _service_headers() -> dict[str, str]:

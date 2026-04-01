@@ -174,7 +174,7 @@ make schema-docs-check
 Notes:
 - `make schema-docs` and `make schema-docs-check` auto-load `TRR-Backend/.env.local` and `TRR-Backend/.env` before resolving the database URL.
 - `make schema-docs-check` auto-resolves the DB URL from `supabase status` when Supabase is running.
-- If Supabase is stopped, it will prompt you to start Supabase or set `SUPABASE_DB_URL`.
+- If Supabase is stopped, it will prompt you to start Supabase or set `TRR_DB_URL` (or `TRR_DB_FALLBACK_URL` for an explicit break-glass fallback).
 
 ## CI-style local run (optional)
 

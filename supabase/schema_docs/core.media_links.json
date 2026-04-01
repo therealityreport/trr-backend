@@ -104,17 +104,6 @@
   "unique_constraints": [],
   "indexes": [
     {
-      "name": "idx_media_links_person_gallery_entity_kind_id",
-      "columns": [
-        "entity_type",
-        "entity_id",
-        "kind",
-        "id) WHERE ((entity_type = 'person'::text) AND (kind = 'gallery'::text)"
-      ],
-      "unique": false,
-      "definition": "CREATE INDEX idx_media_links_person_gallery_entity_kind_id ON core.media_links USING btree (entity_type, entity_id, kind, id) WHERE ((entity_type = 'person'::text) AND (kind = 'gallery'::text))"
-    },
-    {
       "name": "media_links_entity_idx",
       "columns": [
         "entity_type",

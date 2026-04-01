@@ -12,6 +12,7 @@ import requests
 
 from trr_backend.db import pg
 from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.socials.tiktok.scraper import TikTokScraper
 from trr_backend.utils.env import load_env
 
 _REHYDRATION_RE = re.compile(
@@ -34,68 +35,34 @@ class BackfillCounters:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill TikTok saves (collectCount) for existing season posts.")
-    parser.add_argument(
-        "--show-name",
-        default="The Real Housewives of Salt Lake City",
-        help="Show name used with --season-number (default: RHOSLC).",
-    )
-    parser.add_argument(
-        "--season-number",
-        type=int,
-        default=6,
-        help="Season number used with --show-name when --season-id is omitted (default: 6).",
-    )
-    parser.add_argument("--season-id", default="", help="Explicit season_id UUID override.")
+    parser.add_argument("--season-id", required=True, help="Explicit season_id UUID to backfill.")
     parser.add_argument("--limit", type=int, default=0, help="Optional max rows to process.")
+    parser.add_argument("--offset", type=int, default=0, help="Optional row offset for resumable batching.")
     parser.add_argument("--delay-seconds", type=float, default=0.4, help="Delay between TikTok requests.")
     parser.add_argument("--dry-run", action="store_true", help="Compute values without writing updates.")
     return parser.parse_args()
 
 
 def _coerce_non_negative_int(value: Any) -> int:
-    if value is None:
-        return 0
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return max(0, value)
-    if isinstance(value, float):
-        return max(0, int(value))
-    text = str(value).strip()
-    if not text:
-        return 0
-    try:
-        return max(0, int(text))
-    except ValueError:
-        return 0
+    return TikTokScraper._safe_int_metric(value)
 
 
 def _resolve_season_id(*, season_id: str, show_name: str, season_number: int) -> str:
-    if season_id.strip():
-        return season_id.strip()
-    row = pg.fetch_one(
-        """
-        select s.id::text as season_id
-        from core.seasons s
-        join core.shows sh on sh.id = s.show_id
-        where lower(sh.name) = lower(%s)
-          and s.season_number = %s
-        limit 1
-        """,
-        [show_name, season_number],
-    )
-    if not row:
-        raise SystemExit(
-            f"Season not found for show={show_name!r} season_number={season_number}. Provide --season-id explicitly."
-        )
-    return str(row.get("season_id") or "").strip()
+    del show_name, season_number
+    resolved = season_id.strip()
+    if not resolved:
+        raise SystemExit("Provide --season-id explicitly.")
+    return resolved
 
 
-def _load_candidate_rows(*, season_id: str, limit: int, has_saves_column: bool) -> list[dict[str, Any]]:
+def _load_candidate_rows(*, season_id: str, limit: int, offset: int, has_saves_column: bool) -> list[dict[str, Any]]:
     limit_clause = "limit %s" if limit > 0 else ""
+    offset_clause = "offset %s" if offset > 0 else ""
     params: list[Any] = [season_id]
     if limit > 0:
         params.append(limit)
+    if offset > 0:
+        params.append(offset)
     existing_saves_expr = (
         """
         coalesce(
@@ -122,15 +89,27 @@ def _load_candidate_rows(*, season_id: str, limit: int, has_saves_column: bool) 
     )
     return pg.fetch_all(
         f"""
+        with candidate_posts as (
+          select
+            p.id::text as id,
+            p.video_id,
+            coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '') as account,
+            p.posted_at,
+            p.scraped_at,
+            {existing_saves_expr} as existing_saves
+          from social.tiktok_posts p
+          where p.season_id = %s
+        )
         select
-          p.id::text as id,
-          p.video_id,
-          coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '') as account,
-          {existing_saves_expr} as existing_saves
-        from social.tiktok_posts p
-        where p.season_id = %s
-        order by coalesce(p.posted_at, p.scraped_at) desc
+          id,
+          video_id,
+          account,
+          existing_saves
+        from candidate_posts
+        where existing_saves <= 0
+        order by coalesce(posted_at, scraped_at) desc
         {limit_clause}
+        {offset_clause}
         """,
         params,
     )
@@ -211,11 +190,26 @@ def _build_video_url(*, account: str, video_id: str) -> str:
     return f"https://www.tiktok.com/@_/video/{video_id}"
 
 
+def _candidate_video_urls(*, account: str, video_id: str) -> list[str]:
+    urls = [f"https://www.tiktok.com/@_/video/{video_id}"]
+    handle = str(account or "").strip().lstrip("@")
+    if handle:
+        urls.append(_build_video_url(account=handle, video_id=video_id))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        ordered.append(url)
+    return ordered
+
+
 def _fetch_saves(
     *,
     session: requests.Session,
     cookies: dict[str, str],
-    video_url: str,
+    video_urls: list[str],
     video_id: str,
     timeout: tuple[int, int] = (10, 45),
 ) -> tuple[int | None, str | None]:
@@ -229,19 +223,25 @@ def _fetch_saves(
         ),
         "referer": "https://www.tiktok.com/",
     }
-    try:
-        response = session.get(video_url, headers=headers, cookies=cookies, timeout=timeout)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        return None, f"request_failed:{exc}"
+    last_error = "video_url_missing"
+    for video_url in video_urls:
+        try:
+            response = session.get(video_url, headers=headers, cookies=cookies, timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            last_error = f"request_failed:{exc}"
+            continue
 
-    payload = _extract_embedded_payload(response.text or "")
-    if not payload:
-        return None, "embedded_payload_missing"
-    item = _extract_candidate_item(payload, video_id=video_id)
-    if not item:
-        return None, "item_struct_missing"
-    return _extract_saves_from_item(item), None
+        payload = _extract_embedded_payload(response.text or "")
+        if not payload:
+            last_error = "embedded_payload_missing"
+            continue
+        item = _extract_candidate_item(payload, video_id=video_id)
+        if not item:
+            last_error = "item_struct_missing"
+            continue
+        return _extract_saves_from_item(item), None
+    return None, last_error
 
 
 def _update_row(*, row_id: str, saves: int, has_saves_column: bool) -> None:
@@ -284,12 +284,13 @@ def main() -> int:
     has_saves_column = social_repo._platform_posts_has_column("tiktok", "saves")  # noqa: SLF001
     season_id = _resolve_season_id(
         season_id=str(args.season_id or ""),
-        show_name=str(args.show_name or ""),
-        season_number=max(1, int(args.season_number)),
+        show_name="",
+        season_number=0,
     )
     rows = _load_candidate_rows(
         season_id=season_id,
         limit=max(0, int(args.limit)),
+        offset=max(0, int(args.offset)),
         has_saves_column=has_saves_column,
     )
     cookies = social_repo._load_tiktok_cookies()  # noqa: SLF001
@@ -309,11 +310,11 @@ def main() -> int:
                 failures.append({"row_id": row_id or "?", "video_id": video_id or "?", "reason": "missing_id"})
                 continue
 
-            video_url = _build_video_url(account=account, video_id=video_id)
+            video_urls = _candidate_video_urls(account=account, video_id=video_id)
             fetched_saves, fail_reason = _fetch_saves(
                 session=session,
                 cookies=cookies,
-                video_url=video_url,
+                video_urls=video_urls,
                 video_id=video_id,
             )
             if fetched_saves is None:
@@ -342,10 +343,9 @@ def main() -> int:
         json.dumps(
             {
                 "season_id": season_id,
-                "show_name": str(args.show_name or ""),
-                "season_number": max(1, int(args.season_number)),
                 "dry_run": bool(args.dry_run),
                 "has_saves_column": bool(has_saves_column),
+                "offset": max(0, int(args.offset)),
                 "totals": {
                     "scanned": counters.scanned,
                     "updated": counters.updated,

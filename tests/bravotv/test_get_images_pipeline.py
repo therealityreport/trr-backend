@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import types
+
 from trr_backend.bravotv.get_images_pipeline import (
     _extract_bravo_image_people_names,
     _extract_people_from_text,
+    _normalize_getty_record,
     _normalize_nup_key,
     _refreshed_artifacts,
     _selected_source_families,
     _split_caption_people,
+    acquire_best_image,
     build_bridge_and_catalog,
+    run_get_images_pipeline,
 )
 
 
@@ -122,3 +127,125 @@ def test_build_bridge_and_catalog_sends_ambiguous_caption_matches_to_manual_revi
 
     assert any(row.get("strategy") == "manual_review" for row in bridge_rows)
     assert len(merged_catalog) == 3
+
+
+def test_normalize_getty_record_preserves_large_and_thumb_urls() -> None:
+    asset = {
+        "editorial_id": "928663262",
+        "object_name": "NUP_181952_0005.JPG",
+        "caption": "Pictured: Andy Cohen, Brandi Glanville",
+        "event_name": "Watch What Happens Live Season 15",
+        "detail_url": "https://www.gettyimages.com/detail/news-photo/example/928663262",
+        "thumbUrl": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=170x170&w=gi&k=20&c=thumb",
+        "compUrl": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=594x594&w=gi&k=20&c=comp",
+        "galleryComp1024Url": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=1024x1024&w=gi&k=20&c=gallery-comp",
+        "highResCompUrl": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=1365x2048&w=gi&k=20&c=hires",
+        "galleryHighResCompUrl": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=2048x2048&w=gi&k=20&c=gallery-hires",
+        "assetDimensions": {"width": 2048, "height": 1365},
+    }
+
+    normalized = _normalize_getty_record(asset, known_people=["Andy Cohen", "Brandi Glanville"])
+
+    assert normalized["source_url"] == asset["galleryHighResCompUrl"]
+    assert normalized["preview_image_url"] == asset["galleryComp1024Url"]
+    assert normalized["getty_original_image_url"] == asset["galleryHighResCompUrl"]
+    assert isinstance(normalized["thumb_url"], str)
+    assert "612x612" in str(normalized["thumb_url"])
+    assert "w=0" in str(normalized["thumb_url"])
+
+
+def test_acquire_best_image_uploads_getty_large_and_thumb(monkeypatch) -> None:
+    mirrored_urls: list[str] = []
+
+    def fake_mirror(url: str):  # noqa: ANN001
+        mirrored_urls.append(url)
+        suffix = "thumb" if "612x612" in url else "full"
+        return types.SimpleNamespace(
+            status="mirrored",
+            hosted_url=f"https://cdn.example.com/{suffix}.jpg",
+            hosted_key=f"shared-media/{suffix}.jpg",
+            sha256=f"sha-{suffix}",
+            content_type="image/jpeg",
+            size_bytes=1234 if suffix == "full" else 123,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        "trr_backend.bravotv.get_images_pipeline.mirror_url_to_s3",
+        lambda url: fake_mirror(url),
+    )
+
+    record = {
+        "id": "group-1",
+        "per_source": {
+            "getty": {
+                "source_url": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=2048x2048&w=gi&k=20&c=gallery-hires",
+                "thumb_url": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=612x612&w=0&k=20&c=thumb-clean",
+                "source_page_url": "https://www.gettyimages.com/detail/news-photo/example/928663262",
+            }
+        },
+    }
+
+    acquisition = acquire_best_image(record)
+
+    assert mirrored_urls == [
+        "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=2048x2048&w=gi&k=20&c=gallery-hires",
+        "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=612x612&w=0&k=20&c=thumb-clean",
+    ]
+    assert acquisition["status"] == "uploaded"
+    assert acquisition["source"] == "getty"
+    assert acquisition["hosted_url"] == "https://cdn.example.com/full.jpg"
+    assert acquisition["hosted_thumb_url"] == "https://cdn.example.com/thumb.jpg"
+    assert acquisition["source_page_url"] == "https://www.gettyimages.com/detail/news-photo/example/928663262"
+
+
+def test_run_get_images_pipeline_uses_prefetched_getty_assets_without_live_collect(monkeypatch, tmp_path) -> None:
+    prefetched_assets = [
+        {
+            "editorial_id": "928663262",
+            "object_name": "NUP_181952_0005.JPG",
+            "caption": "Pictured: Andy Cohen",
+            "event_name": "Watch What Happens Live",
+            "detail_url": "https://www.gettyimages.com/detail/news-photo/example/928663262",
+            "galleryHighResCompUrl": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=2048x2048&w=gi&k=20&c=gallery-hires",
+            "galleryComp1024Url": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=1024x1024&w=gi&k=20&c=gallery-comp",
+            "thumbUrl": "https://media.gettyimages.com/id/928663262/photo/example.jpg?s=170x170&w=gi&k=20&c=thumb",
+            "assetDimensions": {"width": 2048, "height": 1365},
+        }
+    ]
+
+    monkeypatch.setattr(
+        "trr_backend.bravotv.get_images_pipeline._collect_getty_person",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("live Getty collection should be skipped")),
+    )
+    monkeypatch.setattr("trr_backend.bravotv.get_images_pipeline._collect_nbcumv_person", lambda *args, **kwargs: [])
+    monkeypatch.setattr("trr_backend.bravotv.get_images_pipeline._collect_bravo_person", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "trr_backend.bravotv.get_images_pipeline.mirror_url_to_s3",
+        lambda url: types.SimpleNamespace(
+            status="mirrored",
+            hosted_url=f"https://cdn.example.com/{'thumb' if '612x612' in url else 'full'}.jpg",
+            hosted_key="shared-media/test.jpg",
+            sha256="sha-test",
+            content_type="image/jpeg",
+            size_bytes=1234,
+            error=None,
+        ),
+    )
+
+    result = run_get_images_pipeline(
+        person_name="Andy Cohen",
+        output_dir=tmp_path,
+        sources=["getty"],
+        getty_prefetched_assets=prefetched_assets,
+        getty_prefetch_mode="full",
+    )
+
+    manifest = result["manifest"]
+    raw_getty = (tmp_path / "raw" / "getty.json").read_text()
+    merged_catalog = (tmp_path / "merged_catalog.json").read_text()
+
+    assert manifest["counts"]["getty"] == 1
+    assert any("getty_prefetched_assets" in str(note) for note in manifest["notes"])
+    assert "928663262" in raw_getty
+    assert "hosted_thumb_url" in merged_catalog

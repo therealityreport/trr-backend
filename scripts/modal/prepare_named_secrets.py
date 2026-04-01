@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import subprocess
 import sys
@@ -52,6 +53,20 @@ SOCIAL_AUTH_EXACT_KEYS = {
     "TWITTER_BEARER_TOKEN",
     "SOCIALBLADE_EMAIL",
     "SOCIALBLADE_PASSWORD",
+}
+FILE_BACKED_SOCIAL_AUTH_ENV_MAP = {
+    "SOCIAL_INSTAGRAM_COOKIES_FILE": "SOCIAL_INSTAGRAM_COOKIES_JSON",
+    "INSTAGRAM_COOKIES_FILE": "SOCIAL_INSTAGRAM_COOKIES_JSON",
+    "SOCIAL_TIKTOK_COOKIES_FILE": "SOCIAL_TIKTOK_COOKIES_JSON",
+    "TIKTOK_COOKIES_FILE": "SOCIAL_TIKTOK_COOKIES_JSON",
+    "SOCIAL_FACEBOOK_COOKIES_FILE": "SOCIAL_FACEBOOK_COOKIES_JSON",
+    "FACEBOOK_COOKIES_FILE": "SOCIAL_FACEBOOK_COOKIES_JSON",
+    "SOCIAL_THREADS_COOKIES_FILE": "SOCIAL_THREADS_COOKIES_JSON",
+    "THREADS_COOKIES_FILE": "SOCIAL_THREADS_COOKIES_JSON",
+    "SOCIAL_TWITTER_COOKIES_FILE": "SOCIAL_TWITTER_COOKIES_JSON",
+    "TWITTER_COOKIES_FILE": "SOCIAL_TWITTER_COOKIES_JSON",
+    "TWIKIT_COOKIES_FILE": "TWIKIT_COOKIES_JSON",
+    "SOCIALBLADE_COOKIES_FILE": "SOCIALBLADE_COOKIES_JSON",
 }
 
 
@@ -122,6 +137,50 @@ def _is_social_auth_env_key(key: str) -> bool:
     )
 
 
+def _resolve_env_file_path(raw_path: str) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (REPO_ROOT / candidate).resolve()
+    return candidate
+
+
+def _compact_secret_value(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return stripped
+    try:
+        return json.dumps(json.loads(stripped), separators=(",", ":"))
+    except json.JSONDecodeError:
+        return " ".join(line.strip() for line in stripped.splitlines() if line.strip())
+
+
+def _materialize_file_backed_social_auth(
+    source_values: dict[str, str],
+    social_values: dict[str, str],
+) -> dict[str, str]:
+    rendered = dict(social_values)
+    for file_env_key, inline_env_key in FILE_BACKED_SOCIAL_AUTH_ENV_MAP.items():
+        if (rendered.get(inline_env_key) or "").strip():
+            continue
+        file_path = (source_values.get(file_env_key) or "").strip()
+        if not file_path:
+            continue
+        resolved_path = _resolve_env_file_path(file_path)
+        if not resolved_path.is_file():
+            raise FileNotFoundError(
+                f"{file_env_key} points to a missing file: {resolved_path}. "
+                f"Remote Modal secrets cannot use local-only *_FILE auth paths."
+            )
+        file_contents = resolved_path.read_text(encoding="utf-8").strip()
+        if not file_contents:
+            raise ValueError(
+                f"{file_env_key} resolved to an empty file: {resolved_path}. "
+                f"Remote Modal secrets require non-empty auth payloads."
+            )
+        rendered[inline_env_key] = _compact_secret_value(file_contents)
+    return rendered
+
+
 def _load_source_env(path: Path) -> dict[str, str]:
     if not path.is_file():
         raise FileNotFoundError(f"Source env file not found: {path}")
@@ -152,7 +211,7 @@ def _split_env(values: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
             social_values[key] = value
             continue
         runtime_values[key] = value
-    return runtime_values, social_values
+    return runtime_values, _materialize_file_backed_social_auth(values, social_values)
 
 
 def _apply_runtime_overrides(values: dict[str, str], *, disabled: bool) -> dict[str, str]:
@@ -161,9 +220,7 @@ def _apply_runtime_overrides(values: dict[str, str], *, disabled: bool) -> dict[
         merged.pop(retired_name, None)
     canonical_db_url = (merged.get(CANONICAL_DB_ENV) or "").strip()
     if not canonical_db_url:
-        raise KeyError(
-            f"{CANONICAL_DB_ENV} is required in the source env to render the Modal runtime secret."
-        )
+        raise KeyError(f"{CANONICAL_DB_ENV} is required in the source env to render the Modal runtime secret.")
     merged[CANONICAL_DB_ENV] = canonical_db_url
     if disabled:
         return merged

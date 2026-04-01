@@ -206,3 +206,7 @@ def test_resolve_modal_function_hydrates_when_available(monkeypatch: pytest.Monk
     assert payload["resolved"] is True
     assert payload["reason"] is None
     assert hydrated["called"] is True
+
+
+def test_supports_admin_operation_includes_bravotv_image_runs() -> None:
+    assert modal_dispatch.supports_admin_operation("admin_bravotv_image_run") is True

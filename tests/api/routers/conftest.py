@@ -7,8 +7,15 @@ from uuid import uuid4
 
 import pytest
 
+from api.routers import socials as socials_router
 from trr_backend.pipeline import admin_operations as pipeline_admin_operations
 from trr_backend.repositories import admin_operations as admin_ops_repo
+
+
+@pytest.fixture(autouse=True)
+def _clear_social_router_caches() -> None:
+    socials_router._clear_account_profile_caches()
+    socials_router.invalidate_week_detail_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -119,10 +126,7 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
                 for op in operations.values()
                 if op.get("operation_type") == operation_type
                 and deepcopy(op.get("request_payload") or {}) == deepcopy(request_payload or {})
-                and (
-                    not normalized_statuses
-                    or str(op.get("status") or "").strip().lower() in normalized_statuses
-                )
+                and (not normalized_statuses or str(op.get("status") or "").strip().lower() in normalized_statuses)
             ]
             if not matches:
                 return None
@@ -225,7 +229,11 @@ def _in_memory_admin_operation_store(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(admin_ops_repo, "create_or_attach_operation", _create_or_attach_operation)
     monkeypatch.setattr(admin_ops_repo, "get_operation", _get_operation)
-    monkeypatch.setattr(admin_ops_repo, "get_latest_operation_for_request_payload", _get_latest_operation_for_request_payload)
+    monkeypatch.setattr(
+        admin_ops_repo,
+        "get_latest_operation_for_request_payload",
+        _get_latest_operation_for_request_payload,
+    )
     monkeypatch.setattr(admin_ops_repo, "append_operation_event", _append_operation_event)
     monkeypatch.setattr(admin_ops_repo, "stream_events_after_seq", _stream_events_after_seq)
     monkeypatch.setattr(admin_ops_repo, "update_operation_status", _update_operation_status)

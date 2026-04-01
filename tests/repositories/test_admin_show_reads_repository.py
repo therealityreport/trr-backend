@@ -273,6 +273,213 @@ def test_get_show_detail_strips_raw_metadata_fields(monkeypatch: pytest.MonkeyPa
     assert "imdb_meta" not in row
 
 
+def test_get_show_credits_filters_cast_to_curated_roles_and_groups_crew(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = [
+        [
+            {
+                "show_id": "show-1",
+                "person_id": "person-heather",
+                "person_name": "Heather Gay",
+                "total_episodes": 80,
+                "archive_episodes": 0,
+                "seasons_appeared": 4,
+                "season_numbers": [1, 2, 3, 4],
+                "latest_season": 4,
+                "roles": ["Housewife"],
+                "photo_url": "https://cdn.example/heather.jpg",
+            },
+            {
+                "show_id": "show-1",
+                "person_id": "person-andy",
+                "person_name": "Andy Cohen",
+                "total_episodes": 99,
+                "archive_episodes": 14,
+                "seasons_appeared": 6,
+                "season_numbers": [1, 2, 3, 4, 5, 6],
+                "latest_season": 6,
+                "roles": [],
+                "photo_url": "https://cdn.example/andy.jpg",
+            },
+        ],
+        [
+            {"person_id": "person-heather", "role_names": ["Housewife"]},
+        ],
+        [
+            {
+                "person_id": "person-heather",
+                "metadata": {"episode_count": 20, "episodes_label": "20 episodes"},
+            },
+            {
+                "person_id": "person-andy",
+                "metadata": {"episode_count": 31, "episodes_label": "31 episodes"},
+            },
+        ],
+        [
+            {
+                "credit_id": "credit-1",
+                "show_id": "show-1",
+                "person_id": "person-andy",
+                "person_name": "Andy Cohen",
+                "credit_category": "Producers",
+                "role": "executive producer",
+                "billing_order": 2,
+                "source_type": "imdb_fullcredits",
+                "metadata": {
+                    "episode_count": 107,
+                    "episodes_label": "107 episodes",
+                    "years_label": "2020-2026",
+                    "imdb_name_id": "nm0169212",
+                    "source_page_url": "https://www.imdb.com/title/tt11363282/fullcredits/",
+                    "display_order": 2,
+                },
+                "updated_at": "2026-03-31T12:00:00Z",
+                "imdb_id": "tt11363282",
+            }
+        ],
+    ]
+
+    def fake_fetch_all_rows(query: str, params: list[Any], cur: Any | None = None) -> list[dict[str, Any]]:
+        assert cur is None
+        assert query
+        assert params
+        return responses.pop(0)
+
+    monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all_rows)
+
+    payload, query_count = repo.get_show_credits("show-1")
+
+    assert query_count == 4
+    assert [row["person_name"] for row in payload["cast_roster"]] == ["Heather Gay"]
+    assert payload["cast_roster"][0]["roles"] == ["Housewife"]
+    assert payload["cast_roster"][0]["total_episodes"] == 80
+    assert payload["crew_sections"] == [
+        {
+            "title": "Producers",
+            "rows": [
+                {
+                    "credit_id": "credit-1",
+                    "person_id": "person-andy",
+                    "person_name": "Andy Cohen",
+                    "role": "executive producer",
+                    "billing_order": 2,
+                    "source_type": "imdb_fullcredits",
+                    "episode_count": 107,
+                    "episodes_label": "107 episodes",
+                    "years_label": "2020-2026",
+                    "imdb_name_id": "nm0169212",
+                    "display_order": 2,
+                }
+            ],
+        }
+    ]
+    assert payload["source_metadata"]["show_imdb_id"] == "tt11363282"
+
+
+def test_get_show_credits_falls_back_to_existing_cast_roles_when_curated_assignments_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        [
+            {
+                "show_id": "show-1",
+                "person_id": "person-heather",
+                "person_name": "Heather Gay",
+                "total_episodes": 80,
+                "archive_episodes": 0,
+                "seasons_appeared": 4,
+                "season_numbers": [1, 2, 3, 4],
+                "latest_season": 4,
+                "roles": ["Housewife"],
+                "photo_url": "https://cdn.example/heather.jpg",
+            },
+            {
+                "show_id": "show-1",
+                "person_id": "person-meredith",
+                "person_name": "Meredith Marks",
+                "total_episodes": 75,
+                "archive_episodes": 0,
+                "seasons_appeared": 4,
+                "season_numbers": [1, 2, 3, 4],
+                "latest_season": 4,
+                "roles": ["Housewife"],
+                "photo_url": "https://cdn.example/meredith.jpg",
+            },
+        ],
+        [],
+        [],
+        [],
+    ]
+
+    def fake_fetch_all_rows(query: str, params: list[Any], cur: Any | None = None) -> list[dict[str, Any]]:
+        assert cur is None
+        assert query
+        assert params
+        return responses.pop(0)
+
+    monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all_rows)
+
+    payload, query_count = repo.get_show_credits("show-1")
+
+    assert query_count == 4
+    assert [row["person_name"] for row in payload["cast_roster"]] == ["Heather Gay", "Meredith Marks"]
+    assert payload["cast_roster"][0]["roles"] == ["Housewife"]
+
+
+def test_get_show_credits_uses_self_credit_episode_count_metadata_when_occurrences_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        [
+            {
+                "show_id": "show-1",
+                "person_id": "person-andy",
+                "person_name": "Andy Cohen",
+                "total_episodes": 0,
+                "archive_episodes": 0,
+                "seasons_appeared": 0,
+                "season_numbers": [],
+                "latest_season": None,
+                "roles": ["Host"],
+                "photo_url": "https://cdn.example/andy.jpg",
+            }
+        ],
+        [],
+        [
+            {
+                "person_id": "person-andy",
+                "metadata": {"episode_count": 31, "episodes_label": "31 episodes"},
+            }
+        ],
+        [],
+    ]
+
+    def fake_fetch_all_rows(query: str, params: list[Any], cur: Any | None = None) -> list[dict[str, Any]]:
+        assert cur is None
+        assert query
+        assert params
+        return responses.pop(0)
+
+    monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all_rows)
+
+    payload, query_count = repo.get_show_credits("show-1")
+
+    assert query_count == 4
+    assert payload["cast_roster"] == [
+        {
+            "show_id": "show-1",
+            "person_id": "person-andy",
+            "person_name": "Andy Cohen",
+            "photo_url": "https://cdn.example/andy.jpg",
+            "total_episodes": 31,
+            "archive_episodes": 0,
+            "seasons_appeared": 0,
+            "season_numbers": [],
+            "latest_season": None,
+            "roles": ["Host"],
+        }
+    ]
+
+
 def test_get_show_seasons_default_path_uses_explicit_projection(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

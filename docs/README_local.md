@@ -22,12 +22,14 @@ Python 3.11+ is required.
 2. **Configure environment**
    ```bash
    cp .env.example .env
-   # edit .env with Supabase + API keys
+   # edit .env with runtime DB/auth + API keys
    ```
 
    Minimum required for most scripts:
-   - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `TRR_DB_URL`
+   - `SUPABASE_JWT_SECRET`
+   - `TRR_INTERNAL_ADMIN_SHARED_SECRET`
+   - `SCREENALYTICS_SERVICE_TOKEN`
    - `TMDB_API_KEY`
    - `TVDB_API_KEY`
    - `IMDB_API_KEY`

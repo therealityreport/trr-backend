@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from api.auth import AdminUser
+from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.clients.screenalytics import (
     ScreenalyticsClientError,
@@ -1362,7 +1362,7 @@ def auto_count_cast_photo(
     photo_id: UUID,
     force: bool = Query(default=False),
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> AutoCountResponse:
     response = (
         db.schema("core")
@@ -1636,7 +1636,7 @@ def auto_count_media_asset(
     asset_id: UUID,
     force: bool = Query(default=False),
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> AutoCountResponse:
     response = (
         db.schema("core")
@@ -1983,7 +1983,7 @@ def auto_count_show_images(
     show_id: UUID,
     payload: AutoCountShowImagesRequest,
     db: SupabaseAdminClient = None,
-    _: AdminUser = None,
+    _: InternalAdminUser = None,
 ) -> AutoCountShowImagesResponse:
     show_id_str = str(show_id)
 

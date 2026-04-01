@@ -605,7 +605,10 @@ def test_post_social_account_catalog_gap_analysis_run_returns_status_payload(
         "last_error": None,
     }
 
-    with patch("api.routers.socials._start_social_catalog_gap_analysis_operation", return_value=started_operation) as start_mock:
+    with patch(
+        "api.routers.socials._start_social_catalog_gap_analysis_operation",
+        return_value=started_operation,
+    ) as start_mock:
         with patch(
             "trr_backend.repositories.social_season_analytics.get_social_account_catalog_gap_analysis_status",
             return_value=status_payload,

@@ -9,9 +9,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from trr_backend.bravotv.get_images_pipeline import _upload_bytes, run_get_images_pipeline
+from trr_backend.bravotv.get_images_pipeline import (
+    _normalize_sources,
+    _selected_source_families,
+    _upload_bytes,
+    run_get_images_pipeline,
+)
 from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.integrations.picdetective import ReverseImageCandidate
+from trr_backend.job_plane import execution_backend_canonical
 from trr_backend.media.getty_replacement import (
     resolve_best_public_replacement,
     search_public_replacement_candidates,
@@ -311,6 +317,7 @@ def _build_asset_payload(record: dict[str, Any], *, run_id: str) -> tuple[dict[s
             "hosted_at": acquisition.get("hosted_at"),
         }
     )
+    getty_source = _safe_json(_safe_json(record.get("per_source")).get("getty"))
     metadata = {
         "run_id": run_id,
         "bridge_strategy": record.get("bridge_strategy"),
@@ -327,9 +334,21 @@ def _build_asset_payload(record: dict[str, Any], *, run_id: str) -> tuple[dict[s
         "replacement_pending": preview_only,
         "google_reverse_image_search_url": acquisition.get("google_reverse_image_search_url"),
         "source_page_url": acquisition.get("source_page_url")
-        or _safe_json(_safe_json(record.get("per_source")).get("getty")).get("source_page_url")
+        or getty_source.get("source_page_url")
         or _safe_json(_safe_json(record.get("per_source")).get("bravo")).get("source_page_url"),
     }
+    getty_metadata = {
+        "getty_original_image_url": getty_source.get("getty_original_image_url")
+        or getty_source.get("original_image_url"),
+        "getty_full_res_url": getty_source.get("getty_full_res_url") or getty_source.get("source_url"),
+        "getty_full_res_clean_url": getty_source.get("getty_full_res_clean_url"),
+        "getty_thumb_clean_url": getty_source.get("getty_thumb_clean_url") or getty_source.get("thumb_url"),
+        "getty_preview_image_url": getty_source.get("getty_preview_image_url") or getty_source.get("preview_image_url"),
+        "hosted_thumb_url": acquisition.get("hosted_thumb_url"),
+        "hosted_thumb_key": acquisition.get("hosted_thumb_key"),
+        "hosted_thumb_sha256": acquisition.get("hosted_thumb_sha256"),
+    }
+    metadata.update({key: value for key, value in getty_metadata.items() if value is not None})
     payload = {
         "id": str(asset_id),
         "media_type": "image",
@@ -725,12 +744,24 @@ def execute_bravotv_image_run(
     bravo_limit: int = 300,
     supplemental_limit: int = 100,
     force_all: bool = False,
+    getty_prefetched_assets: list[dict[str, Any]] | None = None,
+    getty_prefetched_events: list[dict[str, Any]] | None = None,
+    getty_prefetched_queries: list[dict[str, Any]] | None = None,
+    getty_prefetch_mode: str | None = None,
+    getty_prefetch_auth_mode: str | None = None,
+    getty_prefetch_auth_warning: str | None = None,
     initiated_by: str | None = None,
     operation_id: str | None = None,
     progress_cb: ProgressEmitter | None = None,
 ) -> dict[str, Any]:
     if mode not in {"show", "person"}:
         raise ValueError("mode must be 'show' or 'person'")
+    selected_sources = _normalize_sources(sources, mode=mode)
+    selected_families = _selected_source_families(selected_sources, mode=mode)
+    if execution_backend_canonical() == "modal" and "getty" in selected_families and not getty_prefetched_assets:
+        raise RuntimeError(
+            "Getty/NBCUMV BRAVOTV runs on Modal require local Getty prefetch because Modal is blocked by Getty."
+        )
     show_name = None
     person_name = None
     imdb_id = None
@@ -755,19 +786,25 @@ def execute_bravotv_image_run(
         person_name=person_name,
         season=season,
         episode=episode,
-        selected_sources=sources,
+        selected_sources=selected_sources,
         request_payload={
             "mode": mode,
             "show_id": show_id,
             "person_id": person_id,
             "season": season,
             "episode": episode,
-            "sources": sources or [],
+            "sources": selected_sources,
             "getty_limit": getty_limit,
             "nbcumv_limit": nbcumv_limit,
             "bravo_limit": bravo_limit,
             "supplemental_limit": supplemental_limit,
             "force_all": force_all,
+            "getty_prefetched_assets": getty_prefetched_assets or [],
+            "getty_prefetched_events": getty_prefetched_events or [],
+            "getty_prefetched_queries": getty_prefetched_queries or [],
+            "getty_prefetch_mode": getty_prefetch_mode,
+            "getty_prefetch_auth_mode": getty_prefetch_auth_mode,
+            "getty_prefetch_auth_warning": getty_prefetch_auth_warning,
         },
         created_by=initiated_by,
         operation_id=operation_id,
@@ -788,7 +825,7 @@ def execute_bravotv_image_run(
             season=season,
             episode=episode,
             output_dir=output_root,
-            sources=sources,
+            sources=selected_sources,
             getty_limit=getty_limit,
             nbcumv_limit=nbcumv_limit,
             bravo_limit=bravo_limit,
@@ -796,6 +833,12 @@ def execute_bravotv_image_run(
             imdb_id=imdb_id,
             tmdb_id=tmdb_id,
             force_all=force_all,
+            getty_prefetched_assets=getty_prefetched_assets,
+            getty_prefetched_events=getty_prefetched_events,
+            getty_prefetched_queries=getty_prefetched_queries,
+            getty_prefetch_mode=getty_prefetch_mode,
+            getty_prefetch_auth_mode=getty_prefetch_auth_mode,
+            getty_prefetch_auth_warning=getty_prefetch_auth_warning,
             progress_cb=_pipeline_progress,
         )
         merged_catalog = _safe_list(_read_json(output_root / "merged_catalog.json"))
@@ -884,6 +927,18 @@ def execute_bravotv_image_run_from_request_payload(
         bravo_limit=int(payload.get("bravo_limit") or 300),
         supplemental_limit=int(payload.get("supplemental_limit") or 100),
         force_all=bool(payload.get("force_all") or False),
+        getty_prefetched_assets=payload.get("getty_prefetched_assets")
+        if isinstance(payload.get("getty_prefetched_assets"), list)
+        else None,
+        getty_prefetched_events=payload.get("getty_prefetched_events")
+        if isinstance(payload.get("getty_prefetched_events"), list)
+        else None,
+        getty_prefetched_queries=payload.get("getty_prefetched_queries")
+        if isinstance(payload.get("getty_prefetched_queries"), list)
+        else None,
+        getty_prefetch_mode=str(payload.get("getty_prefetch_mode") or "").strip() or None,
+        getty_prefetch_auth_mode=str(payload.get("getty_prefetch_auth_mode") or "").strip() or None,
+        getty_prefetch_auth_warning=str(payload.get("getty_prefetch_auth_warning") or "").strip() or None,
         initiated_by=str(request_payload.get("initiated_by") or "admin"),
         operation_id=str(request_payload.get("operation_id") or "").strip() or None,
         progress_cb=progress_cb,

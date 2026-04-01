@@ -22,6 +22,8 @@ from botocore.exceptions import ClientError, ProfileNotFound
 
 from trr_backend.object_storage import load_object_storage_config
 
+LOGGER = logging.getLogger(__name__)
+
 _DEFAULT_HEADERS = {
     "accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     "accept-language": "en-US,en;q=0.9",
@@ -1370,6 +1372,7 @@ def mirror_cast_photo_row(
     force: bool = False,
     s3_client=None,
 ) -> dict[str, Any] | None:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     hosted_url = row.get("hosted_url")
     hosted_key = row.get("hosted_key")
     if not force:
@@ -1474,7 +1477,7 @@ def mirror_cast_photo_row(
                 existing_meta["hosted_thumb_sha256"] = thumb_sha
                 patch["metadata"] = existing_meta
             except Exception:
-                logger.debug("Getty thumb mirror failed for %s", row.get("id"), exc_info=True)
+                LOGGER.debug("Getty thumb mirror failed for %s", row.get("id"), exc_info=True)
 
     return patch
 
@@ -1548,6 +1551,28 @@ def mirror_media_asset_row(
     metadata_out = dict(metadata or {})
     metadata_out["mirrored_at"] = hosted_at
     metadata_out.setdefault("mirrored_from", source_url)
+    if source_name == "getty":
+        thumb_clean_url = (metadata_out.get("getty_thumb_clean_url") or "").strip()
+        if thumb_clean_url.startswith("https://"):
+            try:
+                thumb_data, thumb_ct = download_image(thumb_clean_url, source="getty", referer=referer)
+                thumb_sha = _sha256_bytes(thumb_data)
+                thumb_ext = guess_ext_from_content_type(thumb_ct)
+                thumb_key = build_shared_media_s3_key(thumb_sha, thumb_ext)
+                thumb_head = _head_object(s3_client, bucket, thumb_key)
+                if thumb_head is None:
+                    upload_bytes_to_s3(
+                        s3_client,
+                        bucket=bucket,
+                        key=thumb_key,
+                        data=thumb_data,
+                        content_type=thumb_ct or "application/octet-stream",
+                    )
+                metadata_out["hosted_thumb_url"] = build_hosted_url(thumb_key)
+                metadata_out["hosted_thumb_key"] = thumb_key
+                metadata_out["hosted_thumb_sha256"] = thumb_sha
+            except Exception:
+                LOGGER.debug("Getty media asset thumb mirror failed for %s", row.get("media_asset_id"), exc_info=True)
 
     patch: dict[str, Any] = {
         "source": source,

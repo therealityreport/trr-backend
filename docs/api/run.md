@@ -7,13 +7,21 @@ For the current production-target hosting plan, use `/Users/thomashulihan/Projec
 
 The API requires the following environment variables to be set:
 
-### Supabase (Required)
+### Database + Supabase JWT (Required)
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `SUPABASE_URL` | Your Supabase project URL | `https://your-project.supabase.co` |
-| `SUPABASE_ANON_KEY` | Supabase anonymous/public key | `eyJhbGciOiJIUzI1NiIs...` |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (for admin operations) | `eyJhbGciOiJIUzI1NiIs...` |
+| `TRR_DB_URL` | Canonical runtime Postgres URL (Supavisor session pooler preferred) | `postgresql://postgres.<project>:<password>@aws-0-...pooler.supabase.com:5432/postgres` |
+| `TRR_DB_FALLBACK_URL` | Optional explicit runtime fallback URL | `postgresql://...` |
+| `SUPABASE_JWT_SECRET` | Signing secret used to verify incoming Supabase access tokens | `long-random-jwt-secret` |
+
+### Supabase API/Auth Helpers (Required only for SDK or PostgREST admin flows)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SUPABASE_URL` | Supabase API base URL for SDK/PostgREST calls | `https://<project>.supabase.co` |
+| `SUPABASE_ANON_KEY` | Optional anon key for non-admin API flows | `eyJ...` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key for backend-owned Supabase admin operations | `eyJ...` |
 
 ### Screenalytics (Service-to-service)
 
@@ -28,11 +36,13 @@ If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backe
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `TRR_INTERNAL_ADMIN_SHARED_SECRET` | Shared secret required for service-role calls to facebank seed toggle admin endpoint | `long-random-shared-secret` |
+| `TRR_INTERNAL_ADMIN_SHARED_SECRET` | Shared signing secret for TRR-APP internal admin JWTs | `long-random-shared-secret` |
+| `TRR_INTERNAL_ADMIN_JWT_ISSUER` | Optional issuer override for internal admin JWT verification | `trr-app-internal` |
+| `TRR_INTERNAL_ADMIN_JWT_AUDIENCE` | Optional audience override for internal admin JWT verification | `trr-backend-internal-admin` |
 
-For `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`, backend accepts:
+For internal admin routes such as `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`, backend accepts:
 - allowlisted user JWT (`ADMIN_EMAIL_ALLOWLIST`), or
-- `service_role` JWT **only** when header `X-TRR-Internal-Admin-Secret` matches `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
+- a signed internal admin JWT from TRR-APP with the configured issuer/audience and `scope=internal_admin`.
 
 ### Redis (Optional)
 
@@ -110,16 +120,16 @@ pip install -r requirements.txt
 # Copy the example env file
 cp .env.example .env
 
-# Edit .env with your Supabase credentials
+# Edit .env with your runtime DB/auth credentials
 nano .env  # or use your preferred editor
 ```
 
 At minimum, set these in `.env`:
 ```
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your_anon_key
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-TRR_INTERNAL_ADMIN_SHARED_SECRET=your_internal_shared_secret
+TRR_DB_URL=postgresql://postgres.<project>:<password>@aws-0-...pooler.supabase.com:5432/postgres
+SUPABASE_JWT_SECRET=your_supabase_jwt_secret
+TRR_INTERNAL_ADMIN_SHARED_SECRET=your_internal_admin_signing_secret
+SCREENALYTICS_SERVICE_TOKEN=your_screenalytics_service_token
 ```
 
 ### 3. Run the development server
@@ -159,11 +169,11 @@ FastAPI ships with interactive API docs and an OpenAPI schema:
 | Client | Auth Header | Notes |
 | --- | --- | --- |
 | TRR App | `Authorization: Bearer <Supabase access token>` | Use for user-scoped endpoints under `/api/v1/*`. |
-| TRR App internal proxy (facebank toggle) | `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` + `X-TRR-Internal-Admin-Secret: <TRR_INTERNAL_ADMIN_SHARED_SECRET>` | Allowed only for `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`. |
+| TRR App internal proxy (facebank toggle) | `Authorization: Bearer <internal admin JWT>` | Allowed only for `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`; TRR-APP signs the JWT with `TRR_INTERNAL_ADMIN_SHARED_SECRET`. |
 | Screenalytics | `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` | Use for `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*`. |
 
 Admin allowlist
-- Facebank seed toggle endpoint requires either allowlisted user JWT or service-role plus valid `X-TRR-Internal-Admin-Secret`.
+- Facebank seed toggle endpoint requires either an allowlisted user JWT or a valid internal admin JWT signed with `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
 
 **CORS guidance**
 

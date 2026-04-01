@@ -80,9 +80,10 @@ class ScrapeConfig:
             if self.delay_seconds == 2.0:  # Only override if at default
                 self.delay_seconds = 0.5
             logger.info(
-                "ScrapeConfig fast_mode enabled: delay=%.2fs, scrape_mode=%s, "
-                "comment_replies=%s",
-                self.delay_seconds, self.scrape_mode, self.fetch_comment_replies,
+                "ScrapeConfig fast_mode enabled: delay=%.2fs, scrape_mode=%s, comment_replies=%s",
+                self.delay_seconds,
+                self.scrape_mode,
+                self.fetch_comment_replies,
             )
 
     @property
@@ -502,8 +503,8 @@ class InstagramScraper:
                             if cursor and cursor not in post_data:
                                 return
                             payload = response.json()
-                            connection = (
-                                payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+                            connection = payload.get("data", {}).get(
+                                "xdt_api__v1__feed__user_timeline_graphql_connection", {}
                             )
                             edges = connection.get("edges") or []
                             count_value = self._coerce_int(connection.get("count"), default=0)
@@ -990,12 +991,18 @@ class InstagramScraper:
                 elif self._consecutive_success >= 5:
                     effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
                 else:
-                    effective_delay = delay * 0.5   # e.g. 0.5 * 0.5 = 0.25s
+                    effective_delay = delay * 0.5  # e.g. 0.5 * 0.5 = 0.25s
             elif self._consecutive_success >= 20:
                 effective_delay = delay * 0.5
             else:
                 effective_delay = delay * 0.5
-            logger.debug(f"Rate limiting: waiting {effective_delay:.3f}s (base={delay}s, fast={fast_mode}, streak={self._consecutive_success})")
+            logger.debug(
+                "Rate limiting: waiting %.3fs (base=%ss, fast=%s, streak=%s)",
+                effective_delay,
+                delay,
+                fast_mode,
+                self._consecutive_success,
+            )
             time.sleep(effective_delay)
         self._request_count += 1
 
@@ -1925,11 +1932,15 @@ class InstagramScraper:
             # In fast_mode, only warm context on the first page and every 5th page
             # to avoid the overhead of an extra HTTP request per cursor page.
             should_warm = not fast_mode or not cursor or (self._request_count % 5 == 0) or attempt_index > 0
-            page_context = self._warm_profile_request_context(
-                username,
-                timeout=timeout,
-                force=(bool(cursor) or attempt_index > 0) if should_warm else False,
-            ) if should_warm else self._profile_page_context_cache.get(username, {})
+            page_context = (
+                self._warm_profile_request_context(
+                    username,
+                    timeout=timeout,
+                    force=(bool(cursor) or attempt_index > 0) if should_warm else False,
+                )
+                if should_warm
+                else self._profile_page_context_cache.get(username, {})
+            )
             request_cookies = self._request_cookies()
             viewer_id = str(request_cookies.get("ds_user_id") or self.cookies.get("ds_user_id") or "0")
 
@@ -2253,7 +2264,11 @@ class InstagramScraper:
                 # Fetch replies if requested and comment has replies
                 if fetch_replies and comment.reply_count > 0 and not comment.replies:
                     replies = self._fetch_comment_replies(
-                        media_id, comment.comment_id, shortcode, post_url, delay,
+                        media_id,
+                        comment.comment_id,
+                        shortcode,
+                        post_url,
+                        delay,
                         fast_mode=fast_mode,
                     )
                     comment.replies = replies
@@ -2406,8 +2421,11 @@ class InstagramScraper:
             result: dict[str, list[InstagramComment]] = {}
             for sc in shortcodes:
                 result[sc] = self.fetch_comments(
-                    sc, max_comments=max_comments, fetch_replies=fetch_replies,
-                    delay=delay, fast_mode=fast_mode,
+                    sc,
+                    max_comments=max_comments,
+                    fetch_replies=fetch_replies,
+                    delay=delay,
+                    fast_mode=fast_mode,
                 )
             return result
 
@@ -2421,15 +2439,16 @@ class InstagramScraper:
                 original_rate_limit(d, fast_mode=fast_mode)
 
         results: dict[str, list[InstagramComment]] = {}
-        errors: dict[str, str] = {}
 
         def _fetch_one(shortcode: str) -> tuple[str, list[InstagramComment]]:
             # Temporarily patch _rate_limit with the synchronized version
             self._rate_limit = _synchronized_rate_limit  # type: ignore[assignment]
             try:
                 comments = self.fetch_comments(
-                    shortcode, max_comments=max_comments,
-                    fetch_replies=fetch_replies, delay=delay,
+                    shortcode,
+                    max_comments=max_comments,
+                    fetch_replies=fetch_replies,
+                    delay=delay,
                     fast_mode=fast_mode,
                 )
                 return shortcode, comments
@@ -2439,7 +2458,9 @@ class InstagramScraper:
 
         logger.info(
             "Fetching comments for %d posts concurrently (workers=%d, fast=%s)",
-            len(shortcodes), max_workers, fast_mode,
+            len(shortcodes),
+            max_workers,
+            fast_mode,
         )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_fetch_one, sc): sc for sc in shortcodes}
@@ -2451,14 +2472,16 @@ class InstagramScraper:
                 if completed % 10 == 0:
                     logger.info(
                         "Concurrent comments: %d/%d posts done",
-                        completed, len(shortcodes),
+                        completed,
+                        len(shortcodes),
                     )
 
         # Restore original _rate_limit
         self._rate_limit = original_rate_limit  # type: ignore[assignment]
         logger.info(
             "Concurrent comment fetch complete: %d posts, %d total comments",
-            len(results), sum(len(v) for v in results.values()),
+            len(results),
+            sum(len(v) for v in results.values()),
         )
         return results
 
@@ -2887,7 +2910,9 @@ class InstagramScraper:
 
         logger.info(
             "Starting scrape for @%s (mode=%s, fast=%s)",
-            config.username, config.scrape_mode, config.fast_mode,
+            config.username,
+            config.scrape_mode,
+            config.fast_mode,
         )
         if config.hashtags:
             logger.info("Filtering by hashtags: %s", config.hashtags)
@@ -2904,11 +2929,17 @@ class InstagramScraper:
             if auto_refresh_result.get("refreshed"):
                 has_auth = True
             elif config.require_auth:
-                logger.warning("[instagram] scrape aborted for @%s: no sessionid, auto-refresh failed (%s)",
-                               config.username, auto_refresh_result.get("reason"))
+                logger.warning(
+                    "[instagram] scrape aborted for @%s: no sessionid, auto-refresh failed (%s)",
+                    config.username,
+                    auto_refresh_result.get("reason"),
+                )
                 self.last_retrieval_meta = self._auth_failure_meta(
-                    scrape_start, mode="auth_required", code="instagram_auth_required",
-                    cls="InstagramAuthRequired", auto_refresh=auto_refresh_result,
+                    scrape_start,
+                    mode="auth_required",
+                    code="instagram_auth_required",
+                    cls="InstagramAuthRequired",
+                    auto_refresh=auto_refresh_result,
                 )
                 return []
 
@@ -2919,11 +2950,17 @@ class InstagramScraper:
                 if auto_refresh_result.get("refreshed"):
                     auth_check = self._validate_cookies()
                 if not auth_check["valid"]:
-                    logger.warning("[instagram] scrape aborted for @%s: cookies invalid (%s)",
-                                   config.username, auth_check.get("reason"))
+                    logger.warning(
+                        "[instagram] scrape aborted for @%s: cookies invalid (%s)",
+                        config.username,
+                        auth_check.get("reason"),
+                    )
                     self.last_retrieval_meta = self._auth_failure_meta(
-                        scrape_start, mode="auth_validation_failed", code="instagram_auth_invalid",
-                        cls="InstagramAuthInvalid", auto_refresh=auto_refresh_result,
+                        scrape_start,
+                        mode="auth_validation_failed",
+                        code="instagram_auth_invalid",
+                        cls="InstagramAuthInvalid",
+                        auto_refresh=auto_refresh_result,
                         validation_reason=auth_check.get("reason"),
                     )
                     return []
@@ -2980,7 +3017,11 @@ class InstagramScraper:
         self.last_retrieval_meta["scrape_elapsed_seconds"] = round(elapsed, 1)
         self.last_retrieval_meta["timed_out"] = timed_out
         if timed_out:
-            logger.warning("[instagram] scrape timed out after %.0fs (limit: %.0fs)", elapsed, config.max_scrape_seconds)
+            logger.warning(
+                "[instagram] scrape timed out after %.0fs (limit: %.0fs)",
+                elapsed,
+                config.max_scrape_seconds,
+            )
 
     def _auth_failure_meta(
         self,
@@ -3107,14 +3148,17 @@ class InstagramScraper:
             if time.monotonic() - _t0 > config.max_scrape_seconds:
                 logger.warning(
                     "[instagram] graphql pagination timed out after %.0fs (limit: %.0fs)",
-                    time.monotonic() - _t0, config.max_scrape_seconds,
+                    time.monotonic() - _t0,
+                    config.max_scrape_seconds,
                 )
                 stop_reason = "timeout"
                 break
 
             logger.info("Fetching page %d%s", page_num, " [fast]" if config.fast_mode else "")
             data = self.fetch_posts_graphql(
-                config.username, cursor, config.delay_seconds,
+                config.username,
+                cursor,
+                config.delay_seconds,
                 fast_mode=config.fast_mode,
             )
             if not data:
@@ -3155,8 +3199,11 @@ class InstagramScraper:
                     page_matches += 1
                     logger.info(
                         "Found #%d: %s (%s) - %s - %s likes",
-                        len(posts), post.shortcode, post.date_time,
-                        getattr(post, "post_type", "?"), getattr(post, "likes", 0),
+                        len(posts),
+                        post.shortcode,
+                        post.date_time,
+                        getattr(post, "post_type", "?"),
+                        getattr(post, "likes", 0),
                     )
 
             self._emit_progress(
@@ -3247,11 +3294,13 @@ class InstagramScraper:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
             logger.error("Playwright not available for browser_intercept mode: %s", exc)
-            self.last_retrieval_meta.update({
-                "retrieval_mode": "browser_intercept",
-                "error_code": "playwright_unavailable",
-                "error_class": type(exc).__name__,
-            })
+            self.last_retrieval_meta.update(
+                {
+                    "retrieval_mode": "browser_intercept",
+                    "error_code": "playwright_unavailable",
+                    "error_class": type(exc).__name__,
+                }
+            )
             return []
 
         logger.info(
@@ -3306,9 +3355,7 @@ class InstagramScraper:
                             # Try the known connection key first, then scan for
                             # any key containing "timeline" or "feed" as a
                             # fallback in case Instagram renamed the field.
-                            connection = data_obj.get(
-                                "xdt_api__v1__feed__user_timeline_graphql_connection"
-                            )
+                            connection = data_obj.get("xdt_api__v1__feed__user_timeline_graphql_connection")
                             if not connection:
                                 for key in data_obj:
                                     if "timeline" in key.lower() or "feed" in key.lower():
@@ -3359,7 +3406,8 @@ class InstagramScraper:
                                 no_new_data_scrolls = 0
                                 logger.info(
                                     "browser_intercept: +%d posts (total: %d)",
-                                    new_posts_this_batch, len(posts),
+                                    new_posts_this_batch,
+                                    len(posts),
                                 )
                                 self._emit_progress(
                                     progress_cb,
@@ -3394,7 +3442,8 @@ class InstagramScraper:
                         if scroll_count % 20 == 0:
                             logger.info(
                                 "browser_intercept: scrolled %d times, %d posts collected",
-                                scroll_count, len(posts),
+                                scroll_count,
+                                len(posts),
                             )
             except Exception as exc:
                 logger.error("browser_intercept failed for @%s: %s", config.username, exc)
@@ -3411,14 +3460,20 @@ class InstagramScraper:
                 return posts
 
         stop_reason = (
-            "date_start_reached" if reached_date_limit
-            else "max_posts_reached" if len(posts) >= max_posts
-            else "no_new_data" if no_new_data_scrolls >= max_no_new_data_scrolls
+            "date_start_reached"
+            if reached_date_limit
+            else "max_posts_reached"
+            if len(posts) >= max_posts
+            else "no_new_data"
+            if no_new_data_scrolls >= max_no_new_data_scrolls
             else "unknown"
         )
         logger.info(
             "browser_intercept complete for @%s: %d posts in %d scrolls (stop: %s)",
-            config.username, len(posts), scroll_count, stop_reason,
+            config.username,
+            len(posts),
+            scroll_count,
+            stop_reason,
         )
         self.last_retrieval_meta = {
             "retrieval_mode": "browser_intercept",

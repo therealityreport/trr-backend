@@ -256,13 +256,13 @@ class TestManifestErrorHandling:
         mock_error_response = {"Error": {"Code": "NoSuchKey", "Message": "Not found"}}
         error = ClientError(mock_error_response, "GetObject")
 
-        with patch("trr_backend.pipeline.manifests.boto3.client") as mock_boto:
-            mock_s3 = MagicMock()
-            mock_s3.get_object.side_effect = error
-            mock_boto.return_value = mock_s3
+        mock_s3 = MagicMock()
+        mock_s3.get_object.side_effect = error
 
-            with patch("trr_backend.pipeline.manifests.get_manifest_bucket", return_value="test-bucket"):
-                result = read_manifest("test-run-id", "01_collect")
+        with patch("trr_backend.pipeline.manifests.build_s3_client", return_value=mock_s3):
+            with patch("trr_backend.pipeline.manifests.load_object_storage_config", return_value=MagicMock()):
+                with patch("trr_backend.pipeline.manifests.get_manifest_bucket", return_value="test-bucket"):
+                    result = read_manifest("test-run-id", "01_collect")
 
         assert result is None
 
@@ -275,13 +275,13 @@ class TestManifestErrorHandling:
         mock_error_response = {"Error": {"Code": "404", "Message": "Not found"}}
         error = ClientError(mock_error_response, "GetObject")
 
-        with patch("trr_backend.pipeline.manifests.boto3.client") as mock_boto:
-            mock_s3 = MagicMock()
-            mock_s3.get_object.side_effect = error
-            mock_boto.return_value = mock_s3
+        mock_s3 = MagicMock()
+        mock_s3.get_object.side_effect = error
 
-            with patch("trr_backend.pipeline.manifests.get_manifest_bucket", return_value="test-bucket"):
-                result = read_manifest("test-run-id", "01_collect")
+        with patch("trr_backend.pipeline.manifests.build_s3_client", return_value=mock_s3):
+            with patch("trr_backend.pipeline.manifests.load_object_storage_config", return_value=MagicMock()):
+                with patch("trr_backend.pipeline.manifests.get_manifest_bucket", return_value="test-bucket"):
+                    result = read_manifest("test-run-id", "01_collect")
 
         assert result is None
 
@@ -294,11 +294,11 @@ class TestManifestErrorHandling:
         mock_error_response = {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}
         error = ClientError(mock_error_response, "GetObject")
 
-        with patch("trr_backend.pipeline.manifests.boto3.client") as mock_boto:
-            mock_s3 = MagicMock()
-            mock_s3.get_object.side_effect = error
-            mock_boto.return_value = mock_s3
+        mock_s3 = MagicMock()
+        mock_s3.get_object.side_effect = error
 
-            with patch("trr_backend.pipeline.manifests.get_manifest_bucket", return_value="test-bucket"):
-                with pytest.raises(ClientError):
-                    read_manifest("test-run-id", "01_collect")
+        with patch("trr_backend.pipeline.manifests.build_s3_client", return_value=mock_s3):
+            with patch("trr_backend.pipeline.manifests.load_object_storage_config", return_value=MagicMock()):
+                with patch("trr_backend.pipeline.manifests.get_manifest_bucket", return_value="test-bucket"):
+                    with pytest.raises(ClientError):
+                        read_manifest("test-run-id", "01_collect")

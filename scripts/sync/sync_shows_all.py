@@ -62,7 +62,7 @@ def _maybe_reload_schema_cache(enabled: bool) -> None:
         print(
             "WARN: Failed to reload PostgREST schema cache."
             " If you hit PGRST204 errors, run:\n"
-            '  psql "$SUPABASE_DB_URL" -f scripts/db/reload_postgrest_schema.sql'
+            '  psql "${TRR_DB_URL:-${TRR_DB_FALLBACK_URL:-$DATABASE_URL}}" -f scripts/db/reload_postgrest_schema.sql'
         )
         print(f"  Details: {exc}")
 

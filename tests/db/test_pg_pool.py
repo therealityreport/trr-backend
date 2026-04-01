@@ -420,6 +420,24 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
     assert calls["reset"] == 1
 
 
+def test_get_connection_with_retry_reraises_last_pool_error_after_retries_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakePoolExhaustThenSuccess(failures_before_success=99)
+
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: fake_pool)
+    monkeypatch.setenv("TRR_DB_POOL_ACQUIRE_ATTEMPTS", "1")
+    monkeypatch.setenv("TRR_DB_TRANSIENT_QUERY_ATTEMPTS", "1")
+
+    with pytest.raises(PoolError, match="connection pool exhausted"):
+        pg._get_connection_with_retry(label="fetch_one")
+
+
 def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"fetch": 0, "reset": 0}
 

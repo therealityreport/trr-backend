@@ -488,7 +488,7 @@ def _resolve_remote_operation_producer(
     if normalized_type == "admin_show_refresh":
         from api.routers.admin_show_sync import build_show_refresh_operation_producer
 
-        return build_show_refresh_operation_producer(request_payload=request_payload)
+        return build_show_refresh_operation_producer(request_payload=request_payload, operation_id=operation_id)
     if normalized_type == "admin_show_refresh_photos":
         from api.routers.admin_show_sync import build_show_refresh_photos_operation_producer
 

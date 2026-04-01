@@ -7,7 +7,7 @@ immediately gets the current aggregate results across all respondents.
 
 from __future__ import annotations
 
-from collections import Counter
+import time
 from typing import Any
 from uuid import UUID
 
@@ -19,11 +19,66 @@ from api.deps import (
     SupabaseAdminClient,
     SupabaseClient,
     get_list_result,
-    raise_for_supabase_error,
     require_single_result,
 )
+from trr_backend.db import pg
+from trr_backend.read_path_diagnostics import log_read_path
 
 router = APIRouter(prefix="/surveys", tags=["surveys"])
+
+SURVEY_SELECT_FIELDS = "id,show_id,season_id,episode_id,slug,title,description,status,starts_at,ends_at,config"
+QUESTION_SELECT_FIELDS = "id,survey_id,question_order,prompt,question_type,config"
+OPTION_SELECT_FIELDS = "id,question_id,option_order,label,value"
+SURVEY_RESULTS_SQL = """
+WITH response_totals AS (
+  SELECT count(*)::int AS total_responses
+  FROM surveys.responses
+  WHERE survey_id = %s::uuid
+),
+expanded_answers AS (
+  SELECT
+    a.question_id::text AS question_id,
+    CASE
+      WHEN jsonb_typeof(a.answer->'value') = 'array' THEN array_item.value
+      ELSE a.answer->>'value'
+    END AS answer_value
+  FROM surveys.answers AS a
+  LEFT JOIN LATERAL jsonb_array_elements_text(a.answer->'value') AS array_item(value)
+    ON jsonb_typeof(a.answer->'value') = 'array'
+  WHERE a.survey_id = %s::uuid
+),
+distribution AS (
+  SELECT
+    question_id,
+    answer_value,
+    count(*)::int AS answer_count
+  FROM expanded_answers
+  WHERE answer_value IS NOT NULL
+  GROUP BY question_id, answer_value
+),
+question_totals AS (
+  SELECT
+    question_id,
+    count(*)::int AS total_responses
+  FROM expanded_answers
+  WHERE answer_value IS NOT NULL
+  GROUP BY question_id
+)
+SELECT
+  qt.question_id,
+  qt.total_responses,
+  COALESCE(
+    jsonb_object_agg(d.answer_value, d.answer_count ORDER BY d.answer_value),
+    '{}'::jsonb
+  ) AS distribution,
+  rt.total_responses AS survey_total_responses
+FROM question_totals AS qt
+LEFT JOIN distribution AS d
+  ON d.question_id = qt.question_id
+CROSS JOIN response_totals AS rt
+GROUP BY qt.question_id, qt.total_responses, rt.total_responses
+ORDER BY qt.question_id
+"""
 
 
 # --- Pydantic models ---
@@ -100,6 +155,21 @@ class SubmissionResponse(BaseModel):
     results: SurveyResults
 
 
+def _load_survey_questions(db: SupabaseClient, survey_id: str) -> list[dict[str, Any]]:
+    questions_response = (
+        db.schema("surveys")
+        .table("questions")
+        .select(f"{QUESTION_SELECT_FIELDS}, options({OPTION_SELECT_FIELDS})")
+        .eq("survey_id", survey_id)
+        .order("question_order")
+        .execute()
+    )
+    questions = get_list_result(questions_response, "fetching survey questions")
+    for question in questions:
+        question["options"] = sorted(question.get("options", []), key=lambda option: option["option_order"])
+    return questions
+
+
 # --- Endpoints ---
 
 
@@ -115,7 +185,7 @@ def list_surveys(
     List surveys, optionally filtered by show and status.
     Only published surveys are returned by default.
     """
-    query = db.schema("surveys").table("surveys").select("*")
+    query = db.schema("surveys").table("surveys").select(SURVEY_SELECT_FIELDS)
 
     if show_id:
         query = query.eq("show_id", str(show_id))
@@ -132,25 +202,13 @@ def get_survey(db: SupabaseClient, survey_id: UUID) -> dict:
     Get a survey with all its questions and options.
     """
     # Get survey
-    survey_response = db.schema("surveys").table("surveys").select("*").eq("id", str(survey_id)).single().execute()
+    survey_response = (
+        db.schema("surveys").table("surveys").select(SURVEY_SELECT_FIELDS).eq("id", str(survey_id)).single().execute()
+    )
     survey = require_single_result(survey_response, "Survey")
 
     # Get questions with options
-    questions_response = (
-        db.schema("surveys")
-        .table("questions")
-        .select("*, options(*)")
-        .eq("survey_id", str(survey_id))
-        .order("question_order")
-        .execute()
-    )
-    questions = get_list_result(questions_response, "fetching survey questions")
-
-    # Sort options within each question
-    for q in questions:
-        q["options"] = sorted(q.get("options", []), key=lambda x: x["option_order"])
-
-    survey["questions"] = questions
+    survey["questions"] = _load_survey_questions(db, str(survey_id))
     return survey
 
 
@@ -160,24 +218,13 @@ def get_survey_by_slug(db: SupabaseClient, slug: str) -> dict:
     Get a survey by its URL-friendly slug.
     """
     # Get survey by slug
-    survey_response = db.schema("surveys").table("surveys").select("*").eq("slug", slug).single().execute()
+    survey_response = (
+        db.schema("surveys").table("surveys").select(SURVEY_SELECT_FIELDS).eq("slug", slug).single().execute()
+    )
     survey = require_single_result(survey_response, "Survey")
 
     # Get questions with options
-    questions_response = (
-        db.schema("surveys")
-        .table("questions")
-        .select("*, options(*)")
-        .eq("survey_id", str(survey["id"]))
-        .order("question_order")
-        .execute()
-    )
-    questions = get_list_result(questions_response, "fetching survey questions")
-
-    for q in questions:
-        q["options"] = sorted(q.get("options", []), key=lambda x: x["option_order"])
-
-    survey["questions"] = questions
+    survey["questions"] = _load_survey_questions(db, str(survey["id"]))
     return survey
 
 
@@ -218,6 +265,7 @@ def submit_survey(
     Security note: user_id is NEVER accepted from client payload.
     The RPC uses auth.uid() internally.
     """
+    started_at = time.perf_counter()
     # Build answers array for RPC
     answers_json = [
         {
@@ -262,93 +310,59 @@ def submit_survey(
     # Update aggregates table for caching
     _update_aggregates(admin_db, survey_id, results)
 
-    return {
+    payload = {
         "response_id": response_id,
         "results": results,
     }
+    log_read_path(
+        "surveys.submit",
+        latency_ms=(time.perf_counter() - started_at) * 1000.0,
+        query_count=3,
+        payload=payload,
+        extra={"answer_count": len(submission.answers), "survey_id": survey_id},
+    )
+    return payload
 
 
 def _compute_survey_results(db: SupabaseClient, survey_id: UUID) -> dict:
     """
     Compute aggregate results for a survey from the answers table.
     """
-    # Get all answers for this survey
-    answers_response = (
-        db.schema("surveys").table("answers").select("question_id, answer").eq("survey_id", str(survey_id)).execute()
-    )
-    answers = get_list_result(answers_response, "fetching survey answers")
-
-    # Get questions for context
-    questions_response = (
-        db.schema("surveys").table("questions").select("id, question_type").eq("survey_id", str(survey_id)).execute()
-    )
-    questions_list = get_list_result(questions_response, "fetching survey questions")
-    questions = {q["id"]: q for q in questions_list}
-
-    # Group answers by question
-    question_answers: dict[str, list] = {}
-    for ans in answers:
-        qid = ans["question_id"]
-        if qid not in question_answers:
-            question_answers[qid] = []
-        question_answers[qid].append(ans["answer"])
-
-    # Get unique response count
-    responses_response = db.schema("surveys").table("responses").select("id").eq("survey_id", str(survey_id)).execute()
-    responses_list = get_list_result(responses_response, "counting survey responses")
-    total_responses = len(responses_list)
-
-    # Compute aggregates per question
+    _ = db
+    started_at = time.perf_counter()
+    rows = pg.fetch_all(SURVEY_RESULTS_SQL, [str(survey_id), str(survey_id)])
+    total_responses = int(rows[0]["survey_total_responses"]) if rows else 0
     question_aggregates = []
-    for qid, answers_list in question_answers.items():
-        question_type = questions.get(qid, {}).get("question_type", "single_choice")
-        aggregate = _compute_question_aggregate(qid, answers_list, question_type)
-        question_aggregates.append(aggregate)
+    for row in rows:
+        distribution_raw = row.get("distribution") or {}
+        distribution = {str(key): int(value) for key, value in distribution_raw.items()}
+        question_total = int(row.get("total_responses") or 0)
+        percentages = {}
+        if question_total > 0:
+            for key, count in distribution.items():
+                percentages[key] = round(count / question_total * 100, 1)
+        question_aggregates.append(
+            {
+                "question_id": row["question_id"],
+                "total_responses": question_total,
+                "distribution": distribution,
+                "percentages": percentages,
+            }
+        )
 
-    return {
+    payload = {
         "survey_id": str(survey_id),
         "total_responses": total_responses,
         "questions": question_aggregates,
     }
-
-
-def _compute_question_aggregate(
-    question_id: str,
-    answers: list[dict],
-    question_type: str,
-) -> dict:
-    """
-    Compute aggregate for a single question.
-    """
-    total = len(answers)
-
-    # Extract values from answer objects
-    values = []
-    for ans in answers:
-        if isinstance(ans, dict):
-            val = ans.get("value")
-            if isinstance(val, list):
-                values.extend(val)  # multiple_choice
-            else:
-                values.append(val)
-        else:
-            values.append(ans)
-
-    # Count distribution
-    distribution = dict(Counter(str(v) for v in values if v is not None))
-
-    # Calculate percentages
-    percentages = {}
-    if total > 0:
-        for key, count in distribution.items():
-            percentages[key] = round(count / total * 100, 1)
-
-    return {
-        "question_id": question_id,
-        "total_responses": total,
-        "distribution": distribution,
-        "percentages": percentages,
-    }
+    log_read_path(
+        "surveys.results",
+        latency_ms=(time.perf_counter() - started_at) * 1000.0,
+        query_count=1,
+        payload=payload,
+        extra={"survey_id": survey_id},
+    )
+    return payload
 
 
 def _update_aggregates(
@@ -360,22 +374,30 @@ def _update_aggregates(
     Update the aggregates table with computed results (for caching).
     Uses upsert to handle both insert and update cases.
     """
-    for question_result in results["questions"]:
-        response = (
-            admin_db.schema("surveys")
-            .table("aggregates")
-            .upsert(
-                {
-                    "survey_id": str(survey_id),
-                    "question_id": question_result["question_id"],
-                    "aggregate": {
-                        "total_responses": question_result["total_responses"],
-                        "distribution": question_result["distribution"],
-                        "percentages": question_result["percentages"],
-                    },
-                },
-                on_conflict="survey_id,question_id",
-            )
-            .execute()
+    _ = admin_db
+    rows = [
+        (
+            str(survey_id),
+            question_result["question_id"],
+            {
+                "total_responses": question_result["total_responses"],
+                "distribution": question_result["distribution"],
+                "percentages": question_result["percentages"],
+            },
         )
-        raise_for_supabase_error(response, "updating survey aggregates")
+        for question_result in results["questions"]
+    ]
+    if not rows:
+        return
+
+    pg.execute_values_no_return(
+        """
+        INSERT INTO surveys.aggregates (survey_id, question_id, aggregate)
+        VALUES %s
+        ON CONFLICT (survey_id, question_id)
+        DO UPDATE SET
+          aggregate = EXCLUDED.aggregate,
+          updated_at = now()
+        """,
+        rows,
+    )

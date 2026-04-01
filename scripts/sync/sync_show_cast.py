@@ -16,8 +16,9 @@ from scripts._sync_common import (
 )
 from trr_backend.ingestion.show_importer import parse_imdb_headers_json_env
 from trr_backend.integrations.imdb.fullcredits_cast_parser import (
-    fetch_fullcredits_cast_with_fallback,
+    HttpImdbFullCreditsClient,
     filter_self_cast_rows,
+    parse_fullcredits_html,
 )
 from trr_backend.integrations.tmdb.client import TmdbClientError, find_by_imdb_id, resolve_api_key
 from trr_backend.repositories.credits import assert_core_credits_table_exists, insert_credits_ignore_conflicts
@@ -34,10 +35,22 @@ from trr_backend.repositories.sync_state import (
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sync_show_cast",
-        description="Sync show-level cast credits from IMDb full credits (Self only).",
+        description="Sync show-level IMDb full credits (cast Self rows plus allowlisted crew sections).",
     )
     add_show_filter_args(parser)
     return parser.parse_args(argv)
+
+
+_IMDB_ALLOWLISTED_CREW_CATEGORIES = {
+    "Producers",
+    "Editors",
+    "Casting Director",
+    "Casting Department",
+    "Visual Effects",
+    "Production Design",
+    "Editorial Department",
+    "Production Department",
+}
 
 
 def _merge_external_ids(existing: object, updates: dict[str, object]) -> dict[str, object] | None:
@@ -120,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     tmdb_find_cache: dict[str, dict[str, object] | None] = {}
     cast_rows_total = 0
     cast_rows_self = 0
+    crew_rows_total = 0
     person_images_upserted = 0
     failures: list[str] = []
     people_cache: dict[str, str] = {}
@@ -153,19 +167,25 @@ def main(argv: list[str] | None = None) -> int:
             mark_sync_state_in_progress(db, table_name="show_cast", show_id=show_id)
 
         try:
-            # Use centralized fallback function (returns cast_rows + source_type + person_images)
-            cast_rows, source_type, person_images = fetch_fullcredits_cast_with_fallback(
-                imdb_id,
-                extra_headers=extra_headers,
-                verbose=bool(args.verbose),
-                primary_source="graphql",
-            )
+            print(f"Fetching IMDb Full Credits for {imdb_id}...", flush=True)
+            client = HttpImdbFullCreditsClient(extra_headers=extra_headers)
+            html = client.fetch_fullcredits_page(imdb_id, verbose=bool(args.verbose))
+            parsed = parse_fullcredits_html(html, series_id=imdb_id)
 
-            cast_rows_total += len(cast_rows)
-            self_rows = filter_self_cast_rows(cast_rows)
+            cast_rows_total += len(parsed.cast_rows)
+            self_rows = filter_self_cast_rows(parsed.cast_rows)
             cast_rows_self += len(self_rows)
+            crew_rows = [row for row in parsed.crew_rows if row.credit_category in _IMDB_ALLOWLISTED_CREW_CATEGORIES]
+            crew_rows_total += len(crew_rows)
+            print(
+                f"Parsed IMDb Full Credits: {len(self_rows)} cast rows and {len(crew_rows)} allowlisted crew rows.",
+                flush=True,
+            )
+            source_type = "fullcredits_html"
+            person_images: list[dict[str, object]] = []
 
-            name_ids = [row.name_id.strip().lower() for row in self_rows if row.name_id]
+            credit_people = [*self_rows, *crew_rows]
+            name_ids = [row.name_id.strip().lower() for row in credit_people if row.name_id]
             missing_ids = [name_id for name_id in name_ids if name_id not in people_cache]
             if missing_ids:
                 existing_people = fetch_people_by_imdb_ids(db, missing_ids)
@@ -198,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"WARNING: failed to update person external_ids id={person_id} error={exc}")
 
                 new_people_map: dict[str, str] = {}
-                for row in self_rows:
+                for row in credit_people:
                     key = row.name_id.strip().lower()
                     if not key or key in people_cache:
                         continue
@@ -258,17 +278,50 @@ def main(argv: list[str] | None = None) -> int:
                         "billing_order": row.billing_order,
                         "role": row.raw_role_text,
                         "credit_category": "Self",
+                        "imdb_name_id": row.name_id,
+                        "episode_count": row.episode_count,
+                        "episodes_label": row.episodes_label,
+                        "years_label": row.years_label,
                     }
                 )
 
-            if show_cast_rows and not args.dry_run:
-                # Replace all non-manual scraped Self credits so this run is authoritative.
+            crew_credit_rows: list[dict[str, object]] = []
+            for row in crew_rows:
+                person_id = people_cache.get(row.name_id.strip().lower())
+                if not person_id:
+                    continue
+                crew_credit_rows.append(
+                    {
+                        "show_id": show_id,
+                        "person_id": person_id,
+                        "credit_category": row.credit_category,
+                        "role": row.role,
+                        "billing_order": row.display_order,
+                        "source_type": source_type,
+                        "metadata": {
+                            "imdb_name_id": row.name_id,
+                            "episode_count": row.episode_count,
+                            "episodes_label": row.episodes_label,
+                            "years_label": row.years_label,
+                            "source_page_url": f"https://www.imdb.com/title/{imdb_id}/fullcredits/",
+                            "display_order": row.display_order,
+                        },
+                    }
+                )
+
+            if (show_cast_rows or crew_credit_rows) and not args.dry_run:
+                print(
+                    "Writing credits for show "
+                    f"{show_id}: {len(show_cast_rows)} cast rows, {len(crew_credit_rows)} crew rows.",
+                    flush=True,
+                )
+                # Replace all non-manual scraped credits so this run is authoritative.
                 delete_resp = (
                     db.schema("core")
                     .table("credits")
                     .delete()
                     .eq("show_id", show_id)
-                    .eq("credit_category", "Self")
+                    .in_("credit_category", ["Self", *_IMDB_ALLOWLISTED_CREW_CATEGORIES])
                     .not_.eq("source_type", "manual")
                     .execute()
                 )
@@ -283,14 +336,20 @@ def main(argv: list[str] | None = None) -> int:
                         "role": row.get("role"),
                         "billing_order": row.get("billing_order"),
                         "source_type": source_type,
-                        "metadata": {},
+                        "metadata": {
+                            "imdb_name_id": row.get("imdb_name_id"),
+                            "episode_count": row.get("episode_count"),
+                            "episodes_label": row.get("episodes_label"),
+                            "years_label": row.get("years_label"),
+                        },
                     }
                     for row in show_cast_rows
                 ]
+                credit_rows.extend(crew_credit_rows)
                 inserted = insert_credits_ignore_conflicts(db, credit_rows)
                 credits_inserted += len(inserted)
-            elif show_cast_rows:
-                credits_inserted += len(show_cast_rows)
+            elif show_cast_rows or crew_credit_rows:
+                credits_inserted += len(show_cast_rows) + len(crew_credit_rows)
 
             if not args.dry_run:
                 mark_sync_state_success(
@@ -299,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
                     show_id=show_id,
                     last_seen_most_recent_episode=extract_most_recent_episode(show),
                 )
+            print(f"Saved IMDb Full Credits for {imdb_id}.", flush=True)
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{imdb_id}: {exc}")
             if not args.dry_run:
@@ -308,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"shows_processed={len(show_rows)}")
     print(f"cast_rows_total={cast_rows_total}")
     print(f"cast_rows_self={cast_rows_self}")
+    print(f"crew_rows_total={crew_rows_total}")
     print(f"people_inserted={people_inserted}")
     print(f"credits_inserted={credits_inserted}")
     print(f"person_images_upserted={person_images_upserted}")

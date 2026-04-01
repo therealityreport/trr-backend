@@ -65,9 +65,7 @@ def _relation_exists() -> bool:
 
 
 def _missing_table_error() -> RuntimeError:
-    return RuntimeError(
-        "BRAVOTV image runs table is not installed. Apply migration 0202_bravotv_image_runs.sql first."
-    )
+    return RuntimeError("BRAVOTV image runs table is not installed. Apply migration 0202_bravotv_image_runs.sql first.")
 
 
 def create_run(

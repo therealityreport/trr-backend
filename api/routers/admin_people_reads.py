@@ -91,7 +91,10 @@ def _log_read(
     started_at: float,
 ) -> None:
     logger.info(
-        "[admin-people-read] route=%s latency_ms=%.1f repo_ms=%.1f payload_bytes=%s query_count=%s cache=%s singleflight=%s request_role=%s",
+        (
+            "[admin-people-read] route=%s latency_ms=%.1f repo_ms=%.1f "
+            "payload_bytes=%s query_count=%s cache=%s singleflight=%s request_role=%s"
+        ),
         route,
         (time.perf_counter() - started_at) * 1000.0,
         repo_ms,

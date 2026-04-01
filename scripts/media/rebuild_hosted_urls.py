@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from collections.abc import Iterable
 from typing import Any
@@ -14,6 +13,7 @@ try:
 except ImportError as exc:  # pragma: no cover - depends on local environment
     raise SystemExit("Missing psycopg2; install deps (e.g., `pip install -r requirements.txt`).") from exc
 
+from scripts._db_url import resolve_db_url
 from trr_backend.media.s3_mirror import build_hosted_url, get_cdn_base_url
 from trr_backend.utils.env import load_env
 
@@ -72,10 +72,7 @@ REWRITEABLE_HOSTED_PATH_PREFIXES = (
 
 
 def _resolve_db_url() -> str:
-    url = (os.getenv("SUPABASE_DB_URL") or "").strip()
-    if not url:
-        raise RuntimeError("SUPABASE_DB_URL is required for rebuild_hosted_urls.")
-    return url
+    return resolve_db_url(allow_database_url=True).value
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

@@ -241,13 +241,15 @@ def log_database_resolution_summary(*, allow_local_fallback: bool = True) -> Non
         )
     if winner_connection_class in {"direct", "transaction"}:
         logger.warning(
-            "[db-resolution] non_default_connection_class connection_class=%s source=%s; default runtime lane is session via pooler.supabase.com:5432",
+            "[db-resolution] non_default_connection_class connection_class=%s "
+            "source=%s; default runtime lane is session via pooler.supabase.com:5432",
             winner_connection_class,
             winner_source,
         )
     for index, candidate in enumerate(candidates):
         logger.info(
-            "[db-resolution] candidate_index=%s source=%s host_class=%s connection_class=%s host=%s port=%s database=%s",
+            "[db-resolution] candidate_index=%s source=%s host_class=%s "
+            "connection_class=%s host=%s port=%s database=%s",
             index,
             candidate["source"],
             candidate["host_class"],
