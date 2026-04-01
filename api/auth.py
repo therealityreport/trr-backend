@@ -177,6 +177,10 @@ async def require_internal_admin(request: Request) -> dict:
     if matched_user:
         return matched_user
 
+    role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
+    if role == "service_role":
+        return current_user
+
     token = get_bearer_token(request)
     internal_admin_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     attempted_internal_admin_verification = False
@@ -254,7 +258,27 @@ AllowlistAdminUser = Annotated[dict, Depends(require_allowlist_admin)]
 
 
 async def require_facebank_seed_admin(request: Request) -> dict:
-    """Require allowlist admin, or a signed internal admin caller."""
+    """Require allowlist admin, or a signed internal admin caller with secret header."""
+    try:
+        current_user = await get_current_user(request)
+    except HTTPException as exc:
+        if exc.status_code == 500 and exc.headers.get("x-error-code") == "AUTH_SERVICE_UNAVAILABLE":
+            current_user = None
+        else:
+            raise
+
+    allowlisted_user = _allowlist_match(current_user)
+    if allowlisted_user:
+        return allowlisted_user
+
+    secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
+    header_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
+    role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
+    if role == "service_role":
+        if secret and header_secret and hmac.compare_digest(header_secret, secret):
+            return current_user
+        raise HTTPException(status_code=403, detail="Allowlist admin access required")
+
     return await require_internal_admin(request)
 
 
