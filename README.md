@@ -189,8 +189,8 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 TRR_DB_URL=postgresql://postgres.<project>:password@aws-1-us-east-1.pooler.supabase.com:5432/postgres
 TRR_DB_FALLBACK_URL=
-# Local-only troubleshooting lane only. Supply a direct-host DSN here when needed.
-# Leave TRR_DB_ENABLE_DIRECT_FALLBACK unset.
+# Optional operator-supplied secondary runtime fallback. Keep runtime lanes on
+# Supavisor session mode (:5432) or local Postgres.
 
 # Optional Configuration
 REALITEASE_TMDB_SHOW_LIMIT=5
