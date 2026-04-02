@@ -424,8 +424,36 @@ def root():
 
 @app.get("/health")
 def health():
-    """Health check endpoint."""
-    return {"status": "healthy"}
+    """DB-aware readiness probe.
+
+    Returns 200 when the database is reachable, 503 when degraded.
+    """
+    try:
+        with pg.db_connection(label="health-probe") as conn:
+            with conn.cursor() as cur:
+                # SET LOCAL is transaction-scoped — safe for pooled connections
+                cur.execute("SET LOCAL statement_timeout = '3000'")
+                cur.execute("SELECT 1")
+        return {
+            "status": "healthy",
+            "service": "trr-backend",
+            "database": "connected",
+        }
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "service": "trr-backend",
+                "database": "unreachable",
+            },
+        )
+
+
+@app.get("/health/live")
+def health_live():
+    """Lightweight liveness probe. No DB check."""
+    return {"status": "alive", "service": "trr-backend"}
 
 
 @app.get("/metrics")
