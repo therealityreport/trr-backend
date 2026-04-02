@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 
 from trr_backend.db import connection
@@ -91,8 +89,8 @@ class TestStartupLaneValidation:
         with pytest.raises(RuntimeError, match="direct"):
             _validate_startup_config()
 
-    def test_direct_lane_warns_in_local_dev(self, monkeypatch, caplog):
-        """Direct-host DSN warns (not fails) in local/dev during transition."""
+    def test_direct_lane_rejected_in_local_dev(self, monkeypatch):
+        """Direct-host DSN must fail-fast even in local/dev — grace period closed."""
         from api.main import _validate_startup_config
 
         monkeypatch.setenv(
@@ -102,10 +100,8 @@ class TestStartupLaneValidation:
         # Ensure IS local/dev
         monkeypatch.setenv("TRR_LOCAL_DEV", "1")
 
-        with caplog.at_level(logging.WARNING):
-            _validate_startup_config()  # Should NOT raise
-
-        assert "transitional_local_direct_lane" in caplog.text
+        with pytest.raises(RuntimeError, match="direct"):
+            _validate_startup_config()
 
     @pytest.mark.usefixtures("_force_deployed_runtime")
     def test_other_lane_rejected_in_deployed(self, monkeypatch):
@@ -133,8 +129,8 @@ class TestStartupLaneValidation:
         with pytest.raises(RuntimeError, match="pooler"):
             _validate_startup_config()
 
-    def test_other_lane_warns_in_local_dev(self, monkeypatch, caplog):
-        """Other-classified DSN warns (not fails) in local/dev during transition."""
+    def test_other_lane_rejected_in_local_dev(self, monkeypatch):
+        """Other-classified DSN must fail-fast even in local/dev — grace period closed."""
         from api.main import _validate_startup_config
 
         monkeypatch.setenv(
@@ -144,10 +140,8 @@ class TestStartupLaneValidation:
         # Ensure IS local/dev
         monkeypatch.setenv("TRR_LOCAL_DEV", "1")
 
-        with caplog.at_level(logging.WARNING):
-            _validate_startup_config()  # Should NOT raise
-
-        assert "transitional_local_direct_lane" in caplog.text
+        with pytest.raises(RuntimeError, match="other"):
+            _validate_startup_config()
 
     def test_no_candidates_rejected(self, monkeypatch):
         """No DB candidates at all must fail-fast."""
@@ -155,7 +149,6 @@ class TestStartupLaneValidation:
 
         monkeypatch.delenv("TRR_DB_URL", raising=False)
         monkeypatch.delenv("TRR_DB_FALLBACK_URL", raising=False)
-        monkeypatch.delenv("TRR_DB_ENABLE_DIRECT_FALLBACK", raising=False)
 
         with pytest.raises(RuntimeError, match="No database URL candidates"):
             _validate_startup_config()

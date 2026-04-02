@@ -131,36 +131,16 @@ def _validate_startup_config() -> None:
         is_local,
     )
 
-    # Fail-fast for invalid runtime lanes
-    # warn-only in local/dev until local pooler lands
-    transitional_local_lanes = {"direct", "unknown", "other", "pooler"}
+    # Fail-fast for invalid runtime lanes — only session and local are allowed.
+    invalid_lanes = {"direct", "unknown", "other", "pooler", "transaction"}
 
-    # Transaction mode always hard-fails — even locally it cannot support
-    # session-level timeout controls or persistent connections, so there
-    # is no transitional grace period.
-    if winner_connection_class == "transaction":
+    if winner_connection_class in invalid_lanes:
         raise RuntimeError(
             f"Invalid runtime connection lane: {winner_connection_class}\n"
-            f"Transaction-mode pooler (:6543) is not supported for persistent runtime.\n"
+            f"Only session-mode pooler (:5432) and local Postgres are supported.\n"
             f"Use session-mode pooler (:5432) via TRR_DB_URL.\n"
             f"Winner source: {winner_source}"
         )
-
-    if winner_connection_class in transitional_local_lanes:
-        if is_local:
-            logger.warning(
-                "[startup-config] transitional_local_direct_lane connection_class=%s "
-                "source=%s; will hard-fail after local pooler is enabled",
-                winner_connection_class,
-                winner_source,
-            )
-        else:
-            raise RuntimeError(
-                f"Invalid runtime connection lane: {winner_connection_class}\n"
-                f"Direct-host and unknown Supabase DSNs are not supported for persistent runtime.\n"
-                f"Use session-mode pooler (:5432) via TRR_DB_URL.\n"
-                f"Winner source: {winner_source}"
-            )
 
     if winner_connection_class == "session":
         raw_minconn = (os.getenv("TRR_DB_POOL_MINCONN") or "").strip()

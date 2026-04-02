@@ -9,30 +9,21 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess
 import sys
 from functools import lru_cache
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
 CANONICAL_DB_ENV = "TRR_DB_URL"
 FALLBACK_DB_ENV = "TRR_DB_FALLBACK_URL"
-DIRECT_FALLBACK_OVERRIDE_ENV = "TRR_DB_ENABLE_DIRECT_FALLBACK"
 
 
 class DatabaseConnectionError(RuntimeError):
     """Raised when database connection cannot be established."""
 
     pass
-
-
-def _env_flag(name: str, default: bool) -> bool:
-    raw = (os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
-    return raw not in {"0", "false", "no", "off"}
 
 
 def _parse_supabase_status_env(output: str) -> dict[str, str]:
@@ -126,7 +117,6 @@ def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None
     Priority order:
     1. TRR_DB_URL
     2. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
-    3. (Optional) Auto-derived Supabase direct host fallback when explicitly enabled
     """
 
     def _append_candidate(
@@ -142,51 +132,11 @@ def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None
         ordered.append({"url": url, **describe_database_url_target(url, source=source)})
         seen.add(url)
 
-    def _derive_supabase_direct_url(pooler_url: str) -> str | None:
-        parsed = urlsplit(pooler_url)
-        host = (parsed.hostname or "").strip().lower()
-        if not host.endswith("pooler.supabase.com"):
-            return None
-
-        username = parsed.username or ""
-        project_ref_match = re.match(r"^postgres\.([a-zA-Z0-9]+)$", username)
-        if not project_ref_match:
-            return None
-        project_ref = project_ref_match.group(1)
-
-        direct_host = f"db.{project_ref}.supabase.co"
-        userinfo = quote(username, safe="")
-        if parsed.password is not None:
-            userinfo = f"{userinfo}:{quote(parsed.password, safe='')}"
-        netloc = f"{direct_host}:5432"
-        if userinfo:
-            netloc = f"{userinfo}@{netloc}"
-        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
-
     candidates: list[dict[str, str | int | None]] = []
     seen: set[str] = set()
-    direct_fallbacks: list[tuple[str, str]] = []
 
-    def _append_candidate_with_optional_direct_fallback(value: str | None, *, source: str) -> None:
-        url = (value or "").strip()
-        if not url:
-            return
-        _append_candidate(candidates, seen, url, source=source)
-        direct_fallback = _derive_supabase_direct_url(url)
-        if direct_fallback:
-            direct_fallbacks.append((source, direct_fallback))
-
-    _append_candidate_with_optional_direct_fallback(os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
-    _append_candidate_with_optional_direct_fallback(os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
-
-    if _env_flag(DIRECT_FALLBACK_OVERRIDE_ENV, False):
-        for source, direct_fallback in direct_fallbacks:
-            _append_candidate(
-                candidates,
-                seen,
-                direct_fallback,
-                source=f"{source}:derived_direct",
-            )
+    _append_candidate(candidates, seen, os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
+    _append_candidate(candidates, seen, os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
 
     return tuple(candidates)
 
@@ -205,26 +155,16 @@ def log_database_resolution_summary() -> None:
         return
     winner = candidates[0]
     logger.info(
-        (
-            "[db-resolution] winner_source=%s host_class=%s connection_class=%s host=%s port=%s "
-            "database=%s direct_fallback_enabled=%s"
-        ),
+        "[db-resolution] winner_source=%s host_class=%s connection_class=%s host=%s port=%s database=%s",
         winner["source"],
         winner["host_class"],
         winner["connection_class"],
         winner["host"],
         winner["port"],
         winner["database"],
-        _env_flag(DIRECT_FALLBACK_OVERRIDE_ENV, False),
     )
     winner_source = str(winner["source"])
     winner_connection_class = str(winner["connection_class"])
-    if winner_source.endswith(":derived_direct"):
-        logger.warning(
-            "[db-resolution] derived_direct_fallback_in_use source=%s override_env=%s",
-            winner_source,
-            DIRECT_FALLBACK_OVERRIDE_ENV,
-        )
     if winner_connection_class in {"direct", "transaction"}:
         logger.warning(
             "[db-resolution] non_default_connection_class connection_class=%s "
@@ -254,7 +194,6 @@ def resolve_database_url() -> str:
     Priority order:
     1. TRR_DB_URL - Canonical runtime database URL
     2. TRR_DB_FALLBACK_URL - Optional operator-provided fallback
-    3. (Optional) derived direct-host fallback when TRR_DB_ENABLE_DIRECT_FALLBACK=1
 
     Returns:
         Database connection URL string.

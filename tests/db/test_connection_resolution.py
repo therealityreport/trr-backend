@@ -22,7 +22,6 @@ def _clear_resolution_cache() -> None:
 def _reset_db_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("TRR_DB_FALLBACK_URL", "TRR_DB_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.delenv("TRR_DB_ENABLE_DIRECT_FALLBACK", raising=False)
 
 
 def test_resolve_database_url_candidates_prefers_trr_runtime_envs(
@@ -43,25 +42,23 @@ def test_resolve_database_url_candidates_prefers_trr_runtime_envs(
     )
 
 
-def test_resolve_database_url_candidates_can_append_direct_fallbacks_when_explicitly_enabled(
+def test_derived_direct_never_produced_at_runtime(
     monkeypatch: pytest.MonkeyPatch,
     _reset_db_env: None,
 ) -> None:
-    database_pooler = "postgresql://postgres.qwerty123456:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
+    """Derived direct-host candidates must never appear in runtime resolution."""
     trr_pooler = "postgresql://postgres.asdfgh789012:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
+    database_pooler = "postgresql://postgres.qwerty123456:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
 
-    monkeypatch.setenv("TRR_DB_ENABLE_DIRECT_FALLBACK", "1")
     monkeypatch.setenv("TRR_DB_URL", trr_pooler)
     monkeypatch.setenv("TRR_DB_FALLBACK_URL", database_pooler)
 
     candidates = connection.resolve_database_url_candidates()
 
-    assert candidates == (
-        trr_pooler,
-        database_pooler,
-        "postgresql://postgres.asdfgh789012:secret@db.asdfgh789012.supabase.co:5432/postgres",
-        "postgresql://postgres.qwerty123456:secret@db.qwerty123456.supabase.co:5432/postgres",
-    )
+    # Only the two explicit URLs should appear — no derived direct hosts.
+    assert candidates == (trr_pooler, database_pooler)
+    for detail in connection.resolve_database_url_candidate_details():
+        assert ":derived_direct" not in str(detail.get("source", ""))
 
 
 def test_resolve_database_url_candidate_details_reports_source_and_host_class(
