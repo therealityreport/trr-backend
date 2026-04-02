@@ -16,7 +16,6 @@
 | place_of_birth | jsonb | NO | '{}'::jsonb | NO | NEVER |
 | homepage | jsonb | NO | '{}'::jsonb | NO | NEVER |
 | profile_image_url | jsonb | NO | '{}'::jsonb | NO | NEVER |
-| alternative_names | jsonb | NO | '{}'::jsonb | NO | NEVER |
 
 ## Primary Key
 
@@ -55,7 +54,6 @@ true
   "biography": {},
   "place_of_birth": {},
   "homepage": {},
-  "profile_image_url": {},
-  "alternative_names": {}
+  "profile_image_url": {}
 }
 ```

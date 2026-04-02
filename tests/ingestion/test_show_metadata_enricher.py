@@ -213,6 +213,54 @@ def test_enrich_shows_after_upsert_imdb_meta(monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
+def test_enrich_shows_after_upsert_prefers_tmdb_series_overview_for_show_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    details_payload = json.loads((repo_root / "tests" / "fixtures" / "tmdb" / "tv_details_sample.json").read_text())
+    details_payload["overview"] = "Series-level TMDb description."
+    details_payload["alternative_titles"] = {"results": []}
+    providers_payload = json.loads(
+        (repo_root / "tests" / "fixtures" / "tmdb" / "tv_watch_providers_sample.json").read_text()
+    )
+    title_html = (repo_root / "tests" / "fixtures" / "imdb" / "title_page_sample.html").read_text(encoding="utf-8")
+    overview_html = (repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_overview_sample.html").read_text(
+        encoding="utf-8"
+    )
+    season_html = (repo_root / "tests" / "fixtures" / "imdb" / "episodes_page_season3_sample.html").read_text(
+        encoding="utf-8"
+    )
+
+    from trr_backend.ingestion import show_metadata_enricher as mod
+
+    monkeypatch.setattr(mod, "_now_utc_iso", lambda: "2025-12-18T00:00:00Z")
+    monkeypatch.setattr(mod, "resolve_api_key", lambda: "fake")
+    monkeypatch.setattr(mod, "fetch_tv_details", lambda *args, **kwargs: details_payload)
+    monkeypatch.setattr(mod, "fetch_tv_watch_providers", lambda *args, **kwargs: providers_payload)
+    monkeypatch.setattr(mod, "fetch_imdb_title_html", lambda *args, **kwargs: title_html)
+    monkeypatch.setattr(mod, "fetch_imdb_mediaindex_html", lambda *args, **kwargs: None)
+
+    def fake_fetch_episodes_page(self, imdb_id: str, *, season: int | None = None) -> str:  # noqa: ANN001
+        return season_html if season is not None else overview_html
+
+    monkeypatch.setattr(mod.HttpImdbTitleMetadataClient, "fetch_episodes_page", fake_fetch_episodes_page)
+
+    show = ShowRecord(
+        id=UUID("00000000-0000-0000-0000-000000000006"),
+        name="Sample Show",
+        imdb_id="tt1353056",
+        tmdb_id=12345,
+        description="Season-level description that should be replaced.",
+    )
+
+    summary = enrich_shows_after_upsert([show], region="US", concurrency=1, force_refresh=True)
+
+    assert summary.failed == 0
+    assert summary.updated == 1
+    patch = summary.patches[0]
+    assert patch.show_update.get("description") == "Series-level TMDb description."
+
+
 def test_merge_alternative_names_preserves_manual_entries() -> None:
     existing = ["Manual Name"]
     incoming = ["TMDb Name", "Manual Name"]

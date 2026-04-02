@@ -40,7 +40,7 @@ from trr_backend.media.getty_replacement import (
     resolve_best_public_replacement,
 )
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
-from trr_backend.repositories import admin_operations
+from trr_backend.repositories import admin_operations, face_references
 from trr_backend.repositories.identity_assignment import (
     build_identity_candidate_person_ids as build_identity_candidate_person_ids_shared,
 )
@@ -17203,6 +17203,19 @@ def update_facebank_seed(
         updated = update_media_link_facebank_seed(db, str(link_id), payload.facebank_seed)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Database error updating facebank_seed: {exc}") from exc
+
+    try:
+        face_references.sync_face_reference_image(
+            link_id=str(link_id),
+            enabled=bool(payload.facebank_seed),
+        )
+    except Exception:
+        logger.exception(
+            "facebank_seed_reference_sync_failed person_id=%s link_id=%s enabled=%s",
+            person_id,
+            link_id,
+            payload.facebank_seed,
+        )
 
     return FacebankSeedResponse(
         link_id=str(updated.get("id") or link_id),

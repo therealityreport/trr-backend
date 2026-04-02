@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from api.auth import require_cast_screentime_admin
 from api.main import app
 from api.routers import admin_cast_screentime as router_module
-from trr_backend.clients import screenalytics_cast_screentime
 from trr_backend.repositories import cast_screentime as repo
+from trr_backend.services import retained_cast_screentime_dispatch
 
 
 @pytest.fixture(autouse=True)
@@ -596,9 +596,13 @@ def fake_storage(monkeypatch):
             },
         ),
     )
-    monkeypatch.setattr(screenalytics_cast_screentime, "start_run", lambda run_id: {"run_id": run_id, "accepted": True})
     monkeypatch.setattr(
-        screenalytics_cast_screentime,
+        retained_cast_screentime_dispatch,
+        "start_run",
+        lambda run_id: {"run_id": run_id, "accepted": True},
+    )
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch,
         "generate_segment_clip",
         lambda run_id, **kwargs: {
             "run_id": run_id,
@@ -664,11 +668,11 @@ def test_upload_complete_and_run_flow():
 
 def test_create_run_marks_dispatch_failures_failed(monkeypatch):
     def _raise_dispatch_error(_run_id):
-        raise screenalytics_cast_screentime.ScreenalyticsCastScreentimeClientError(
+        raise retained_cast_screentime_dispatch.RetainedCastScreentimeDispatchError(
             "SCREENALYTICS_SERVICE_TOKEN is not configured"
         )
 
-    monkeypatch.setattr(screenalytics_cast_screentime, "start_run", _raise_dispatch_error)
+    monkeypatch.setattr(retained_cast_screentime_dispatch, "start_run", _raise_dispatch_error)
 
     client = TestClient(app)
     episode_id = uuid4()

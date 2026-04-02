@@ -125,12 +125,134 @@ def _normalize_string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str)]
 
 
+def _dedupe_preserve_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(value)
+    return deduped
+
+
+def _build_show_overview_alternative_names(alternative_names: list[str] | None) -> list[str]:
+    return _dedupe_preserve_strings(_normalize_string_list(alternative_names))
+
+
+def _canonicalize_overview_network(value: str) -> str | None:
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        return None
+    if normalized in {"bravo", "bravo tv"}:
+        return "Bravo"
+    return None
+
+
+def _canonicalize_overview_streaming_provider(value: str) -> str:
+    trimmed = str(value or "").strip()
+    normalized = trimmed.casefold()
+    if normalized in {"peacock", "peacock premium", "peacock premium plus"}:
+        return "Peacock"
+    if normalized == "hayu" or normalized.startswith("hayu "):
+        return "Hayu"
+    return trimmed
+
+
+def _build_show_overview_brand_buckets(
+    *,
+    networks: list[str] | None,
+    streaming_providers: list[str] | None,
+    watch_providers: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    overview_networks: list[str] = []
+    overview_streaming_providers: list[str] = []
+
+    for network in _normalize_string_list(networks):
+        canonical_network = _canonicalize_overview_network(network)
+        if canonical_network:
+            overview_networks.append(canonical_network)
+        else:
+            overview_networks.append(network.strip())
+
+    for provider in [*_normalize_string_list(streaming_providers), *_normalize_string_list(watch_providers)]:
+        canonical_network = _canonicalize_overview_network(provider)
+        if canonical_network:
+            overview_networks.append(canonical_network)
+            continue
+        canonical_provider = _canonicalize_overview_streaming_provider(provider)
+        if canonical_provider:
+            overview_streaming_providers.append(canonical_provider)
+
+    return (
+        sorted(_dedupe_preserve_strings(overview_networks)),
+        sorted(_dedupe_preserve_strings(overview_streaming_providers)),
+    )
+
+
+def _build_show_derived_external_links(row: dict[str, Any]) -> dict[str, Any]:
+    justwatch_url = str(row.get("justwatch_url") or "").strip() or None
+    return {
+        "justwatch_url": justwatch_url,
+    }
+
+
+def _normalize_overview_watch_availability(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    region_order = {"US": 0, "GB": 1, "CA": 2, "AU": 3}
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        region = str(item.get("region") or "").strip().upper()
+        if region not in region_order:
+            continue
+        stream = sorted(_dedupe_preserve_strings(_normalize_string_list(item.get("stream"))))
+        buy = sorted(_dedupe_preserve_strings(_normalize_string_list(item.get("buy"))))
+        if not stream and not buy:
+            continue
+        rows.append(
+            {
+                "region": region,
+                "stream": stream,
+                "buy": buy,
+            }
+        )
+    return sorted(rows, key=lambda row: region_order.get(str(row.get("region") or ""), 99))
+
+
 def _normalize_show_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(row)
     for key in ("alternative_names", "genres", "networks", "streaming_providers", "watch_providers", "tags"):
         normalized[key] = _normalize_string_list(normalized.get(key))
     for key in ("computed_slug", "slug_collision_count", "tmdb_meta", "imdb_meta"):
         normalized.pop(key, None)
+    return normalized
+
+
+def _augment_show_detail_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_show_row(row)
+    overview_networks, overview_streaming_providers = _build_show_overview_brand_buckets(
+        networks=normalized.get("networks"),
+        streaming_providers=normalized.get("streaming_providers"),
+        watch_providers=normalized.get("watch_providers"),
+    )
+    normalized["overview_alternative_names"] = _build_show_overview_alternative_names(
+        normalized.get("alternative_names")
+    )
+    normalized["overview_networks"] = overview_networks
+    normalized["overview_streaming_providers"] = overview_streaming_providers
+    normalized["overview_watch_availability"] = _normalize_overview_watch_availability(
+        row.get("overview_watch_availability")
+    )
+    normalized["derived_external_links"] = _build_show_derived_external_links(row)
+    normalized.pop("justwatch_url", None)
     return normalized
 
 
@@ -1847,7 +1969,8 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
             COALESCE(s.genres, ARRAY[]::text[]) AS genres,
             COALESCE(s.networks, ARRAY[]::text[]) AS networks,
             COALESCE(s.streaming_providers, ARRAY[]::text[]) AS streaming_providers,
-            ARRAY[]::text[] AS watch_providers,
+            COALESCE(watch.provider_names, ARRAY[]::text[]) AS watch_providers,
+            watch.justwatch_url,
             COALESCE(s.tags, ARRAY[]::text[]) AS tags,
             s.primary_poster_image_id,
             s.primary_backdrop_image_id,
@@ -1860,6 +1983,67 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
             {SHOW_SLUG_SQL} AS computed_slug,
             COUNT(*) OVER (PARTITION BY {SHOW_SLUG_SQL}) AS slug_collision_count
           FROM core.shows AS s
+          LEFT JOIN LATERAL (
+            SELECT
+              COALESCE(
+                ARRAY_AGG(DISTINCT btrim(wp.provider_name) ORDER BY btrim(wp.provider_name))
+                  FILTER (WHERE btrim(COALESCE(wp.provider_name, '')) <> ''),
+                ARRAY[]::text[]
+              ) AS provider_names,
+              MIN(NULLIF(btrim(swp.link), '')) AS justwatch_url
+              ,
+              COALESCE(
+                (
+                  SELECT jsonb_agg(
+                    jsonb_build_object(
+                      'region',
+                      grouped.region,
+                      'stream',
+                      grouped.stream,
+                      'buy',
+                      grouped.buy
+                    )
+                    ORDER BY grouped.sort_order
+                  )
+                  FROM (
+                    SELECT
+                      swp_group.region,
+                      CASE swp_group.region
+                        WHEN 'US' THEN 0
+                        WHEN 'GB' THEN 1
+                        WHEN 'CA' THEN 2
+                        WHEN 'AU' THEN 3
+                        ELSE 99
+                      END AS sort_order,
+                      COALESCE(
+                        ARRAY_AGG(DISTINCT btrim(wp_group.provider_name) ORDER BY btrim(wp_group.provider_name))
+                          FILTER (
+                            WHERE swp_group.offer_type IN ('flatrate', 'ads')
+                              AND btrim(COALESCE(wp_group.provider_name, '')) <> ''
+                          ),
+                        ARRAY[]::text[]
+                      ) AS stream,
+                      COALESCE(
+                        ARRAY_AGG(DISTINCT btrim(wp_group.provider_name) ORDER BY btrim(wp_group.provider_name))
+                          FILTER (
+                            WHERE swp_group.offer_type IN ('buy', 'rent')
+                              AND btrim(COALESCE(wp_group.provider_name, '')) <> ''
+                          ),
+                        ARRAY[]::text[]
+                      ) AS buy
+                    FROM core.show_watch_providers AS swp_group
+                    JOIN core.watch_providers AS wp_group ON wp_group.provider_id = swp_group.provider_id
+                    WHERE swp_group.show_id = s.id
+                      AND swp_group.region IN ('US', 'GB', 'CA', 'AU')
+                    GROUP BY swp_group.region
+                  ) AS grouped
+                ),
+                '[]'::jsonb
+              ) AS overview_watch_availability
+            FROM core.show_watch_providers AS swp
+            JOIN core.watch_providers AS wp ON wp.provider_id = swp.provider_id
+            WHERE swp.show_id = s.id
+          ) AS watch ON TRUE
         )
         SELECT
           s.*,
@@ -1880,7 +2064,7 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
         """,
         [show_id],
     )
-    return (_normalize_show_row(row) if row else None, 1)
+    return (_augment_show_detail_row(row) if row else None, 1)
 
 
 def list_show_seasons(
@@ -1921,7 +2105,9 @@ def list_show_seasons(
                    COALESCE(ep.episode_airdate_count, 0)::int AS episode_airdate_count,
                    ep.first_episode_air_date,
                    ep.last_episode_air_date,
-                   (COALESCE(ep.episode_airdate_count, 0) > 0) AS has_scheduled_or_aired_episode
+                   (COALESCE(ep.episode_airdate_count, 0) > 0) AS has_scheduled_or_aired_episode,
+                   sf.source_url AS fandom_source_url,
+                   sf.page_title AS fandom_page_title
               FROM core.seasons AS s
               LEFT JOIN LATERAL (
                 SELECT COUNT(*)::int AS episode_count,
@@ -1931,6 +2117,13 @@ def list_show_seasons(
                   FROM core.episodes AS e
                  WHERE e.season_id = s.id
               ) AS ep ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT sf.source_url, sf.page_title
+                FROM core.season_fandom AS sf
+                WHERE sf.season_id = s.id
+                ORDER BY sf.scraped_at DESC NULLS LAST, sf.id DESC
+                LIMIT 1
+              ) AS sf ON TRUE
              WHERE s.show_id = %s::uuid
              ORDER BY s.season_number DESC
              LIMIT %s OFFSET %s
@@ -1962,8 +2155,17 @@ def list_show_seasons(
           s.fetched_at,
           s.id::text AS id,
           s.created_at,
-          s.updated_at
+          s.updated_at,
+          sf.source_url AS fandom_source_url,
+          sf.page_title AS fandom_page_title
           FROM core.seasons AS s
+          LEFT JOIN LATERAL (
+            SELECT sf.source_url, sf.page_title
+            FROM core.season_fandom AS sf
+            WHERE sf.season_id = s.id
+            ORDER BY sf.scraped_at DESC NULLS LAST, sf.id DESC
+            LIMIT 1
+          ) AS sf ON TRUE
          WHERE show_id = %s::uuid
          ORDER BY s.season_number DESC
          LIMIT %s OFFSET %s
@@ -2203,7 +2405,11 @@ def _shape_show_cast_payload(
 ) -> dict[str, Any]:
     membership_rows = [dict(row) for row in rows]
     normalized_roster_mode = "imdb_show_membership" if roster_mode == "imdb_show_membership" else "episode_evidence"
-    min_episodes_value = DEFAULT_CAST_MIN_EPISODES if min_episodes is None else max(min_episodes, 0)
+    min_episodes_value = (
+        0
+        if normalized_roster_mode == "imdb_show_membership" and min_episodes is None
+        else DEFAULT_CAST_MIN_EPISODES if min_episodes is None else max(min_episodes, 0)
+    )
 
     cast_rows = (
         membership_rows

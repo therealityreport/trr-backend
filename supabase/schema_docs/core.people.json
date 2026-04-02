@@ -97,14 +97,6 @@
       "default": "'{}'::jsonb",
       "is_identity": "NO",
       "is_generated": "NEVER"
-    },
-    {
-      "name": "alternative_names",
-      "data_type": "jsonb",
-      "is_nullable": "NO",
-      "default": "'{}'::jsonb",
-      "is_identity": "NO",
-      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
@@ -151,7 +143,6 @@
     "biography": {},
     "place_of_birth": {},
     "homepage": {},
-    "profile_image_url": {},
-    "alternative_names": {}
+    "profile_image_url": {}
   }
 }

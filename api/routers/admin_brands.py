@@ -800,6 +800,94 @@ def _like_term(value: str) -> str:
     return f"%{value}%"
 
 
+_BRAND_RELEVANCE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "asset",
+    "assets",
+    "cdn",
+    "com",
+    "commons",
+    "example",
+    "file",
+    "files",
+    "for",
+    "http",
+    "https",
+    "icon",
+    "image",
+    "images",
+    "logo",
+    "logos",
+    "mark",
+    "media",
+    "net",
+    "official",
+    "org",
+    "png",
+    "print",
+    "special",
+    "svg",
+    "symbol",
+    "the",
+    "tv",
+    "wiki",
+    "wikimedia",
+    "www",
+}
+
+
+def _brand_relevance_aliases(*values: Any) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        normalized = _normalize_text(value)
+        if not normalized:
+            continue
+        host = _normalize_hostname_from_url(normalized)
+        for candidate in (normalized, host):
+            friendly = re.sub(r"[^a-z0-9]+", "", _normalize_text(candidate).casefold())
+            if len(friendly) >= 3:
+                aliases.add(friendly)
+                if friendly.endswith("tv") and len(friendly) > 4:
+                    aliases.add(friendly[:-2])
+    return aliases
+
+
+def _brand_relevance_tokens(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        text = _normalize_text(value).casefold()
+        if not text:
+            continue
+        for token in re.findall(r"[a-z0-9]+", text):
+            if len(token) < 3 or token in _BRAND_RELEVANCE_STOPWORDS:
+                continue
+            tokens.add(token)
+            if token.endswith("tv") and len(token) > 4:
+                tokens.add(token[:-2])
+    return tokens
+
+
+def _matches_brand_identity(
+    *,
+    target_host: str,
+    target_label: str | None = None,
+    candidate_values: list[Any],
+) -> bool:
+    target_aliases = _brand_relevance_aliases(target_host, target_label)
+    candidate_aliases = _brand_relevance_aliases(*candidate_values)
+    if target_aliases & candidate_aliases:
+        return True
+    target_tokens = _brand_relevance_tokens(target_host, target_label)
+    if not target_tokens:
+        return True
+    candidate_tokens = _brand_relevance_tokens(*candidate_values)
+    if not candidate_tokens:
+        return True
+    return bool(target_tokens & candidate_tokens)
+
+
 def _sort_logo_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         rows,
@@ -818,6 +906,7 @@ def _find_related_network_streaming_assets_by_host(
     *,
     target_type: BrandLogoTargetType,
     target_host: str,
+    target_label: str | None = None,
     logo_role: BrandLogoRole | None = None,
     limit: int = 60,
 ) -> list[dict[str, Any]]:
@@ -873,6 +962,16 @@ def _find_related_network_streaming_assets_by_host(
         raise
     related_rows: list[dict[str, Any]] = []
     for row in rows:
+        if not _matches_brand_identity(
+            target_host=normalized_host,
+            target_label=target_label,
+            candidate_values=[
+                row.get("target_label"),
+                row.get("entity_key"),
+                row.get("source_url"),
+            ],
+        ):
+            continue
         role: BrandLogoRole = "wordmark" if bool(row.get("is_primary")) else "icon"
         if logo_role and role != logo_role:
             continue
@@ -1117,6 +1216,7 @@ def _list_brand_logos(
 
         if include_related and target_type in {"publication", "social"}:
             target_hosts: set[str] = set()
+            related_target_label = _normalize_text(target_key) or None
             if target_key:
                 normalized_host = _normalize_text(target_key).casefold()
                 if "." in normalized_host:
@@ -1125,6 +1225,8 @@ def _list_brand_logos(
                 host = _normalize_text(row.get("target_key")).casefold()
                 if host and "." in host:
                     target_hosts.add(host)
+                if not related_target_label:
+                    related_target_label = _normalize_text(row.get("target_label")) or None
 
             dedupe_related: set[tuple[str, str, str]] = set()
             for row in rows:
@@ -1141,6 +1243,7 @@ def _list_brand_logos(
                     related_rows = _find_related_network_streaming_assets_by_host(
                         target_type=target_type,
                         target_host=host,
+                        target_label=related_target_label,
                         logo_role=logo_role,
                         limit=120,
                     )
@@ -1875,7 +1978,7 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
     aliases = [target_label]
     if "." in target_key:
         aliases.append(target_key.split(".", 1)[0])
-    limit_per_source = max(10, payload.offset + payload.limit + 10)
+    limit_per_source = max(_DEFAULT_DISCOVER_PAGE_SIZE, payload.offset + payload.limit + _DEFAULT_DISCOVER_PAGE_SIZE)
     candidates = collect_free_logo_candidates(
         target_label=target_label,
         target_key=target_key,
@@ -1893,6 +1996,16 @@ def _discover_logo_candidates_by_source(payload: BrandLogosOptionDiscoverRequest
     for candidate in candidates:
         source_url = _normalize_text(candidate.url)
         if not source_url:
+            continue
+        if not _matches_brand_identity(
+            target_host=target_key,
+            target_label=target_label,
+            candidate_values=[
+                source_url,
+                getattr(candidate, "discovered_from", None),
+                getattr(candidate, "context", None),
+            ],
+        ):
             continue
         if not _is_previewable_logo_url(source_url):
             continue
@@ -2555,6 +2668,7 @@ def _select_logo_option(
         related_rows = _find_related_network_streaming_assets_by_host(
             target_type=payload.target_type,
             target_host=normalized_target_key,
+            target_label=target_label,
             logo_role=payload.logo_role,
             limit=200,
         )
@@ -2766,6 +2880,7 @@ def _load_related_pair_candidates_for_sync(
     return _find_related_network_streaming_assets_by_host(
         target_type=target_type,
         target_host=target_key,
+        target_label=target_key,
         logo_role=None,
         limit=160,
     )

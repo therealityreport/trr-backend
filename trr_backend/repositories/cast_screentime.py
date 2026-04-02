@@ -41,7 +41,7 @@ def _normalize(value: Any) -> Any:
 
 def create_media_upload_session(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
-        "INSERT INTO screenalytics.media_upload_sessions "
+        "INSERT INTO ml.analysis_media_upload_sessions "
         "(id, show_id, season_id, episode_id, created_by, status, temp_object_key, content_type, "
         " expected_size_bytes, expected_checksum_sha256, verification_json, expires_at, "
         " video_class, promo_subtype, media_type, media_kind, source_import_type, owner_scope) "
@@ -78,7 +78,7 @@ def create_media_upload_session(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_media_upload_session(upload_session_id: str) -> dict[str, Any] | None:
-    return pg.fetch_one("SELECT * FROM screenalytics.media_upload_sessions WHERE id = %s", [upload_session_id])
+    return pg.fetch_one("SELECT * FROM ml.analysis_media_upload_sessions WHERE id = %s", [upload_session_id])
 
 
 def update_media_upload_session(upload_session_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -93,7 +93,7 @@ def update_media_upload_session(upload_session_id: str, payload: dict[str, Any])
     params.append(upload_session_id)
 
     rows = pg.execute_returning(
-        f"UPDATE screenalytics.media_upload_sessions SET {', '.join(assignments)} WHERE id = %s RETURNING *",
+        f"UPDATE ml.analysis_media_upload_sessions SET {', '.join(assignments)} WHERE id = %s RETURNING *",
         params,
     )
     return rows[0] if rows else None
@@ -101,7 +101,7 @@ def update_media_upload_session(upload_session_id: str, payload: dict[str, Any])
 
 def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
-        "INSERT INTO screenalytics.video_assets "
+        "INSERT INTO ml.analysis_media_assets "
         "(id, episode_id, season_id, show_id, media_asset_id, source_url, source_json, duration_seconds, metadata, "
         " video_class, promo_subtype, media_type, media_kind, source_import_type) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
@@ -130,15 +130,15 @@ def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_video_asset(video_asset_id: str) -> dict[str, Any] | None:
-    return pg.fetch_one("SELECT * FROM screenalytics.video_assets WHERE id = %s", [video_asset_id])
+    return pg.fetch_one("SELECT * FROM ml.analysis_media_assets WHERE id = %s", [video_asset_id])
 
 
 def get_video_asset_upload_session_status(video_asset_id: str) -> str | None:
     row = pg.fetch_one(
         """
         SELECT mus.status
-        FROM screenalytics.video_assets va
-        LEFT JOIN screenalytics.media_upload_sessions mus
+        FROM ml.analysis_media_assets va
+        LEFT JOIN ml.analysis_media_upload_sessions mus
           ON mus.id::text = coalesce(va.source_json->>'upload_session_id', '')
         WHERE va.id = %s
         LIMIT 1
@@ -162,7 +162,7 @@ def list_video_asset_cast_candidates(video_asset_id: str) -> list[dict[str, Any]
           vacc.credit_category,
           vacc.billing_order,
           vacc.role
-        FROM screenalytics.video_asset_cast_candidates vacc
+        FROM ml.analysis_media_cast_candidates vacc
         JOIN core.people p ON p.id = vacc.person_id
         WHERE vacc.video_asset_id = %s
         ORDER BY vacc.billing_order NULLS LAST, p.full_name ASC
@@ -471,8 +471,9 @@ def _approved_facebank_person_ids(person_ids: list[str]) -> set[str]:
     rows = pg.fetch_all(
         """
         SELECT DISTINCT person_id::text AS person_id
-        FROM screenalytics.face_bank_images
-        WHERE approved = true
+        FROM ml.face_reference_images
+        WHERE is_active = true
+          AND approved = true
           AND person_id::text = ANY(%s)
         """,
         [normalized],
@@ -618,7 +619,7 @@ def build_candidate_cast_snapshot(
 
 def create_run(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
-        "INSERT INTO screenalytics.runs_v2 "
+        "INSERT INTO ml.screentime_runs "
         "(video_asset_id, status, run_type, pipeline_version, execution_backend, review_status, "
         " run_config_json, config_hash, candidate_cast_snapshot_json, candidate_scope_policy_json, "
         " cast_coverage_summary_json, "
@@ -649,7 +650,7 @@ def create_run(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_run(run_id: str) -> dict[str, Any] | None:
-    return pg.fetch_one("SELECT * FROM screenalytics.runs_v2 WHERE id = %s", [run_id])
+    return pg.fetch_one("SELECT * FROM ml.screentime_runs WHERE id = %s", [run_id])
 
 
 def get_run_with_video_asset(run_id: str) -> dict[str, Any] | None:
@@ -670,8 +671,8 @@ def get_run_with_video_asset(run_id: str) -> dict[str, Any] | None:
           va.media_kind,
           va.source_import_type,
           va.metadata AS video_asset_metadata
-        FROM screenalytics.runs_v2 r
-        JOIN screenalytics.video_assets va ON va.id = r.video_asset_id
+        FROM ml.screentime_runs r
+        JOIN ml.analysis_media_assets va ON va.id = r.video_asset_id
         WHERE r.id = %s
         LIMIT 1
         """,
@@ -689,7 +690,7 @@ def update_run(run_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         params.append(_json(_normalize(value)))
     params.append(run_id)
     rows = pg.execute_returning(
-        f"UPDATE screenalytics.runs_v2 SET {', '.join(assignments)} WHERE id = %s RETURNING *",
+        f"UPDATE ml.screentime_runs SET {', '.join(assignments)} WHERE id = %s RETURNING *",
         params,
     )
     return rows[0] if rows else None
@@ -717,7 +718,7 @@ def upsert_run_artifacts(run_id: str, artifacts: list[dict[str, Any]]) -> list[d
         for artifact in artifacts
     ]
     sql = (
-        "INSERT INTO screenalytics.run_artifacts "
+        "INSERT INTO ml.screentime_artifacts "
         "(run_id, artifact_key, artifact_kind, s3_key, schema_version, content_type, checksum_sha256, row_count) "
         "VALUES %s "
         "ON CONFLICT (run_id, artifact_key) DO UPDATE SET "
@@ -746,11 +747,11 @@ def replace_run_person_metrics(run_id: str, metrics: list[dict[str, Any]]) -> li
         for metric in metrics
     ]
     with pg.db_connection() as conn, pg.db_cursor(conn=conn) as cur:
-        cur.execute("DELETE FROM screenalytics.run_person_metrics WHERE run_id = %s", [_normalize(run_id)])
+        cur.execute("DELETE FROM ml.screentime_person_metrics WHERE run_id = %s", [_normalize(run_id)])
         if not rows:
             return []
         sql = (
-            "INSERT INTO screenalytics.run_person_metrics "
+            "INSERT INTO ml.screentime_person_metrics "
             "(run_id, person_id, screen_time_seconds, frame_count, confidence_avg, metadata) "
             "VALUES %s RETURNING *"
         )
@@ -778,11 +779,11 @@ def replace_cast_screentime_segments(run_id: str, segments: list[dict[str, Any]]
         for segment in segments
     ]
     with pg.db_connection() as conn, pg.db_cursor(conn=conn) as cur:
-        cur.execute("DELETE FROM screenalytics.cast_screentime_segments WHERE run_id = %s", [_normalize(run_id)])
+        cur.execute("DELETE FROM ml.screentime_segments WHERE run_id = %s", [_normalize(run_id)])
         if not rows:
             return []
         sql = (
-            "INSERT INTO screenalytics.cast_screentime_segments "
+            "INSERT INTO ml.screentime_segments "
             "(run_id, segment_key, person_id, start_ms, end_ms, duration_ms, frame_count, confidence_score, "
             " similarity_score, pose_bucket, assignment_source, is_counted, classification_json, metadata) "
             "VALUES %s RETURNING *"
@@ -815,11 +816,11 @@ def replace_cast_screentime_evidence(run_id: str, evidence_items: list[dict[str,
         for evidence_key in ordered_keys
     ]
     with pg.db_connection() as conn, pg.db_cursor(conn=conn) as cur:
-        cur.execute("DELETE FROM screenalytics.cast_screentime_evidence WHERE run_id = %s", [_normalize(run_id)])
+        cur.execute("DELETE FROM ml.screentime_evidence WHERE run_id = %s", [_normalize(run_id)])
         if not rows:
             return []
         sql = (
-            "INSERT INTO screenalytics.cast_screentime_evidence "
+            "INSERT INTO ml.screentime_evidence "
             "(run_id, segment_key, evidence_key, evidence_type, timestamp_ms, "
             "object_key, content_type, ttl_expires_at, metadata) "
             "VALUES %s RETURNING *"
@@ -845,7 +846,7 @@ def upsert_cast_screentime_evidence(run_id: str, evidence_items: list[dict[str, 
         for item in evidence_items
     ]
     sql = (
-        "INSERT INTO screenalytics.cast_screentime_evidence "
+        "INSERT INTO ml.screentime_evidence "
         "(run_id, segment_key, evidence_key, evidence_type, timestamp_ms, "
         "object_key, content_type, ttl_expires_at, metadata) "
         "VALUES %s "
@@ -867,6 +868,7 @@ def replace_cast_screentime_excluded_sections(run_id: str, sections: list[dict[s
     rows = [
         (
             _normalize(run_id),
+            "excluded_section",
             section.get("section_key"),
             section.get("section_type"),
             section.get("start_ms"),
@@ -875,20 +877,22 @@ def replace_cast_screentime_excluded_sections(run_id: str, sections: list[dict[s
             section.get("detection_source"),
             section.get("confidence_score"),
             _json(section.get("metadata", {})),
+            "run",
+            _normalize(run_id),
         )
         for section in sections
     ]
     with pg.db_connection() as conn, pg.db_cursor(conn=conn) as cur:
         cur.execute(
-            "DELETE FROM screenalytics.cast_screentime_excluded_sections WHERE run_id = %s",
+            "DELETE FROM ml.screentime_review_state WHERE run_id = %s AND review_kind = 'excluded_section'",
             [_normalize(run_id)],
         )
         if not rows:
             return []
         sql = (
-            "INSERT INTO screenalytics.cast_screentime_excluded_sections "
-            "(run_id, section_key, section_type, start_ms, end_ms, duration_ms, "
-            "detection_source, confidence_score, metadata) "
+            "INSERT INTO ml.screentime_review_state "
+            "(run_id, review_kind, review_key, section_type, start_ms, end_ms, duration_ms, "
+            "detection_source, confidence_score, payload_json, owner_scope, owner_entity_id) "
             "VALUES %s RETURNING *"
         )
         return pg.execute_values_returning(sql, rows, conn=conn)
@@ -905,7 +909,7 @@ def list_leaderboard(run_id: str) -> list[dict[str, Any]]:
           rpm.frame_count,
           rpm.confidence_avg,
           rpm.metadata
-        FROM screenalytics.run_person_metrics rpm
+        FROM ml.screentime_person_metrics rpm
         LEFT JOIN core.people p ON p.id = rpm.person_id
         WHERE rpm.run_id = %s
         ORDER BY rpm.screen_time_seconds DESC, rpm.frame_count DESC
@@ -920,7 +924,7 @@ def list_segments(run_id: str) -> list[dict[str, Any]]:
         SELECT
           seg.*,
           p.full_name AS display_name
-        FROM screenalytics.cast_screentime_segments seg
+        FROM ml.screentime_segments seg
         LEFT JOIN core.people p ON p.id = seg.person_id
         WHERE seg.run_id = %s
         ORDER BY seg.start_ms ASC, seg.segment_key ASC
@@ -933,7 +937,7 @@ def list_evidence(run_id: str) -> list[dict[str, Any]]:
     return pg.fetch_all(
         """
         SELECT *
-        FROM screenalytics.cast_screentime_evidence
+        FROM ml.screentime_evidence
         WHERE run_id = %s
         ORDER BY timestamp_ms ASC, evidence_key ASC
         """,
@@ -945,8 +949,24 @@ def list_excluded_sections(run_id: str) -> list[dict[str, Any]]:
     return pg.fetch_all(
         """
         SELECT *
-        FROM screenalytics.cast_screentime_excluded_sections
-        WHERE run_id = %s
+        FROM (
+          SELECT
+            run_id,
+            review_key AS section_key,
+            section_type,
+            start_ms,
+            end_ms,
+            duration_ms,
+            detection_source,
+            confidence_score,
+            payload_json AS metadata,
+            decided_at,
+            updated_at,
+            created_at
+          FROM ml.screentime_review_state
+          WHERE run_id = %s
+            AND review_kind = 'excluded_section'
+        ) excluded_sections
         ORDER BY start_ms ASC, section_key ASC
         """,
         [_normalize(run_id)],
@@ -981,8 +1001,8 @@ def list_runs_for_show(
           va.media_type,
           va.media_kind,
           va.source_import_type
-        FROM screenalytics.runs_v2 r
-        JOIN screenalytics.video_assets va ON va.id = r.video_asset_id
+        FROM ml.screentime_runs r
+        JOIN ml.analysis_media_assets va ON va.id = r.video_asset_id
         WHERE r.run_type = 'cast_screentime' AND va.show_id = %s
           {classification_clause}
         ORDER BY r.created_at DESC
@@ -996,7 +1016,7 @@ def get_run_artifact(run_id: str, artifact_key: str) -> dict[str, Any] | None:
     return pg.fetch_one(
         """
         SELECT *
-        FROM screenalytics.run_artifacts
+        FROM ml.screentime_artifacts
         WHERE run_id = %s
           AND artifact_key = %s
         LIMIT 1
@@ -1020,9 +1040,9 @@ def list_publish_versions(video_asset_id: str) -> list[dict[str, Any]]:
           va.show_id,
           va.season_id,
           va.episode_id
-        FROM screenalytics.cast_screentime_publish_versions pv
-        JOIN screenalytics.runs_v2 r ON r.id = pv.run_id
-        JOIN screenalytics.video_assets va ON va.id = pv.video_asset_id
+        FROM ml.screentime_publications pv
+        JOIN ml.screentime_runs r ON r.id = pv.run_id
+        JOIN ml.analysis_media_assets va ON va.id = pv.video_asset_id
         WHERE pv.video_asset_id = %s
         ORDER BY pv.version_number DESC, pv.published_at DESC
         """,
@@ -1034,7 +1054,7 @@ def get_current_publish_version(video_asset_id: str) -> dict[str, Any] | None:
     return pg.fetch_one(
         """
         SELECT *
-        FROM screenalytics.cast_screentime_publish_versions
+        FROM ml.screentime_publications
         WHERE video_asset_id = %s
           AND is_current = true
         LIMIT 1
@@ -1047,7 +1067,7 @@ def get_publish_version_for_run(run_id: str) -> dict[str, Any] | None:
     return pg.fetch_one(
         """
         SELECT *
-        FROM screenalytics.cast_screentime_publish_versions
+        FROM ml.screentime_publications
         WHERE run_id = %s
         LIMIT 1
         """,
@@ -1068,7 +1088,7 @@ def publish_run(
             cur,
             """
             SELECT *
-            FROM screenalytics.cast_screentime_publish_versions
+            FROM ml.screentime_publications
             WHERE run_id = %s
             LIMIT 1
             """,
@@ -1081,7 +1101,7 @@ def publish_run(
             cur,
             """
             SELECT *
-            FROM screenalytics.cast_screentime_publish_versions
+            FROM ml.screentime_publications
             WHERE video_asset_id = %s
               AND is_current = true
             LIMIT 1
@@ -1092,7 +1112,7 @@ def publish_run(
         if current:
             cur.execute(
                 """
-                UPDATE screenalytics.cast_screentime_publish_versions
+                UPDATE ml.screentime_publications
                 SET is_current = false,
                     updated_at = now()
                 WHERE id = %s
@@ -1102,7 +1122,7 @@ def publish_run(
 
         cur.execute(
             """
-            INSERT INTO screenalytics.cast_screentime_publish_versions
+            INSERT INTO ml.screentime_publications
               (video_asset_id, run_id, version_number, published_by, notes_json, metrics_snapshot_json, is_current)
             VALUES
               (%s, %s, %s, %s, %s, %s, true)
@@ -1149,13 +1169,13 @@ def replace_reference_fingerprints_for_run(
     ]
     with pg.db_connection() as conn, pg.db_cursor(conn=conn) as cur:
         cur.execute(
-            "DELETE FROM screenalytics.cast_screentime_reference_fingerprints WHERE run_id = %s",
+            "DELETE FROM ml.screentime_reference_fingerprints WHERE run_id = %s",
             [_normalize(run_id)],
         )
         if not rows:
             return []
         sql = (
-            "INSERT INTO screenalytics.cast_screentime_reference_fingerprints "
+            "INSERT INTO ml.screentime_reference_fingerprints "
             "(show_id, season_id, episode_id, video_asset_id, run_id, scene_key, fingerprint_type, fingerprint_hash, "
             " start_ms, end_ms, duration_ms, metadata) "
             "VALUES %s RETURNING *"
@@ -1167,7 +1187,7 @@ def list_reference_fingerprints_for_show(show_id: str) -> list[dict[str, Any]]:
     return pg.fetch_all(
         """
         SELECT *
-        FROM screenalytics.cast_screentime_reference_fingerprints
+        FROM ml.screentime_reference_fingerprints
         WHERE show_id = %s
         ORDER BY created_at DESC, scene_key ASC
         """,
@@ -1178,7 +1198,7 @@ def list_reference_fingerprints_for_show(show_id: str) -> list[dict[str, Any]]:
 def upsert_suggestion_decision(payload: dict[str, Any]) -> dict[str, Any]:
     rows = pg.execute_returning(
         """
-        INSERT INTO screenalytics.cast_screentime_suggestion_decisions (
+        INSERT INTO ml.screentime_review_state (
           show_id,
           season_id,
           episode_id,
@@ -1186,25 +1206,26 @@ def upsert_suggestion_decision(payload: dict[str, Any]) -> dict[str, Any]:
           owner_entity_id,
           video_asset_id,
           run_id,
-          suggestion_key,
+          review_kind,
+          review_key,
           person_id,
           decision,
           notes_json,
-          suggestion_payload,
+          payload_json,
           decided_by,
           decided_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-        ON CONFLICT (owner_scope, owner_entity_id, person_id) DO UPDATE SET
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'suggestion_decision', %s, %s, %s, %s, %s, now())
+        ON CONFLICT (owner_scope, owner_entity_id, review_kind, review_key) DO UPDATE SET
           show_id = EXCLUDED.show_id,
           season_id = EXCLUDED.season_id,
           episode_id = EXCLUDED.episode_id,
           video_asset_id = EXCLUDED.video_asset_id,
           run_id = EXCLUDED.run_id,
-          suggestion_key = EXCLUDED.suggestion_key,
+          person_id = EXCLUDED.person_id,
           decision = EXCLUDED.decision,
           notes_json = EXCLUDED.notes_json,
-          suggestion_payload = EXCLUDED.suggestion_payload,
+          payload_json = EXCLUDED.payload_json,
           decided_by = EXCLUDED.decided_by,
           decided_at = EXCLUDED.decided_at,
           updated_at = now()
@@ -1226,7 +1247,12 @@ def upsert_suggestion_decision(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("decided_by"),
         ],
     )
-    return rows[0] if rows else {}
+    if not rows:
+        return {}
+    row = rows[0]
+    row["suggestion_key"] = row.get("review_key")
+    row["suggestion_payload"] = row.get("payload_json")
+    return row
 
 
 def list_suggestion_decisions_for_context(
@@ -1244,10 +1270,13 @@ def list_suggestion_decisions_for_context(
         f"""
         SELECT
           d.*,
+          d.review_key AS suggestion_key,
+          d.payload_json AS suggestion_payload,
           p.full_name AS display_name
-        FROM screenalytics.cast_screentime_suggestion_decisions d
+        FROM ml.screentime_review_state d
         LEFT JOIN core.people p ON p.id = d.person_id
         WHERE {" OR ".join(clauses)}
+          AND d.review_kind = 'suggestion_decision'
         ORDER BY d.decided_at DESC, d.updated_at DESC
         """,
         params,
@@ -1257,7 +1286,7 @@ def list_suggestion_decisions_for_context(
 def upsert_unknown_review_state(payload: dict[str, Any]) -> dict[str, Any]:
     rows = pg.execute_returning(
         """
-        INSERT INTO screenalytics.cast_screentime_unknown_review_state (
+        INSERT INTO ml.screentime_review_state (
           show_id,
           season_id,
           episode_id,
@@ -1265,31 +1294,32 @@ def upsert_unknown_review_state(payload: dict[str, Any]) -> dict[str, Any]:
           owner_entity_id,
           video_asset_id,
           run_id,
-          queue_key,
+          review_kind,
+          review_key,
           queue_group,
           candidate_person_id,
           decision,
           escalation_level,
           recommended_action,
           notes_json,
-          queue_payload,
+          payload_json,
           decided_by,
           decided_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-        ON CONFLICT (owner_scope, owner_entity_id, queue_group) DO UPDATE SET
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'unknown_review', %s, %s, %s, %s, %s, %s, %s, %s, now())
+        ON CONFLICT (owner_scope, owner_entity_id, review_kind, review_key) DO UPDATE SET
           show_id = EXCLUDED.show_id,
           season_id = EXCLUDED.season_id,
           episode_id = EXCLUDED.episode_id,
           video_asset_id = EXCLUDED.video_asset_id,
           run_id = EXCLUDED.run_id,
-          queue_key = EXCLUDED.queue_key,
+          queue_group = EXCLUDED.queue_group,
           candidate_person_id = EXCLUDED.candidate_person_id,
           decision = EXCLUDED.decision,
           escalation_level = EXCLUDED.escalation_level,
           recommended_action = EXCLUDED.recommended_action,
           notes_json = EXCLUDED.notes_json,
-          queue_payload = EXCLUDED.queue_payload,
+          payload_json = EXCLUDED.payload_json,
           decided_by = EXCLUDED.decided_by,
           decided_at = EXCLUDED.decided_at,
           updated_at = now()
@@ -1314,7 +1344,12 @@ def upsert_unknown_review_state(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("decided_by"),
         ],
     )
-    return rows[0] if rows else {}
+    if not rows:
+        return {}
+    row = rows[0]
+    row["queue_key"] = row.get("review_key")
+    row["queue_payload"] = row.get("payload_json")
+    return row
 
 
 def list_unknown_review_state_for_context(
@@ -1332,10 +1367,13 @@ def list_unknown_review_state_for_context(
         f"""
         SELECT
           q.*,
+          q.review_key AS queue_key,
+          q.payload_json AS queue_payload,
           p.full_name AS candidate_display_name
-        FROM screenalytics.cast_screentime_unknown_review_state q
+        FROM ml.screentime_review_state q
         LEFT JOIN core.people p ON p.id = q.candidate_person_id
         WHERE {" OR ".join(clauses)}
+          AND q.review_kind = 'unknown_review'
         ORDER BY q.decided_at DESC, q.updated_at DESC
         """,
         params,
@@ -1354,8 +1392,8 @@ def list_current_published_versions_for_show(show_id: str) -> list[dict[str, Any
           va.promo_subtype,
           va.media_type,
           va.media_kind
-        FROM screenalytics.cast_screentime_publish_versions pv
-        JOIN screenalytics.video_assets va ON va.id = pv.video_asset_id
+        FROM ml.screentime_publications pv
+        JOIN ml.analysis_media_assets va ON va.id = pv.video_asset_id
         WHERE pv.is_current = true
           AND va.show_id = %s
           AND va.media_type = 'episode'
@@ -1377,8 +1415,8 @@ def list_current_published_versions_for_season(season_id: str) -> list[dict[str,
           va.promo_subtype,
           va.media_type,
           va.media_kind
-        FROM screenalytics.cast_screentime_publish_versions pv
-        JOIN screenalytics.video_assets va ON va.id = pv.video_asset_id
+        FROM ml.screentime_publications pv
+        JOIN ml.analysis_media_assets va ON va.id = pv.video_asset_id
         WHERE pv.is_current = true
           AND va.season_id = %s
           AND va.media_type = 'episode'
@@ -1392,7 +1430,7 @@ def reconcile_stale_runs(*, stale_after_seconds: int, show_id: str | None = None
     where_show = "AND va.show_id = %s::uuid" if show_id else ""
     return pg.execute_returning(
         f"""
-        UPDATE screenalytics.runs_v2 AS r
+        UPDATE ml.screentime_runs AS r
         SET status = %s,
             error_message = CASE
               WHEN r.status = 'queued' THEN 'worker_dispatch_expired'
@@ -1401,7 +1439,7 @@ def reconcile_stale_runs(*, stale_after_seconds: int, show_id: str | None = None
             completed_at = COALESCE(r.completed_at, NOW()),
             worker_heartbeat_at = NOW(),
             updated_at = NOW()
-        FROM screenalytics.video_assets AS va
+        FROM ml.analysis_media_assets AS va
         WHERE r.video_asset_id = va.id
           AND r.run_type = 'cast_screentime'
           AND (

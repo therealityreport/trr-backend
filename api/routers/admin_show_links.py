@@ -180,6 +180,74 @@ def _positive_int_env(key: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _is_allowlisted_fandom_seed_input(value: str) -> bool:
+    candidate = _canonicalize_url(str(value or "").strip())
+    if not candidate:
+        return False
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    allowlist = load_fandom_community_allowlist()
+    return is_allowlisted_fandom_domain(candidate, allowlist=allowlist)
+
+
+def _dedupe_casefold_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(value)
+    return deduped
+
+
+def _kickoff_show_link_discovery_for_manual_fandom_seed(
+    *,
+    show_id: str,
+    db: SupabaseAdminClient,
+    actor: str,
+    inputs: list[str],
+) -> bool:
+    seed_inputs = _dedupe_casefold_strings([value for value in inputs if _is_allowlisted_fandom_seed_input(value)])
+    if not seed_inputs:
+        return False
+
+    def _runner() -> None:
+        try:
+            logger.info(
+                "starting_background_show_link_discovery show_id=%s actor=%s inputs=%s",
+                show_id,
+                actor,
+                seed_inputs,
+            )
+            _run_show_link_discovery(
+                show_id_str=show_id,
+                payload=LinkDiscoverRequest(include_seasons=True, include_people=True),
+                db=db,
+                actor=actor,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "background_show_link_discovery_failed show_id=%s actor=%s inputs=%s",
+                show_id,
+                actor,
+                seed_inputs,
+            )
+
+    thread = threading.Thread(
+        target=_runner,
+        name=f"show-link-discovery-{show_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
 def _link_discovery_run_timeout_seconds() -> float:
     return _positive_float_env("TRR_LINK_DISCOVERY_RUN_TIMEOUT_SECONDS", 12 * 60.0)
 
@@ -425,7 +493,6 @@ _LINK_KIND_LABELS: dict[str, str] = {
     "external": "External Link",
 }
 
-
 def _normalize_lookup_value(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
@@ -443,6 +510,108 @@ def _normalize_show_network_tokens(values: list[str] | tuple[str, ...] | None) -
         if "nbc" in normalized or "nbcuniversal" in normalized.replace(" ", ""):
             tokens.add("nbc")
     return tokens
+
+
+def _build_social_profile_url(link_kind: str, handle: str) -> str:
+    canonical_handle = str(handle or "").strip().lstrip("@")
+    if not canonical_handle:
+        return ""
+    normalized_kind = _normalize_link_kind(link_kind)
+    if normalized_kind == "instagram":
+        return f"https://www.instagram.com/{canonical_handle}"
+    if normalized_kind == "tiktok":
+        return f"https://www.tiktok.com/@{canonical_handle}"
+    if normalized_kind == "twitter":
+        return f"https://x.com/{canonical_handle}"
+    if normalized_kind == "youtube":
+        return f"https://www.youtube.com/@{canonical_handle}"
+    if normalized_kind == "facebook":
+        return f"https://www.facebook.com/{canonical_handle}"
+    if normalized_kind == "threads":
+        return f"https://www.threads.net/@{canonical_handle}"
+    if normalized_kind == "reddit":
+        return f"https://www.reddit.com/user/{canonical_handle}"
+    return ""
+
+
+def _build_shared_social_source_links(
+    show_id: str,
+    *,
+    source_scope: str,
+) -> list[dict[str, Any]]:
+    rows = pg.fetch_all(
+        """
+        SELECT platform, account_handle, metadata
+        FROM social.shared_account_sources
+        WHERE source_scope = %s
+          AND is_active = true
+        ORDER BY scrape_priority ASC, platform ASC, account_handle ASC
+        """,
+        [source_scope],
+    )
+
+    discovered: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        link_kind = _normalize_link_kind(str(row.get("platform") or ""))
+        handle = str(row.get("account_handle") or "").strip()
+        url = _build_social_profile_url(link_kind, handle)
+        if not link_kind or not handle or not url:
+            continue
+        dedupe_key = (link_kind, _url_key(url))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        metadata = dict(row.get("metadata") or {})
+        label = str(metadata.get("label") or _LINK_KIND_LABELS.get(link_kind, link_kind.title())).strip()
+        discovered.append(
+            {
+                "entity_type": "show",
+                "entity_id": show_id,
+                "season_number": 0,
+                "link_group": "social",
+                "link_kind": link_kind,
+                "label": label,
+                "url": url,
+                "source": "social.shared_account_sources",
+                "metadata": {
+                    "shared_account_source_scope": source_scope,
+                    **metadata,
+                },
+            }
+        )
+    return discovered
+
+
+def _persist_shared_social_source_links(
+    *,
+    show_id: str,
+    db: SupabaseAdminClient,
+    actor: str,
+    discovered_by: str,
+    source_scope: str,
+) -> int:
+    persisted = 0
+    for row in _build_shared_social_source_links(show_id, source_scope=source_scope):
+        _upsert_link(
+            db,
+            show_id=show_id,
+            entity_type=str(row["entity_type"]),
+            entity_id=str(row["entity_id"]),
+            link_group=str(row["link_group"]),
+            link_kind=str(row["link_kind"]),
+            url=str(row["url"]),
+            label=str(row["label"]),
+            season_number=int(row["season_number"]),
+            status="approved",
+            confidence=0.95,
+            source=str(row["source"]),
+            discovered_by=discovered_by,
+            metadata=dict(row.get("metadata") or {}),
+            actor=actor,
+        )
+        persisted += 1
+    return persisted
 
 
 def _effective_fandom_allowlist(
@@ -3661,50 +3830,7 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
         )
 
     if "bravo" in networks:
-        discovered.extend(
-            [
-                {
-                    "entity_type": "show",
-                    "entity_id": show_id,
-                    "season_number": 0,
-                    "link_group": "social",
-                    "link_kind": "instagram",
-                    "label": "Instagram",
-                    "url": "https://www.instagram.com/BravoTV",
-                    "source": "network_default",
-                },
-                {
-                    "entity_type": "show",
-                    "entity_id": show_id,
-                    "season_number": 0,
-                    "link_group": "social",
-                    "link_kind": "tiktok",
-                    "label": "TikTok",
-                    "url": "https://www.tiktok.com/@BravoTV",
-                    "source": "network_default",
-                },
-                {
-                    "entity_type": "show",
-                    "entity_id": show_id,
-                    "season_number": 0,
-                    "link_group": "social",
-                    "link_kind": "twitter",
-                    "label": "Twitter/X",
-                    "url": "https://x.com/BravoTV",
-                    "source": "network_default",
-                },
-                {
-                    "entity_type": "show",
-                    "entity_id": show_id,
-                    "season_number": 0,
-                    "link_group": "social",
-                    "link_kind": "youtube",
-                    "label": "YouTube",
-                    "url": "https://www.youtube.com/@Bravo",
-                    "source": "network_default",
-                },
-            ]
-        )
+        discovered.extend(_build_shared_social_source_links(show_id, source_scope="bravo"))
 
     if isinstance(external_ids, dict):
         for kind in ("instagram", "tiktok", "twitter", "youtube"):
@@ -6533,9 +6659,11 @@ def add_show_links(
     context = _load_show_link_classifier_context(show_id_str)
     upserted_count = 0
     connected_count = 0
+    network_default_links_upserted = 0
     errors: list[dict[str, str]] = []
     assignments: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str, int, str, str]] = set()
+    discovery_seed_inputs: list[str] = []
 
     for raw_input in inputs:
         rows, error = _classify_submitted_link_input(raw_input, context)
@@ -6602,11 +6730,31 @@ def add_show_links(
                     "connected": index > 0,
                 }
             )
+            if link_kind == "fandom" and _is_allowlisted_fandom_seed_input(canonical_url):
+                discovery_seed_inputs.append(raw_input)
+
+    if discovery_seed_inputs:
+        _kickoff_show_link_discovery_for_manual_fandom_seed(
+            show_id=show_id_str,
+            db=db,
+            actor=actor,
+            inputs=discovery_seed_inputs,
+        )
+
+    if bool(context.get("is_bravo_show")):
+        network_default_links_upserted = _persist_shared_social_source_links(
+            show_id=show_id_str,
+            db=db,
+            actor=actor,
+            discovered_by="shared_account_source",
+            source_scope="bravo",
+        )
 
     return {
         "show_id": show_id_str,
         "submitted_count": len(inputs),
         "added": upserted_count,
+        "network_default_links_upserted": network_default_links_upserted,
         "connected_links_added": connected_count,
         "errors": errors,
         "assignments": assignments,

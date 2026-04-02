@@ -34,6 +34,7 @@ from api.routers.admin_show_links import (
     _validate_person_social_url,
     _validated_person_knowledge_url,
 )
+from scripts import backfill_fandom_link_discovery
 
 
 def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
@@ -660,6 +661,44 @@ def test_discover_show_links_includes_peacock_and_nbc_network_blog_links() -> No
     )
 
 
+def test_build_shared_social_source_links_reads_cloud_catalog_rows() -> None:
+    show_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_all",
+        return_value=[
+            {"platform": "instagram", "account_handle": "bravotv", "metadata": {}},
+            {"platform": "youtube", "account_handle": "bravo", "metadata": {}},
+        ],
+    ):
+        links = admin_show_links._build_shared_social_source_links(show_id, source_scope="bravo")
+
+    assert links == [
+        {
+            "entity_type": "show",
+            "entity_id": show_id,
+            "season_number": 0,
+            "link_group": "social",
+            "link_kind": "instagram",
+            "label": "Instagram",
+            "url": "https://www.instagram.com/bravotv",
+            "source": "social.shared_account_sources",
+            "metadata": {"shared_account_source_scope": "bravo"},
+        },
+        {
+            "entity_type": "show",
+            "entity_id": show_id,
+            "season_number": 0,
+            "link_group": "social",
+            "link_kind": "youtube",
+            "label": "YouTube",
+            "url": "https://www.youtube.com/@bravo",
+            "source": "social.shared_account_sources",
+            "metadata": {"shared_account_source_scope": "bravo"},
+        },
+    ]
+
+
 def test_discover_show_links_includes_curated_traitors_fandom_base_urls() -> None:
     show_id = str(uuid4())
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
@@ -1166,14 +1205,21 @@ def test_add_show_links_expands_person_fandom_url_into_related_pages() -> None:
                             "api.routers.admin_show_links._upsert_link",
                             side_effect=lambda *args, **kwargs: {"id": str(uuid4())},
                         ):
-                            result = admin_show_links.add_show_links(
-                                UUID(show_id),
-                                admin_show_links.LinkBulkAddRequest(
-                                    inputs=["https://real-housewives.fandom.com/wiki/Angie_Katsanevas"]
-                                ),
-                                MagicMock(),
-                                {"email": "admin@example.com"},
-                            )
+                            with patch(
+                                "api.routers.admin_show_links._build_shared_social_source_links",
+                                return_value=[],
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._kickoff_show_link_discovery_for_manual_fandom_seed"
+                                ):
+                                    result = admin_show_links.add_show_links(
+                                        UUID(show_id),
+                                        admin_show_links.LinkBulkAddRequest(
+                                            inputs=["https://real-housewives.fandom.com/wiki/Angie_Katsanevas"]
+                                        ),
+                                        MagicMock(),
+                                        {"email": "admin@example.com"},
+                                    )
 
     assert result["added"] == 4
     assert {assignment["url"] for assignment in result["assignments"]} == {
@@ -1182,6 +1228,250 @@ def test_add_show_links_expands_person_fandom_url_into_related_pages() -> None:
         "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
         "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
     }
+
+
+def test_add_show_links_triggers_background_discovery_for_allowlisted_fandom_seed() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_name_norm": "the real housewives of salt lake city",
+        "show_imdb_id": None,
+        "show_tmdb_id": None,
+        "show_wikidata_id": None,
+        "show_networks": ["bravo"],
+        "is_bravo_show": True,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+    kickoff_calls: list[dict[str, object]] = []
+
+    with patch("api.routers.admin_show_links._show_exists", return_value=True):
+        with patch("api.routers.admin_show_links._load_show_link_classifier_context", return_value=context):
+            with patch(
+                "api.routers.admin_show_links._classify_submitted_link_input",
+                return_value=(
+                    [
+                        {
+                            "entity_type": "show",
+                            "entity_id": show_id,
+                            "season_number": 0,
+                            "link_group": "knowledge",
+                            "link_kind": "fandom",
+                            "url": "https://real-housewives.fandom.com/",
+                            "label": "Fandom",
+                            "source": "manual_classifier",
+                            "metadata": {},
+                        }
+                    ],
+                    None,
+                ),
+            ):
+                with patch(
+                    "api.routers.admin_show_links._upsert_link",
+                    side_effect=lambda *args, **kwargs: {"id": str(uuid4())},
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._build_shared_social_source_links",
+                        return_value=[],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links._kickoff_show_link_discovery_for_manual_fandom_seed",
+                            side_effect=lambda **kwargs: kickoff_calls.append(kwargs),
+                        ):
+                            result = admin_show_links.add_show_links(
+                                UUID(show_id),
+                                admin_show_links.LinkBulkAddRequest(inputs=["https://real-housewives.fandom.com/"]),
+                                MagicMock(),
+                                {"email": "admin@example.com"},
+                            )
+
+    assert result["added"] == 1
+    assert len(kickoff_calls) == 1
+    assert kickoff_calls[0]["show_id"] == show_id
+    assert kickoff_calls[0]["actor"] == "admin@example.com"
+    assert kickoff_calls[0]["inputs"] == ["https://real-housewives.fandom.com/"]
+
+
+def test_add_show_links_restores_shared_social_source_links_for_bravo_shows() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_name_norm": "the real housewives of salt lake city",
+        "show_imdb_id": None,
+        "show_tmdb_id": None,
+        "show_wikidata_id": None,
+        "show_networks": ["bravo"],
+        "is_bravo_show": True,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    with patch("api.routers.admin_show_links._show_exists", return_value=True):
+        with patch("api.routers.admin_show_links._load_show_link_classifier_context", return_value=context):
+            with patch(
+                "api.routers.admin_show_links._classify_submitted_link_input",
+                return_value=(
+                    [
+                        {
+                            "entity_type": "show",
+                            "entity_id": show_id,
+                            "season_number": 0,
+                            "link_group": "knowledge",
+                            "link_kind": "wikipedia",
+                            "url": "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                            "label": "Wikipedia",
+                            "source": "manual_classifier",
+                            "metadata": {},
+                        }
+                    ],
+                    None,
+                ),
+            ):
+                with patch(
+                    "api.routers.admin_show_links._build_shared_social_source_links",
+                    return_value=[
+                        {
+                            "entity_type": "show",
+                            "entity_id": show_id,
+                            "season_number": 0,
+                            "link_group": "social",
+                            "link_kind": "instagram",
+                            "label": "Instagram",
+                            "url": "https://www.instagram.com/bravotv",
+                            "source": "social.shared_account_sources",
+                            "metadata": {"shared_account_source_scope": "bravo"},
+                        },
+                        {
+                            "entity_type": "show",
+                            "entity_id": show_id,
+                            "season_number": 0,
+                            "link_group": "social",
+                            "link_kind": "youtube",
+                            "label": "YouTube",
+                            "url": "https://www.youtube.com/@bravo",
+                            "source": "social.shared_account_sources",
+                            "metadata": {"shared_account_source_scope": "bravo"},
+                        },
+                    ],
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._upsert_link",
+                        side_effect=lambda *args, **kwargs: {"id": str(uuid4())},
+                    ):
+                        result = admin_show_links.add_show_links(
+                            UUID(show_id),
+                            admin_show_links.LinkBulkAddRequest(
+                                inputs=["https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City"]
+                            ),
+                            MagicMock(),
+                            {"email": "admin@example.com"},
+                        )
+
+    assert result["added"] == 1
+    assert result["network_default_links_upserted"] == 2
+
+
+def test_add_show_links_does_not_trigger_background_discovery_for_non_fandom_links() -> None:
+    show_id = str(uuid4())
+    context = {
+        "show_id": show_id,
+        "show_name": "The Real Housewives of Salt Lake City",
+        "show_name_norm": "the real housewives of salt lake city",
+        "show_imdb_id": None,
+        "show_tmdb_id": None,
+        "show_wikidata_id": None,
+        "show_networks": ["bravo"],
+        "is_bravo_show": True,
+        "seasons_by_number": {},
+        "seasons_by_wikidata": {},
+        "people_by_id": {},
+        "people_by_name": {},
+        "people_by_slug": {},
+        "people_by_imdb": {},
+        "people_by_tmdb": {},
+        "people_by_wikidata": {},
+    }
+
+    with patch("api.routers.admin_show_links._show_exists", return_value=True):
+        with patch("api.routers.admin_show_links._load_show_link_classifier_context", return_value=context):
+            with patch(
+                "api.routers.admin_show_links._classify_submitted_link_input",
+                return_value=(
+                    [
+                        {
+                            "entity_type": "show",
+                            "entity_id": show_id,
+                            "season_number": 0,
+                            "link_group": "knowledge",
+                            "link_kind": "wikipedia",
+                            "url": "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                            "label": "Wikipedia",
+                            "source": "manual_classifier",
+                            "metadata": {},
+                        }
+                    ],
+                    None,
+                ),
+            ):
+                with patch(
+                    "api.routers.admin_show_links._upsert_link",
+                    side_effect=lambda *args, **kwargs: {"id": str(uuid4())},
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._build_shared_social_source_links",
+                        return_value=[],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links._kickoff_show_link_discovery_for_manual_fandom_seed"
+                        ) as kickoff:
+                            result = admin_show_links.add_show_links(
+                                UUID(show_id),
+                                admin_show_links.LinkBulkAddRequest(
+                                    inputs=["https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City"]
+                                ),
+                                MagicMock(),
+                                {"email": "admin@example.com"},
+                            )
+
+    assert result["added"] == 1
+    kickoff.assert_not_called()
+
+
+def test_backfill_fandom_link_discovery_filters_to_allowlisted_seed_shows() -> None:
+    rows = [
+        {
+            "show_id": "show-1",
+            "url": "https://real-housewives.fandom.com/",
+        },
+        {
+            "show_id": "show-1",
+            "url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+        },
+        {
+            "show_id": "show-2",
+            "url": "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City",
+        },
+        {
+            "show_id": "show-3",
+            "url": "https://not-allowlisted.fandom.com/wiki/Show",
+        },
+    ]
+
+    assert backfill_fandom_link_discovery.filter_allowlisted_fandom_seed_show_ids(rows) == ["show-1"]
 
 
 def test_classify_submitted_link_input_recognizes_tvdb_urls() -> None:
