@@ -27,6 +27,7 @@ from api.realtime.broker import init_broker, shutdown_broker
 from trr_backend.db import pg
 from trr_backend.db.connection import log_database_resolution_summary, resolve_database_url_candidate_details
 from trr_backend.db.pg import DatabaseServiceUnavailableError, database_service_unavailable_detail
+from trr_backend.middleware.request_timeout import RequestTimeoutMiddleware
 from trr_backend.observability import (
     CONTENT_TYPE_LATEST,
     bind_trace_id,
@@ -283,6 +284,7 @@ app = FastAPI(
 cors_origins = get_cors_origins()
 allow_credentials = len(cors_origins) > 0  # Only allow credentials with explicit origins
 
+app.add_middleware(RequestTimeoutMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins if cors_origins else ["*"],
