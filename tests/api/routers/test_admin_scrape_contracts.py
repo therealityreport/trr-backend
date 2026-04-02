@@ -127,6 +127,7 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
 
 
 def test_import_images_stream_includes_operation_contract_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_DB_URL", "postgresql://postgres:postgres@localhost:54322/postgres")
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     operation_id = str(uuid4())
