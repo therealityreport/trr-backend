@@ -28,7 +28,7 @@ EXEMPT_PATHS: frozenset[str] = frozenset(
     }
 )
 
-# SSE/streaming route path prefixes that must be exempt.
+# SSE/streaming route path suffixes that must be exempt.
 # These are identified from the Phase 0 route inventory.
 EXEMPT_STREAM_SUFFIXES: tuple[str, ...] = ("/stream",)
 
@@ -44,13 +44,13 @@ def _parse_timeout_from_env() -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
-def _extract_trace_headers(scope: dict) -> list[list[bytes]]:
+def _extract_trace_headers(scope: dict) -> list[tuple[bytes, bytes]]:
     """Extract trace-related headers from the incoming request to forward in error responses."""
     trace_header_names = {b"x-request-id", b"x-trace-id", b"traceparent"}
-    headers = []
+    headers: list[tuple[bytes, bytes]] = []
     for name, value in scope.get("headers", []):
         if name.lower() in trace_header_names:
-            headers.append([name, value])
+            headers.append((name, value))
     return headers
 
 
