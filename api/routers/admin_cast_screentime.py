@@ -19,9 +19,9 @@ from pydantic import BaseModel, Field
 
 from api.auth import CastScreentimeAdminUser
 from api.screenalytics_auth import require_screenalytics_service_token
-from trr_backend.clients import screenalytics_cast_screentime
 from trr_backend.media.s3_mirror import build_public_object_url, get_cdn_base_url, get_s3_bucket, get_s3_client
 from trr_backend.repositories import cast_screentime
+from trr_backend.services import retained_cast_screentime_dispatch
 from trr_backend.socials.youtube import YouTubeScraper, resolve_youtube_media
 
 router = APIRouter(tags=["admin-cast-screentime"])
@@ -1520,7 +1520,7 @@ def create_run(
             "status": "pending",
             "run_type": "cast_screentime",
             "pipeline_version": str(run_config.get("pipeline_version") or "cast_screentime_v1"),
-            "execution_backend": "screenalytics",
+            "execution_backend": "trr_backend_retained_dispatch",
             "review_status": "draft",
             "run_config_json": run_config,
             "config_hash": _compute_config_hash(run_config),
@@ -1533,7 +1533,7 @@ def create_run(
     dispatch_state = "queued"
     dispatch_result: dict[str, Any] | None = None
     try:
-        dispatch_result = screenalytics_cast_screentime.start_run(str(run["id"]))
+        dispatch_result = retained_cast_screentime_dispatch.start_run(str(run["id"]))
         cast_screentime.update_run(
             str(run["id"]),
             {
@@ -1543,7 +1543,7 @@ def create_run(
                 "dispatch_accepted_at": datetime.now(UTC).isoformat(),
             },
         )
-    except screenalytics_cast_screentime.ScreenalyticsCastScreentimeClientError as exc:
+    except retained_cast_screentime_dispatch.RetainedCastScreentimeDispatchError as exc:
         dispatch_state = "dispatch_failed"
         cast_screentime.update_run(
             str(run["id"]),
@@ -1609,14 +1609,14 @@ def generate_segment_clip(
 ) -> dict[str, Any]:
     _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
     try:
-        result = screenalytics_cast_screentime.generate_segment_clip(
+        result = retained_cast_screentime_dispatch.generate_segment_clip(
             str(run_id),
             segment_key=segment_key,
             mode=request.mode,
             duration_seconds=request.duration_seconds,
             ttl_days=request.ttl_days,
         )
-    except screenalytics_cast_screentime.ScreenalyticsCastScreentimeClientError as exc:
+    except retained_cast_screentime_dispatch.RetainedCastScreentimeDispatchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     evidence_payload = result.get("evidence")
     if not isinstance(evidence_payload, dict):

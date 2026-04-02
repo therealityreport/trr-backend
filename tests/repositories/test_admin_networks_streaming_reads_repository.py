@@ -168,7 +168,22 @@ def test_get_networks_streaming_detail_shapes_contract(monkeypatch: pytest.Monke
                     "failure_reason": None,
                     "is_primary": True,
                     "updated_at": "2026-03-26T00:00:00Z",
-                }
+                },
+                {
+                    "id": "asset-2",
+                    "source": "catalog",
+                    "source_url": "https://example.com/wwhl-logo.svg",
+                    "source_rank": 2,
+                    "hosted_logo_url": "https://cdn.example.com/wwhl.png",
+                    "hosted_logo_content_type": "image/png",
+                    "base_logo_format": "png",
+                    "pixel_width": 400,
+                    "pixel_height": 200,
+                    "mirror_status": "mirrored",
+                    "failure_reason": None,
+                    "is_primary": False,
+                    "updated_at": "2026-03-25T00:00:00Z",
+                },
             ]
         return [
             {
@@ -188,6 +203,7 @@ def test_get_networks_streaming_detail_shapes_contract(monkeypatch: pytest.Monke
     assert payload is not None
     assert payload["entity_key"] == "bravo"
     assert payload["core"]["entity_id"] == "74"
+    assert len(payload["logo_assets"]) == 1
     assert payload["logo_assets"][0]["mirror_status"] == "mirrored"
     assert payload["shows"][0]["canonical_slug"] == "bravo-show"
 

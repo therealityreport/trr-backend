@@ -127,6 +127,7 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
 
 
 def test_import_images_stream_includes_operation_contract_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_DB_URL", "postgresql://postgres:postgres@localhost:54322/postgres")
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     operation_id = str(uuid4())
@@ -161,7 +162,7 @@ def test_import_images_stream_includes_operation_contract_fields(monkeypatch: py
             },
         ]
 
-    with TestClient(app) as client:
+    with patch("api.main._validate_startup_config"), patch("api.main._prewarm_database_pool"), TestClient(app) as client:
         with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=MagicMock()):
             with patch("api.routers.admin_scrape.start_operation_for_stream", return_value={"id": operation_id}):
                 with patch(

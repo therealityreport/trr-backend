@@ -481,6 +481,28 @@ def _to_string_array(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
+def _normalize_brand_identity(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _logo_asset_matches_entity(display_name: str, row: dict[str, Any]) -> bool:
+    brand_identity = _normalize_brand_identity(display_name)
+    if not brand_identity:
+        return True
+    source_url = _to_string_or_none(row.get("source_url")) or ""
+    source = _to_string_or_none(row.get("source")) or ""
+    if source in {"tmdb", "override"}:
+        return True
+    haystack = _normalize_brand_identity(f"{source} {source_url}")
+    if not haystack:
+        return True
+    if brand_identity in haystack:
+        return True
+    if brand_identity.endswith("tv") and brand_identity[:-2] and brand_identity[:-2] in haystack:
+        return True
+    return False
+
+
 @lru_cache(maxsize=16)
 def _table_exists(table_name: str) -> bool:
     row = pg.fetch_one("select to_regclass(%s) is not null as exists", [table_name]) or {}
@@ -783,6 +805,10 @@ def get_networks_streaming_detail(
             }
             for row in logo_asset_rows
             if _to_string_or_none(row.get("id"))
+            and _logo_asset_matches_entity(
+                str(entity_row.get("display_name") or ""),
+                row,
+            )
         ]
     else:
         query_count += 1

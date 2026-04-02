@@ -83,3 +83,123 @@ def test_replace_cast_screentime_evidence_dedupes_duplicate_evidence_keys(monkey
     assert captured["rows"][0][4] == 125
     assert captured["rows"][0][5] == "b.jpg"
     assert result == [{"evidence_key": "still-1"}]
+
+
+def test_replace_cast_screentime_excluded_sections_writes_review_state(monkeypatch):
+    captured = {}
+
+    class _DummyCursor:
+        def execute(self, sql, params):
+            captured["delete_sql"] = sql
+            captured["delete_params"] = params
+
+    class _CursorContext:
+        def __enter__(self):
+            return _DummyCursor()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _ConnContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_execute_values_returning(sql, rows, *, conn=None):
+        captured["insert_sql"] = sql
+        captured["rows"] = rows
+        return [{"review_kind": "excluded_section", "review_key": row[2]} for row in rows]
+
+    monkeypatch.setattr(cast_screentime.pg, "db_connection", lambda: _ConnContext())
+    monkeypatch.setattr(cast_screentime.pg, "db_cursor", lambda conn=None: _CursorContext())
+    monkeypatch.setattr(cast_screentime.pg, "execute_values_returning", _fake_execute_values_returning)
+
+    result = cast_screentime.replace_cast_screentime_excluded_sections(
+        "run-1",
+        [
+            {
+                "section_key": "cold-open",
+                "section_type": "intro",
+                "start_ms": 0,
+                "end_ms": 12000,
+                "duration_ms": 12000,
+                "detection_source": "manual",
+                "confidence_score": 1.0,
+                "metadata": {"reason": "credits"},
+            }
+        ],
+    )
+
+    assert "DELETE FROM ml.screentime_review_state" in captured["delete_sql"]
+    assert captured["delete_params"] == ["run-1"]
+    assert "INSERT INTO ml.screentime_review_state" in captured["insert_sql"]
+    assert captured["rows"][0][1] == "excluded_section"
+    assert captured["rows"][0][2] == "cold-open"
+    assert captured["rows"][0][10] == "run"
+    assert captured["rows"][0][11] == "run-1"
+    assert result == [{"review_kind": "excluded_section", "review_key": "cold-open"}]
+
+
+def test_upsert_suggestion_decision_maps_review_columns_back_to_legacy_shape(monkeypatch):
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "execute_returning",
+        lambda _sql, _params: [
+            {
+                "review_key": "suggestion-1",
+                "payload_json": {"person_id": "person-1"},
+                "decision": "accepted",
+            }
+        ],
+    )
+
+    result = cast_screentime.upsert_suggestion_decision(
+        {
+            "show_id": "show-1",
+            "owner_scope": "show",
+            "owner_entity_id": "show-1",
+            "suggestion_key": "suggestion-1",
+            "person_id": "person-1",
+            "decision": "accepted",
+            "suggestion_payload": {"person_id": "person-1"},
+            "decided_by": "admin-1",
+        }
+    )
+
+    assert result["suggestion_key"] == "suggestion-1"
+    assert result["suggestion_payload"] == {"person_id": "person-1"}
+    assert result["decision"] == "accepted"
+
+
+def test_upsert_unknown_review_state_maps_review_columns_back_to_legacy_shape(monkeypatch):
+    monkeypatch.setattr(
+        cast_screentime.pg,
+        "execute_returning",
+        lambda _sql, _params: [
+            {
+                "review_key": "queue-1",
+                "payload_json": {"candidate_person_id": "person-2"},
+                "decision": "defer",
+            }
+        ],
+    )
+
+    result = cast_screentime.upsert_unknown_review_state(
+        {
+            "show_id": "show-1",
+            "owner_scope": "show",
+            "owner_entity_id": "show-1",
+            "queue_key": "queue-1",
+            "queue_group": "episode",
+            "candidate_person_id": "person-2",
+            "decision": "defer",
+            "queue_payload": {"candidate_person_id": "person-2"},
+            "decided_by": "admin-1",
+        }
+    )
+
+    assert result["queue_key"] == "queue-1"
+    assert result["queue_payload"] == {"candidate_person_id": "person-2"}
+    assert result["decision"] == "defer"

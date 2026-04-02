@@ -29,7 +29,7 @@ def _normalize(value: Any) -> Any:
 
 def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
-        "INSERT INTO screenalytics.video_assets "
+        "INSERT INTO ml.analysis_media_assets "
         "(episode_id, season_id, show_id, media_asset_id, source_url, duration_seconds, metadata) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s) "
         "RETURNING *"
@@ -48,13 +48,13 @@ def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_video_asset(video_asset_id: str) -> dict[str, Any] | None:
-    sql = "SELECT * FROM screenalytics.video_assets WHERE id = %s"
+    sql = "SELECT * FROM ml.analysis_media_assets WHERE id = %s"
     return pg.fetch_one(sql, [video_asset_id])
 
 
 def create_run(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
-        "INSERT INTO screenalytics.runs_v2 "
+        "INSERT INTO ml.screentime_runs "
         "(video_asset_id, status, run_config_json, config_hash, candidate_cast_snapshot_json) "
         "VALUES (%s, %s, %s, %s, %s) "
         "RETURNING *"
@@ -71,7 +71,7 @@ def create_run(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_run(run_id: str) -> dict[str, Any] | None:
-    sql = "SELECT * FROM screenalytics.runs_v2 WHERE id = %s"
+    sql = "SELECT * FROM ml.screentime_runs WHERE id = %s"
     return pg.fetch_one(sql, [run_id])
 
 
@@ -80,8 +80,8 @@ def get_run_with_video_asset(run_id: str) -> dict[str, Any] | None:
         "SELECT r.*, "
         "va.episode_id, va.season_id, va.show_id, va.media_asset_id, "
         "va.source_url, va.duration_seconds, va.metadata "
-        "FROM screenalytics.runs_v2 r "
-        "JOIN screenalytics.video_assets va ON va.id = r.video_asset_id "
+        "FROM ml.screentime_runs r "
+        "JOIN ml.analysis_media_assets va ON va.id = r.video_asset_id "
         "WHERE r.id = %s"
     )
     return pg.fetch_one(sql, [run_id])
@@ -98,7 +98,7 @@ def update_run(run_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         params.append(_json(_normalize(value)))
 
     params.append(run_id)
-    sql = f"UPDATE screenalytics.runs_v2 SET {', '.join(assignments)} WHERE id = %s RETURNING *"
+    sql = f"UPDATE ml.screentime_runs SET {', '.join(assignments)} WHERE id = %s RETURNING *"
     rows = pg.execute_returning(sql, params)
     return rows[0] if rows else None
 
@@ -118,7 +118,7 @@ def upsert_run_artifacts(run_id: str, artifacts: list[dict[str, Any]]) -> list[d
         for artifact in artifacts
     ]
     sql = (
-        "INSERT INTO screenalytics.run_artifacts "
+        "INSERT INTO ml.screentime_artifacts "
         "(run_id, artifact_key, artifact_kind, s3_key, schema_version, content_type, checksum_sha256, row_count) "
         "VALUES %s "
         "ON CONFLICT (run_id, artifact_key) DO UPDATE SET "
@@ -147,7 +147,7 @@ def upsert_run_person_metrics(run_id: str, metrics: list[dict[str, Any]]) -> lis
         for metric in metrics
     ]
     sql = (
-        "INSERT INTO screenalytics.run_person_metrics "
+        "INSERT INTO ml.screentime_person_metrics "
         "(run_id, person_id, screen_time_seconds, frame_count, confidence_avg, metadata) "
         "VALUES %s "
         "ON CONFLICT (run_id, person_id) DO UPDATE SET "
@@ -162,12 +162,12 @@ def upsert_run_person_metrics(run_id: str, metrics: list[dict[str, Any]]) -> lis
 
 
 def list_leaderboard(run_id: str) -> list[dict[str, Any]]:
-    sql = "SELECT * FROM screenalytics.run_person_metrics WHERE run_id = %s ORDER BY screen_time_seconds DESC"
+    sql = "SELECT * FROM ml.screentime_person_metrics WHERE run_id = %s ORDER BY screen_time_seconds DESC"
     return pg.fetch_all(sql, [_normalize(run_id)])
 
 
 def list_unknown_clusters(run_id: str) -> list[dict[str, Any]]:
-    sql = "SELECT * FROM screenalytics.unknown_clusters WHERE run_id = %s"
+    sql = "SELECT * FROM ml.screentime_unknown_clusters WHERE run_id = %s"
     return pg.fetch_all(sql, [_normalize(run_id)])
 
 
@@ -183,7 +183,7 @@ def upsert_unknown_clusters(run_id: str, clusters: list[dict[str, Any]]) -> list
         for cluster in clusters
     ]
     sql = (
-        "INSERT INTO screenalytics.unknown_clusters "
+        "INSERT INTO ml.screentime_unknown_clusters "
         "(run_id, cluster_id, track_count, preview_s3_key, metadata) "
         "VALUES %s "
         "ON CONFLICT (run_id, cluster_id) DO UPDATE SET "
@@ -204,7 +204,7 @@ def assign_unknown_cluster(
 ) -> dict[str, Any] | None:
     now = datetime.now(UTC).isoformat()
     sql = (
-        "UPDATE screenalytics.unknown_clusters "
+        "UPDATE ml.screentime_unknown_clusters "
         "SET assigned_person_id = %s, assigned_by = %s, assigned_at = %s, updated_at = now() "
         "WHERE run_id = %s AND cluster_id = %s "
         "RETURNING *"

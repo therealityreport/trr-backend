@@ -668,6 +668,7 @@ def _enrich_one_show(
 
     tmdb_sources: list[str] = []
     imdb_sources: list[str] = []
+    description_from_series_source = False
 
     # Resolve TMDb id from IMDb id if missing.
     if tmdb_id is None and tmdb_api_key and imdb_id:
@@ -770,6 +771,7 @@ def _enrich_one_show(
             overview = _as_str(details.get("overview"))
             if overview:
                 show_update["description"] = overview
+                description_from_series_source = True
         if force_refresh or _is_blank(show.premiere_date):
             first_air_date = _as_str(details.get("first_air_date"))
             if first_air_date:
@@ -906,10 +908,11 @@ def _enrich_one_show(
             if parsed.get("tags"):
                 tags.extend(parsed.get("tags") or [])
 
-            if force_refresh or _is_blank(show.description):
+            if (force_refresh or _is_blank(show.description)) and not description_from_series_source:
                 description = _as_str(parsed.get("description"))
                 if description:
                     show_update["description"] = description
+                    description_from_series_source = True
 
             # Use IMDb title page for network + totals when TMDb missing.
             try:

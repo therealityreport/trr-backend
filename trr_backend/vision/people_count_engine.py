@@ -8,7 +8,6 @@ locally or inside a dedicated Modal function.
 from __future__ import annotations
 
 import hashlib
-import io
 import logging
 import os
 import time
@@ -19,7 +18,6 @@ from typing import Any
 import requests
 
 from trr_backend.db.pg import db_cursor
-from trr_backend.media.s3_mirror import get_s3_bucket, get_s3_client
 
 logger = logging.getLogger(__name__)
 
@@ -227,34 +225,26 @@ def _extract_face_embedding(face: object):
     return None
 
 
-def _download_embedding_from_s3_key(key: str):
+def _coerce_embedding_vector(value: Any):
     np = _lazy_numpy()
-    if not key or key.startswith("external:"):
-        return None
-    bucket = get_s3_bucket()
-    client = get_s3_client()
-    try:
-        response = client.get_object(Bucket=bucket, Key=key)
-        payload = response["Body"].read()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Failed to load facebank embedding key=%s error=%s", key, exc)
-        return None
-    if not payload:
+    if value is None:
         return None
     try:
-        with np.load(io.BytesIO(payload), allow_pickle=False) as data:
-            if isinstance(data, np.lib.npyio.NpzFile):
-                values = list(data.values())
-                if not values:
-                    return None
-                arr = np.asarray(values[0], dtype=np.float32)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            if normalized.startswith("[") and normalized.endswith("]"):
+                arr = np.fromstring(normalized[1:-1], sep=",", dtype=np.float32)
             else:
-                arr = np.asarray(data, dtype=np.float32)
-    except Exception:
-        try:
-            arr = np.asarray(np.load(io.BytesIO(payload), allow_pickle=False), dtype=np.float32)
-        except Exception:
-            return None
+                arr = np.fromstring(normalized, sep=",", dtype=np.float32)
+        else:
+            arr = np.asarray(value, dtype=np.float32)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to coerce retained face-reference embedding: %s", exc)
+        return None
+    if getattr(arr, "size", 0) == 0:
+        return None
     return _l2_normalize(arr)
 
 
@@ -273,16 +263,19 @@ def _load_person_facebank_centroids() -> list[dict[str, object]]:
             cur.execute(
                 """
                 SELECT
-                  f.person_id::text AS person_id,
+                  fri.person_id::text AS person_id,
                   p.full_name AS person_name,
-                  f.s3_embedding_key
-                FROM screenalytics.face_bank_images AS f
+                  fre.embedding
+                FROM ml.face_reference_images AS fri
+                JOIN ml.face_reference_embeddings AS fre
+                  ON fre.reference_image_id = fri.id
                 JOIN core.people AS p
-                  ON p.id = f.person_id
-                WHERE f.approved = true
-                  AND f.is_seed = true
-                  AND f.s3_embedding_key IS NOT NULL
-                ORDER BY f.created_at DESC
+                  ON p.id = fri.person_id
+                WHERE fri.approved = true
+                  AND fri.is_active = true
+                  AND fre.embedding_status = 'ready'
+                  AND fre.embedding IS NOT NULL
+                ORDER BY coalesce(fre.generated_at, fre.created_at) DESC
                 LIMIT 5000
                 """
             )
@@ -297,7 +290,7 @@ def _load_person_facebank_centroids() -> list[dict[str, object]]:
         person_id = str(row.get("person_id") or "").strip()
         if not person_id:
             continue
-        embedding = _download_embedding_from_s3_key(str(row.get("s3_embedding_key") or "").strip())
+        embedding = _coerce_embedding_vector(row.get("embedding"))
         if embedding is None:
             continue
         vectors_by_person.setdefault(person_id, []).append(embedding)

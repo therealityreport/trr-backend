@@ -12,6 +12,7 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - None.
 
 ## Recent Completions
+- `TASK24 Final Supabase connection audit and donor transition inventory` | last updated `2026-04-02` | current phase `audit implemented` | next action `use the matrix and dependency inventory as direct input to the DeepFace reset` | details `../cross-collab/TASK24/STATUS.md`
 - `TASK18 Social backfill remediation for Instagram and TikTok` | last updated `2026-03-30` | current phase `Validation and closeout` | next action `Resolve unrelated schema-doc drift or accept targeted validation for this remediation-only change set` | details `../cross-collab/TASK18/STATUS.md`
 - `Reddit Stable Reads Backend Read Cutover` | last updated `2026-03-26` | current phase `backend-owned stable reddit reads shipped for Batch 2.5 with live local smoke` | next action `keep live/discover/backfill/mutation flows out of scope; treat sampled resolve 404 as a legacy stable-read behavior note unless later parity work promotes it` | details `local-status/reddit-stable-reads-backend-read-cutover.md`
 - `Networks Streaming Summary Backend Read Cutover` | last updated `2026-03-26` | current phase `backend-owned networks-streaming summary reads shipped for Batch 2.4` | next action `keep the summary route on the measured query/payload envelope while app consumers finish Batch 2 summary cutover` | details `local-status/networks-streaming-summary-backend-read-cutover.md`

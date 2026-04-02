@@ -51,7 +51,7 @@ The TRR Backend Data Pipeline is a Supabase-first data processing system that tr
 
 4. **Add credentials**
   - Set the runtime Postgres URL in `.env`: `TRR_DB_URL` (Supavisor session mode on `pooler.supabase.com:5432`)
-  - Optional local-only troubleshooting lane: set `TRR_DB_FALLBACK_URL` to an operator-supplied direct-host DSN when you intentionally bypass session-mode saturation in dev; keep the derived direct-fallback toggle unset
+  - Optional secondary DSN: set `TRR_DB_FALLBACK_URL` to another session-mode pooler URL (`pooler.supabase.com:5432`); both `TRR_DB_URL` (primary) and `TRR_DB_FALLBACK_URL` (secondary) must use session pooler `:5432`
   - Set auth/runtime secrets in `.env`: `SUPABASE_JWT_SECRET`, `TRR_INTERNAL_ADMIN_SHARED_SECRET`, `SCREENALYTICS_SERVICE_TOKEN`
   - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `TVDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
   - Optional: `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_PUBLIC_BASE_URL` for media mirroring
@@ -189,8 +189,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 TRR_DB_URL=postgresql://postgres.<project>:password@aws-1-us-east-1.pooler.supabase.com:5432/postgres
 TRR_DB_FALLBACK_URL=
-# Local-only troubleshooting lane only. Supply a direct-host DSN here when needed.
-# Leave TRR_DB_ENABLE_DIRECT_FALLBACK unset.
+# Optional secondary DSN. Must also be a session-mode pooler URL (pooler.supabase.com:5432).
 
 # Optional Configuration
 REALITEASE_TMDB_SHOW_LIMIT=5

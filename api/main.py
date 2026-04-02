@@ -27,6 +27,7 @@ from api.realtime.broker import init_broker, shutdown_broker
 from trr_backend.db import pg
 from trr_backend.db.connection import log_database_resolution_summary, resolve_database_url_candidate_details
 from trr_backend.db.pg import DatabaseServiceUnavailableError, database_service_unavailable_detail
+from trr_backend.middleware.request_timeout import RequestTimeoutMiddleware
 from trr_backend.observability import (
     CONTENT_TYPE_LATEST,
     bind_trace_id,
@@ -111,39 +112,60 @@ def _validate_startup_config() -> None:
     log_database_resolution_summary()
     winner = next(iter(resolve_database_url_candidate_details()), None)
 
-    if winner:
-        winner_source = str(winner.get("source") or "")
-        winner_connection_class = str(winner.get("connection_class") or "")
-        if winner_source in {"SUPABASE_DB_URL", "DATABASE_URL"}:
+    if not winner:
+        raise RuntimeError(
+            "No database URL candidates available.\n"
+            "Set TRR_DB_URL to your Supabase session-pooler connection string.\n"
+            "Optionally set TRR_DB_FALLBACK_URL for controlled failover."
+        )
+
+    winner_connection_class = str(winner.get("connection_class") or "")
+    winner_source = str(winner.get("source") or "")
+    is_local = _is_local_or_dev_runtime()
+
+    # Log structured startup fields
+    logger.info(
+        "[startup-config] db_winner source=%s connection_class=%s is_local=%s",
+        winner_source,
+        winner_connection_class,
+        is_local,
+    )
+
+    # Fail-fast for invalid runtime lanes — only session and local are allowed.
+    invalid_lanes = {"direct", "unknown", "other", "pooler", "transaction"}
+
+    if winner_connection_class in invalid_lanes:
+        raise RuntimeError(
+            f"Invalid runtime connection lane: {winner_connection_class}\n"
+            f"Only session-mode pooler (:5432) and local Postgres are supported.\n"
+            f"Use session-mode pooler (:5432) via TRR_DB_URL.\n"
+            f"Winner source: {winner_source}"
+        )
+
+    if winner_connection_class == "session":
+        raw_minconn = (os.getenv("TRR_DB_POOL_MINCONN") or "").strip()
+        raw_maxconn = (os.getenv("TRR_DB_POOL_MAXCONN") or "").strip()
+        try:
+            minconn = int(raw_minconn) if raw_minconn else None
+        except ValueError:
+            minconn = None
+        try:
+            maxconn = int(raw_maxconn) if raw_maxconn else None
+        except ValueError:
+            maxconn = None
+        if (minconn is not None and minconn > 1) or (maxconn is not None and maxconn > 2):
             logger.warning(
-                "[startup-config] legacy_runtime_db_env_in_use source=%s; "
-                "set TRR_DB_URL and optional TRR_DB_FALLBACK_URL instead",
-                winner_source,
+                "[startup-config] oversized_session_pool_override detected for "
+                "Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",
+                raw_minconn or "<unset>",
+                raw_maxconn or "<unset>",
             )
-        if winner_connection_class == "session":
-            raw_minconn = (os.getenv("TRR_DB_POOL_MINCONN") or "").strip()
-            raw_maxconn = (os.getenv("TRR_DB_POOL_MAXCONN") or "").strip()
-            try:
-                minconn = int(raw_minconn) if raw_minconn else None
-            except ValueError:
-                minconn = None
-            try:
-                maxconn = int(raw_maxconn) if raw_maxconn else None
-            except ValueError:
-                maxconn = None
-            if (minconn is not None and minconn > 1) or (maxconn is not None and maxconn > 2):
-                logger.warning(
-                    "[startup-config] oversized_session_pool_override detected for "
-                    "Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",
-                    raw_minconn or "<unset>",
-                    raw_maxconn or "<unset>",
-                )
-            if _env_flag("SOCIAL_QUEUE_ENABLED", False):
-                logger.warning(
-                    "[startup-config] session_pooler_with_social_queue_enabled; keep "
-                    "local worker lanes and DB pool sizing conservative when using "
-                    "pooler.supabase.com:5432"
-                )
+        if _env_flag("SOCIAL_QUEUE_ENABLED", False):
+            logger.warning(
+                "[startup-config] session_pooler_with_social_queue_enabled; keep "
+                "local worker lanes and DB pool sizing conservative when using "
+                "pooler.supabase.com:5432"
+            )
 
     if screenalytics_api_url:
         parsed = urlparse(screenalytics_api_url)
@@ -242,6 +264,7 @@ app = FastAPI(
 cors_origins = get_cors_origins()
 allow_credentials = len(cors_origins) > 0  # Only allow credentials with explicit origins
 
+app.add_middleware(RequestTimeoutMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins if cors_origins else ["*"],
@@ -381,8 +404,37 @@ def root():
 
 @app.get("/health")
 def health():
-    """Health check endpoint."""
-    return {"status": "healthy"}
+    """DB-aware readiness probe.
+
+    Returns 200 when the database is reachable, 503 when degraded.
+    """
+    try:
+        with pg.db_connection(label="health-probe") as conn:
+            with conn.cursor() as cur:
+                # SET LOCAL is transaction-scoped — safe for pooled connections
+                cur.execute("SET LOCAL statement_timeout = '3000'")
+                cur.execute("SELECT 1")
+        return {
+            "status": "healthy",
+            "service": "trr-backend",
+            "database": "connected",
+        }
+    except Exception:
+        logger.warning("[health] readiness probe failed", exc_info=True)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "service": "trr-backend",
+                "database": "unreachable",
+            },
+        )
+
+
+@app.get("/health/live")
+def health_live():
+    """Lightweight liveness probe. No DB check."""
+    return {"status": "alive", "service": "trr-backend"}
 
 
 @app.get("/metrics")

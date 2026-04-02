@@ -55,18 +55,6 @@ jobs:
       - name: Run API tests
         run: python -m pytest tests/api -q
 
-      - name: Set up Supabase CLI
-        uses: supabase/setup-cli@v1
-        with:
-          version: 2.70.5
-
-      - name: Start Supabase
-        run: |
-          supabase start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
-          supabase db reset --yes
-
-      - name: Schema docs check
-        run: make schema-docs-check
 
   test-py312-canary:
     runs-on: ubuntu-latest

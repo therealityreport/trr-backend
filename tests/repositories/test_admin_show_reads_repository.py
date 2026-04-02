@@ -273,6 +273,95 @@ def test_get_show_detail_strips_raw_metadata_fields(monkeypatch: pytest.MonkeyPa
     assert "imdb_meta" not in row
 
 
+def test_get_show_detail_builds_overview_fields_without_mutating_raw_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        repo,
+        "_fetch_one_row",
+        lambda query, params=None, cur=None: {
+            "id": "show-1",
+            "name": "The Real Housewives of Salt Lake City",
+            "slug": "rhoslc",
+            "canonical_slug": "rhoslc",
+            "alternative_names": ["RHOSLC"],
+            "imdb_id": "tt123",
+            "tmdb_id": 456,
+            "tvdb_id": 789,
+            "tvrage_id": "tv-1",
+            "wikidata_id": "Q123",
+            "external_ids": {"imdb_id": "tt123"},
+            "show_total_seasons": 5,
+            "show_total_episodes": 90,
+            "description": "A Bravo show",
+            "premiere_date": "2020-01-01",
+            "genres": ["Reality"],
+            "networks": ["Bravo TV"],
+            "streaming_providers": ["Peacock Premium", "Peacock Premium Plus"],
+            "watch_providers": ["Hayu", "Hayu Amazon Channel"],
+            "overview_watch_availability": [
+                {
+                    "region": "US",
+                    "stream": ["Peacock", "Hayu"],
+                    "buy": ["Apple TV", "Prime Video"],
+                },
+                {
+                    "region": "GB",
+                    "stream": ["Hayu"],
+                    "buy": [],
+                },
+                {
+                    "region": "DE",
+                    "stream": ["RTL+"],
+                    "buy": ["Apple TV"],
+                },
+            ],
+            "justwatch_url": "https://www.themoviedb.org/tv/110381-the-real-housewives-of-salt-lake-city/watch?locale=US",
+            "tags": ["Housewives"],
+            "primary_poster_image_id": "poster-1",
+            "primary_backdrop_image_id": "backdrop-1",
+            "primary_logo_image_id": "logo-1",
+            "tmdb_status": "Returning Series",
+            "tmdb_vote_average": 7.8,
+            "imdb_rating_value": 7.2,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+            "poster_url": "https://cdn.example.com/poster.jpg",
+            "backdrop_url": "https://cdn.example.com/backdrop.jpg",
+            "logo_url": "https://cdn.example.com/logo.png",
+            "tmdb_meta": {"ignored": True},
+            "imdb_meta": {"ignored": True},
+            "computed_slug": "rhoslc",
+            "slug_collision_count": 0,
+        },
+    )
+
+    row, query_count = repo.get_show_detail("show-1")
+
+    assert query_count == 1
+    assert row is not None
+    assert row["alternative_names"] == ["RHOSLC"]
+    assert row["networks"] == ["Bravo TV"]
+    assert row["streaming_providers"] == ["Peacock Premium", "Peacock Premium Plus"]
+    assert row["watch_providers"] == ["Hayu", "Hayu Amazon Channel"]
+    assert row["overview_alternative_names"] == ["RHOSLC"]
+    assert row["overview_networks"] == ["Bravo"]
+    assert row["overview_streaming_providers"] == ["Hayu", "Peacock"]
+    assert row["overview_watch_availability"] == [
+        {
+            "region": "US",
+            "stream": ["Hayu", "Peacock"],
+            "buy": ["Apple TV", "Prime Video"],
+        },
+        {
+            "region": "GB",
+            "stream": ["Hayu"],
+            "buy": [],
+        },
+    ]
+    assert row["derived_external_links"] == {
+        "justwatch_url": "https://www.themoviedb.org/tv/110381-the-real-housewives-of-salt-lake-city/watch?locale=US"
+    }
+
+
 def test_get_show_credits_filters_cast_to_curated_roles_and_groups_crew(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = [
         [
@@ -530,6 +619,8 @@ def test_get_show_seasons_include_episode_signal_preserves_overview_contract(
                 "first_episode_air_date": "2024-09-18",
                 "last_episode_air_date": "2025-01-22",
                 "has_scheduled_or_aired_episode": True,
+                "fandom_source_url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_6",
+                "fandom_page_title": "The Real Housewives of Salt Lake City - Season 6",
             }
         ]
 
@@ -554,6 +645,8 @@ def test_get_show_seasons_include_episode_signal_preserves_overview_contract(
             "first_episode_air_date": "2024-09-18",
             "last_episode_air_date": "2025-01-22",
             "has_scheduled_or_aired_episode": True,
+            "fandom_source_url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_6",
+            "fandom_page_title": "The Real Housewives of Salt Lake City - Season 6",
         }
     ]
     assert "s.overview" in str(captured["query"])
@@ -562,6 +655,8 @@ def test_get_show_seasons_include_episode_signal_preserves_overview_contract(
     assert "episode_airdate_count" in str(captured["query"])
     assert "first_episode_air_date" in str(captured["query"])
     assert "last_episode_air_date" in str(captured["query"])
+    assert "sf.source_url AS fandom_source_url" in str(captured["query"])
+    assert "sf.page_title AS fandom_page_title" in str(captured["query"])
     assert "s.episode_count" not in str(captured["query"])
 
 
@@ -1130,6 +1225,37 @@ def test_shape_show_cast_payload_respects_membership_mode_and_filters() -> None:
             "person_id": "person-2",
             "photo_url": "https://cdn.example.com/photo.jpg",
             "total_episodes": 5,
+            "archive_episode_count": 0,
+        }
+    ]
+
+
+def test_shape_show_cast_payload_keeps_membership_rows_without_explicit_minimum() -> None:
+    payload = repo._shape_show_cast_payload(
+        [
+            {
+                "person_id": "person-1",
+                "photo_url": "https://cdn.example.com/photo.jpg",
+                "total_episodes": 0,
+                "archive_episode_count": 0,
+            }
+        ],
+        limit=20,
+        offset=0,
+        min_episodes=None,
+        has_explicit_min_episodes=False,
+        exclude_zero_episode_members=False,
+        require_image=False,
+        roster_mode="imdb_show_membership",
+    )
+
+    assert payload["cast_source"] == "imdb_show_membership"
+    assert payload["eligibility_warning"] is None
+    assert payload["cast"] == [
+        {
+            "person_id": "person-1",
+            "photo_url": "https://cdn.example.com/photo.jpg",
+            "total_episodes": 0,
             "archive_episode_count": 0,
         }
     ]

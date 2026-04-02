@@ -9,31 +9,21 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess
 import sys
 from functools import lru_cache
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
 CANONICAL_DB_ENV = "TRR_DB_URL"
 FALLBACK_DB_ENV = "TRR_DB_FALLBACK_URL"
-DIRECT_FALLBACK_OVERRIDE_ENV = "TRR_DB_ENABLE_DIRECT_FALLBACK"
-LEGACY_RUNTIME_DB_ENVS = ("SUPABASE_DB_URL", "DATABASE_URL")
 
 
 class DatabaseConnectionError(RuntimeError):
     """Raised when database connection cannot be established."""
 
     pass
-
-
-def _env_flag(name: str, default: bool) -> bool:
-    raw = (os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
-    return raw not in {"0", "false", "no", "off"}
 
 
 def _parse_supabase_status_env(output: str) -> dict[str, str]:
@@ -120,19 +110,13 @@ def describe_database_url_target(url: str, *, source: str) -> dict[str, str | in
 
 
 @lru_cache(maxsize=1)
-def resolve_database_url_candidate_details(
-    *,
-    allow_local_fallback: bool = True,
-) -> tuple[dict[str, str | int | None], ...]:
+def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None], ...]:
     """
     Resolve candidate database URLs in priority order.
 
     Priority order:
     1. TRR_DB_URL
     2. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
-    3. Legacy runtime envs (compatibility-only): SUPABASE_DB_URL, DATABASE_URL
-    4. (Optional) Auto-derived Supabase direct host fallback when explicitly enabled
-    5. (Local only) `supabase status --output env` DB_URL
     """
 
     def _append_candidate(
@@ -148,97 +132,39 @@ def resolve_database_url_candidate_details(
         ordered.append({"url": url, **describe_database_url_target(url, source=source)})
         seen.add(url)
 
-    def _derive_supabase_direct_url(pooler_url: str) -> str | None:
-        parsed = urlsplit(pooler_url)
-        host = (parsed.hostname or "").strip().lower()
-        if not host.endswith("pooler.supabase.com"):
-            return None
-
-        username = parsed.username or ""
-        project_ref_match = re.match(r"^postgres\.([a-zA-Z0-9]+)$", username)
-        if not project_ref_match:
-            return None
-        project_ref = project_ref_match.group(1)
-
-        direct_host = f"db.{project_ref}.supabase.co"
-        userinfo = quote(username, safe="")
-        if parsed.password is not None:
-            userinfo = f"{userinfo}:{quote(parsed.password, safe='')}"
-        netloc = f"{direct_host}:5432"
-        if userinfo:
-            netloc = f"{userinfo}@{netloc}"
-        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
-
     candidates: list[dict[str, str | int | None]] = []
     seen: set[str] = set()
-    direct_fallbacks: list[tuple[str, str]] = []
 
-    def _append_candidate_with_optional_direct_fallback(value: str | None, *, source: str) -> None:
-        url = (value or "").strip()
-        if not url:
-            return
-        _append_candidate(candidates, seen, url, source=source)
-        direct_fallback = _derive_supabase_direct_url(url)
-        if direct_fallback:
-            direct_fallbacks.append((source, direct_fallback))
-
-    _append_candidate_with_optional_direct_fallback(os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
-    _append_candidate_with_optional_direct_fallback(os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
-    for legacy_env in LEGACY_RUNTIME_DB_ENVS:
-        _append_candidate_with_optional_direct_fallback(os.getenv(legacy_env), source=legacy_env)
-
-    if _env_flag(DIRECT_FALLBACK_OVERRIDE_ENV, False):
-        for source, direct_fallback in direct_fallbacks:
-            _append_candidate(
-                candidates,
-                seen,
-                direct_fallback,
-                source=f"{source}:derived_direct",
-            )
-
-    if allow_local_fallback:
-        _append_candidate(candidates, seen, _get_local_supabase_db_url(), source="supabase status (local)")
+    _append_candidate(candidates, seen, os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
+    _append_candidate(candidates, seen, os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
 
     return tuple(candidates)
 
 
 @lru_cache(maxsize=1)
-def resolve_database_url_candidates(*, allow_local_fallback: bool = True) -> tuple[str, ...]:
+def resolve_database_url_candidates() -> tuple[str, ...]:
     """Resolve candidate database URLs in priority order."""
-    return tuple(
-        str(candidate["url"])
-        for candidate in resolve_database_url_candidate_details(allow_local_fallback=allow_local_fallback)
-    )
+    return tuple(str(candidate["url"]) for candidate in resolve_database_url_candidate_details())
 
 
-def log_database_resolution_summary(*, allow_local_fallback: bool = True) -> None:
+def log_database_resolution_summary() -> None:
     """Log the configured database target order without exposing credentials."""
-    candidates = resolve_database_url_candidate_details(allow_local_fallback=allow_local_fallback)
+    candidates = resolve_database_url_candidate_details()
     if not candidates:
         logger.warning("[db-resolution] no database URL candidates available")
         return
     winner = candidates[0]
     logger.info(
-        (
-            "[db-resolution] winner_source=%s host_class=%s connection_class=%s host=%s port=%s "
-            "database=%s direct_fallback_enabled=%s"
-        ),
+        "[db-resolution] winner_source=%s host_class=%s connection_class=%s host=%s port=%s database=%s",
         winner["source"],
         winner["host_class"],
         winner["connection_class"],
         winner["host"],
         winner["port"],
         winner["database"],
-        _env_flag(DIRECT_FALLBACK_OVERRIDE_ENV, False),
     )
     winner_source = str(winner["source"])
     winner_connection_class = str(winner["connection_class"])
-    if winner_source.endswith(":derived_direct"):
-        logger.warning(
-            "[db-resolution] derived_direct_fallback_in_use source=%s override_env=%s",
-            winner_source,
-            DIRECT_FALLBACK_OVERRIDE_ENV,
-        )
     if winner_connection_class in {"direct", "transaction"}:
         logger.warning(
             "[db-resolution] non_default_connection_class connection_class=%s "
@@ -261,19 +187,13 @@ def log_database_resolution_summary(*, allow_local_fallback: bool = True) -> Non
 
 
 @lru_cache(maxsize=1)
-def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
+def resolve_database_url() -> str:
     """
     Resolve the database URL using a prioritized lookup.
 
     Priority order:
     1. TRR_DB_URL - Canonical runtime database URL
     2. TRR_DB_FALLBACK_URL - Optional operator-provided fallback
-    3. (Optional) derived direct-host fallback when TRR_DB_ENABLE_DIRECT_FALLBACK=1
-    4. (Local only) `supabase status --output env` DB_URL - Local Supabase instance
-
-    Args:
-        allow_local_fallback: If True, try to resolve from local Supabase instance
-                              when env vars are not set. Set to False for production.
 
     Returns:
         Database connection URL string.
@@ -281,7 +201,7 @@ def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
     Raises:
         DatabaseConnectionError: If no valid database URL can be resolved.
     """
-    candidates = resolve_database_url_candidates(allow_local_fallback=allow_local_fallback)
+    candidates = resolve_database_url_candidates()
     if candidates:
         return candidates[0]
 
@@ -292,8 +212,7 @@ def resolve_database_url(*, allow_local_fallback: bool = True) -> str:
         "  Optionally set TRR_DB_FALLBACK_URL for controlled failover.\n"
         "  Example: postgresql://postgres.<project>:<password>@<host>:5432/postgres\n\n"
         "For local development:\n"
-        "  Start local Supabase: supabase start\n"
-        "  Or set TRR_DB_URL to your local Postgres connection string.\n\n"
+        "  Set TRR_DB_URL to your local Postgres connection string.\n\n"
         "Available environment variables (checked in order):\n"
         "  - TRR_DB_URL (canonical runtime env)\n"
         "  - TRR_DB_FALLBACK_URL (optional runtime fallback)\n"
