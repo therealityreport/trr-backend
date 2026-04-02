@@ -10,6 +10,8 @@ from trr_backend.db.pg import (
     DEFAULT_IDLE_IN_TX_TIMEOUT_MS,
     DEFAULT_STATEMENT_TIMEOUT_MS,
     _build_pool_for_url,
+    _is_statement_timeout_error,
+    _is_transient_transport_error,
 )
 
 
@@ -95,3 +97,20 @@ class TestStatementTimeout:
             _build_pool_for_url(TEST_DSN)
 
         assert "statement_timeout=5000" in captured_kwargs["options"]
+
+
+class TestStatementTimeoutDetection:
+    def test_statement_timeout_detected(self) -> None:
+        """A psycopg2-style statement timeout error is correctly identified."""
+        err = Exception("canceling statement due to statement timeout")
+        assert _is_statement_timeout_error(err) is True
+
+    def test_transient_error_not_detected_as_timeout(self) -> None:
+        """A connection error is not misclassified as a statement timeout."""
+        err = Exception("connection reset by peer")
+        assert _is_statement_timeout_error(err) is False
+
+    def test_statement_timeout_excluded_from_transient(self) -> None:
+        """A statement timeout error must NOT be classified as a transient transport error."""
+        err = Exception("canceling statement due to statement timeout")
+        assert _is_transient_transport_error(err) is False
