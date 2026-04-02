@@ -57,3 +57,30 @@ class TestRequestTimeoutMiddleware:
         from trr_backend.middleware.request_timeout import _parse_timeout_from_env
 
         assert _parse_timeout_from_env() == 42.0
+
+    def test_stream_endpoint_exempt(self):
+        """SSE/stream routes ending in /stream bypass timeout."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.get("/api/v1/admin/some-resource/stream")
+        async def stream_endpoint():
+            await asyncio.sleep(1)  # Would timeout if not exempt
+            return {"streaming": True}
+
+        client = TestClient(app)
+        response = client.get("/api/v1/admin/some-resource/stream")
+        assert response.status_code == 200
+
+    def test_timeout_response_forwards_trace_headers(self):
+        """504 response includes trace headers from the original request."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.get("/traced")
+        async def traced_endpoint():
+            await asyncio.sleep(10)
+            return {"ok": True}
+
+        client = TestClient(app)
+        response = client.get("/traced", headers={"X-Request-ID": "test-trace-123"})
+        assert response.status_code == 504
+        assert response.headers.get("x-request-id") == "test-trace-123"

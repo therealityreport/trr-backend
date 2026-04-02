@@ -44,8 +44,24 @@ def _parse_timeout_from_env() -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
+def _extract_trace_headers(scope: dict) -> list[list[bytes]]:
+    """Extract trace-related headers from the incoming request to forward in error responses."""
+    trace_header_names = {b"x-request-id", b"x-trace-id", b"traceparent"}
+    headers = []
+    for name, value in scope.get("headers", []):
+        if name.lower() in trace_header_names:
+            headers.append([name, value])
+    return headers
+
+
 def _is_exempt(path: str) -> bool:
-    """Check if a path is exempt from timeout enforcement."""
+    """Check if a path is exempt from timeout enforcement.
+
+    Uses path-based matching because pure ASGI middleware runs before
+    FastAPI routing, so route-level metadata is not yet available.
+    The /stream suffix convention covers all SSE endpoints identified
+    in the Phase 0 route inventory.
+    """
     if path in EXEMPT_PATHS:
         return True
     # SSE/streaming routes end with /stream
@@ -101,6 +117,7 @@ class RequestTimeoutMiddleware:
                         }
                     }
                 ).encode()
+                trace_headers = _extract_trace_headers(scope)
                 await send(
                     {
                         "type": "http.response.start",
@@ -108,7 +125,8 @@ class RequestTimeoutMiddleware:
                         "headers": [
                             [b"content-type", b"application/json"],
                             [b"content-length", str(len(body)).encode()],
-                        ],
+                        ]
+                        + trace_headers,
                     }
                 )
                 await send(
