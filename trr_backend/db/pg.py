@@ -193,6 +193,17 @@ def _is_transient_transport_error(error: Exception) -> bool:
     return any(marker in message for marker in markers)
 
 
+def _is_statement_timeout_error(error: Exception) -> bool:
+    """Check if the error is a Postgres statement_timeout cancellation.
+
+    Statement timeouts are NOT transient — retrying the same query will hit
+    the same timeout. They must be logged distinctly and must NOT enter
+    the transient retry classification.
+    """
+    message = _error_message(error)
+    return "canceling statement due to statement timeout" in message
+
+
 def _resolve_pool_sizing(url: str) -> dict[str, Any]:
     session_pooler = _is_supavisor_session_pooler_url(url)
     default_minconn = DEFAULT_SESSION_POOLER_MINCONN if session_pooler else DEFAULT_POOL_MINCONN
@@ -634,7 +645,14 @@ def db_connection(*, label: str = "write"):
     try:
         yield conn
         conn.commit()
-    except Exception:
+    except Exception as error:
+        if _is_statement_timeout_error(error):
+            logger.warning(
+                "[db-pool] statement_timeout label=%s checkout_id=%s error=%s",
+                label,
+                checkout_id,
+                error,
+            )
         try:
             conn.rollback()
         except Exception:
@@ -670,6 +688,15 @@ def db_read_connection(*, label: str = "read"):
         if not previous_autocommit:
             conn.autocommit = True
         yield conn
+    except Exception as error:
+        if _is_statement_timeout_error(error):
+            logger.warning(
+                "[db-pool] statement_timeout label=%s checkout_id=%s error=%s",
+                label,
+                checkout_id,
+                error,
+            )
+        raise
     finally:
         try:
             if not previous_autocommit and not _is_connection_closed(conn):
