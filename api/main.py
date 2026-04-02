@@ -440,6 +440,7 @@ def health():
             "database": "connected",
         }
     except Exception:
+        logger.warning("[health] readiness probe failed", exc_info=True)
         return JSONResponse(
             status_code=503,
             content={
