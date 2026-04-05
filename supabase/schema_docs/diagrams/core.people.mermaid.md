@@ -16,5 +16,6 @@ erDiagram
         JSONB place_of_birth
         JSONB homepage
         JSONB profile_image_url
+        JSONB alternative_names
     }
 ```

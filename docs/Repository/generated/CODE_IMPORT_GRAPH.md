@@ -2,76 +2,91 @@
 
 ```mermaid
 flowchart TB
-    n0["api.main"]
-    n1["api.routers"]
-    n2["scripts._sync_common"]
-    n3["trr_backend.cli"]
-    n4["trr_backend.clients"]
-    n5["trr_backend.db"]
-    n6["trr_backend.ingestion"]
-    n7["trr_backend.integrations"]
-    n8["trr_backend.job_plane"]
-    n9["trr_backend.media"]
-    n10["trr_backend.modal_dispatch"]
-    n11["trr_backend.modal_jobs"]
-    n12["trr_backend.models"]
-    n13["trr_backend.object_storage"]
-    n14["trr_backend.observability"]
-    n15["trr_backend.pipeline"]
-    n16["trr_backend.repositories"]
-    n17["trr_backend.scraping"]
-    n18["trr_backend.socials"]
-    n19["trr_backend.utils"]
-    n20["trr_backend.vision"]
+    n0["api.auth"]
+    n1["api.main"]
+    n2["api.routers"]
+    n3["scripts._sync_common"]
+    n4["trr_backend.bravotv"]
+    n5["trr_backend.cli"]
+    n6["trr_backend.clients"]
+    n7["trr_backend.db"]
+    n8["trr_backend.ingestion"]
+    n9["trr_backend.integrations"]
+    n10["trr_backend.job_plane"]
+    n11["trr_backend.media"]
+    n12["trr_backend.modal_dispatch"]
+    n13["trr_backend.modal_jobs"]
+    n14["trr_backend.models"]
+    n15["trr_backend.object_storage"]
+    n16["trr_backend.observability"]
+    n17["trr_backend.pipeline"]
+    n18["trr_backend.read_path_diagnostics"]
+    n19["trr_backend.repositories"]
+    n20["trr_backend.scraping"]
+    n21["trr_backend.services"]
+    n22["trr_backend.socials"]
+    n23["trr_backend.utils"]
+    n24["trr_backend.vision"]
 
-    n3 --> n5
-    n3 --> n15
-    n3 --> n19
+    n4 --> n2
+    n4 --> n7
     n4 --> n8
+    n4 --> n9
+    n4 --> n10
+    n4 --> n11
+    n4 --> n19
     n4 --> n20
-    n5 --> n14
-    n6 --> n5
-    n6 --> n7
-    n6 --> n12
-    n6 --> n16
-    n7 --> n5
-    n7 --> n14
-    n7 --> n19
-    n9 --> n5
+    n5 --> n7
+    n5 --> n17
+    n5 --> n23
+    n6 --> n0
+    n6 --> n10
+    n6 --> n24
+    n7 --> n16
+    n8 --> n7
+    n8 --> n9
+    n8 --> n14
+    n8 --> n19
     n9 --> n7
-    n9 --> n13
-    n9 --> n14
     n9 --> n16
-    n9 --> n17
-    n10 --> n8
-    n10 --> n16
-    n10 --> n18
-    n11 --> n0
-    n11 --> n1
-    n11 --> n10
-    n11 --> n14
+    n9 --> n23
+    n11 --> n7
+    n11 --> n9
     n11 --> n15
     n11 --> n16
-    n11 --> n18
+    n11 --> n19
     n11 --> n20
-    n15 --> n1
-    n15 --> n2
-    n15 --> n5
-    n15 --> n6
-    n15 --> n7
-    n15 --> n8
-    n15 --> n9
-    n15 --> n10
-    n15 --> n13
-    n15 --> n16
-    n16 --> n5
-    n16 --> n8
-    n16 --> n9
-    n16 --> n10
-    n16 --> n12
-    n16 --> n18
-    n18 --> n9
-    n18 --> n16
-    n20 --> n5
-    n20 --> n9
+    n12 --> n10
+    n12 --> n19
+    n12 --> n22
+    n13 --> n1
+    n13 --> n2
+    n13 --> n12
+    n13 --> n16
+    n13 --> n17
+    n13 --> n19
+    n13 --> n22
+    n13 --> n24
+    n17 --> n2
+    n17 --> n3
+    n17 --> n7
+    n17 --> n8
+    n17 --> n9
+    n17 --> n10
+    n17 --> n11
+    n17 --> n12
+    n17 --> n15
+    n17 --> n19
+    n19 --> n7
+    n19 --> n10
+    n19 --> n11
+    n19 --> n12
+    n19 --> n14
+    n19 --> n18
+    n19 --> n22
+    n21 --> n6
+    n22 --> n11
+    n22 --> n19
+    n24 --> n7
+    n24 --> n11
 ```
