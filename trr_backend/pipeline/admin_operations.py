@@ -804,3 +804,96 @@ def start_operation_for_stream(
     refreshed["execution_mode_canonical"] = current_execution_metadata["execution_mode_canonical"]
     refreshed["execution_backend_canonical"] = current_execution_metadata["execution_backend_canonical"]
     return refreshed
+
+
+async def parent_operation_stream_generator(
+    parent_operation_id: str,
+    *,
+    after_event_id: int = 0,
+    request: Request | None = None,
+) -> AsyncGenerator[str, None]:
+    """Fan-in SSE stream: yields events from all children of a parent operation."""
+    next_event_id = max(0, int(after_event_id))
+
+    while True:
+        events = await run_in_threadpool(
+            admin_operations.stream_sub_operation_events_after_seq,
+            parent_operation_id,
+            after_seq=next_event_id,
+            limit=500,
+        )
+        for event in events:
+            event_id = int(event.get("id") or 0)
+            event_payload = _to_json_payload(event.get("event_payload"))
+            event_payload["refresh_target"] = str(event.get("refresh_target") or "")
+            event_payload["sub_operation_id"] = str(event.get("operation_id") or "")
+            payload = _ensure_operation_payload(
+                parent_operation_id,
+                event_payload,
+                request_id=str(event_payload.get("request_id") or "") or None,
+            )
+            payload["event_id"] = event_id
+            event_type = str(event.get("event_type") or "message")
+            yield _sse_chunk(event_type, payload)
+            if event_id > next_event_id:
+                next_event_id = event_id
+
+        # Check if parent is terminal (all children done)
+        parent_status = await run_in_threadpool(
+            admin_operations.aggregate_parent_status,
+            parent_operation_id,
+        )
+        if parent_status in ("completed", "failed", "cancelled"):
+            # Drain any final events
+            final_events = await run_in_threadpool(
+                admin_operations.stream_sub_operation_events_after_seq,
+                parent_operation_id,
+                after_seq=next_event_id,
+                limit=500,
+            )
+            for event in final_events:
+                event_id = int(event.get("id") or 0)
+                event_payload = _to_json_payload(event.get("event_payload"))
+                event_payload["refresh_target"] = str(event.get("refresh_target") or "")
+                event_payload["sub_operation_id"] = str(event.get("operation_id") or "")
+                payload = _ensure_operation_payload(
+                    parent_operation_id,
+                    event_payload,
+                    request_id=str(event_payload.get("request_id") or "") or None,
+                )
+                payload["event_id"] = event_id
+                event_type = str(event.get("event_type") or "message")
+                yield _sse_chunk(event_type, payload)
+
+            # Final parent-level terminal event
+            yield _sse_chunk(
+                "complete" if parent_status == "completed" else "error",
+                {"operation_id": parent_operation_id, "status": parent_status},
+            )
+            return
+
+        if request is not None:
+            try:
+                if await request.is_disconnected():
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+
+        await asyncio.sleep(_EVENT_POLL_INTERVAL_SECONDS)
+
+
+def operation_stream_response_for_parent(
+    parent_operation_id: str,
+    *,
+    after_event_id: int = 0,
+    request: Request | None = None,
+) -> StreamingResponse:
+    return StreamingResponse(
+        parent_operation_stream_generator(
+            parent_operation_id,
+            after_event_id=after_event_id,
+            request=request,
+        ),
+        media_type="text/event-stream",
+        headers=_stream_headers(),
+    )

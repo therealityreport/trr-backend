@@ -67,7 +67,14 @@ from trr_backend.media.s3_mirror import (
     mirror_logo_monochrome_variants_row,
     upload_bytes_to_s3,
 )
-from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
+from trr_backend.job_plane import is_remote_job_plane_enabled
+from trr_backend.modal_dispatch import supports_admin_operation
+from trr_backend.pipeline.admin_operations import (
+    operation_stream_response,
+    operation_stream_response_for_parent,
+    start_operation_for_stream,
+)
+from trr_backend.pipeline.show_refresh_orchestrator import ShowRefreshOrchestrator
 from trr_backend.repositories import admin_operations as admin_operations_repo
 from trr_backend.repositories import brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
@@ -2740,39 +2747,26 @@ def _run_cast_person_refresh_stage(
     show_name = str((show_row or {}).get("name") or "").strip() or None
     successes = 0
     failures: list[str] = []
-
-    if mode == "profile_only":
-        admin_show_roles.sync_cast_matrix_for_show(
-            show_id=show_id,
-            payload=admin_show_roles.CastMatrixSyncRequest(
-                include_relationship_roles=True,
-                include_bravo_links=False,
-                include_bravo_images=False,
-            ),
-            db=db,
-            admin_user=admin_user or {"id": "admin"},
-        )
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
 
     for member in members:
         person_id = member["person_id"]
         person_name = member["person_name"] or person_id
         try:
             if mode == "profile_only":
-                request = admin_person_images.RefreshImagesRequest(
-                    sources=["tmdb", "fandom"],
-                    limit_per_source=20,
-                    skip_mirror=True,
-                    skip_prune=True,
-                    skip_auto_count=True,
-                    skip_word_detection=True,
-                    skip_centering=True,
-                    skip_resize=True,
-                    show_id=UUID(show_id),
-                    show_name=show_name,
+                result = admin_person_profile._run_person_profile_refresh(
+                    person_id=str(person_id),
+                    payload=admin_person_profile.RefreshProfileRequest(refresh_links=False, refresh_credits=False),
+                    db=db,
+                    actor=actor,
                 )
+                if _infer_profile_refresh_outcome(result) == "failed":
+                    failure_messages = [str(item) for item in result.get("failures") or [] if str(item).strip()]
+                    raise RuntimeError("; ".join(failure_messages) or "profile refresh failed")
+                successes += 1
             else:
                 request = admin_person_images.RefreshImagesRequest(
-                    sources=["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"],
+                    sources=["imdb", "tmdb", "nbcumv"],
                     limit_per_source=25,
                     skip_mirror=False,
                     skip_prune=False,
@@ -2783,13 +2777,13 @@ def _run_cast_person_refresh_stage(
                     show_id=UUID(show_id),
                     show_name=show_name,
                 )
-            admin_person_images.refresh_person_images(
-                UUID(person_id),
-                request=request,
-                db=db,
-                _=admin_user,
-            )
-            successes += 1
+                admin_person_images.refresh_person_images(
+                    UUID(person_id),
+                    request=request,
+                    db=db,
+                    _=admin_user,
+                )
+                successes += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("show_refresh_%s failed for person_id=%s: %s", mode, person_id, exc)
             failures.append(f"{person_name}: {exc}")
@@ -3124,7 +3118,7 @@ def _refresh_show_bravo_target(
     if not official_page_url:
         raise RefreshStepSkippedError("Official show page is not configured for Bravo sync.")
 
-    payload = admin_show_bravo.BravoCommitRequest(show_url=official_page_url)
+    payload = admin_show_bravo.BravoCommitRequest(show_url=official_page_url, sync_cast_matrix=False)
     admin_show_bravo.commit_bravo_import(
         show_id=UUID(show_id),
         payload=payload,
@@ -4014,6 +4008,35 @@ def refresh_show_stream(
         "request_id": request_id,
         "initiated_by": actor,
     }
+
+    # If remote mode + Modal supported, use parallel orchestrator
+    if is_remote_job_plane_enabled() and supports_admin_operation("admin_show_refresh"):
+        client_session_id = str(request.headers.get("x-trr-tab-session-id") or "").strip() or None
+        client_workflow_id = str(request.headers.get("x-trr-flow-key") or "").strip() or None
+        orchestrator = ShowRefreshOrchestrator(
+            show_id=show_id_str,
+            targets=[t.value if hasattr(t, "value") else str(t) for t in ordered],
+            initiated_by=actor,
+            request_payload=request_payload,
+            request_id=request_id,
+            client_session_id=client_session_id,
+            client_workflow_id=client_workflow_id,
+        )
+        parent_id, sub_ops = orchestrator.create_operations()
+
+        # Dispatch all waves — Modal workers handle dependency ordering
+        # via wait_for_sub_operation_dependencies (Task 6)
+        for wave_ops in orchestrator.get_waves():
+            orchestrator.dispatch_wave(
+                wave_ops,
+                producer_factory=lambda sub_op: build_show_refresh_operation_producer(
+                    request_payload=sub_op.get("request_payload", {}),
+                    operation_id=str(sub_op["id"]),
+                    db=db,
+                ),
+            )
+
+        return operation_stream_response_for_parent(parent_id, request=request)
 
     def _yield_event(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"

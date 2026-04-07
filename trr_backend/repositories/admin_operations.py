@@ -1350,3 +1350,32 @@ def aggregate_parent_status(parent_operation_id: str) -> str:
     if int(row.get("pending_count") or 0) > 0:
         return "pending"
     return "completed"
+
+
+def stream_sub_operation_events_after_seq(
+    parent_operation_id: str,
+    *,
+    after_seq: int = 0,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Stream events from all sub-operations of a parent, interleaved by event ID."""
+    rows = pg.fetch_all(
+        """
+        select
+          e.id,
+          e.operation_id::text as operation_id,
+          e.event_seq,
+          e.event_type,
+          e.event_payload,
+          e.created_at,
+          o.refresh_target
+        from core.admin_operation_events e
+        join core.admin_operations o on o.id = e.operation_id
+        where o.parent_operation_id = %s::uuid
+          and e.id > %s
+        order by e.id asc
+        limit %s
+        """,
+        [parent_operation_id, after_seq, limit],
+    )
+    return [dict(r) for r in (rows or [])]
