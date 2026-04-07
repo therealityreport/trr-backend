@@ -698,6 +698,19 @@ def _worker_health_detail(worker_health: Any) -> Any:
     return jsonable_encoder(worker_health) if worker_health is not None else None
 
 
+def _remote_worker_unavailable_message(
+    exc: Exception,
+    *,
+    default_message: str = (
+        "Social ingest remote-worker ownership is enforced and no healthy worker is currently reporting heartbeats."
+    ),
+) -> str:
+    exc_message = str(exc or "").strip()
+    if not exc_message:
+        return default_message
+    return f"Social ingest remote-worker ownership is enforced. {exc_message.removesuffix('.')}."
+
+
 def _account_profile_cache_key(
     *,
     surface: str,
@@ -860,12 +873,7 @@ def _resolve_social_account_catalog_route_execution(
                                 if requires_modal_executor
                                 else "SOCIAL_WORKER_UNAVAILABLE"
                             ),
-                            "message": (
-                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                                "reporting heartbeats."
-                                if remote_plane_enforced
-                                else str(exc)
-                            ),
+                            "message": (_remote_worker_unavailable_message(exc) if remote_plane_enforced else str(exc)),
                             "execution_mode": canonical_execution_mode(),
                             "execution_owner": execution_owner_label(),
                             "worker_health": _worker_health_detail(exc.worker_health),
@@ -1177,12 +1185,7 @@ async def scrape_instagram_async(
                         "code": (
                             "SOCIAL_REMOTE_JOB_PLANE_ENFORCED" if remote_plane_enforced else "SOCIAL_WORKER_UNAVAILABLE"
                         ),
-                        "message": (
-                            "Social ingest remote-worker ownership is enforced and "
-                            "no healthy worker is currently reporting heartbeats."
-                            if remote_plane_enforced
-                            else str(exc)
-                        ),
+                        "message": _remote_worker_unavailable_message(exc) if remote_plane_enforced else str(exc),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
                         "worker_health": _worker_health_detail(exc.worker_health),
@@ -3050,10 +3053,7 @@ async def ingest_season_social(
                         status_code=503,
                         detail={
                             "code": "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
-                            "message": (
-                                "Social ingest remote-worker ownership is enforced and no healthy worker "
-                                "is currently reporting heartbeats."
-                            ),
+                            "message": _remote_worker_unavailable_message(exc),
                             "execution_mode": canonical_execution_mode(),
                             "execution_owner": execution_owner_label(),
                             "worker_health": worker_health_detail,
@@ -3436,9 +3436,12 @@ async def create_season_sync_session(
                         status_code=503,
                         detail={
                             "code": "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
-                            "message": (
-                                "Social sync-session kickoff requires healthy remote workers because "
-                                "remote-worker ownership is enforced."
+                            "message": _remote_worker_unavailable_message(
+                                exc,
+                                default_message=(
+                                    "Social sync-session kickoff requires healthy remote workers because "
+                                    "remote-worker ownership is enforced."
+                                ),
                             ),
                             "execution_mode": canonical_execution_mode(),
                             "execution_owner": execution_owner_label(),
@@ -4676,12 +4679,7 @@ async def ingest_shared_social_accounts(
                         "code": (
                             "SOCIAL_REMOTE_JOB_PLANE_ENFORCED" if remote_plane_enforced else "SOCIAL_WORKER_UNAVAILABLE"
                         ),
-                        "message": (
-                            "Social ingest remote-worker ownership is enforced and no healthy "
-                            "worker is currently reporting heartbeats."
-                            if remote_plane_enforced
-                            else str(exc)
-                        ),
+                        "message": _remote_worker_unavailable_message(exc) if remote_plane_enforced else str(exc),
                         "execution_mode": canonical_execution_mode(),
                         "execution_owner": execution_owner_label(),
                         "worker_health": _worker_health_detail(exc.worker_health),

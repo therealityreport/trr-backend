@@ -852,6 +852,52 @@ def test_post_social_account_catalog_backfill_requires_modal_executor(
     assert body["detail"]["required_execution_backend"] == "modal"
 
 
+def test_post_social_account_catalog_backfill_surfaces_auth_preflight_failure_when_remote_enforced(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("api.routers.socials.is_remote_job_plane_enabled", return_value=True),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "Modal social dispatch auth preflight is not ready for instagram.",
+                worker_health={
+                    "healthy": True,
+                    "reason": "modal_executor_ready",
+                    "shared_account_backfill_readiness": {
+                        "ready": False,
+                        "reason": "validation_exception:Error",
+                        "platform": "instagram",
+                        "platform_requires_remote_auth": True,
+                        "platform_remote_auth_ready": False,
+                        "platform_remote_auth_reason": "validation_exception:Error",
+                    },
+                },
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history"},
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+    assert "auth preflight is not ready for instagram" in body["detail"]["message"].lower()
+    assert "reporting heartbeats" not in body["detail"]["message"].lower()
+    readiness = body["detail"]["worker_health"]["shared_account_backfill_readiness"]
+    assert readiness["reason"] == "validation_exception:Error"
+
+
 def test_post_social_account_catalog_backfill_allows_local_inline_fallback_for_instagram(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

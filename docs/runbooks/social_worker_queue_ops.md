@@ -28,6 +28,7 @@ job plane:
   - `TRR_MODAL_REDDIT_REFRESH_FUNCTION=run_reddit_refresh`
   - `TRR_MODAL_SOCIAL_JOB_FUNCTION=run_social_job`
   - `TRR_MODAL_SOCIAL_RECOVERY_FUNCTION=sweep_social_dispatch_queue`
+  - `TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION=probe_social_remote_auth`
   - `TRR_MODAL_RUNTIME_SECRET_NAME=trr-backend-runtime`
   - `TRR_MODAL_SOCIAL_SECRET_NAME=trr-social-auth`
   - `SOCIAL_QUEUE_ENABLED=true`
@@ -100,12 +101,19 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 python3.11 scripts/modal/render_cutover_commands.py --parameter-prefix /trr/staging
 ```
 
-Verify the named secrets, deployed app, and all eight required Modal functions
+Verify the named secrets, deployed app, and all required Modal functions
 plus the API web URL before rollout:
 
 ```bash
 cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 python3.11 scripts/modal/verify_modal_readiness.py
+```
+
+Verify the deployed worker image can actually read and validate the remote Instagram cookie bundle:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/verify_modal_readiness.py --probe-remote-auth instagram --json
 ```
 
 Deploy the Modal app after named secrets are provisioned:
@@ -115,11 +123,21 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 ./.venv/bin/python -m modal deploy -m trr_backend.modal_jobs
 ```
 
+Run the full operator repair flow when `remote_auth_capabilities.instagram.reason` is not ready and the worker plane needs a fresh shared-account session:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/modal/repair_instagram_auth.py --json
+```
+
 Do not treat local cookie files as proof that remote Instagram backfills are
 ready. Full shared-account Instagram backfill is only considered ready when all
 of the following are true:
 
 - `scripts/modal/verify_modal_readiness.py --json` returns `ok: true`
+- `scripts/modal/verify_modal_readiness.py --probe-remote-auth instagram --json` returns:
+  - `remote_auth_probe.platform = "instagram"`
+  - `remote_auth_probe.ready = true`
 - `GET /api/v1/admin/socials/ingest/worker-health` reports:
   - `dispatcher_readiness.resolved = true`
   - `dispatcher_heartbeat_fresh = true`
@@ -159,6 +177,13 @@ Use those fields to distinguish:
 - dispatcher heartbeat missing or stale
 - remote Instagram auth missing in the worker plane
 - queue backlog or stale-running recovery issues after dispatch has already succeeded
+
+For remote Instagram auth failures, use these reason buckets:
+
+- `checkpoint_required`: the shared Instagram session itself needs operator attention; refresh locally in headed mode and expect Instagram to challenge or reject the account.
+- `cookie_schema_invalid`: the Modal social secret contains a partial or malformed Instagram cookie bundle; regenerate and re-apply named secrets before retrying.
+- `request_error`: the worker image had structurally valid cookies but the GraphQL validation canary failed at transport/runtime level; inspect Modal runtime health, network, and deployment drift.
+- `unexpected_exception:*`: the validation path itself raised inside the worker image; treat this as a runtime or image issue first, not as proof that the Instagram account is invalid.
 
 ## Alert Contract
 

@@ -163,6 +163,7 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_REDDIT_REFRESH_FUNCTION": "run_reddit_refresh",
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
+    "TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION": "probe_social_remote_auth",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",
@@ -426,6 +427,20 @@ def _reddit_runtime_probe_payload() -> dict[str, object]:
 )
 def probe_reddit_refresh_runtime() -> dict[str, object]:
     return _reddit_runtime_probe_payload()
+
+
+@app.function(
+    name=str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or "probe_social_remote_auth").strip()
+    or "probe_social_remote_auth",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+)
+def probe_social_remote_auth(platform: str) -> dict[str, object]:
+    from trr_backend.repositories.social_season_analytics import probe_remote_auth_health
+
+    return probe_remote_auth_health(platform)
 
 
 @app.function(

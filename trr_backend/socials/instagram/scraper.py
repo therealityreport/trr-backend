@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import threading
 import time
@@ -27,6 +28,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+from trr_backend.socials.instagram.permalink_metadata import _shortcode_to_media_id as permalink_shortcode_to_media_id
 
 logger = logging.getLogger(__name__)
 _INSTAGRAM_BROWSER_SESSIONS = AccountBrowserSessionManager(
@@ -298,6 +300,7 @@ class InstagramScraper:
         self._request_count = 0
         self._last_429_at: float = 0.0
         self._consecutive_success: int = 0
+        self._rate_lock = threading.Lock()
         self._profile_page_context_cache: dict[str, dict[str, str]] = {}
         self.last_retrieval_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
@@ -335,12 +338,16 @@ class InstagramScraper:
 
         csrftoken = str(self.cookies.get("csrftoken") or "").strip()
         ds_user_id = str(self.cookies.get("ds_user_id") or "").strip()
-        if csrftoken or ds_user_id:
+        result["has_csrftoken"] = bool(csrftoken)
+        result["has_ds_user_id"] = bool(ds_user_id)
+        if csrftoken and ds_user_id:
             result["valid"] = True
-            result["has_csrftoken"] = bool(csrftoken)
-            result["has_ds_user_id"] = bool(ds_user_id)
-        else:
+        elif not csrftoken and not ds_user_id:
             result["reason"] = "missing_csrftoken_and_ds_user_id"
+        elif not csrftoken:
+            result["reason"] = "missing_csrftoken"
+        else:
+            result["reason"] = "missing_ds_user_id"
         return result
 
     def _try_auto_refresh_cookies(self) -> dict[str, Any]:
@@ -439,7 +446,8 @@ class InstagramScraper:
             base = 1.5 if cursor else 0.75
         if base <= 0:
             return 0.0
-        return min(base * max(1, attempt_index + 1), 30.0)
+        computed = min(base * max(1, attempt_index + 1), 30.0)
+        return random.uniform(computed * 0.5, computed)
 
     @staticmethod
     def _playwright_graphql_fallback_enabled() -> bool:
@@ -1002,40 +1010,43 @@ class InstagramScraper:
         Standard mode: starts at 50% of the base delay.
         Fast mode: uses aggressive tiers that ramp down with consecutive successes.
         Both modes: double delay for 60s after any 429 response.
+        Thread-safe via _rate_lock to support concurrent partition runners.
         """
-        if self._request_count > 0:
-            now = time.monotonic()
-            if self._last_429_at and (now - self._last_429_at) < 60.0:
-                effective_delay = delay * 2.0
-            elif fast_mode:
-                # Aggressive tiers: ramp down as we prove the session is healthy
-                if self._consecutive_success >= 20:
-                    effective_delay = delay * 0.15  # e.g. 0.5 * 0.15 = 0.075s
-                elif self._consecutive_success >= 5:
-                    effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
+        with self._rate_lock:
+            if self._request_count > 0:
+                now = time.monotonic()
+                if self._last_429_at and (now - self._last_429_at) < 60.0:
+                    effective_delay = delay * 2.0
+                elif fast_mode:
+                    # Aggressive tiers: ramp down as we prove the session is healthy
+                    if self._consecutive_success >= 20:
+                        effective_delay = delay * 0.15  # e.g. 0.5 * 0.15 = 0.075s
+                    elif self._consecutive_success >= 5:
+                        effective_delay = delay * 0.25  # e.g. 0.5 * 0.25 = 0.125s
+                    else:
+                        effective_delay = delay * 0.5  # e.g. 0.5 * 0.5 = 0.25s
+                elif self._consecutive_success >= 20:
+                    effective_delay = delay * 0.5
                 else:
-                    effective_delay = delay * 0.5  # e.g. 0.5 * 0.5 = 0.25s
-            elif self._consecutive_success >= 20:
-                effective_delay = delay * 0.5
-            else:
-                effective_delay = delay * 0.5
-            logger.debug(
-                "Rate limiting: waiting %.3fs (base=%ss, fast=%s, streak=%s)",
-                effective_delay,
-                delay,
-                fast_mode,
-                self._consecutive_success,
-            )
-            time.sleep(effective_delay)
-        self._request_count += 1
+                    effective_delay = delay * 0.75
+                logger.debug(
+                    "Rate limiting: waiting %.3fs (base=%ss, fast=%s, streak=%s)",
+                    effective_delay,
+                    delay,
+                    fast_mode,
+                    self._consecutive_success,
+                )
+                time.sleep(effective_delay)
+            self._request_count += 1
 
     def _track_response_status(self, status_code: int) -> None:
         """Track response status for adaptive rate limiting."""
-        if status_code == 429:
-            self._last_429_at = time.monotonic()
-            self._consecutive_success = 0
-        elif 200 <= status_code < 400:
-            self._consecutive_success += 1
+        with self._rate_lock:
+            if status_code == 429:
+                self._last_429_at = time.monotonic()
+                self._consecutive_success = 0
+            elif 200 <= status_code < 400:
+                self._consecutive_success += 1
 
     @staticmethod
     def _normalize_tag_coord(value: Any) -> float | None:
@@ -1929,6 +1940,8 @@ class InstagramScraper:
         *,
         request_timeout: tuple[int, int] | float | None = None,
         fast_mode: bool = False,
+        allow_browser_fallback: bool = True,
+        page_size: int | None = None,
     ) -> dict | None:
         """Fetch posts using GraphQL (requires auth for full access)."""
         self._rate_limit(delay, fast_mode=fast_mode)
@@ -1967,18 +1980,20 @@ class InstagramScraper:
             request_cookies = self._request_cookies()
             viewer_id = str(request_cookies.get("ds_user_id") or self.cookies.get("ds_user_id") or "0")
 
-            page_size = self.PROFILE_POSTS_FAST_PAGE_SIZE if fast_mode else self.PROFILE_POSTS_PAGE_SIZE
+            resolved_page_size = page_size or (
+                self.PROFILE_POSTS_FAST_PAGE_SIZE if fast_mode else self.PROFILE_POSTS_PAGE_SIZE
+            )
             variables = {
                 "after": cursor,
                 "before": None,
                 "data": {
-                    "count": page_size,
+                    "count": resolved_page_size,
                     "include_reel_media_seen_timestamp": True,
                     "include_relationship_info": True,
                     "latest_besties_reel_media": True,
                     "latest_reel_media": True,
                 },
-                "first": page_size,
+                "first": resolved_page_size,
                 "last": None,
                 "username": username,
             }
@@ -2078,7 +2093,20 @@ class InstagramScraper:
             self.last_retrieval_meta.update(self._graphql_request_error_details(cursor=cursor, error=last_error))
             self.last_retrieval_meta["transport"] = "requests_enriched"
             self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
-        if self._playwright_graphql_fallback_enabled():
+        unrecoverable_fallback_errors = {
+            "instagram_graphql_checkpoint_required",
+            "instagram_graphql_cursor_rate_limited",
+            "instagram_graphql_cursor_unauthorized",
+            "instagram_graphql_cursor_forbidden",
+        }
+        if self.last_retrieval_meta.get("error_code") in unrecoverable_fallback_errors:
+            logger.warning(
+                "Skipping Instagram GraphQL Playwright fallback for @%s because %s is not browser-recoverable",
+                username,
+                self.last_retrieval_meta.get("error_code"),
+            )
+            return None
+        if allow_browser_fallback and self._playwright_graphql_fallback_enabled():
             fallback_payload = self._fetch_posts_graphql_with_browser(
                 username,
                 cursor,
@@ -2119,11 +2147,7 @@ class InstagramScraper:
 
     def _shortcode_to_media_id(self, shortcode: str) -> str:
         """Convert Instagram shortcode to media ID."""
-        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-        media_id = 0
-        for char in shortcode:
-            media_id = media_id * 64 + alphabet.index(char)
-        return str(media_id)
+        return permalink_shortcode_to_media_id(shortcode)
 
     def fetch_post_info(self, shortcode: str, delay: float = 2.0) -> dict | None:
         """Fetch detailed post info including media URLs."""

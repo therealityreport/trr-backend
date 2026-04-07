@@ -32,6 +32,7 @@ CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_MODAL_REDDIT_REFRESH_FUNCTION": "run_reddit_refresh",
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
+    "TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION": "probe_social_remote_auth",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_RUNTIME_SECRET_NAME": DEFAULT_RUNTIME_SECRET,
@@ -68,6 +69,13 @@ FILE_BACKED_SOCIAL_AUTH_ENV_MAP = {
     "TWIKIT_COOKIES_FILE": "TWIKIT_COOKIES_JSON",
     "SOCIALBLADE_COOKIES_FILE": "SOCIALBLADE_COOKIES_JSON",
 }
+
+
+def _python_command() -> str:
+    repo_venv_python = REPO_ROOT / ".venv" / "bin" / "python"
+    if repo_venv_python.is_file():
+        return str(repo_venv_python)
+    return sys.executable or "python3.11"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -235,7 +243,7 @@ def _write_env_file(path: Path, values: dict[str, str]) -> None:
 
 
 def _modal_secret_create_command(secret_name: str, env_file: Path, *, modal_environment: str) -> list[str]:
-    python_cmd = sys.executable or "python3.11"
+    python_cmd = _python_command()
     command = [python_cmd, "-m", "modal", "secret", "create", secret_name, "--force", "--from-dotenv", str(env_file)]
     if modal_environment:
         command.extend(["--env", modal_environment])

@@ -15,6 +15,8 @@ DEFAULT_APP_NAME = "trr-backend-jobs"
 DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_API_FUNCTION = "serve_backend_api"
+DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION = "probe_social_remote_auth"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def _load_get_app_objects() -> Callable[..., dict[str, Any]]:
@@ -23,6 +25,17 @@ def _load_get_app_objects() -> Callable[..., dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Modal experimental helpers are unavailable") from exc
     return modal_get_app_objects
+
+
+def _load_modal_function_class() -> Any:
+    try:
+        import modal
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Modal SDK is unavailable") from exc
+    function_class = getattr(modal, "Function", None)
+    if function_class is None:
+        raise RuntimeError("Modal Function helpers are unavailable")
+    return function_class
 
 
 def _parse_args() -> argparse.Namespace:
@@ -56,10 +69,19 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Emit the verification summary as JSON.",
     )
+    parser.add_argument(
+        "--probe-remote-auth",
+        choices=("instagram",),
+        default="",
+        help="Optionally run the deployed remote auth probe for a supported platform.",
+    )
     return parser.parse_args()
 
 
 def _python_command() -> str:
+    repo_venv_python = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+    if os.path.isfile(repo_venv_python):
+        return repo_venv_python
     virtual_env = str(os.getenv("VIRTUAL_ENV") or "").strip()
     if virtual_env:
         candidate = os.path.join(virtual_env, "bin", "python")
@@ -118,6 +140,8 @@ def expected_function_names() -> tuple[str, ...]:
         str(os.getenv("TRR_MODAL_REDDIT_REFRESH_FUNCTION") or "run_reddit_refresh").strip() or "run_reddit_refresh",
         str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION") or "probe_reddit_refresh_runtime").strip()
         or "probe_reddit_refresh_runtime",
+        str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
+        or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_SOCIAL_JOB_FUNCTION") or "run_social_job").strip() or "run_social_job",
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
         or "sweep_social_dispatch_queue",
@@ -132,11 +156,35 @@ def api_function_name() -> str:
     return str(os.getenv("TRR_MODAL_API_FUNCTION") or DEFAULT_API_FUNCTION).strip() or DEFAULT_API_FUNCTION
 
 
+def social_auth_probe_function_name() -> str:
+    return (
+        str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
+        or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION
+    )
+
+
 def get_app_function_handles(*, app_name: str, modal_environment: str = "") -> dict[str, Any]:
     return _load_get_app_objects()(
         app_name,
         environment_name=modal_environment or None,
     )
+
+
+def get_named_function_handles(
+    *,
+    app_name: str,
+    function_names: tuple[str, ...] | list[str],
+    modal_environment: str = "",
+) -> dict[str, Any]:
+    function_class = _load_modal_function_class()
+    handles: dict[str, Any] = {}
+    for function_name in function_names:
+        handles[function_name] = function_class.from_name(
+            app_name,
+            function_name,
+            environment_name=modal_environment or None,
+        )
+    return handles
 
 
 def hydrate_function_handle(function_handle: Any) -> tuple[bool, str | None]:
@@ -161,6 +209,37 @@ def resolve_function_web_url_from_handle(
         return None, str(exc)
 
 
+def invoke_remote_auth_probe(
+    *,
+    function_handle: Any,
+    platform: str,
+) -> dict[str, Any]:
+    try:
+        payload = function_handle.remote(platform)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "platform": platform,
+            "ready": False,
+            "reason": "probe_invocation_failed",
+            "detail": {
+                "phase": "remote_probe",
+                "exception_class": type(exc).__name__,
+                "message": str(exc)[:240],
+            },
+        }
+    if not isinstance(payload, dict):
+        return {
+            "platform": platform,
+            "ready": False,
+            "reason": "probe_payload_invalid",
+            "detail": {
+                "phase": "remote_probe",
+                "message": f"Expected dict payload, got {type(payload).__name__}",
+            },
+        }
+    return dict(payload)
+
+
 def verify_modal_readiness(
     *,
     app_name: str,
@@ -168,6 +247,7 @@ def verify_modal_readiness(
     social_secret_name: str,
     function_names: tuple[str, ...] | list[str],
     modal_environment: str = "",
+    probe_remote_auth_platform: str | None = None,
 ) -> dict[str, Any]:
     secret_names = list_secret_names(modal_environment=modal_environment)
     app_descriptions = list_app_descriptions(modal_environment=modal_environment)
@@ -185,9 +265,16 @@ def verify_modal_readiness(
                 app_name=app_name,
                 modal_environment=modal_environment,
             )
-        except Exception as exc:  # noqa: BLE001
-            app_function_handles = {}
-            app_lookup_error = str(exc)
+        except Exception:  # noqa: BLE001
+            try:
+                app_function_handles = get_named_function_handles(
+                    app_name=app_name,
+                    function_names=function_names,
+                    modal_environment=modal_environment,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001
+                app_function_handles = {}
+                app_lookup_error = str(fallback_exc)
 
     function_results: list[dict[str, Any]] = []
     missing_functions: list[str] = []
@@ -218,8 +305,26 @@ def verify_modal_readiness(
         if web_error:
             missing_web_endpoints.append(api_name)
 
+    remote_auth_probe: dict[str, Any] | None = None
+    if probe_remote_auth_platform:
+        probe_function_name = social_auth_probe_function_name()
+        probe_handle = app_function_handles.get(probe_function_name)
+        if probe_handle is None or probe_function_name in missing_functions:
+            remote_auth_probe = {
+                "platform": probe_remote_auth_platform,
+                "ready": False,
+                "reason": "probe_function_unavailable",
+            }
+        else:
+            remote_auth_probe = invoke_remote_auth_probe(
+                function_handle=probe_handle,
+                platform=probe_remote_auth_platform,
+            )
+
+    probe_ready = True if remote_auth_probe is None else bool(remote_auth_probe.get("ready"))
+
     return {
-        "ok": app_found and not missing_secrets and not missing_functions and not missing_web_endpoints,
+        "ok": app_found and not missing_secrets and not missing_functions and not missing_web_endpoints and probe_ready,
         "modal_environment": modal_environment or None,
         "app_name": app_name,
         "app_found": app_found,
@@ -232,6 +337,7 @@ def verify_modal_readiness(
         "api_function_name": api_name,
         "api_web_url": api_web_url,
         "missing_web_endpoints": missing_web_endpoints,
+        "remote_auth_probe": remote_auth_probe,
     }
 
 
@@ -253,6 +359,13 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
         suffix = f" ({result['error']})" if result["error"] else ""
         print(f"    - {result['name']}: {status}{suffix}")
     print(f"  API endpoint URL: {summary['api_web_url'] or '<missing>'}")
+    if summary.get("remote_auth_probe"):
+        probe = summary["remote_auth_probe"]
+        probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
+        print(
+            "  Remote auth probe: "
+            f"{probe.get('platform')}: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}"
+        )
     print(f"  Ready: {'yes' if summary['ok'] else 'no'}")
 
 
@@ -264,6 +377,7 @@ def main() -> int:
         social_secret_name=args.social_secret_name,
         function_names=expected_function_names(),
         modal_environment=args.env,
+        probe_remote_auth_platform=str(args.probe_remote_auth or "").strip() or None,
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

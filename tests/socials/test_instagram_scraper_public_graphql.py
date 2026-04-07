@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 import requests
 
 from trr_backend.socials.instagram.scraper import InstagramScraper
@@ -288,3 +289,209 @@ def test_fetch_posts_graphql_uses_browser_fallback_after_requests_fail(monkeypat
     assert payload == browser_payload
     assert scraper.last_retrieval_meta["transport"] == "playwright"
     assert scraper.last_retrieval_meta["retrieval_transport"] == "playwright"
+
+
+def test_fetch_posts_graphql_skips_browser_fallback_when_disabled(monkeypatch) -> None:
+    scraper = InstagramScraper(cookies={})
+
+    def _fake_warm(username: str, *, timeout: Any = None, force: bool = False) -> dict[str, str]:
+        del timeout, force
+        assert username == "bravotv"
+        scraper.session.cookies.set("csrftoken", "csrf-1")
+        return {
+            "lsd": "lsd-1",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        }
+
+    def _fake_post(_url: str, **_kwargs: Any) -> _FakeResponse:
+        response = requests.Response()
+        response.status_code = 403
+        raise requests.exceptions.HTTPError("http_403", response=response)
+
+    monkeypatch.setattr(scraper, "_warm_profile_request_context", _fake_warm)
+    monkeypatch.setattr(scraper, "_post", _fake_post)
+    monkeypatch.setattr(scraper, "_playwright_graphql_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_posts_graphql_with_browser",
+        lambda *_args, **_kwargs: pytest.fail("browser fallback should stay disabled"),
+    )
+
+    payload = scraper.fetch_posts_graphql("bravotv", None, 0.0, allow_browser_fallback=False)
+
+    assert payload is None
+    assert scraper.last_retrieval_meta["transport"] == "requests_enriched"
+
+
+@pytest.mark.parametrize(
+    ("cookies", "expected_reason"),
+    [
+        ({"sessionid": "session"}, "missing_csrftoken_and_ds_user_id"),
+        ({"sessionid": "session", "csrftoken": "csrf"}, "missing_ds_user_id"),
+        ({"sessionid": "session", "ds_user_id": "123"}, "missing_csrftoken"),
+        ({"sessionid": "session", "csrftoken": "csrf", "ds_user_id": "123"}, None),
+    ],
+)
+def test_validate_cookies_requires_complete_instagram_cookie_triplet(
+    cookies: dict[str, str],
+    expected_reason: str | None,
+) -> None:
+    scraper = InstagramScraper(cookies=cookies)
+
+    result = scraper._validate_cookies()
+
+    assert result["valid"] is (expected_reason is None)
+    assert result["reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
+    ("error_code", "cursor"),
+    [
+        ("instagram_graphql_checkpoint_required", None),
+        ("instagram_graphql_cursor_rate_limited", "cursor-1"),
+        ("instagram_graphql_cursor_unauthorized", "cursor-1"),
+        ("instagram_graphql_cursor_forbidden", "cursor-1"),
+    ],
+)
+def test_fetch_posts_graphql_skips_browser_fallback_for_unrecoverable_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    cursor: str | None,
+) -> None:
+    scraper = InstagramScraper(cookies={})
+    browser_called = False
+
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *_args, **_kwargs: {
+            "lsd": "lsd-1",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+
+    def _fake_post(_url: str, **_kwargs: Any) -> _FakeResponse:
+        raise requests.exceptions.RequestException("network failure")
+
+    def _fake_browser_fetch(*_args: Any, **_kwargs: Any) -> dict[str, Any] | None:
+        nonlocal browser_called
+        browser_called = True
+        return {"unexpected": True}
+
+    monkeypatch.setattr(scraper, "_post", _fake_post)
+    monkeypatch.setattr(scraper, "_playwright_graphql_fallback_enabled", lambda: True)
+    monkeypatch.setattr(scraper, "_fetch_posts_graphql_with_browser", _fake_browser_fetch)
+    monkeypatch.setattr(scraper, "_graphql_request_error_details", lambda **_kwargs: {"error_code": error_code})
+    monkeypatch.setattr(scraper, "_resolve_graphql_retry_backoff_seconds", lambda *_args: 0.0)
+
+    payload = scraper.fetch_posts_graphql("bravotv", cursor, 0.0)
+
+    assert payload is None
+    assert browser_called is False
+
+
+def test_resolve_graphql_retry_backoff_seconds_uses_bounded_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={})
+    captured: dict[str, float] = {}
+
+    def _fake_uniform(low: float, high: float) -> float:
+        captured["low"] = low
+        captured["high"] = high
+        return 1.23
+
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.random.uniform", _fake_uniform)
+
+    backoff = scraper._resolve_graphql_retry_backoff_seconds("cursor-1", 1)  # noqa: SLF001
+
+    assert backoff == 1.23
+    assert captured == {"low": 1.5, "high": 3.0}
+
+
+def test_fetch_posts_graphql_uses_explicit_page_size_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """page_size kwarg should override the default PROFILE_POSTS_PAGE_SIZE in GraphQL variables."""
+    import json as _json
+
+    scraper = InstagramScraper(cookies={"sessionid": "x", "csrftoken": "y", "ds_user_id": "1"})
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *_args, **_kwargs: {
+            "lsd": "lsd-1",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_request_cookies",
+        lambda: {"sessionid": "x", "csrftoken": "y", "ds_user_id": "1"},
+    )
+    monkeypatch.setattr(scraper, "_graphql_form_runtime_fields", lambda **_kwargs: {})
+    monkeypatch.setattr(scraper, "_profile_posts_doc_ids", lambda: ["doc"])
+
+    def _fake_post(_url: str, *, data: dict[str, Any] | None = None, **_kwargs: Any) -> _FakeResponse:
+        captured["variables"] = _json.loads(data["variables"])
+        return _FakeResponse(
+            json_payload={
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "1"}}],
+                        "page_info": {"has_next_page": False, "end_cursor": None},
+                    }
+                }
+            },
+        )
+
+    monkeypatch.setattr(scraper, "_post", _fake_post)
+
+    scraper.fetch_posts_graphql("bravotv", None, 0.15, page_size=50)
+
+    assert captured["variables"]["first"] == 50
+    assert captured["variables"]["data"]["count"] == 50
+
+
+def test_fetch_posts_graphql_uses_default_page_size_without_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without page_size kwarg, should use the default PROFILE_POSTS_PAGE_SIZE (33)."""
+    import json as _json
+
+    scraper = InstagramScraper(cookies={"sessionid": "x", "csrftoken": "y", "ds_user_id": "1"})
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *_args, **_kwargs: {
+            "lsd": "lsd-1",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_request_cookies",
+        lambda: {"sessionid": "x", "csrftoken": "y", "ds_user_id": "1"},
+    )
+    monkeypatch.setattr(scraper, "_graphql_form_runtime_fields", lambda **_kwargs: {})
+    monkeypatch.setattr(scraper, "_profile_posts_doc_ids", lambda: ["doc"])
+
+    def _fake_post(_url: str, *, data: dict[str, Any] | None = None, **_kwargs: Any) -> _FakeResponse:
+        captured["variables"] = _json.loads(data["variables"])
+        return _FakeResponse(
+            json_payload={
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "1"}}],
+                        "page_info": {"has_next_page": False, "end_cursor": None},
+                    }
+                }
+            },
+        )
+
+    monkeypatch.setattr(scraper, "_post", _fake_post)
+
+    scraper.fetch_posts_graphql("bravotv", None, 0.15)
+
+    assert captured["variables"]["first"] == scraper.PROFILE_POSTS_PAGE_SIZE
+    assert captured["variables"]["data"]["count"] == scraper.PROFILE_POSTS_PAGE_SIZE
