@@ -21,7 +21,6 @@ def _clear_caches():
 def _set_auth_envs(monkeypatch):
     """Set required auth envs so tests don't fail on auth validation."""
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "test-secret")
-    monkeypatch.setenv("SCREENALYTICS_SERVICE_TOKEN", "test-token")
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-jwt-secret")
 
 

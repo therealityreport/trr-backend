@@ -113,6 +113,14 @@
   ],
   "indexes": [
     {
+      "name": "core_season_source_latest_source_id_idx",
+      "columns": [
+        "source_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_season_source_latest_source_id_idx ON core.season_source_latest USING btree (source_id)"
+    },
+    {
       "name": "season_source_latest_season_id_source_id_variant_key",
       "columns": [
         "season_id",

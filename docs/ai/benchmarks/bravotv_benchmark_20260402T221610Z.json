@@ -1,0 +1,92 @@
+{
+  "generated_at": "2026-04-02T22:16:10.943903+00:00",
+  "date_start": "2026-03-26T22:16:10.943903+00:00",
+  "date_end": "2026-04-02T22:16:10.943903+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "youtube": {
+      "status": "ok",
+      "videos": 56,
+      "duration": "104.4s",
+      "sample": [
+        {
+          "id": "_THmyIWVz_s",
+          "title": "SNEAK PEEK: Lacy Nicole Teases Jesse Lally For Being \"Clingy\" | The Valley (S3 E",
+          "views": 2900,
+          "likes": 0,
+          "is_short": false,
+          "published_at": 1775153771,
+          "url": "https://www.youtube.com/watch?v=_THmyIWVz_s"
+        },
+        {
+          "id": "Xt1kALV7WSw",
+          "title": "SNEAK PEEK: Emmy Sharrett Seeks Peace With Bradley Carter | Southern Hospitality",
+          "views": 3014,
+          "likes": 0,
+          "is_short": false,
+          "published_at": 1775150171,
+          "url": "https://www.youtube.com/watch?v=Xt1kALV7WSw"
+        },
+        {
+          "id": "nvhDiSpAfeg",
+          "title": "FULL EPISODE: Watch The Valley Season 3 Premiere | The Valley (S3 E1) | Bravo",
+          "views": 9508,
+          "likes": 0,
+          "is_short": false,
+          "published_at": 1775142971,
+          "url": "https://www.youtube.com/watch?v=nvhDiSpAfeg&pp=0gcJCdkKAYcqIYzv"
+        }
+      ],
+      "meta": {
+        "retrieval_mode": "channel_continuation",
+        "continuation_pages": 4,
+        "continuation_pages_by_surface": {
+          "videos": 2,
+          "shorts": 2
+        },
+        "pages_scanned": 6,
+        "posts_checked": 234,
+        "matched_posts": 56,
+        "checked_renderers": 234,
+        "timestamp_unknown_count": 0,
+        "in_range_hits": 56,
+        "pre_window_pages": 4,
+        "before_window_pages": 4,
+        "after_window_pages": 0,
+        "pre_window_page_cap": 12,
+        "first_page_count": 28,
+        "first_page_counts": {
+          "videos": 28,
+          "shorts": 28
+        },
+        "ownership_filtered": 0,
+        "scan_capped_reason": null,
+        "videos_pages_scanned": 3,
+        "shorts_pages_scanned": 3,
+        "surface_cap_override_applied": false,
+        "requested_max_results": null,
+        "effective_max_results": null,
+        "continuation_failure_reason": null,
+        "continuation_failure_count": 0,
+        "precise_publish_attempts": 146,
+        "precise_publish_successes": 146,
+        "precise_publish_failures": 0,
+        "shorts_candidates_found": 28,
+        "shorts_precise_publish_attempts": 144,
+        "shorts_precise_publish_successes": 144,
+        "shorts_precise_publish_failures": 0,
+        "canonical_handle": "bravo",
+        "canonical_channel_id": "UCjSKDpYQkGS005Vf13NAe8A",
+        "resolved_channel_title": "Bravo",
+        "resolved_channel_avatar_url": "https://yt3.googleusercontent.com/ytc/AIdro_lkC2Vcxa2Bw7TwyT1-qv5s_LXyPm39FAn7PGdScrcvDWQ=s1024-c-k-c0x00ffffff-no-rj"
+      }
+    }
+  }
+}

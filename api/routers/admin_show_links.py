@@ -7,8 +7,8 @@ import re
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterator, Sequence
+from datetime import datetime, timezone
 from functools import lru_cache
 from queue import Empty, SimpleQueue
 from time import perf_counter
@@ -24,10 +24,12 @@ from pydantic import BaseModel, Field, HttpUrl
 from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.db import pg
+from trr_backend.ingestion.fandom_person_scraper import fetch_fandom_person_html, parse_fandom_person_html
 from trr_backend.ingestion.show_cast_matrix_scraper import (
     is_missing_fandom_page,
     is_missing_wikipedia_page,
 )
+from trr_backend.repositories import admin_show_reads as show_reads_repo
 from trr_backend.integrations.fandom import (
     build_fandom_wiki_url_from_name,
     is_allowlisted_fandom_domain,
@@ -42,6 +44,7 @@ from trr_backend.integrations.fandom import (
 )
 from trr_backend.integrations.fandom_discovery import discover_fandom_candidate_pages
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
+from trr_backend.scraping.bravo_parser import parse_person_page
 from trr_backend.socials.platforms import infer_platform_from_url
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-links"])
@@ -178,6 +181,106 @@ def _positive_int_env(key: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _link_discovery_stalled_threshold_seconds() -> float:
+    return _positive_float_env("TRR_LINK_DISCOVERY_STALLED_THRESHOLD_SECONDS", 60.0)
+
+
+def _stage_progress_source_label(value: str | None) -> str | None:
+    normalized = _normalize_link_kind(str(value or "").strip().lower())
+    if not normalized:
+        return None
+    if normalized in {"bravo", "bravotv", "bravotv.com"}:
+        return "bravotv"
+    if normalized == "twitter":
+        return "twitter"
+    return normalized
+
+
+def _classify_validated_live_source_key(row: dict[str, Any]) -> str | None:
+    link_kind = _normalize_link_kind(str(row.get("link_kind") or "").strip().lower())
+    if link_kind == "fandom":
+        return "fandom"
+    if link_kind in _SOCIAL_LINK_KINDS:
+        return link_kind
+    parsed = urlparse(str(row.get("url") or "").strip())
+    host = str(parsed.hostname or "").strip().lower()
+    source = str(row.get("source") or "").strip().lower()
+    if "bravotv.com" in host or source.startswith("bravo"):
+        return "bravotv"
+    if link_kind in {
+        "tmdb",
+        "wikidata",
+        "wikipedia",
+        "imdb",
+        "tvmaze",
+        "tvdb",
+        "freebase",
+        "google_kg",
+        "famous_birthdays",
+        "trakt",
+        "x_topic",
+    }:
+        return link_kind
+    if "wikipedia.org" in host:
+        return "wikipedia"
+    if "wikidata.org" in host:
+        return "wikidata"
+    if "themoviedb.org" in host:
+        return "tmdb"
+    if "imdb.com" in host:
+        return "imdb"
+    return _stage_progress_source_label(link_kind or source or host)
+
+
+def _accumulate_validated_live_source_counts(stats: dict[str, Any] | None, rows: list[dict[str, Any]]) -> None:
+    if stats is None or not rows:
+        return
+    bucket_raw = stats.get("validated_live_counts_by_source")
+    bucket: dict[str, int]
+    if isinstance(bucket_raw, dict):
+        bucket = {
+            str(key).strip(): int(value or 0)
+            for key, value in bucket_raw.items()
+            if str(key).strip()
+        }
+    else:
+        bucket = {}
+    for row in rows:
+        source_key = _classify_validated_live_source_key(row)
+        if not source_key:
+            continue
+        bucket[source_key] = int(bucket.get(source_key) or 0) + 1
+    stats["validated_live_counts_by_source"] = bucket
+
+
+def _normalized_count_map(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for raw_key, raw_value in value.items():
+        key = _stage_progress_source_label(str(raw_key or ""))
+        if not key:
+            continue
+        try:
+            count = int(raw_value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        normalized[key] = normalized.get(key, 0) + count
+    return normalized
+
+
+def _merge_count_maps(*maps: dict[str, int]) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for bucket in maps:
+        for key, value in bucket.items():
+            if value <= 0:
+                continue
+            merged[key] = merged.get(key, 0) + int(value)
+    return merged
 
 
 def _is_allowlisted_fandom_seed_input(value: str) -> bool:
@@ -493,8 +596,16 @@ _LINK_KIND_LABELS: dict[str, str] = {
     "external": "External Link",
 }
 
+
 def _normalize_lookup_value(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _is_real_housewives_show_name(value: str | None) -> bool:
+    normalized = _normalize_lookup_value(value)
+    if not normalized:
+        return False
+    return normalized.startswith("the real housewives of ") or normalized.startswith("real housewives of ")
 
 
 def _normalize_show_network_tokens(values: list[str] | tuple[str, ...] | None) -> set[str]:
@@ -628,7 +739,7 @@ def _effective_fandom_allowlist(
         if normalized:
             domains.add(normalized)
     domains.update(_curated_show_fandom_domains(show_name))
-    if network_tokens and "bravo" in network_tokens:
+    if _is_real_housewives_show_name(show_name):
         domains.add("real-housewives.fandom.com")
     for raw_domain in additional_domains or []:
         normalized = normalize_fandom_community_domain(str(raw_domain or ""))
@@ -814,6 +925,44 @@ def _build_fandom_link_metadata(
     return metadata
 
 
+def _extract_featured_image_from_html(html: str | None, *, base_url: str) -> str | None:
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    for selector in (
+        'meta[property="og:image"]',
+        'meta[name="twitter:image"]',
+        'meta[name="twitter:image:src"]',
+    ):
+        tag = soup.select_one(selector)
+        content = str(tag.get("content") or "").strip() if tag else ""
+        if not content:
+            continue
+        resolved = _canonicalize_url(urljoin(base_url, content))
+        if resolved:
+            return resolved
+    return None
+
+
+def _select_fandom_profile_image_url(photos: list[dict[str, Any]]) -> str | None:
+    for photo in photos:
+        if not isinstance(photo, dict):
+            continue
+        context_type = str(photo.get("context_type") or "").strip().lower()
+        context_section = str(photo.get("context_section") or "").strip().lower()
+        if context_type == "hero" or context_section == "infobox":
+            candidate = str(photo.get("image_url_canonical") or photo.get("image_url") or "").strip()
+            if candidate:
+                return candidate
+    for photo in photos:
+        if not isinstance(photo, dict):
+            continue
+        candidate = str(photo.get("image_url_canonical") or photo.get("image_url") or "").strip()
+        if candidate:
+            return candidate
+    return None
+
+
 def _extract_fandom_wiki_urls_from_html(html: str, *, base_url: str, max_results: int = 200) -> list[str]:
     if not html:
         return []
@@ -880,25 +1029,46 @@ def _search_fandom_allpages_html_candidates(
         return []
     candidates: list[str] = []
     seen: set[str] = set()
+
+    def extract_next_page_url(html: str, *, current_url: str) -> str | None:
+        if not html:
+            return None
+        soup = BeautifulSoup(html, "html.parser")
+        for anchor in soup.select("a[href]"):
+            label = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip().casefold()
+            if "next page" not in label:
+                continue
+            href = str(anchor.get("href") or "").strip()
+            if not href:
+                continue
+            return urljoin(current_url, href)
+        return None
+
     for prefix in _fandom_allpages_prefixes(query):
         if not _can_attempt_fandom_candidate(stats):
             break
-        all_pages_url = f"https://{host}/wiki/Special:AllPages?from={quote(prefix)}&to=&namespace=0"
-        status_code, html, resolved_url, _ = _fetch_html_with_status(
-            all_pages_url,
-            timeout=_source_timeout_seconds("fandom"),
-        )
-        if status_code is None or status_code >= 400 or not html:
-            continue
-        resolved = _canonicalize_url(resolved_url or all_pages_url) or all_pages_url
-        for page_url in _extract_fandom_wiki_urls_from_html(html, base_url=resolved, max_results=max_results):
-            key = _url_key(page_url)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(page_url)
-            if len(candidates) >= max_results:
+        next_page_url: str | None = f"https://{host}/wiki/Special:AllPages?from={quote(prefix)}&to=&namespace=0"
+        seen_page_urls: set[str] = set()
+        while next_page_url and next_page_url not in seen_page_urls:
+            if not _can_attempt_fandom_candidate(stats):
                 return candidates[:max_results]
+            seen_page_urls.add(next_page_url)
+            status_code, html, resolved_url, _ = _fetch_html_with_status(
+                next_page_url,
+                timeout=_source_timeout_seconds("fandom"),
+            )
+            if status_code is None or status_code >= 400 or not html:
+                break
+            resolved = _canonicalize_url(resolved_url or next_page_url) or next_page_url
+            for page_url in _extract_fandom_wiki_urls_from_html(html, base_url=resolved, max_results=max_results):
+                key = _url_key(page_url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(page_url)
+                if len(candidates) >= max_results:
+                    return candidates[:max_results]
+            next_page_url = extract_next_page_url(html, current_url=resolved)
     return candidates[:max_results]
 
 
@@ -910,6 +1080,7 @@ def _score_fandom_show_candidate_url(url: str, *, show_name: str | None) -> int:
         return 0
     distinctive_show_tokens = _fandom_show_distinctive_tokens(show_name)
     title_tokens = {token for token in _normalize_lookup_value(title).split() if token}
+    show_tokens: set[str] = set()
     if distinctive_show_tokens:
         if not distinctive_show_tokens.issubset(title_tokens):
             return 0
@@ -1245,7 +1416,8 @@ def _load_show_link_classifier_context(show_id: str) -> dict[str, Any]:
         person_id = str(row.get("person_id") or "").strip()
         if not person_id:
             continue
-        external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
+        external_ids_raw = row.get("external_ids")
+        external_ids: dict[str, Any] = external_ids_raw if isinstance(external_ids_raw, dict) else {}
         person_name = str(row.get("full_name") or "").strip()
         person_name_norm = _normalize_lookup_value(person_name)
         imdb_id = _extract_imdb_person_id(
@@ -1776,6 +1948,7 @@ def _classify_submitted_link_input(
     source = "manual_classifier"
     metadata: dict[str, Any] = {"submitted_input": submitted}
     canonical_url = canonical_input
+    wiki_title_text = ""
 
     if "imdb.com" in host:
         title_match = re.search(r"/title/(tt\d+)", path, flags=re.IGNORECASE)
@@ -2599,6 +2772,34 @@ def _is_missing_social_profile_page(kind: str, html: str, resolved_url: str) -> 
     return False
 
 
+def _is_invalid_social_profile_route(kind: str, resolved_url: str) -> bool:
+    normalized_kind = _normalize_link_kind(kind)
+    parsed = urlparse(str(resolved_url or "").strip())
+    path = unquote(parsed.path or "").strip().lower()
+    segments = [segment for segment in path.split("/") if segment]
+    if normalized_kind == "instagram":
+        if len(segments) != 1:
+            return True
+        return segments[0] in {
+            "accounts",
+            "about",
+            "challenge",
+            "developer",
+            "directory",
+            "download",
+            "explore",
+            "legal",
+            "login",
+            "oauth",
+            "p",
+            "press",
+            "reel",
+            "reels",
+            "stories",
+        }
+    return False
+
+
 def _validate_person_social_url(
     url: str,
     *,
@@ -2626,6 +2827,8 @@ def _validate_person_social_url(
         return (None, "fetch_error") if fetch_error else (None, "invalid")
 
     resolved = _canonicalize_url(final_url or candidate)
+    if _is_invalid_social_profile_route(normalized_kind, resolved):
+        return None, "invalid"
     if html and _is_missing_social_profile_page(normalized_kind, html, resolved):
         return None, "invalid"
     if status_code in {404, 410}:
@@ -2673,10 +2876,12 @@ def _extract_wikidata_claim_scalar(entity: dict[str, Any], property_ids: tuple[s
         for claim_row in claim_rows:
             if not isinstance(claim_row, dict):
                 continue
-            mainsnak = claim_row.get("mainsnak") if isinstance(claim_row.get("mainsnak"), dict) else {}
+            mainsnak_raw = claim_row.get("mainsnak")
+            mainsnak: dict[str, Any] = mainsnak_raw if isinstance(mainsnak_raw, dict) else {}
             if str(mainsnak.get("snaktype") or "value") != "value":
                 continue
-            datavalue = mainsnak.get("datavalue") if isinstance(mainsnak.get("datavalue"), dict) else {}
+            datavalue_raw = mainsnak.get("datavalue")
+            datavalue: dict[str, Any] = datavalue_raw if isinstance(datavalue_raw, dict) else {}
             value = datavalue.get("value")
             if isinstance(value, str):
                 candidate = value.strip()
@@ -2698,10 +2903,12 @@ def _extract_wikidata_claim_scalars(entity: dict[str, Any], property_ids: tuple[
         for claim_row in claim_rows:
             if not isinstance(claim_row, dict):
                 continue
-            mainsnak = claim_row.get("mainsnak") if isinstance(claim_row.get("mainsnak"), dict) else {}
+            mainsnak_raw = claim_row.get("mainsnak")
+            mainsnak: dict[str, Any] = mainsnak_raw if isinstance(mainsnak_raw, dict) else {}
             if str(mainsnak.get("snaktype") or "value") != "value":
                 continue
-            datavalue = mainsnak.get("datavalue") if isinstance(mainsnak.get("datavalue"), dict) else {}
+            datavalue_raw = mainsnak.get("datavalue")
+            datavalue: dict[str, Any] = datavalue_raw if isinstance(datavalue_raw, dict) else {}
             value = datavalue.get("value")
             candidate = ""
             if isinstance(value, str):
@@ -2729,10 +2936,12 @@ def _extract_wikidata_claim_entity_ids(entity: dict[str, Any], property_ids: tup
         for claim_row in claim_rows:
             if not isinstance(claim_row, dict):
                 continue
-            mainsnak = claim_row.get("mainsnak") if isinstance(claim_row.get("mainsnak"), dict) else {}
+            mainsnak_raw = claim_row.get("mainsnak")
+            mainsnak: dict[str, Any] = mainsnak_raw if isinstance(mainsnak_raw, dict) else {}
             if str(mainsnak.get("snaktype") or "value") != "value":
                 continue
-            datavalue = mainsnak.get("datavalue") if isinstance(mainsnak.get("datavalue"), dict) else {}
+            datavalue_raw = mainsnak.get("datavalue")
+            datavalue: dict[str, Any] = datavalue_raw if isinstance(datavalue_raw, dict) else {}
             value = datavalue.get("value")
             if isinstance(value, dict):
                 entity_id = str(value.get("id") or "").strip()
@@ -2771,12 +2980,16 @@ def _fetch_wikidata_summary(wikidata_id: str) -> tuple[dict[str, Any] | None, bo
     if not isinstance(entity, dict):
         return None, False
 
-    sitelinks = entity.get("sitelinks") if isinstance(entity.get("sitelinks"), dict) else {}
-    enwiki = sitelinks.get("enwiki") if isinstance(sitelinks.get("enwiki"), dict) else {}
+    sitelinks_raw = entity.get("sitelinks")
+    sitelinks: dict[str, Any] = sitelinks_raw if isinstance(sitelinks_raw, dict) else {}
+    enwiki_raw = sitelinks.get("enwiki")
+    enwiki: dict[str, Any] = enwiki_raw if isinstance(enwiki_raw, dict) else {}
     enwiki_title = str(enwiki.get("title") or "").strip()
 
-    labels = entity.get("labels") if isinstance(entity.get("labels"), dict) else {}
-    en_label_payload = labels.get("en") if isinstance(labels.get("en"), dict) else {}
+    labels_raw = entity.get("labels")
+    labels: dict[str, Any] = labels_raw if isinstance(labels_raw, dict) else {}
+    en_label_payload_raw = labels.get("en")
+    en_label_payload: dict[str, Any] = en_label_payload_raw if isinstance(en_label_payload_raw, dict) else {}
     en_label = str(en_label_payload.get("value") or "").strip()
 
     imdb_id = _extract_wikidata_claim_scalar(entity, ("P345",))
@@ -2841,7 +3054,7 @@ def _normalized_person_name(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 
-def _person_name_candidates_match(expected_name: str | None, candidates: list[str | None]) -> bool:
+def _person_name_candidates_match(expected_name: str | None, candidates: Sequence[str | None]) -> bool:
     expected = _normalized_person_name(expected_name)
     if not expected:
         return True
@@ -3016,7 +3229,8 @@ def _resolve_wikipedia_wikidata_id(value: str) -> str | None:
     if first_page.get("missing") is not None:
         return None
 
-    pageprops = first_page.get("pageprops") if isinstance(first_page.get("pageprops"), dict) else {}
+    pageprops_raw = first_page.get("pageprops")
+    pageprops: dict[str, Any] = pageprops_raw if isinstance(pageprops_raw, dict) else {}
     item_id = str(pageprops.get("wikibase_item") or "").strip()
     return item_id if re.fullmatch(r"Q\d+", item_id) else None
 
@@ -3276,6 +3490,67 @@ def _validated_person_knowledge_url(
     return resolved
 
 
+@lru_cache(maxsize=2048)
+def _build_person_page_link_metadata(url: str, *, kind: str) -> dict[str, Any]:
+    candidate = _canonicalize_url(url)
+    normalized_kind = _normalize_link_kind(kind)
+    if not candidate or normalized_kind not in {"bravo_profile", "fandom", "imdb", "tmdb", "wikipedia"}:
+        return {}
+
+    featured_image_url: str | None = None
+    if normalized_kind == "bravo_profile":
+        try:
+            parsed = parse_person_page(
+                candidate,
+                include_related_content=False,
+                hydrate_related_dates=False,
+            )
+        except Exception:  # noqa: BLE001
+            parsed = {}
+        raw_featured_image_url = str(parsed.get("hero_image_url") or "").strip() if isinstance(parsed, dict) else ""
+        if raw_featured_image_url:
+            featured_image_url = _canonicalize_url(raw_featured_image_url)
+
+    elif normalized_kind == "fandom":
+        html: str | None = None
+        resolved_url = candidate
+        try:
+            html, final_url = fetch_fandom_person_html(candidate)
+            resolved_url = _canonicalize_url(final_url) or candidate
+            _cast_fandom, photos = parse_fandom_person_html(html, source_url=resolved_url)
+            selected_fandom_image_url = _select_fandom_profile_image_url(photos)
+            if selected_fandom_image_url:
+                featured_image_url = _canonicalize_url(selected_fandom_image_url)
+        except Exception:  # noqa: BLE001
+            pass
+        if not featured_image_url and html:
+            featured_image_url = _extract_featured_image_from_html(html, base_url=resolved_url)
+
+    if not featured_image_url:
+        timeout_source = (
+            "wikipedia"
+            if normalized_kind == "wikipedia"
+            else "fandom"
+            if normalized_kind == "fandom"
+            else "bravo"
+            if normalized_kind == "bravo_profile"
+            else "imdb"
+            if normalized_kind == "imdb"
+            else "tmdb"
+        )
+        status_code, html, final_url, fetch_error = _fetch_html_with_status(
+            candidate,
+            timeout=_source_timeout_seconds(timeout_source),
+        )
+        if status_code is not None and status_code < 400 and html and not fetch_error:
+            featured_image_url = _extract_featured_image_from_html(
+                html,
+                base_url=_canonicalize_url(final_url or candidate) or candidate,
+            )
+
+    return {"featured_image_url": featured_image_url} if featured_image_url else {}
+
+
 def _load_preapproved_person_source_url(
     *,
     person_id: str,
@@ -3356,7 +3631,9 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
     show_slug = _slug(show_name)
     network_values = [str(n).strip() for n in (show.get("networks") or []) if isinstance(n, str) and str(n).strip()]
     networks = _normalize_show_network_tokens(network_values)
-    external_ids = show.get("external_ids") if isinstance(show.get("external_ids"), dict) else {}
+    is_real_housewives_show = _is_real_housewives_show_name(show_name)
+    external_ids_raw = show.get("external_ids")
+    external_ids: dict[str, Any] = external_ids_raw if isinstance(external_ids_raw, dict) else {}
     show_wikidata_id = _resolve_show_wikidata_id(show_id, show.get("wikidata_id"))
     show_imdb_id = str(show.get("imdb_id") or "").strip().lower()
     show_tmdb_id = str(show.get("tmdb_id") or "").strip()
@@ -3468,7 +3745,7 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
             if raw_url:
                 fandom_candidates.append((raw_url, "core.entity_links"))
         fandom_candidates.extend((url, "curated_fandom_base") for url in _curated_show_fandom_base_urls(show_name))
-        if "bravo" in networks and show_name:
+        if is_real_housewives_show and show_name:
             bravo_wiki_candidate = search_real_housewives_wiki(show_name)
             if bravo_wiki_candidate:
                 fandom_candidates.append((bravo_wiki_candidate, "bravo_default"))
@@ -3868,13 +4145,12 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
         """,
         [show_id, _BRAVO_VARIANT],
     )
-    payload = snapshot.get("payload") if snapshot and isinstance(snapshot.get("payload"), dict) else {}
-    normalized = payload.get("normalized") if isinstance(payload, dict) else {}
-    news_items = (
-        normalized.get("news_show")
-        if isinstance(normalized, dict) and isinstance(normalized.get("news_show"), list)
-        else []
-    )
+    payload_raw = snapshot.get("payload") if snapshot else None
+    payload: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
+    normalized_payload_raw = payload.get("normalized")
+    normalized_payload: dict[str, Any] = normalized_payload_raw if isinstance(normalized_payload_raw, dict) else {}
+    news_items_raw = normalized_payload.get("news_show")
+    news_items: list[Any] = news_items_raw if isinstance(news_items_raw, list) else []
     for item in news_items:
         if not isinstance(item, dict):
             continue
@@ -3913,6 +4189,11 @@ def _collect_show_fandom_seed_urls(
     candidates: list[str] = []
     if show_fandom_seed_urls:
         candidates.extend(show_fandom_seed_urls)
+    candidates.extend(_curated_show_fandom_base_urls(show_name))
+    if _is_real_housewives_show_name(show_name):
+        real_housewives_wiki_candidate = search_real_housewives_wiki(show_name or "")
+        if real_housewives_wiki_candidate:
+            candidates.append(real_housewives_wiki_candidate)
 
     try:
         existing_rows = pg.fetch_all(
@@ -4211,15 +4492,27 @@ def _discover_season_links(
                     if inferred_season_number and inferred_season_number not in season_wikidata_by_number:
                         season_wikidata_by_number[inferred_season_number] = candidate_item_id
 
+    season_rows = [row for row in rows if int(row.get("season_number") or 0) > 0]
+    if stats is not None:
+        stats["season_total_targets"] = len(season_rows)
+        stats["season_processed"] = 0
+        stats["season_links_discovered"] = 0
+        stats["season_with_links"] = 0
+        stats["current_season_label"] = ""
+
     found: list[dict[str, Any]] = []
-    for row in rows:
+    for index, row in enumerate(season_rows, start=1):
         if _stage_budget_exhausted(stats):
             break
         season_id = str(row.get("id"))
         season_number = int(row.get("season_number") or 0)
-        if season_number <= 0:
-            continue
-        season_external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
+        if stats is not None:
+            stats["current_season_label"] = f"Season {season_number}"
+        season_link_count_before = len(found)
+        season_external_ids_raw = row.get("external_ids")
+        season_external_ids: dict[str, Any] = (
+            season_external_ids_raw if isinstance(season_external_ids_raw, dict) else {}
+        )
         season_tmdb_id = str(
             row.get("tmdb_season_id")
             or season_external_ids.get("tmdb")
@@ -4249,6 +4542,8 @@ def _discover_season_links(
                     ),
                 }
             )
+            if stats is not None:
+                stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
 
         wikidata = _extract_wikidata_item_id(str(row.get("external_wikidata_id") or "").strip())
         wikidata_source = "core.seasons.external_wikidata_id"
@@ -4295,6 +4590,8 @@ def _discover_season_links(
                     },
                 }
             )
+            if stats is not None:
+                stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
         if re.fullmatch(r"\d+", season_tvmaze_id):
             found.append(
                 {
@@ -4314,6 +4611,8 @@ def _discover_season_links(
                     ),
                 }
             )
+            if stats is not None:
+                stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
         season_wikipedia_candidates: list[tuple[str, str]] = []
         season_wikipedia_url = _resolve_wikidata_enwiki_url(wikidata) if wikidata else None
         if season_wikipedia_url:
@@ -4356,8 +4655,14 @@ def _discover_season_links(
                     "source": resolved_season_wikipedia_source or "derived",
                 }
             )
+            if stats is not None:
+                stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
 
         if season_number <= 0 or not fandom_domains:
+            if stats is not None:
+                stats["season_processed"] = index
+                if len(found) > season_link_count_before:
+                    stats["season_with_links"] = int(stats.get("season_with_links") or 0) + 1
             continue
 
         season_fandom_queries = _build_fandom_season_search_queries(
@@ -4443,6 +4748,10 @@ def _discover_season_links(
                         "metadata": _build_fandom_link_metadata(resolved_fandom_url, title=fandom_title),
                     }
                 )
+                if stats is not None:
+                    stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
+                    stats["season_processed"] = index
+                    stats["season_with_links"] = int(stats.get("season_with_links") or 0) + 1
                 continue
 
             for query in season_fandom_queries:
@@ -4510,6 +4819,14 @@ def _discover_season_links(
                     "metadata": _build_fandom_link_metadata(resolved_fandom_url, title=fandom_title),
                 }
             )
+            if stats is not None:
+                stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
+        if stats is not None:
+            stats["season_processed"] = index
+            if len(found) > season_link_count_before:
+                stats["season_with_links"] = int(stats.get("season_with_links") or 0) + 1
+    if stats is not None:
+        stats["current_season_label"] = ""
     return found
 
 
@@ -4568,7 +4885,7 @@ def _discover_fandom_candidates_for_person(
     seeded_fandom_url: str | None,
     show_fandom_domains: list[str] | None,
     seeded_domain_candidates: dict[str, list[str]] | None,
-    is_bravo_show: bool,
+    is_real_housewives_show: bool,
     fandom_allowlist: list[str] | tuple[str, ...],
     stats: dict[str, Any] | None = None,
 ) -> list[str]:
@@ -4605,7 +4922,7 @@ def _discover_fandom_candidates_for_person(
                     candidates.append(candidate)
             if len(candidates) >= max_candidates_per_person:
                 break
-    if not is_bravo_show or not name:
+    if not is_real_housewives_show or not name:
         deduped: list[str] = []
         seen: set[str] = set()
         for candidate in candidates:
@@ -4734,6 +5051,7 @@ def _discover_people_links(
     ]
     networks = _normalize_show_network_tokens(network_values)
     is_bravo_show = "bravo" in networks
+    is_real_housewives_show = _is_real_housewives_show_name(show_name)
     show_wikidata_id = _resolve_show_wikidata_id(show_id, show.get("wikidata_id"))
     fandom_allowlist = _effective_fandom_allowlist(
         show_name=show_name,
@@ -4807,21 +5125,16 @@ def _discover_people_links(
         **show_cast_wikidata_candidates,
     }
 
-    housewife_friend_ids: set[str] = set()
-    if is_bravo_show:
-        role_rows = pg.fetch_all(
-            """
-            SELECT DISTINCT sra.person_id::text AS person_id
-            FROM core.show_cast_role_assignments sra
-            JOIN core.show_role_catalog rc ON rc.id = sra.role_id
-            WHERE sra.show_id = %s
-              AND lower(rc.name) IN ('housewife', 'friend')
-            """,
-            [show_id],
-        )
-        housewife_friend_ids = {str(row.get("person_id") or "").strip() for row in role_rows if row.get("person_id")}
-
     person_id_filter = {str(value).strip() for value in (person_ids or set()) if str(value).strip()}
+    eligible_people_rows, _ = show_reads_repo.get_show_links_eligible_people(
+        show_id,
+        person_ids=person_id_filter or None,
+    )
+    eligible_person_ids = {
+        str(row.get("person_id") or "").strip()
+        for row in eligible_people_rows
+        if str(row.get("person_id") or "").strip()
+    }
     rows = pg.fetch_all(
         """
         SELECT DISTINCT
@@ -4847,8 +5160,7 @@ def _discover_people_links(
         """,
         [show_id],
     )
-    if person_id_filter:
-        rows = [row for row in rows if str(row.get("id") or "").strip() in person_id_filter]
+    rows = [row for row in rows if str(row.get("id") or "").strip() in eligible_person_ids]
     people_fandom_seed_urls = _collect_show_fandom_seed_urls(
         show_id,
         show_name=show_name,
@@ -4899,7 +5211,8 @@ def _discover_people_links(
             stats["current_person_id"] = person_id
             stats["current_person_name"] = name
         fandom_url = str(row.get("fandom_url") or "").strip()
-        external_ids = row.get("external_ids") if isinstance(row.get("external_ids"), dict) else {}
+        external_ids_raw = row.get("external_ids")
+        external_ids: dict[str, Any] = external_ids_raw if isinstance(external_ids_raw, dict) else {}
         person_link_count_before = len(found)
         imdb_id, imdb_source = _resolve_person_external_identifier(
             external_ids,
@@ -5001,6 +5314,7 @@ def _discover_people_links(
                         label=f"{name} IMDb",
                         url=imdb_url,
                         source=imdb_source,
+                        metadata=_build_person_page_link_metadata(imdb_url, kind="imdb"),
                     )
                 )
 
@@ -5020,6 +5334,7 @@ def _discover_people_links(
                         label=f"{name} TMDb",
                         url=tmdb_url,
                         source=tmdb_source,
+                        metadata=_build_person_page_link_metadata(tmdb_url, kind="tmdb"),
                     )
                 )
 
@@ -5056,6 +5371,7 @@ def _discover_people_links(
                         label=f"{name} Wikipedia",
                         url=wikipedia_url,
                         source="derived_validated",
+                        metadata=_build_person_page_link_metadata(wikipedia_url, kind="wikipedia"),
                     )
                 )
 
@@ -5172,7 +5488,7 @@ def _discover_people_links(
             seeded_fandom_url=fandom_url if fandom_url else None,
             show_fandom_domains=show_fandom_domains,
             seeded_domain_candidates=seeded_fandom_candidates_by_domain,
-            is_bravo_show=is_bravo_show,
+            is_real_housewives_show=is_real_housewives_show,
             fandom_allowlist=fandom_allowlist,
             stats=stats,
         )
@@ -5248,10 +5564,13 @@ def _discover_people_links(
                             label=fandom_title or (name if name else "Fandom"),
                             url=canonical_related_url,
                             source=source_value,
-                            metadata=_build_fandom_link_metadata(canonical_related_url, title=fandom_title),
+                            metadata={
+                                **_build_fandom_link_metadata(canonical_related_url, title=fandom_title),
+                                **_build_person_page_link_metadata(canonical_related_url, kind="fandom"),
+                            },
                         )
                     )
-        if is_bravo_show and person_id in housewife_friend_ids and name:
+        if is_bravo_show and name:
             slug = _slug(name)
             if slug:
                 bravo_profile_url = _validated_person_knowledge_url(
@@ -5268,6 +5587,7 @@ def _discover_people_links(
                             label=f"{name} Bravo profile",
                             url=bravo_profile_url,
                             source="cast_matrix_sync",
+                            metadata=_build_person_page_link_metadata(bravo_profile_url, kind="bravo_profile"),
                         )
                     )
         if stats is not None:
@@ -5455,8 +5775,16 @@ def _promote_pending_person_source_links(rows: list[dict[str, Any]], *, conn: An
 
 def _cleanup_invalid_person_knowledge_links(show_id: str) -> dict[str, Any]:
     scan = _scan_invalid_person_knowledge_links(show_id)
-    invalid_rows = scan.get("invalid_rows") if isinstance(scan.get("invalid_rows"), list) else []
-    pending_promotions = scan.get("pending_promotions") if isinstance(scan.get("pending_promotions"), list) else []
+    invalid_rows_raw = scan.get("invalid_rows")
+    invalid_rows: list[dict[str, Any]] = (
+        [row for row in invalid_rows_raw if isinstance(row, dict)] if isinstance(invalid_rows_raw, list) else []
+    )
+    pending_promotions_raw = scan.get("pending_promotions")
+    pending_promotions: list[dict[str, Any]] = (
+        [row for row in pending_promotions_raw if isinstance(row, dict)]
+        if isinstance(pending_promotions_raw, list)
+        else []
+    )
     invalid_ids = [str(row.get("id") or "").strip() for row in invalid_rows if row.get("id")]
 
     with pg.db_connection() as conn:
@@ -5535,8 +5863,16 @@ def _scan_invalid_person_social_links(show_id: str) -> dict[str, Any]:
 
 def _cleanup_invalid_person_social_links(show_id: str) -> dict[str, Any]:
     scan = _scan_invalid_person_social_links(show_id)
-    invalid_rows = scan.get("invalid_rows") if isinstance(scan.get("invalid_rows"), list) else []
-    pending_promotions = scan.get("pending_promotions") if isinstance(scan.get("pending_promotions"), list) else []
+    invalid_rows_raw = scan.get("invalid_rows")
+    invalid_rows: list[dict[str, Any]] = (
+        [row for row in invalid_rows_raw if isinstance(row, dict)] if isinstance(invalid_rows_raw, list) else []
+    )
+    pending_promotions_raw = scan.get("pending_promotions")
+    pending_promotions: list[dict[str, Any]] = (
+        [row for row in pending_promotions_raw if isinstance(row, dict)]
+        if isinstance(pending_promotions_raw, list)
+        else []
+    )
     invalid_ids = [str(row.get("id") or "").strip() for row in invalid_rows if row.get("id")]
 
     with pg.db_connection() as conn:
@@ -5548,6 +5884,12 @@ def _cleanup_invalid_person_social_links(show_id: str) -> dict[str, Any]:
         "promoted": promoted,
         "deleted": deleted,
         "deleted_by_reason": _reason_counts(invalid_rows),
+        "deleted_by_source": _reason_counts(
+            [
+                {"reason": _stage_progress_source_label(str(row.get("link_kind") or "").strip().lower())}
+                for row in invalid_rows
+            ]
+        ),
         "validation_failures": int(scan.get("validation_failures") or 0),
     }
 
@@ -5683,7 +6025,10 @@ def _scan_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
 
 def _cleanup_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
     scan = _scan_invalid_show_knowledge_links(show_id)
-    invalid_rows = scan.get("invalid_rows") if isinstance(scan.get("invalid_rows"), list) else []
+    invalid_rows_raw = scan.get("invalid_rows")
+    invalid_rows: list[dict[str, Any]] = (
+        [row for row in invalid_rows_raw if isinstance(row, dict)] if isinstance(invalid_rows_raw, list) else []
+    )
 
     invalid_ids: list[str] = []
     for row in invalid_rows:
@@ -5916,18 +6261,11 @@ def _count_discovery_scan_targets(show_id: str) -> dict[str, int]:
         """,
         [show_id],
     )
-    people_row = pg.fetch_one(
-        """
-        SELECT count(DISTINCT person_id)::int AS people_count
-        FROM core.show_cast
-        WHERE show_id = %s::uuid
-        """,
-        [show_id],
-    )
+    eligible_people_rows, _ = show_reads_repo.get_show_links_eligible_people(show_id)
     return {
         "show_scanned": 1,
         "season_scanned": int((season_row or {}).get("season_count") or 0),
-        "people_scanned": int((people_row or {}).get("people_count") or 0),
+        "people_scanned": len(eligible_people_rows),
     }
 
 
@@ -5952,7 +6290,7 @@ def _collect_bulk_link_inputs(payload: LinkBulkAddRequest) -> list[str]:
 
 
 def _iso_utc_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _sse_event(event: str, payload: dict[str, Any]) -> str:
@@ -5972,7 +6310,12 @@ def _run_show_link_discovery(
     started_at = _iso_utc_now()
     started_perf = perf_counter()
     run_timeout_seconds = _link_discovery_run_timeout_seconds()
-    discovery_stats: dict[str, Any] = {"fandom_candidates_tested": 0, "skipped_fetch_budget": 0}
+    stalled_threshold_ms = int(_link_discovery_stalled_threshold_seconds() * 1000)
+    discovery_stats: dict[str, Any] = {
+        "fandom_candidates_tested": 0,
+        "skipped_fetch_budget": 0,
+        "validated_live_counts_by_source": {},
+    }
     stage_timings_ms: dict[str, int] = {
         "show_stage_ms": 0,
         "season_stage_ms": 0,
@@ -5982,7 +6325,8 @@ def _run_show_link_discovery(
     scan_targets = _count_discovery_scan_targets(show_id_str)
     discovered: list[dict[str, Any]] = []
 
-    def build_progress_snapshot(stage_name: str) -> dict[str, Any]:
+    def build_progress_snapshot(stage_name: str, payload_in: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload_in = payload_in or {}
         current_stage = (
             str(stage_name or "").strip().lower() or str(discovery_stats.get("__stage_name") or "").strip().lower()
         )
@@ -5996,8 +6340,34 @@ def _run_show_link_discovery(
         total_tested = int(discovery_stats.get("fandom_candidates_tested") or 0)
         stage_start_tested = int(discovery_stats.get("__stage_fandom_candidates_start") or 0)
         stage_tested = max(0, total_tested - stage_start_tested)
+        is_stage_active = current_stage.endswith("_started")
         stage_progress: dict[str, Any] | None = None
-        if budget_stage == "people":
+        if current_stage.startswith("show_discovery"):
+            stage_progress = {
+                "processed_targets": 0 if current_stage.endswith("_started") else 1,
+                "total_targets": 1,
+                "links_discovered": int(payload_in.get("rows") or len(discovered)),
+                "targets_with_links": (
+                    1 if (current_stage.endswith("_completed") and int(payload_in.get("rows") or len(discovered)) > 0) else 0
+                ),
+            }
+        elif current_stage.startswith("season_discovery"):
+            current_season_label = str(discovery_stats.get("current_season_label") or "").strip() or None
+            stage_progress = {
+                "processed_targets": int(discovery_stats.get("season_processed") or 0),
+                "total_targets": int(discovery_stats.get("season_total_targets") or 0),
+                "current_target_label": current_season_label,
+                "links_discovered": int(discovery_stats.get("season_links_discovered") or 0),
+                "targets_with_links": int(discovery_stats.get("season_with_links") or 0),
+            }
+        elif current_stage.startswith("cleanup") or current_stage.startswith("completed"):
+            stage_progress = {
+                "validated_links": int(payload_in.get("links_validated") or 0),
+                "promoted_links": int(payload_in.get("links_promoted") or 0),
+                "deleted_links": int(payload_in.get("deleted_invalid") or 0),
+                "normalized_social_urls": int(payload_in.get("social_urls_normalized") or 0),
+            }
+        elif budget_stage == "people" or current_stage.startswith("people_discovery"):
             current_person_name = str(discovery_stats.get("current_person_name") or "").strip() or None
             stage_progress = {
                 "processed_targets": int(discovery_stats.get("people_processed") or 0),
@@ -6006,12 +6376,28 @@ def _run_show_link_discovery(
                 "links_discovered": int(discovery_stats.get("people_links_discovered") or 0),
                 "targets_with_links": int(discovery_stats.get("people_with_links") or 0),
             }
+        elif current_stage.startswith("social_url_repair"):
+            stage_progress = {
+                "normalized_social_urls": int(payload_in.get("normalized") or 0),
+                "deleted_links": int(payload_in.get("deleted_duplicates") or 0),
+            }
+        elif current_stage.startswith("upsert"):
+            stage_progress = {
+                "processed_targets": int(payload_in.get("upserted") or 0),
+                "total_targets": int(payload_in.get("rows") or len(discovered)),
+                "links_discovered": len(discovered),
+                "targets_with_links": int(payload_in.get("approved_added") or 0),
+            }
+        validated_live_counts_by_source = _normalized_count_map(discovery_stats.get("validated_live_counts_by_source"))
+        stage_budget_reason = str(discovery_stats.get("__stage_budget_exhausted_reason") or "").strip() or None
+        stalled = bool(is_stage_active and stalled_threshold_ms > 0 and stage_elapsed_ms >= stalled_threshold_ms)
         return {
             "current_stage": current_stage,
             "stage_started_elapsed_ms": stage_started_elapsed_ms,
             "stage_elapsed_ms": stage_elapsed_ms,
             "discovered_rows": len(discovered),
             "fandom_candidates_tested": total_tested,
+            "fandom_candidates_tested_total": total_tested,
             "stage_fandom_candidates_tested": stage_tested,
             "scan_targets": {
                 "show_scanned": int(scan_targets.get("show_scanned") or 0),
@@ -6024,19 +6410,35 @@ def _run_show_link_discovery(
                 "max_fandom_candidates": int(discovery_stats.get("__stage_max_fandom_candidates") or 0),
                 "stage_fandom_candidates_tested": stage_tested,
                 "budget_exhausted": bool(discovery_stats.get("__stage_budget_exhausted") is True),
-                "budget_reason": str(discovery_stats.get("__stage_budget_exhausted_reason") or "") or None,
+                "budget_reason": stage_budget_reason,
             },
             "stage_progress": stage_progress,
+            "validated_live_counts_by_source": validated_live_counts_by_source,
+            "last_progress_at": str(discovery_stats.get("__last_progress_at") or "") or None,
+            "last_stage_transition_at": str(discovery_stats.get("__last_stage_transition_at") or "") or None,
+            "stalled": stalled,
+            "stalled_reason": (
+                stage_budget_reason if stalled and stage_budget_reason else "no_new_progress_events" if stalled else None
+            ),
         }
 
     def emit(stage: str, payload_in: dict[str, Any]) -> None:
+        now_iso = _iso_utc_now()
+        now_perf = perf_counter()
+        last_stage_name = str(discovery_stats.get("__last_stage_transition_stage") or "").strip().lower()
+        if stage != last_stage_name:
+            discovery_stats["__last_stage_transition_stage"] = stage
+            discovery_stats["__last_stage_transition_at"] = now_iso
+            discovery_stats["__last_stage_transition_perf"] = now_perf
+        discovery_stats["__last_progress_at"] = now_iso
+        discovery_stats["__last_progress_perf"] = now_perf
         elapsed_ms = int((perf_counter() - started_perf) * 1000)
         payload_with_meta = {
             "show_id": show_id_str,
             "run_id": run_id,
-            "timestamp": _iso_utc_now(),
+            "timestamp": now_iso,
             "elapsed_ms": elapsed_ms,
-            **build_progress_snapshot(stage),
+            **build_progress_snapshot(stage, payload_in),
             **payload_in,
         }
         stage_callback(stage, payload_with_meta)
@@ -6059,6 +6461,7 @@ def _run_show_link_discovery(
     show_started_perf = perf_counter()
     discovered_show_rows = _discover_show_links(show_id_str, stats=discovery_stats)
     discovered.extend(discovered_show_rows)
+    _accumulate_validated_live_source_counts(discovery_stats, discovered_show_rows)
     stage_timings_ms["show_stage_ms"] = int((perf_counter() - show_started_perf) * 1000)
     emit(
         "show_discovery_completed",
@@ -6100,6 +6503,7 @@ def _run_show_link_discovery(
             stats=discovery_stats,
         )
         discovered.extend(season_rows)
+        _accumulate_validated_live_source_counts(discovery_stats, season_rows)
         stage_timings_ms["season_stage_ms"] = int((perf_counter() - season_started_perf) * 1000)
         emit(
             "season_discovery_completed",
@@ -6125,6 +6529,7 @@ def _run_show_link_discovery(
             stats=discovery_stats,
         )
         discovered.extend(people_rows)
+        _accumulate_validated_live_source_counts(discovery_stats, people_rows)
         stage_timings_ms["people_stage_ms"] = int((perf_counter() - people_started_perf) * 1000)
         emit(
             "people_discovery_completed",
@@ -6263,6 +6668,10 @@ def _run_show_link_discovery(
             if not key:
                 continue
             validation_reasons[key] = validation_reasons.get(key, 0) + int(count or 0)
+    cleanup_deleted_by_source = _merge_count_maps(
+        _normalized_count_map(invalid_people_social_cleanup.get("deleted_by_source")),
+    )
+    validated_live_counts_by_source = _normalized_count_map(discovery_stats.get("validated_live_counts_by_source"))
     stage_counts = {
         "show_scanned": int(scan_targets.get("show_scanned") or 0),
         "season_scanned": int(scan_targets.get("season_scanned") or 0) if payload.include_seasons else 0,
@@ -6282,6 +6691,8 @@ def _run_show_link_discovery(
             "skipped_fetch_error": skipped_fetch_error,
             "skipped_fetch_budget": skipped_fetch_budget,
             "stage_elapsed_ms": stage_timings_ms["validation_ms"],
+            "social_urls_normalized": int(social_url_normalization.get("normalized") or 0),
+            "cleanup_deleted_by_source": cleanup_deleted_by_source,
         },
     )
     if timed_out and timeout_context:
@@ -6308,9 +6719,22 @@ def _run_show_link_discovery(
         "finished_at": finished_at,
         "duration_ms": duration_ms,
         "status": "timed_out" if timed_out else "ok",
+        "current_stage": "completed",
+        "message": "Links refresh complete.",
         "timed_out": timed_out,
         "timeout": timeout_context,
         "discovered": upserted,
+        "validated_live_counts_by_source": validated_live_counts_by_source,
+        "last_progress_at": str(discovery_stats.get("__last_progress_at") or "") or None,
+        "last_stage_transition_at": str(discovery_stats.get("__last_stage_transition_at") or "") or None,
+        "stalled": False,
+        "stalled_reason": None,
+        "stage_progress": {
+            "validated_links": links_validated,
+            "promoted_links": links_promoted,
+            "deleted_links": deleted_invalid,
+            "normalized_social_urls": int(social_url_normalization.get("normalized") or 0),
+        },
         "status_counts": {
             "approved_added": approved_added,
             "deleted_invalid": deleted_invalid,
@@ -6319,6 +6743,7 @@ def _run_show_link_discovery(
             "social_urls_normalized": int(social_url_normalization.get("normalized") or 0),
             "social_url_duplicates_deleted": int(social_url_normalization.get("deleted_duplicates") or 0),
         },
+        "cleanup_deleted_by_source": cleanup_deleted_by_source,
         "validation_reasons": validation_reasons,
         "counts_by_group": by_group,
         "counts_by_kind": by_kind,
@@ -6401,6 +6826,7 @@ def discover_show_links_stream(
         error_box: dict[str, Any] = {}
         last_progress_payload: dict[str, Any] = {}
         heartbeat_interval_seconds = 5.0
+        stalled_threshold_ms = int(_link_discovery_stalled_threshold_seconds() * 1000)
         stream_started_perf = perf_counter()
 
         def on_stage(stage: str, stage_payload: dict[str, Any]) -> None:
@@ -6444,6 +6870,24 @@ def discover_show_links_stream(
             except Empty:
                 elapsed_ms = int((perf_counter() - stream_started_perf) * 1000)
                 stage_started_elapsed_ms = int(last_progress_payload.get("stage_started_elapsed_ms") or 0)
+                stage_elapsed_ms = max(0, elapsed_ms - stage_started_elapsed_ms) if stage_started_elapsed_ms > 0 else 0
+                current_stage = str(
+                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
+                ).strip()
+                stalled = bool(
+                    current_stage.endswith("_started")
+                    and stalled_threshold_ms > 0
+                    and stage_elapsed_ms >= stalled_threshold_ms
+                )
+                stage_budget_payload = last_progress_payload.get("stage_budget")
+                stage_budget = stage_budget_payload if isinstance(stage_budget_payload, dict) else {}
+                stalled_reason = (
+                    str(
+                        stage_budget.get("budget_reason")
+                        or ""
+                    ).strip()
+                    or "no_new_progress_events"
+                ) if stalled else None
                 heartbeat_payload = {
                     **last_progress_payload,
                     "show_id": show_id_str,
@@ -6452,14 +6896,13 @@ def discover_show_links_stream(
                     "elapsed_ms": elapsed_ms,
                     "timestamp": _iso_utc_now(),
                     "message": "Discovery still running...",
+                    "stalled": stalled,
+                    "stalled_reason": stalled_reason,
                 }
-                current_stage = str(
-                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
-                ).strip()
                 if current_stage:
                     heartbeat_payload["current_stage"] = current_stage
                 if stage_started_elapsed_ms > 0:
-                    heartbeat_payload["stage_elapsed_ms"] = max(0, elapsed_ms - stage_started_elapsed_ms)
+                    heartbeat_payload["stage_elapsed_ms"] = stage_elapsed_ms
                 yield _sse_event(
                     "progress",
                     heartbeat_payload,
@@ -6488,10 +6931,25 @@ def discover_show_links_stream(
                     "show_id": show_id_str,
                     "run_id": result.get("run_id"),
                     "duration_ms": result.get("duration_ms"),
+                    "elapsed_ms": result.get("duration_ms"),
+                    "stage_elapsed_ms": (
+                        (result.get("stage_timings_ms") or {}).get("validation_ms")
+                        if isinstance(result.get("stage_timings_ms"), dict)
+                        else None
+                    ),
+                    "message": result.get("message"),
+                    "current_stage": result.get("current_stage"),
+                    "stage_progress": result.get("stage_progress"),
                     "stage_counts": result.get("stage_counts"),
                     "stage_timings_ms": result.get("stage_timings_ms"),
                     "status_counts": result.get("status_counts"),
                     "validation_reasons": result.get("validation_reasons"),
+                    "validated_live_counts_by_source": result.get("validated_live_counts_by_source"),
+                    "cleanup_deleted_by_source": result.get("cleanup_deleted_by_source"),
+                    "last_progress_at": result.get("last_progress_at"),
+                    "last_stage_transition_at": result.get("last_stage_transition_at"),
+                    "stalled": result.get("stalled"),
+                    "stalled_reason": result.get("stalled_reason"),
                     "timed_out": result.get("timed_out"),
                     "timeout": result.get("timeout"),
                     "status": result.get("status"),
@@ -6536,6 +6994,7 @@ def build_show_links_discovery_operation_producer(
         error_box: dict[str, Any] = {}
         last_progress_payload: dict[str, Any] = {}
         heartbeat_interval_seconds = 5.0
+        stalled_threshold_ms = int(_link_discovery_stalled_threshold_seconds() * 1000)
         stream_started_perf = perf_counter()
 
         def on_stage(stage: str, stage_payload: dict[str, Any]) -> None:
@@ -6579,6 +7038,24 @@ def build_show_links_discovery_operation_producer(
             except Empty:
                 elapsed_ms = int((perf_counter() - stream_started_perf) * 1000)
                 stage_started_elapsed_ms = int(last_progress_payload.get("stage_started_elapsed_ms") or 0)
+                stage_elapsed_ms = max(0, elapsed_ms - stage_started_elapsed_ms) if stage_started_elapsed_ms > 0 else 0
+                current_stage = str(
+                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
+                ).strip()
+                stalled = bool(
+                    current_stage.endswith("_started")
+                    and stalled_threshold_ms > 0
+                    and stage_elapsed_ms >= stalled_threshold_ms
+                )
+                stage_budget_payload = last_progress_payload.get("stage_budget")
+                stage_budget = stage_budget_payload if isinstance(stage_budget_payload, dict) else {}
+                stalled_reason = (
+                    str(
+                        stage_budget.get("budget_reason")
+                        or ""
+                    ).strip()
+                    or "no_new_progress_events"
+                ) if stalled else None
                 heartbeat_payload = {
                     **last_progress_payload,
                     "show_id": show_id_str,
@@ -6587,14 +7064,13 @@ def build_show_links_discovery_operation_producer(
                     "elapsed_ms": elapsed_ms,
                     "timestamp": _iso_utc_now(),
                     "message": "Discovery still running...",
+                    "stalled": stalled,
+                    "stalled_reason": stalled_reason,
                 }
-                current_stage = str(
-                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
-                ).strip()
                 if current_stage:
                     heartbeat_payload["current_stage"] = current_stage
                 if stage_started_elapsed_ms > 0:
-                    heartbeat_payload["stage_elapsed_ms"] = max(0, elapsed_ms - stage_started_elapsed_ms)
+                    heartbeat_payload["stage_elapsed_ms"] = stage_elapsed_ms
                 yield _sse_event(
                     "progress",
                     heartbeat_payload,
@@ -6623,10 +7099,25 @@ def build_show_links_discovery_operation_producer(
                     "show_id": show_id_str,
                     "run_id": result.get("run_id"),
                     "duration_ms": result.get("duration_ms"),
+                    "elapsed_ms": result.get("duration_ms"),
+                    "stage_elapsed_ms": (
+                        (result.get("stage_timings_ms") or {}).get("validation_ms")
+                        if isinstance(result.get("stage_timings_ms"), dict)
+                        else None
+                    ),
+                    "message": result.get("message"),
+                    "current_stage": result.get("current_stage"),
+                    "stage_progress": result.get("stage_progress"),
                     "stage_counts": result.get("stage_counts"),
                     "stage_timings_ms": result.get("stage_timings_ms"),
                     "status_counts": result.get("status_counts"),
                     "validation_reasons": result.get("validation_reasons"),
+                    "validated_live_counts_by_source": result.get("validated_live_counts_by_source"),
+                    "cleanup_deleted_by_source": result.get("cleanup_deleted_by_source"),
+                    "last_progress_at": result.get("last_progress_at"),
+                    "last_stage_transition_at": result.get("last_stage_transition_at"),
+                    "stalled": result.get("stalled"),
+                    "stalled_reason": result.get("stalled_reason"),
                     "timed_out": result.get("timed_out"),
                     "timeout": result.get("timeout"),
                     "status": result.get("status"),
@@ -6694,7 +7185,8 @@ def add_show_links(
             if link_group not in {"official", "social", "knowledge", "cast_announcements", "other"}:
                 link_group = "other"
             label = str(row.get("label") or _LINK_KIND_LABELS.get(link_kind, "External Link")).strip() or None
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            metadata_raw = row.get("metadata")
+            metadata: dict[str, Any] = metadata_raw if isinstance(metadata_raw, dict) else {}
 
             persisted = _upsert_link(
                 db,

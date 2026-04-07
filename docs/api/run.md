@@ -23,14 +23,14 @@ The API requires the following environment variables to be set:
 | `SUPABASE_ANON_KEY` | Optional anon key for non-admin API flows | `eyJ...` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role key for backend-owned Supabase admin operations | `eyJ...` |
 
-### Screenalytics (Service-to-service)
+### Screenalytics compatibility (Optional legacy)
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `SCREENALYTICS_SERVICE_TOKEN` | Shared service token for Screenalytics endpoints | `change-me-long-random-token` |
-| `SCREENALYTICS_API_URL` | Base URL for the Screenalytics service (non-admin legacy consumers only) | `https://screenalytics.example.com` |
+| `SCREENALYTICS_SERVICE_TOKEN` | Optional legacy bearer token for old `/api/v1/screenalytics/*` callers | `change-me-long-random-token` |
+| `SCREENALYTICS_API_URL` | Optional base URL for legacy outbound Screenalytics HTTP callers | `https://screenalytics.example.com` |
 
-If you call `/api/v1/screenalytics/*` or `/api/v1/screenalytics/v2/*`, the backend must have `SCREENALYTICS_SERVICE_TOKEN` set and clients must send it as a Bearer token. Covered admin image-analysis routes now execute through the backend-owned vision runtime and Modal, so `SCREENALYTICS_API_URL` is no longer required for the admin auto-count happy path. Keep `SCREENALYTICS_API_URL` only if you still run non-admin flows that call the Screenalytics HTTP service directly.
+Production screentime flows no longer require `SCREENALYTICS_SERVICE_TOKEN` or `SCREENALYTICS_API_URL`. Legacy `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*` endpoints accept either `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` when that token is configured, or a signed internal admin JWT. Keep `SCREENALYTICS_API_URL` only if you still run explicit legacy outbound HTTP calls to the standalone Screenalytics service.
 
 ### Internal Admin Proxy (TRR-APP -> TRR-Backend)
 
@@ -129,7 +129,6 @@ At minimum, set these in `.env`:
 TRR_DB_URL=postgresql://postgres.<project>:<password>@aws-0-...pooler.supabase.com:5432/postgres
 SUPABASE_JWT_SECRET=your_supabase_jwt_secret
 TRR_INTERNAL_ADMIN_SHARED_SECRET=your_internal_admin_signing_secret
-SCREENALYTICS_SERVICE_TOKEN=your_screenalytics_service_token
 ```
 
 ### 3. Run the development server
@@ -170,7 +169,7 @@ FastAPI ships with interactive API docs and an OpenAPI schema:
 | --- | --- | --- |
 | TRR App | `Authorization: Bearer <Supabase access token>` | Use for user-scoped endpoints under `/api/v1/*`. |
 | TRR App internal proxy (facebank toggle) | `Authorization: Bearer <internal admin JWT>` | Allowed only for `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`; TRR-APP signs the JWT with `TRR_INTERNAL_ADMIN_SHARED_SECRET`. |
-| Screenalytics | `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` | Use for `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*`. |
+| Legacy Screenalytics compatibility | `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` or signed internal admin JWT | `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*` remain compatibility routes; production screentime does not require them. |
 
 Admin allowlist
 - Facebank seed toggle endpoint requires either an allowlisted user JWT or a valid internal admin JWT signed with `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
@@ -188,7 +187,7 @@ Admin allowlist
 curl -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
   http://localhost:8000/api/v1/shows
 
-# Screenalytics (service token)
+# Legacy Screenalytics compatibility (service token if still configured)
 curl -H "Authorization: Bearer $SCREENALYTICS_SERVICE_TOKEN" \
   http://localhost:8000/api/v1/screenalytics/episodes/<episode_id>/cast
 ```

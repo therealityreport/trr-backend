@@ -142,6 +142,22 @@
   ],
   "indexes": [
     {
+      "name": "core_show_cast_role_assignments_person_id_idx",
+      "columns": [
+        "person_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_cast_role_assignments_person_id_idx ON core.show_cast_role_assignments USING btree (person_id)"
+    },
+    {
+      "name": "core_show_cast_role_assignments_season_id_idx",
+      "columns": [
+        "season_id) WHERE (season_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_cast_role_assignments_season_id_idx ON core.show_cast_role_assignments USING btree (season_id) WHERE (season_id IS NOT NULL)"
+    },
+    {
       "name": "show_cast_role_assignments_pkey",
       "columns": [
         "id"

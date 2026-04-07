@@ -2348,6 +2348,15 @@ def _fetch_show_cast_base_rows(
           FROM core.v_episode_credits AS vec
           WHERE vec.show_id = %s::uuid
           GROUP BY vec.person_id
+        ),
+        self_credit_metadata AS (
+          SELECT
+            c.person_id,
+            MAX(COALESCE(NULLIF(c.metadata->>'episode_count', '')::int, 0))::int AS metadata_episode_count
+          FROM core.credits AS c
+          WHERE c.show_id = %s::uuid
+            AND c.credit_category = 'Self'
+          GROUP BY c.person_id
         )
         SELECT
           vsc.id::text AS id,
@@ -2366,10 +2375,17 @@ def _fetch_show_cast_base_rows(
           {photo_select_sql}
           cover.photo_url AS cover_photo_url,
           COALESCE(episode_counts.regular_episodes, 0)::int AS total_episodes,
-          COALESCE(episode_counts.archive_episodes, 0)::int AS archive_episode_count
+          COALESCE(episode_counts.archive_episodes, 0)::int AS archive_episode_count,
+          CASE
+            WHEN COALESCE(episode_counts.regular_episodes, 0) > 0
+              THEN COALESCE(episode_counts.regular_episodes, 0)::int
+            ELSE COALESCE(self_credit_metadata.metadata_episode_count, 0)::int
+          END AS effective_total_episodes
         FROM core.v_show_cast AS vsc
         LEFT JOIN episode_counts
           ON episode_counts.person_id = vsc.person_id
+        LEFT JOIN self_credit_metadata
+          ON self_credit_metadata.person_id = vsc.person_id
         LEFT JOIN core.people AS p
           ON p.id = vsc.person_id
         LEFT JOIN admin.person_cover_photos AS cover
@@ -2378,7 +2394,7 @@ def _fetch_show_cast_base_rows(
         WHERE vsc.show_id = %s::uuid
         ORDER BY vsc.billing_order ASC NULLS LAST, vsc.person_id ASC
         """,
-        [show_id, show_id],
+        [show_id, show_id, show_id],
         cur=cur,
     )
     return rows, 1
@@ -2392,6 +2408,50 @@ def _build_show_cast_fallback_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _read_show_cast_effective_total_episodes(row: dict[str, Any]) -> int:
+    effective_total = _normalize_int(row.get("effective_total_episodes"))
+    if effective_total > 0:
+        return effective_total
+    return _normalize_int(row.get("total_episodes"))
+
+
+def _is_voice_only_show_cast_role(role: Any) -> bool:
+    normalized = str(role or "").strip().casefold()
+    if not normalized:
+        return False
+    return bool(re.search(r"\bvoice\b", normalized))
+
+
+def _filter_show_cast_rows_for_links(
+    rows: list[dict[str, Any]],
+    *,
+    show_total_seasons: int | None,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    normalized_total_seasons = max(_normalize_int(show_total_seasons), 0)
+
+    for raw_row in rows:
+        row = dict(raw_row)
+        regular_episodes = _normalize_int(row.get("total_episodes"))
+        archive_episode_count = _normalize_int(row.get("archive_episode_count"))
+        effective_total_episodes = _read_show_cast_effective_total_episodes(row)
+
+        if archive_episode_count > 0 and regular_episodes <= 0:
+            continue
+        if _is_voice_only_show_cast_role(row.get("role")):
+            continue
+        if effective_total_episodes <= 0:
+            continue
+        if normalized_total_seasons > 1 and effective_total_episodes <= 3:
+            continue
+
+        row["total_episodes"] = effective_total_episodes
+        row["effective_total_episodes"] = effective_total_episodes
+        filtered.append(row)
+
+    return filtered
+
+
 def _shape_show_cast_payload(
     rows: list[dict[str, Any]],
     *,
@@ -2402,8 +2462,16 @@ def _shape_show_cast_payload(
     exclude_zero_episode_members: bool,
     require_image: bool,
     roster_mode: str,
+    eligibility_mode: str = "default",
+    links_eligibility_show_total_seasons: int | None = None,
 ) -> dict[str, Any]:
     membership_rows = [dict(row) for row in rows]
+    normalized_eligibility_mode = "links" if eligibility_mode == "links" else "default"
+    if normalized_eligibility_mode == "links":
+        membership_rows = _filter_show_cast_rows_for_links(
+            membership_rows,
+            show_total_seasons=links_eligibility_show_total_seasons,
+        )
     normalized_roster_mode = "imdb_show_membership" if roster_mode == "imdb_show_membership" else "episode_evidence"
     min_episodes_value = (
         0
@@ -2421,6 +2489,8 @@ def _shape_show_cast_payload(
         for row in membership_rows
         if _normalize_int(row.get("total_episodes")) <= 0 and _normalize_int(row.get("archive_episode_count")) > 0
     ]
+    if normalized_eligibility_mode == "links":
+        archive_rows = []
     cast_source = normalized_roster_mode
     eligibility_warning: str | None = None
 
@@ -2470,10 +2540,23 @@ def get_show_cast(
     roster_mode: str = "episode_evidence",
     photo_fallback: str = "none",
     include_photos: bool = True,
+    eligibility_mode: str = "default",
 ) -> tuple[dict[str, Any], int]:
     del photo_fallback
     normalized_limit, normalized_offset = _normalize_pagination(limit, offset)
     rows, query_count = _fetch_show_cast_base_rows(show_id, include_photos=include_photos)
+    links_eligibility_show_total_seasons: int | None = None
+    if eligibility_mode == "links":
+        show_row = pg.fetch_one(
+            """
+            SELECT show_total_seasons
+            FROM core.shows
+            WHERE id = %s::uuid
+            """,
+            [show_id],
+        ) or {}
+        links_eligibility_show_total_seasons = _normalize_int(show_row.get("show_total_seasons")) or None
+        query_count += 1
     payload = _shape_show_cast_payload(
         rows,
         limit=normalized_limit,
@@ -2483,8 +2566,37 @@ def get_show_cast(
         exclude_zero_episode_members=exclude_zero_episode_members,
         require_image=require_image,
         roster_mode=roster_mode,
+        eligibility_mode=eligibility_mode,
+        links_eligibility_show_total_seasons=links_eligibility_show_total_seasons,
     )
     return payload, query_count
+
+
+def get_show_links_eligible_people(
+    show_id: str,
+    *,
+    person_ids: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    rows, query_count = _fetch_show_cast_base_rows(show_id, include_photos=False)
+    show_row = pg.fetch_one(
+        """
+        SELECT show_total_seasons
+        FROM core.shows
+        WHERE id = %s::uuid
+        """,
+        [show_id],
+    ) or {}
+    query_count += 1
+    filtered_rows = _filter_show_cast_rows_for_links(
+        rows,
+        show_total_seasons=_normalize_int(show_row.get("show_total_seasons")) or None,
+    )
+    if person_ids:
+        normalized_person_ids = {str(value).strip() for value in person_ids if str(value).strip()}
+        filtered_rows = [
+            row for row in filtered_rows if str(row.get("person_id") or "").strip() in normalized_person_ids
+        ]
+    return filtered_rows, query_count
 
 
 def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:

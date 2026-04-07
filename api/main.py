@@ -107,7 +107,6 @@ def _validate_startup_config() -> None:
     """Validate high-impact service env configuration with actionable logs."""
     screenalytics_api_url = (os.getenv("SCREENALYTICS_API_URL") or "").strip()
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
-    service_token = (os.getenv("SCREENALYTICS_SERVICE_TOKEN") or "").strip()
     supabase_jwt_secret = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
     log_database_resolution_summary()
     winner = next(iter(resolve_database_url_candidate_details()), None)
@@ -178,14 +177,12 @@ def _validate_startup_config() -> None:
     else:
         logger.info(
             "[startup-config] SCREENALYTICS_API_URL not set; only legacy outbound Screenalytics HTTP flows are "
-            "disabled. Admin image-analysis stays on the backend-owned vision runtime."
+            "disabled. Screentime and covered admin image-analysis stay on backend-owned runtimes."
         )
 
     missing_required: list[str] = []
     if not admin_shared_secret:
         missing_required.append("TRR_INTERNAL_ADMIN_SHARED_SECRET")
-    if not service_token:
-        missing_required.append("SCREENALYTICS_SERVICE_TOKEN")
     if not supabase_jwt_secret:
         missing_required.append("SUPABASE_JWT_SECRET")
 
@@ -323,6 +320,7 @@ from api.routers import (  # noqa: E402
     admin_cast_photos,
     admin_cast_screentime,
     admin_covered_shows,
+    admin_face_references,
     admin_fandom_sync,
     admin_image_counts,
     admin_media_assets,
@@ -371,6 +369,7 @@ app.include_router(admin_cast_photos.router, prefix="/api/v1")
 app.include_router(admin_brands.router, prefix="/api/v1")
 app.include_router(admin_covered_shows.router, prefix="/api/v1")
 app.include_router(admin_fandom_sync.router, prefix="/api/v1")
+app.include_router(admin_face_references.router, prefix="/api/v1")
 app.include_router(admin_image_counts.router, prefix="/api/v1")
 app.include_router(admin_media_assets.router, prefix="/api/v1")
 app.include_router(admin_networks_streaming_reads.router, prefix="/api/v1")

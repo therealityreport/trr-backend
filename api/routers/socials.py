@@ -17,7 +17,7 @@ import copy
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Lock, Thread
@@ -300,6 +300,11 @@ def _remote_only_social_platforms() -> set[str]:
     return {
         token.strip() for token in raw.split(",") if token.strip() and token.strip() in set(SOCIAL_SUPPORTED_PLATFORMS)
     }
+
+
+def _blocked_remote_only_platforms(platforms: list[str] | None) -> list[str]:
+    requested_platforms = set(_normalize_target_platforms(platforms))
+    return sorted(requested_platforms & _remote_only_social_platforms())
 
 
 def _parse_utc_iso_datetime(value: str | None) -> datetime | None:
@@ -802,6 +807,121 @@ def _can_use_local_catalog_inline_fallback(
     remote_plane_enforced: bool,
 ) -> bool:
     return bool(allow_inline_dev_fallback) and _is_local_or_dev_runtime() and not remote_plane_enforced
+
+
+def _resolve_social_account_catalog_route_execution(
+    *,
+    platform: str,
+    allow_inline_dev_fallback: bool,
+    pipeline_ingest_mode: str = "shared_account_catalog_backfill",
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        SocialWorkerUnavailableError,
+        _shared_account_catalog_requires_modal_executor,
+        assert_worker_available_when_queue_enabled,
+        is_queue_enabled,
+    )
+
+    queue_enabled = is_queue_enabled()
+    remote_plane_enforced = is_remote_job_plane_enabled()
+    used_inline_fallback = False
+    requires_modal_executor = _shared_account_catalog_requires_modal_executor(
+        platform=platform,
+        pipeline_ingest_mode=pipeline_ingest_mode,
+    )
+    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
+        allow_inline_dev_fallback=allow_inline_dev_fallback,
+        remote_plane_enforced=remote_plane_enforced,
+    )
+    if queue_enabled:
+        if requires_modal_executor and can_use_local_inline_fallback:
+            queue_enabled = False
+            used_inline_fallback = True
+        else:
+            try:
+                assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal" if requires_modal_executor else None,
+                    platform=platform if requires_modal_executor else None,
+                )
+                if requires_modal_executor:
+                    _raise_if_modal_social_dispatch_unresolvable(platform)
+            except SocialWorkerUnavailableError as exc:
+                if can_use_local_inline_fallback:
+                    queue_enabled = False
+                    used_inline_fallback = True
+                else:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": (
+                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                                if remote_plane_enforced
+                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                                if requires_modal_executor
+                                else "SOCIAL_WORKER_UNAVAILABLE"
+                            ),
+                            "message": (
+                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
+                                "reporting heartbeats."
+                                if remote_plane_enforced
+                                else str(exc)
+                            ),
+                            "execution_mode": canonical_execution_mode(),
+                            "execution_owner": execution_owner_label(),
+                            "worker_health": _worker_health_detail(exc.worker_health),
+                            "required_execution_backend": "modal" if requires_modal_executor else None,
+                        },
+                    ) from exc
+    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": (
+                    "SOCIAL_MODAL_EXECUTOR_REQUIRED" if requires_modal_executor else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                ),
+                "message": (
+                    "Shared-account catalog operations for this platform require the Modal remote executor."
+                    if requires_modal_executor
+                    else "Social ingest remote-worker ownership is enforced."
+                ),
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+                "required_execution_backend": "modal" if requires_modal_executor else None,
+            },
+        )
+    else:
+        used_inline_fallback = can_use_local_inline_fallback
+
+    return {
+        "queue_enabled": queue_enabled,
+        "used_inline_fallback": used_inline_fallback,
+        "requires_modal_executor": requires_modal_executor,
+    }
+
+
+def _finalize_social_account_catalog_route_response(
+    *,
+    result: Mapping[str, Any],
+    platform: str,
+    queue_enabled: bool,
+    used_inline_fallback: bool,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    run_id = str(result.get("run_id") or "").strip()
+    if not queue_enabled and run_id:
+        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
+    execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
+        queue_enabled=queue_enabled,
+        used_inline_fallback=used_inline_fallback,
+    )
+    return {
+        **result,
+        "status": "queued" if queue_enabled else "started",
+        "execution_mode": execution_mode,
+        "execution_mode_canonical": execution_mode_canonical,
+        "execution_mode_legacy": execution_mode_legacy,
+        "deprecations": [_social_execution_mode_deprecation_payload()],
+    }
 
 
 def _load_social_auth_or_503(
@@ -2874,6 +2994,8 @@ async def ingest_season_social(
     try:
         queue_enabled = is_queue_enabled()
         remote_plane_enforced = is_remote_job_plane_enabled()
+        blocked_platforms = _blocked_remote_only_platforms(payload.platforms)
+        requires_modal_executor = bool(blocked_platforms)
         used_inline_fallback = False
         warnings: list[str] = []
         worker_health: dict[str, Any] | None = None
@@ -2903,9 +3025,23 @@ async def ingest_season_social(
                     "execution_owner": execution_owner_label(),
                 },
             )
+        if not queue_enabled and requires_modal_executor:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
+                    "message": "Modal worker execution is required for platform(s): " + ", ".join(blocked_platforms),
+                    "required_platforms": blocked_platforms,
+                    "required_execution_backend": "modal",
+                    "execution_mode": canonical_execution_mode(),
+                    "execution_owner": execution_owner_label(),
+                },
+            )
         if queue_enabled:
             try:
-                worker_health = assert_worker_available_when_queue_enabled()
+                worker_health = assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal" if requires_modal_executor else None,
+                )
             except SocialWorkerUnavailableError as exc:
                 worker_health = exc.worker_health
                 if remote_plane_enforced:
@@ -2923,24 +3059,20 @@ async def ingest_season_social(
                             "worker_health": worker_health_detail,
                         },
                     ) from exc
+                if blocked_platforms:
+                    worker_health_detail = jsonable_encoder(worker_health) if worker_health is not None else None
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
+                            "message": "Modal worker execution is required for platform(s): "
+                            + ", ".join(blocked_platforms),
+                            "required_platforms": blocked_platforms,
+                            "required_execution_backend": "modal",
+                            "worker_health": worker_health_detail,
+                        },
+                    ) from exc
                 if payload.allow_inline_dev_fallback and _is_local_or_dev_runtime():
-                    requested_platforms = set(_normalize_target_platforms(payload.platforms))
-                    remote_only_platforms = _remote_only_social_platforms()
-                    blocked_platforms = sorted(requested_platforms & remote_only_platforms)
-                    if blocked_platforms:
-                        worker_health_detail = jsonable_encoder(worker_health) if worker_health is not None else None
-                        raise HTTPException(
-                            status_code=503,
-                            detail={
-                                "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
-                                "message": (
-                                    "Remote worker execution is required for platform(s): "
-                                    + ", ".join(blocked_platforms)
-                                ),
-                                "required_platforms": blocked_platforms,
-                                "worker_health": worker_health_detail,
-                            },
-                        ) from exc
                     queue_enabled = False
                     used_inline_fallback = True
                     warnings.append(
@@ -3278,17 +3410,27 @@ async def create_season_sync_session(
     try:
         queue_enabled = is_queue_enabled()
         remote_plane_enforced = is_remote_job_plane_enabled()
+        blocked_platforms = _blocked_remote_only_platforms(payload.platforms)
+        requires_modal_executor = bool(blocked_platforms)
+        if not queue_enabled and requires_modal_executor:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
+                    "message": "Modal worker execution is required for platform(s): " + ", ".join(blocked_platforms),
+                    "required_platforms": blocked_platforms,
+                    "required_execution_backend": "modal",
+                    "execution_mode": canonical_execution_mode(),
+                    "execution_owner": execution_owner_label(),
+                },
+            )
         if queue_enabled:
             try:
-                assert_worker_available_when_queue_enabled()
+                assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal" if requires_modal_executor else None,
+                )
             except SocialWorkerUnavailableError as exc:
                 worker_health_detail = _worker_health_detail(exc.worker_health)
-                requested_platforms = {
-                    str(platform or "").strip().lower()
-                    for platform in (payload.platforms or [])
-                    if str(platform or "").strip()
-                }
-                remote_only_requested = bool(requested_platforms & {"instagram", "tiktok"})
                 if remote_plane_enforced:
                     raise HTTPException(
                         status_code=503,
@@ -3303,12 +3445,15 @@ async def create_season_sync_session(
                             "worker_health": worker_health_detail,
                         },
                     ) from exc
-                if remote_only_requested:
+                if blocked_platforms:
                     raise HTTPException(
                         status_code=503,
                         detail={
                             "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
-                            "message": "This sync-session is remote-only for Instagram/TikTok.",
+                            "message": "Modal worker execution is required for platform(s): "
+                            + ", ".join(blocked_platforms),
+                            "required_platforms": blocked_platforms,
+                            "required_execution_backend": "modal",
                             "execution_mode": canonical_execution_mode(),
                             "execution_owner": execution_owner_label(),
                             "worker_health": worker_health_detail,
@@ -4216,85 +4361,25 @@ async def post_social_account_catalog_backfill_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
-        _shared_account_catalog_requires_modal_executor,
-        assert_worker_available_when_queue_enabled,
-        is_queue_enabled,
+        _normalize_catalog_backfill_window,
         start_social_account_catalog_backfill,
     )
 
-    queue_enabled = is_queue_enabled()
-    remote_plane_enforced = is_remote_job_plane_enabled()
-    used_inline_fallback = False
-    requires_modal_executor = _shared_account_catalog_requires_modal_executor(
+    execution_state = _resolve_social_account_catalog_route_execution(
         platform=platform,
-        pipeline_ingest_mode="shared_account_catalog_backfill",
-    )
-    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
-        remote_plane_enforced=remote_plane_enforced,
     )
-    if queue_enabled:
-        if requires_modal_executor and can_use_local_inline_fallback:
-            queue_enabled = False
-            used_inline_fallback = True
-        else:
-            try:
-                assert_worker_available_when_queue_enabled(
-                    required_execution_backend="modal" if requires_modal_executor else None,
-                    platform=platform if requires_modal_executor else None,
-                )
-                if requires_modal_executor:
-                    _raise_if_modal_social_dispatch_unresolvable(platform)
-            except SocialWorkerUnavailableError as exc:
-                if can_use_local_inline_fallback:
-                    queue_enabled = False
-                    used_inline_fallback = True
-                else:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "code": (
-                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                                if remote_plane_enforced
-                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                                if requires_modal_executor
-                                else "SOCIAL_WORKER_UNAVAILABLE"
-                            ),
-                            "message": (
-                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                                "reporting heartbeats."
-                                if remote_plane_enforced
-                                else str(exc)
-                            ),
-                            "execution_mode": canonical_execution_mode(),
-                            "execution_owner": execution_owner_label(),
-                            "worker_health": _worker_health_detail(exc.worker_health),
-                            "required_execution_backend": "modal" if requires_modal_executor else None,
-                        },
-                    ) from exc
-    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                if requires_modal_executor
-                else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
-                "message": (
-                    "Instagram shared-account catalog backfills require the Modal remote executor."
-                    if requires_modal_executor
-                    else "Social ingest remote-worker ownership is enforced."
-                ),
-                "execution_mode": canonical_execution_mode(),
-                "execution_owner": execution_owner_label(),
-                "required_execution_backend": "modal" if requires_modal_executor else None,
-            },
-        )
-    else:
-        used_inline_fallback = can_use_local_inline_fallback
+    queue_enabled = bool(execution_state["queue_enabled"])
+    used_inline_fallback = bool(execution_state["used_inline_fallback"])
+    requires_modal_executor = bool(execution_state["requires_modal_executor"])
 
     try:
         date_start = payload.date_start if payload.backfill_scope == "bounded_window" else None
         date_end = payload.date_end if payload.backfill_scope == "bounded_window" else None
+        date_start, date_end = _normalize_catalog_backfill_window(
+            date_start=date_start,
+            date_end=date_end,
+        )
         result = start_social_account_catalog_backfill(
             platform=platform,
             account_handle=account_handle,
@@ -4304,6 +4389,8 @@ async def post_social_account_catalog_backfill_route(
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
+            catalog_action="backfill",
+            catalog_action_scope=payload.backfill_scope,
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -4330,21 +4417,13 @@ async def post_social_account_catalog_backfill_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
-    run_id = str(result.get("run_id") or "").strip()
-    if not queue_enabled and run_id:
-        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
-    execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
+    return _finalize_social_account_catalog_route_response(
+        result=result,
+        platform=platform,
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
+        background_tasks=background_tasks,
     )
-    return {
-        **result,
-        "status": "queued" if queue_enabled else "started",
-        "execution_mode": execution_mode,
-        "execution_mode_canonical": execution_mode_canonical,
-        "execution_mode_legacy": execution_mode_legacy,
-        "deprecations": [_social_execution_mode_deprecation_payload()],
-    }
 
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/sync-recent")
@@ -4359,81 +4438,16 @@ async def post_social_account_catalog_sync_recent_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
-        _shared_account_catalog_requires_modal_executor,
-        assert_worker_available_when_queue_enabled,
-        is_queue_enabled,
         sync_recent_social_account_catalog,
     )
 
-    queue_enabled = is_queue_enabled()
-    remote_plane_enforced = is_remote_job_plane_enabled()
-    used_inline_fallback = False
-    requires_modal_executor = _shared_account_catalog_requires_modal_executor(
+    execution_state = _resolve_social_account_catalog_route_execution(
         platform=platform,
-        pipeline_ingest_mode="shared_account_catalog_backfill",
-    )
-    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
-        remote_plane_enforced=remote_plane_enforced,
     )
-    if queue_enabled:
-        if requires_modal_executor and can_use_local_inline_fallback:
-            queue_enabled = False
-            used_inline_fallback = True
-        else:
-            try:
-                assert_worker_available_when_queue_enabled(
-                    required_execution_backend="modal" if requires_modal_executor else None,
-                    platform=platform if requires_modal_executor else None,
-                )
-                if requires_modal_executor:
-                    _raise_if_modal_social_dispatch_unresolvable(platform)
-            except SocialWorkerUnavailableError as exc:
-                if can_use_local_inline_fallback:
-                    queue_enabled = False
-                    used_inline_fallback = True
-                else:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "code": (
-                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                                if remote_plane_enforced
-                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                                if requires_modal_executor
-                                else "SOCIAL_WORKER_UNAVAILABLE"
-                            ),
-                            "message": (
-                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                                "reporting heartbeats."
-                                if remote_plane_enforced
-                                else str(exc)
-                            ),
-                            "execution_mode": canonical_execution_mode(),
-                            "execution_owner": execution_owner_label(),
-                            "worker_health": _worker_health_detail(exc.worker_health),
-                            "required_execution_backend": "modal" if requires_modal_executor else None,
-                        },
-                    ) from exc
-    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                if requires_modal_executor
-                else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
-                "message": (
-                    "Instagram shared-account catalog backfills require the Modal remote executor."
-                    if requires_modal_executor
-                    else "Social ingest remote-worker ownership is enforced."
-                ),
-                "execution_mode": canonical_execution_mode(),
-                "execution_owner": execution_owner_label(),
-                "required_execution_backend": "modal" if requires_modal_executor else None,
-            },
-        )
-    else:
-        used_inline_fallback = can_use_local_inline_fallback
+    queue_enabled = bool(execution_state["queue_enabled"])
+    used_inline_fallback = bool(execution_state["used_inline_fallback"])
+    requires_modal_executor = bool(execution_state["requires_modal_executor"])
 
     try:
         result = sync_recent_social_account_catalog(
@@ -4470,21 +4484,13 @@ async def post_social_account_catalog_sync_recent_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
-    run_id = str(result.get("run_id") or "").strip()
-    if not queue_enabled and run_id:
-        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
-    execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
+    return _finalize_social_account_catalog_route_response(
+        result=result,
+        platform=platform,
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
+        background_tasks=background_tasks,
     )
-    return {
-        **result,
-        "status": "queued" if queue_enabled else "started",
-        "execution_mode": execution_mode,
-        "execution_mode_canonical": execution_mode_canonical,
-        "execution_mode_legacy": execution_mode_legacy,
-        "deprecations": [_social_execution_mode_deprecation_payload()],
-    }
 
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/sync-newer")
@@ -4499,81 +4505,16 @@ async def post_social_account_catalog_sync_newer_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
-        _shared_account_catalog_requires_modal_executor,
-        assert_worker_available_when_queue_enabled,
-        is_queue_enabled,
         sync_newer_social_account_catalog,
     )
 
-    queue_enabled = is_queue_enabled()
-    remote_plane_enforced = is_remote_job_plane_enabled()
-    used_inline_fallback = False
-    requires_modal_executor = _shared_account_catalog_requires_modal_executor(
+    execution_state = _resolve_social_account_catalog_route_execution(
         platform=platform,
-        pipeline_ingest_mode="shared_account_catalog_backfill",
-    )
-    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
-        remote_plane_enforced=remote_plane_enforced,
     )
-    if queue_enabled:
-        if requires_modal_executor and can_use_local_inline_fallback:
-            queue_enabled = False
-            used_inline_fallback = True
-        else:
-            try:
-                assert_worker_available_when_queue_enabled(
-                    required_execution_backend="modal" if requires_modal_executor else None,
-                    platform=platform if requires_modal_executor else None,
-                )
-                if requires_modal_executor:
-                    _raise_if_modal_social_dispatch_unresolvable(platform)
-            except SocialWorkerUnavailableError as exc:
-                if can_use_local_inline_fallback:
-                    queue_enabled = False
-                    used_inline_fallback = True
-                else:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "code": (
-                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                                if remote_plane_enforced
-                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                                if requires_modal_executor
-                                else "SOCIAL_WORKER_UNAVAILABLE"
-                            ),
-                            "message": (
-                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                                "reporting heartbeats."
-                                if remote_plane_enforced
-                                else str(exc)
-                            ),
-                            "execution_mode": canonical_execution_mode(),
-                            "execution_owner": execution_owner_label(),
-                            "worker_health": _worker_health_detail(exc.worker_health),
-                            "required_execution_backend": "modal" if requires_modal_executor else None,
-                        },
-                    ) from exc
-    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                if requires_modal_executor
-                else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
-                "message": (
-                    "Instagram shared-account catalog backfills require the Modal remote executor."
-                    if requires_modal_executor
-                    else "Social ingest remote-worker ownership is enforced."
-                ),
-                "execution_mode": canonical_execution_mode(),
-                "execution_owner": execution_owner_label(),
-                "required_execution_backend": "modal" if requires_modal_executor else None,
-            },
-        )
-    else:
-        used_inline_fallback = can_use_local_inline_fallback
+    queue_enabled = bool(execution_state["queue_enabled"])
+    used_inline_fallback = bool(execution_state["used_inline_fallback"])
+    requires_modal_executor = bool(execution_state["requires_modal_executor"])
 
     try:
         result = sync_newer_social_account_catalog(
@@ -4609,21 +4550,13 @@ async def post_social_account_catalog_sync_newer_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
-    run_id = str(result.get("run_id") or "").strip()
-    if not queue_enabled and run_id:
-        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
-    execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
+    return _finalize_social_account_catalog_route_response(
+        result=result,
+        platform=platform,
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
+        background_tasks=background_tasks,
     )
-    return {
-        **result,
-        "status": "queued" if queue_enabled else "started",
-        "execution_mode": execution_mode,
-        "execution_mode_canonical": execution_mode_canonical,
-        "execution_mode_legacy": execution_mode_legacy,
-        "deprecations": [_social_execution_mode_deprecation_payload()],
-    }
 
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/resume-tail")
@@ -4638,81 +4571,16 @@ async def post_social_account_catalog_resume_tail_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
-        _shared_account_catalog_requires_modal_executor,
-        assert_worker_available_when_queue_enabled,
-        is_queue_enabled,
         resume_tail_social_account_catalog,
     )
 
-    queue_enabled = is_queue_enabled()
-    remote_plane_enforced = is_remote_job_plane_enabled()
-    used_inline_fallback = False
-    requires_modal_executor = _shared_account_catalog_requires_modal_executor(
+    execution_state = _resolve_social_account_catalog_route_execution(
         platform=platform,
-        pipeline_ingest_mode="shared_account_catalog_backfill",
-    )
-    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
-        remote_plane_enforced=remote_plane_enforced,
     )
-    if queue_enabled:
-        if requires_modal_executor and can_use_local_inline_fallback:
-            queue_enabled = False
-            used_inline_fallback = True
-        else:
-            try:
-                assert_worker_available_when_queue_enabled(
-                    required_execution_backend="modal" if requires_modal_executor else None,
-                    platform=platform if requires_modal_executor else None,
-                )
-                if requires_modal_executor:
-                    _raise_if_modal_social_dispatch_unresolvable(platform)
-            except SocialWorkerUnavailableError as exc:
-                if can_use_local_inline_fallback:
-                    queue_enabled = False
-                    used_inline_fallback = True
-                else:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "code": (
-                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                                if remote_plane_enforced
-                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                                if requires_modal_executor
-                                else "SOCIAL_WORKER_UNAVAILABLE"
-                            ),
-                            "message": (
-                                "Social ingest remote-worker ownership is enforced and no healthy worker is currently "
-                                "reporting heartbeats."
-                                if remote_plane_enforced
-                                else str(exc)
-                            ),
-                            "execution_mode": canonical_execution_mode(),
-                            "execution_owner": execution_owner_label(),
-                            "worker_health": _worker_health_detail(exc.worker_health),
-                            "required_execution_backend": "modal" if requires_modal_executor else None,
-                        },
-                    ) from exc
-    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                if requires_modal_executor
-                else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED",
-                "message": (
-                    "Instagram shared-account catalog backfills require the Modal remote executor."
-                    if requires_modal_executor
-                    else "Social ingest remote-worker ownership is enforced."
-                ),
-                "execution_mode": canonical_execution_mode(),
-                "execution_owner": execution_owner_label(),
-                "required_execution_backend": "modal" if requires_modal_executor else None,
-            },
-        )
-    else:
-        used_inline_fallback = can_use_local_inline_fallback
+    queue_enabled = bool(execution_state["queue_enabled"])
+    used_inline_fallback = bool(execution_state["used_inline_fallback"])
+    requires_modal_executor = bool(execution_state["requires_modal_executor"])
 
     try:
         result = resume_tail_social_account_catalog(
@@ -4748,21 +4616,13 @@ async def post_social_account_catalog_resume_tail_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
-    run_id = str(result.get("run_id") or "").strip()
-    if not queue_enabled and run_id:
-        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
-    execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
+    return _finalize_social_account_catalog_route_response(
+        result=result,
+        platform=platform,
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
+        background_tasks=background_tasks,
     )
-    return {
-        **result,
-        "status": "queued" if queue_enabled else "started",
-        "execution_mode": execution_mode,
-        "execution_mode_canonical": execution_mode_canonical,
-        "execution_mode_legacy": execution_mode_legacy,
-        "deprecations": [_social_execution_mode_deprecation_payload()],
-    }
 
 
 @router.post("/shared/ingest")
@@ -4781,13 +4641,31 @@ async def ingest_shared_social_accounts(
 
     queue_enabled = is_queue_enabled()
     remote_plane_enforced = is_remote_job_plane_enabled()
+    blocked_platforms = _blocked_remote_only_platforms(payload.platforms)
+    requires_modal_executor = bool(blocked_platforms)
     used_inline_fallback = False
     worker_health: dict[str, Any] | None = None
     if queue_enabled:
         try:
-            worker_health = assert_worker_available_when_queue_enabled()
+            worker_health = assert_worker_available_when_queue_enabled(
+                required_execution_backend="modal" if requires_modal_executor else None,
+            )
         except SocialWorkerUnavailableError as exc:
             worker_health = exc.worker_health
+            if blocked_platforms:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
+                        "message": "Modal worker execution is required for platform(s): "
+                        + ", ".join(blocked_platforms),
+                        "required_platforms": blocked_platforms,
+                        "required_execution_backend": "modal",
+                        "execution_mode": canonical_execution_mode(),
+                        "execution_owner": execution_owner_label(),
+                        "worker_health": _worker_health_detail(exc.worker_health),
+                    },
+                ) from exc
             if payload.allow_inline_dev_fallback and _is_local_or_dev_runtime() and not remote_plane_enforced:
                 queue_enabled = False
                 used_inline_fallback = True
@@ -4809,6 +4687,18 @@ async def ingest_shared_social_accounts(
                         "worker_health": _worker_health_detail(exc.worker_health),
                     },
                 ) from exc
+    elif requires_modal_executor:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_REMOTE_WORKER_REQUIRED",
+                "message": "Modal worker execution is required for platform(s): " + ", ".join(blocked_platforms),
+                "required_platforms": blocked_platforms,
+                "required_execution_backend": "modal",
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+            },
+        )
     elif not remote_plane_enforced:
         used_inline_fallback = bool(payload.allow_inline_dev_fallback)
     else:
@@ -5171,6 +5061,11 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
                 "healthy_workers": int(workers_payload.get("healthy_workers") or 0)
                 if isinstance(workers_payload, dict)
                 else 0,
+                "shared_account_backfill_readiness": (
+                    workers_payload.get("shared_account_backfill_readiness")
+                    if isinstance(workers_payload, dict)
+                    else None
+                ),
             },
             "queue": {
                 "by_status": {
@@ -5180,6 +5075,7 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
                     "failed": int(by_status.get("failed") or 0) if isinstance(by_status, dict) else 0,
                 }
             },
+            "alerts": list(status_payload.get("alerts") or []) if isinstance(status_payload, dict) else [],
             "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
         }
     except Exception as exc:  # noqa: BLE001

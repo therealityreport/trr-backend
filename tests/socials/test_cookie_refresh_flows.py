@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
+import pytest
 
 from trr_backend.socials.facebook import cookie_refresh as facebook_cookie_refresh
+from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh
 from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh
 from trr_backend.socials.tiktok import cookie_refresh as tiktok_cookie_refresh
 from trr_backend.socials.twitter import cookie_refresh as twitter_cookie_refresh
@@ -48,6 +53,107 @@ def test_threads_cookie_refresh_falls_back_to_direct_login(monkeypatch, tmp_path
     assert seen_specs == [threads_cookie_refresh._SPEC, threads_cookie_refresh._DIRECT_LOGIN_SPEC]
     assert cookies["sessionid"] == "fresh-session"
     assert cookies["csrftoken"] == "fresh-csrf"
+
+
+def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatch, tmp_path: Path) -> None:
+    writes: list[Path] = []
+    imported_sessions: list[object] = []
+
+    class _FakePlaywrightTimeoutError(Exception):
+        pass
+
+    class _Locator:
+        @property
+        def first(self) -> _Locator:
+            return self
+
+        def wait_for(self, **_kwargs: object) -> None:
+            return None
+
+        def fill(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def click(self, **_kwargs: object) -> None:
+            return None
+
+        def is_visible(self, **_kwargs: object) -> bool:
+            return False
+
+        def inner_text(self, **_kwargs: object) -> str:
+            return ""
+
+    class _Page:
+        def __init__(self) -> None:
+            self.url = instagram_cookie_refresh.INSTAGRAM_LOGIN_URL
+
+        def goto(self, url: str, **_kwargs: object) -> None:
+            self.url = url
+
+        def locator(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def get_by_label(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def get_by_role(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def wait_for_timeout(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class _Context:
+        def new_page(self) -> _Page:
+            return _Page()
+
+        def cookies(self) -> list[dict[str, object]]:
+            return [
+                {"name": "sessionid", "value": "fresh-session", "domain": ".instagram.com"},
+                {"name": "csrftoken", "value": "fresh-csrf", "domain": ".instagram.com"},
+            ]
+
+        def storage_state(self) -> dict[str, object]:
+            return {"cookies": self.cookies(), "origins": []}
+
+    class _Browser:
+        def new_context(self, **_kwargs: object) -> _Context:
+            return _Context()
+
+        def close(self) -> None:
+            return None
+
+    class _PlaywrightContext:
+        def __enter__(self) -> SimpleNamespace:
+            chromium = SimpleNamespace(launch=lambda **_kwargs: _Browser())
+            return SimpleNamespace(chromium=chromium)
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
+    sync_api_module.sync_playwright = lambda: _PlaywrightContext()
+    playwright_module = ModuleType("playwright")
+    playwright_module.sync_api = sync_api_module
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
+    monkeypatch.setattr(instagram_cookie_refresh, "_write_cookie_file", lambda path, cookies: writes.append(Path(path)))
+    monkeypatch.setattr(
+        instagram_cookie_refresh._INSTAGRAM_BROWSER_SESSIONS,
+        "import_bootstrapped_session",
+        lambda *args, **kwargs: imported_sessions.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="checkpoint_required"):
+        instagram_cookie_refresh.refresh_instagram_cookies(
+            username="operator@example.com",
+            password="secret",
+            cookie_file=tmp_path / "instagram-cookies.json",
+            validation_username="bravotv",
+            validator=lambda _cookies: (False, "checkpoint_required"),
+        )
+
+    assert writes == []
+    assert imported_sessions == []
 
 
 def test_refresh_twitter_cookies_retries_headed_after_headless_error_shell(

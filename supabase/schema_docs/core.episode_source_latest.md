@@ -31,6 +31,7 @@
 
 ## Indexes
 
+- core_episode_source_latest_source_id_idx (non-unique): source_id
 - episode_source_latest_episode_id_source_id_variant_key (unique): episode_id, source_id, variant
 
 ## RLS Enabled

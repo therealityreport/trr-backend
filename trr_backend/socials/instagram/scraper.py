@@ -363,6 +363,27 @@ class InstagramScraper:
             cookie_path = project_root / cookie_file
 
         logger.info("[instagram] attempting cookie auto-refresh via Playwright login (%s)", ig_user)
+        validation_username = str(self.browser_account_id or ig_user).strip().lstrip("@")
+
+        def _validate_refreshed_cookies(cookies: dict[str, str]) -> tuple[bool, str | None]:
+            validator_scraper = InstagramScraper(
+                cookies=cookies,
+                browser_account_id=validation_username or None,
+            )
+            payload = validator_scraper.fetch_posts_graphql(
+                validation_username or ig_user,
+                delay=0.0,
+                request_timeout=(10, 20),
+            )
+            connection = (payload or {}).get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+            if connection.get("edges"):
+                return True, None
+            error_code = str(validator_scraper.last_retrieval_meta.get("error_code") or "").strip().lower()
+            error_message = str(validator_scraper.last_retrieval_meta.get("error_message") or "").strip().lower()
+            if error_code == "instagram_graphql_checkpoint_required" or error_message == "checkpoint_required":
+                return False, "checkpoint_required"
+            return False, "graphql_validation_failed"
+
         try:
             fresh_cookies = refresh_instagram_cookies(
                 username=ig_user,
@@ -371,6 +392,8 @@ class InstagramScraper:
                 account_id=self._resolved_browser_account_id(ig_user),
                 headless=True,
                 timeout_seconds=90,
+                validation_username=validation_username or ig_user,
+                validator=_validate_refreshed_cookies,
             )
             if not fresh_cookies or not fresh_cookies.get("sessionid"):
                 return {"refreshed": False, "reason": "refresh_returned_no_sessionid"}

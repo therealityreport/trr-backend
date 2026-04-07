@@ -18,6 +18,7 @@ from typing import Any
 import requests
 
 from trr_backend.db.pg import db_cursor
+from trr_backend.services.face_reference_embeddings import FACE_REFERENCE_EMBEDDING_CONTRACT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -273,11 +274,14 @@ def _load_person_facebank_centroids() -> list[dict[str, object]]:
                   ON p.id = fri.person_id
                 WHERE fri.approved = true
                   AND fri.is_active = true
+                  AND fri.review_status = 'approved'
                   AND fre.embedding_status = 'ready'
                   AND fre.embedding IS NOT NULL
+                  AND coalesce(fre.metadata->>'contract_key', '') = %s
                 ORDER BY coalesce(fre.generated_at, fre.created_at) DESC
                 LIMIT 5000
-                """
+                """,
+                [FACE_REFERENCE_EMBEDDING_CONTRACT_KEY],
             )
             rows = list(cur.fetchall() or [])
     except Exception as exc:  # noqa: BLE001

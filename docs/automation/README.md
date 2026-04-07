@@ -14,6 +14,7 @@
    - `baseUrl`
    - `accountHandle`
    - `sourceScope`
+   - treat the checked-in `accountHandle` as a placeholder for the selected shared network/streaming profile
    - use the canonical backend admin base, not the public app host
 3. If you imported a non-credential workflow:
    - set `bearerToken`
@@ -31,6 +32,7 @@
 7. Run it manually first.
 8. If it behaves correctly, replace `Manual Trigger` with a schedule trigger.
 9. Use `Sync Recent` as the first canary after Modal deploy. Use `Resume Tail` or `Backfill Posts` only after the worker-health surface shows remote Instagram auth and shared-account backfill readiness as green.
+10. Stop any schedule immediately if the polled run progress or worker-health payload reports error-severity `alerts`; those are red control-plane states, not account-local content gaps.
 
 ## Recommended choice
 
@@ -59,11 +61,14 @@ claims "`n8n` is ready" as an environment, not just as a template set.
 - The `backfill` workflows start a `catalog/backfill` run and poll the same progress route until the run reaches a terminal state.
 - Credential workflows use n8n's `HTTP Bearer Auth` credential mode instead of storing the token in the workflow payload.
 - If the backend returns `SOCIAL_MODAL_DISPATCH_UNAVAILABLE`, `SOCIAL_MODAL_EXECUTOR_REQUIRED`, `SOCIAL_WORKER_UNAVAILABLE`, or an auth-preflight failure, treat that as a control-plane/runtime problem and stop scheduling more runs until Modal and worker health are green.
+- Treat `accountHandle` as the selected network/shared profile, not as a Bravo-specific default. Keep `account_handle` stable in routes and use shared-profile metadata for operator-facing labels.
 - For full-history Instagram backfills, confirm backend worker health reports:
   - `dispatcher_readiness.resolved = true`
   - `dispatcher_heartbeat_fresh = true`
   - `remote_auth_capabilities.instagram.ready = true`
   - `shared_account_backfill_readiness.ready = true`
+- If either worker-health or catalog progress returns populated `alerts`, preserve those alert objects in the workflow result and stop the schedule on any `severity = error` entry. Do not collapse them into a generic retry.
+- One backfill run may enqueue multiple classify jobs. Queued classify jobs are expected fanout and are not, by themselves, evidence of a duplicate backfill click.
 - A checked-in template passing review does not mean a live external `n8n`
   instance is ready. Live readiness additionally requires confirming the active
   workflow id, schedule/trigger owner, credential source, retry policy, and

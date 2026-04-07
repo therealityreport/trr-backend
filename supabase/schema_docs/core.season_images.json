@@ -293,6 +293,23 @@
       "definition": "CREATE INDEX core_season_images_season_id_idx ON core.season_images USING btree (season_id)"
     },
     {
+      "name": "core_season_images_show_id_idx",
+      "columns": [
+        "show_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_season_images_show_id_idx ON core.season_images USING btree (show_id)"
+    },
+    {
+      "name": "core_season_images_show_season_hosted_idx",
+      "columns": [
+        "show_id",
+        "season_number) WHERE (hosted_url IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_season_images_show_season_hosted_idx ON core.season_images USING btree (show_id, season_number) WHERE (hosted_url IS NOT NULL)"
+    },
+    {
       "name": "core_season_images_tmdb_series_season_idx",
       "columns": [
         "tmdb_series_id",

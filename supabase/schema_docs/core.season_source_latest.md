@@ -31,6 +31,7 @@
 
 ## Indexes
 
+- core_season_source_latest_source_id_idx (non-unique): source_id
 - season_source_latest_season_id_source_id_variant_key (unique): season_id, source_id, variant
 
 ## RLS Enabled

@@ -37,6 +37,38 @@ def test_search_fandom_community_wiki_uses_rest_result_url() -> None:
     assert result == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
 
 
+def test_search_fandom_community_wiki_candidates_paginates_api_search_results() -> None:
+    requested_urls: list[str] = []
+
+    def _fetch_html(url: str, timeout: float = 20.0, headers=None):
+        requested_urls.append(url)
+        if "rest.php" in url:
+            return (500, "", None)
+        if "api.php" in url and "sroffset=2" not in url:
+            return (
+                200,
+                '{"query":{"search":[{"title":"Lisa Barlow/Gallery"}]},"continue":{"sroffset":2}}',
+                None,
+            )
+        if "api.php" in url and "sroffset=2" in url:
+            return (
+                200,
+                '{"query":{"search":[{"title":"Lisa Barlow"}]}}',
+                None,
+            )
+        return (404, "", None)
+
+    with patch("trr_backend.integrations.fandom.fetch_html", side_effect=_fetch_html):
+        results = fandom.search_fandom_community_wiki_candidates(
+            "Lisa Barlow",
+            community_domain="real-housewives.fandom.com",
+            max_results=5,
+        )
+
+    assert any("sroffset=2" in url for url in requested_urls)
+    assert "https://real-housewives.fandom.com/wiki/Lisa_Barlow" in results
+
+
 def test_search_allowlisted_fandom_wikis_filters_invalid_domains() -> None:
     with patch(
         "trr_backend.integrations.fandom.search_fandom_community_wiki",

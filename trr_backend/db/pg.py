@@ -46,6 +46,7 @@ _pool: ThreadedConnectionPool | None = None
 _active_pool_dsn: str | None = None
 _pool_lock = Lock()
 _pool_creation_count = 0
+_retired_pools: dict[int, ThreadedConnectionPool] = {}
 _checkout_sequence = 0
 _checkout_lock = Lock()
 _checked_out_connections: dict[int, dict[str, Any]] = {}
@@ -339,6 +340,7 @@ def _log_checkout(
             "checkout_id": checkout_id,
             "label": label,
             "started_at": time.perf_counter(),
+            "pool_id": id(pool),
         }
     in_use, available = _pool_counts(pool)
     logger.info(
@@ -419,6 +421,54 @@ def _reset_pool_locked() -> None:
         _pool.closeall()
     _pool = None
     _active_pool_dsn = None
+
+
+def _close_pool_quietly(pool: ThreadedConnectionPool) -> None:
+    try:
+        pool.closeall()
+    except Exception:
+        logger.exception("[db-pool] closeall_failed")
+
+
+def _checked_out_count_for_pool(pool: ThreadedConnectionPool) -> int:
+    pool_id = id(pool)
+    with _checkout_lock:
+        return sum(1 for metadata in _checked_out_connections.values() if metadata.get("pool_id") == pool_id)
+
+
+def _retire_pool_locked(pool: ThreadedConnectionPool) -> None:
+    global _pool, _active_pool_dsn
+
+    if _pool is pool:
+        _pool = None
+        _active_pool_dsn = None
+
+    checked_out = _checked_out_count_for_pool(pool)
+    in_use, available = _pool_counts(pool)
+    if checked_out > 0:
+        _retired_pools[id(pool)] = pool
+        logger.info(
+            "[db-pool] retire_pool pending_checkouts=%s in_use=%s available=%s",
+            checked_out,
+            in_use,
+            available,
+        )
+        return
+
+    _retired_pools.pop(id(pool), None)
+    _close_pool_quietly(pool)
+
+
+def _finalize_retired_pool(pool: ThreadedConnectionPool) -> None:
+    with _pool_lock:
+        pool_id = id(pool)
+        retired_pool = _retired_pools.get(pool_id)
+        if retired_pool is None:
+            return
+        if _checked_out_count_for_pool(retired_pool) > 0:
+            return
+        _retired_pools.pop(pool_id, None)
+        _close_pool_quietly(retired_pool)
 
 
 def _get_pool() -> ThreadedConnectionPool:
@@ -538,15 +588,33 @@ def _get_pool() -> ThreadedConnectionPool:
         )
 
 
-def reset_pool() -> None:
+def reset_pool(*, expected_pool: ThreadedConnectionPool | None = None) -> None:
     """Reset the shared pool; used for transient transport recovery."""
     with _pool_lock:
-        _reset_pool_locked()
+        current_pool = _pool
+        if current_pool is None:
+            return
+        if expected_pool is not None and current_pool is not expected_pool:
+            return
+        _retire_pool_locked(current_pool)
 
 
 def close_pool() -> None:
     """Close all pooled connections. Intended for tests/process shutdown."""
-    reset_pool()
+    global _pool, _active_pool_dsn
+    with _pool_lock:
+        active_pool = _pool
+        retired_pools = list(_retired_pools.values())
+        _retired_pools.clear()
+        _pool = None
+        _active_pool_dsn = None
+
+    if active_pool is not None:
+        _close_pool_quietly(active_pool)
+    for retired_pool in retired_pools:
+        if retired_pool is active_pool:
+            continue
+        _close_pool_quietly(retired_pool)
 
 
 def current_pool_dsn() -> str | None:
@@ -628,7 +696,7 @@ def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, c
                     time.sleep(acquire_sleep_seconds)
                     continue
                 if _should_retry_query(error, attempt=attempt):
-                    reset_pool()
+                    reset_pool(expected_pool=pool)
                     break
                 raise
         else:
@@ -677,6 +745,7 @@ def db_connection(*, label: str = "write"):
             except PoolError as error:
                 if "pool is closed" not in _error_message(error):
                     raise
+        _finalize_retired_pool(pool)
 
 
 @contextmanager
@@ -728,6 +797,7 @@ def db_read_connection(*, label: str = "read"):
             except PoolError as error:
                 if "pool is closed" not in _error_message(error):
                     raise
+        _finalize_retired_pool(pool)
 
 
 @contextmanager

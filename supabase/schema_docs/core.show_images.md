@@ -68,7 +68,6 @@ id
 - show_images_pkey (unique): id
 - show_images_show_source_source_image_id_key (unique): show_id, source, source_image_id
 - show_images_source_image_id_idx (non-unique): source, source_image_id) WHERE (source_image_id IS NOT NULL
-- show_images_source_unique (unique): show_id, source, source_image_id
 - show_images_tmdb_source_kind_file_path_key (unique): tmdb_id, source, kind, file_path
 
 ## RLS Enabled

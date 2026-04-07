@@ -113,6 +113,14 @@
   ],
   "indexes": [
     {
+      "name": "core_episode_source_latest_source_id_idx",
+      "columns": [
+        "source_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_episode_source_latest_source_id_idx ON core.episode_source_latest USING btree (source_id)"
+    },
+    {
       "name": "episode_source_latest_episode_id_source_id_variant_key",
       "columns": [
         "episode_id",

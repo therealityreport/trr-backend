@@ -422,16 +422,6 @@
       "definition": "CREATE INDEX show_images_source_image_id_idx ON core.show_images USING btree (source, source_image_id) WHERE (source_image_id IS NOT NULL)"
     },
     {
-      "name": "show_images_source_unique",
-      "columns": [
-        "show_id",
-        "source",
-        "source_image_id"
-      ],
-      "unique": true,
-      "definition": "CREATE UNIQUE INDEX show_images_source_unique ON core.show_images USING btree (show_id, source, source_image_id)"
-    },
-    {
       "name": "show_images_tmdb_source_kind_file_path_key",
       "columns": [
         "tmdb_id",

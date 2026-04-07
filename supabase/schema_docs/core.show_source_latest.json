@@ -113,6 +113,14 @@
   ],
   "indexes": [
     {
+      "name": "core_show_source_latest_source_id_idx",
+      "columns": [
+        "source_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_show_source_latest_source_id_idx ON core.show_source_latest USING btree (source_id)"
+    },
+    {
       "name": "show_source_latest_show_id_source_id_variant_key",
       "columns": [
         "show_id",

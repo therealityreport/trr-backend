@@ -1261,6 +1261,63 @@ def test_shape_show_cast_payload_keeps_membership_rows_without_explicit_minimum(
     ]
 
 
+def test_shape_show_cast_payload_can_apply_links_eligibility_filters() -> None:
+    payload = repo._shape_show_cast_payload(
+        [
+            {
+                "person_id": "person-1",
+                "full_name": "Main Cast",
+                "role": "Self",
+                "photo_url": "https://cdn.example.com/main.jpg",
+                "total_episodes": 14,
+                "archive_episode_count": 0,
+                "effective_total_episodes": 14,
+            },
+            {
+                "person_id": "person-2",
+                "full_name": "Archive Only",
+                "role": "Self",
+                "photo_url": "https://cdn.example.com/archive.jpg",
+                "total_episodes": 0,
+                "archive_episode_count": 2,
+                "effective_total_episodes": 2,
+            },
+            {
+                "person_id": "person-3",
+                "full_name": "Voice Guest",
+                "role": "Self (voice)",
+                "photo_url": "https://cdn.example.com/voice.jpg",
+                "total_episodes": 8,
+                "archive_episode_count": 0,
+                "effective_total_episodes": 8,
+            },
+            {
+                "person_id": "person-4",
+                "full_name": "One Scene Friend",
+                "role": "Self",
+                "photo_url": "https://cdn.example.com/friend.jpg",
+                "total_episodes": 0,
+                "archive_episode_count": 0,
+                "effective_total_episodes": 3,
+            },
+        ],
+        limit=20,
+        offset=0,
+        min_episodes=0,
+        has_explicit_min_episodes=True,
+        exclude_zero_episode_members=False,
+        require_image=False,
+        roster_mode="imdb_show_membership",
+        eligibility_mode="links",
+        links_eligibility_show_total_seasons=6,
+    )
+
+    assert payload["cast_source"] == "imdb_show_membership"
+    assert payload["eligibility_warning"] is None
+    assert [row["person_id"] for row in payload["cast"]] == ["person-1"]
+    assert payload["archive_footage_cast"] == []
+
+
 def test_fetch_show_cast_base_rows_can_skip_photo_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 

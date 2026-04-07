@@ -1,3 +1,4 @@
 # Compatibility install entrypoint.
-# Source dependencies live in requirements.in and are compiled into requirements.lock.txt.
+# Source dependencies, including the retained DeepFace runtime lane, live in
+# requirements.in and are compiled into requirements.lock.txt.
 -r requirements.lock.txt

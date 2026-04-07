@@ -109,6 +109,14 @@
   "unique_constraints": [],
   "indexes": [
     {
+      "name": "core_season_source_history_source_id_idx",
+      "columns": [
+        "source_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_season_source_history_source_id_idx ON core.season_source_history USING btree (source_id)"
+    },
+    {
       "name": "season_source_history_lookup_idx",
       "columns": [
         "season_id",

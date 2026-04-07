@@ -637,6 +637,8 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
         "run_id": "catalog-run-1",
         "status": "queued",
         "ingest_mode": "shared_account_catalog_backfill",
+        "catalog_action": "backfill",
+        "catalog_action_scope": "full_history",
     }
 
     with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
@@ -657,12 +659,16 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-1"
     assert response.json()["status"] == "queued"
+    assert response.json()["catalog_action"] == "backfill"
+    assert response.json()["catalog_action_scope"] == "full_history"
     worker_guard.assert_called_once_with(
         required_execution_backend="modal",
         platform="instagram",
     )
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["catalog_action"] == "backfill"
+    assert mocked.call_args.kwargs["catalog_action_scope"] == "full_history"
 
 
 def test_post_social_account_catalog_backfill_ignores_date_bounds_for_full_history(
@@ -732,7 +738,7 @@ def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
 
     assert response.status_code == 200
     assert mocked.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
-    assert mocked.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 0, 0, tzinfo=UTC)
+    assert mocked.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 23, 59, 59, tzinfo=UTC)
 
 
 def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -761,7 +767,7 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
 
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-tt-1"
-    worker_guard.assert_called_once_with(required_execution_backend=None, platform=None)
+    worker_guard.assert_called_once_with(required_execution_backend="modal", platform="tiktok")
     assert mocked.call_args.kwargs["platform"] == "tiktok"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
 
@@ -806,7 +812,7 @@ def test_post_social_account_catalog_backfill_additional_supported_platforms(
 
     assert response.status_code == 200
     assert response.json()["run_id"] == run_id
-    worker_guard.assert_called_once_with(required_execution_backend=None, platform=None)
+    worker_guard.assert_called_once_with(required_execution_backend="modal", platform=platform)
     assert mocked.call_args.kwargs["platform"] == platform
     assert mocked.call_args.kwargs["account_handle"] == handle
 
@@ -972,6 +978,8 @@ def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch
         "run_id": "catalog-run-2",
         "status": "queued",
         "ingest_mode": "shared_account_catalog_backfill",
+        "catalog_action": "sync_recent",
+        "catalog_action_scope": "recent_window",
     }
 
     with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
@@ -992,9 +1000,145 @@ def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-2"
     assert response.json()["status"] == "queued"
+    assert response.json()["catalog_action"] == "sync_recent"
+    assert response.json()["catalog_action_scope"] == "recent_window"
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
     assert mocked.call_args.kwargs["lookback_days"] == 3
+
+
+def test_post_social_account_catalog_sync_newer(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "run_id": "catalog-run-3",
+        "status": "queued",
+        "ingest_mode": "shared_account_catalog_backfill",
+        "catalog_action": "sync_newer",
+        "catalog_action_scope": "head_gap",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.sync_newer_social_account_catalog",
+                return_value=expected,
+            ) as mocked:
+                response = client.post(
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-newer",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"source_scope": "bravo"},
+                )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "catalog-run-3"
+    assert response.json()["catalog_action"] == "sync_newer"
+    assert response.json()["catalog_action_scope"] == "head_gap"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_post_social_account_catalog_sync_newer_returns_validation_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.sync_newer_social_account_catalog",
+            side_effect=SocialIngestValidationError(
+                "NO_STORED_POSTS",
+                "No stored posts found for this account. Run a full backfill first.",
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/sync-newer",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"source_scope": "bravo"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "NO_STORED_POSTS"
+
+
+def test_post_social_account_catalog_resume_tail(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "run_id": "catalog-run-4",
+        "status": "queued",
+        "ingest_mode": "shared_account_catalog_backfill",
+        "catalog_action": "resume_tail",
+        "catalog_action_scope": "frontier_resume",
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.resume_tail_social_account_catalog",
+                return_value=expected,
+            ) as mocked:
+                response = client.post(
+                    "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/resume-tail",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"source_scope": "bravo"},
+                )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "catalog-run-4"
+    assert response.json()["catalog_action"] == "resume_tail"
+    assert response.json()["catalog_action_scope"] == "frontier_resume"
+    assert mocked.call_args.kwargs["platform"] == "instagram"
+    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+
+
+def test_post_social_account_catalog_resume_tail_returns_validation_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.resume_tail_social_account_catalog",
+            side_effect=SocialIngestValidationError(
+                "NO_RESUMABLE_FRONTIER",
+                "No resumable frontier cursor found.",
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/resume-tail",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"source_scope": "bravo"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "NO_RESUMABLE_FRONTIER"
 
 
 def test_post_social_account_catalog_sync_recent_returns_modal_dispatch_unavailable_when_target_unresolvable(
@@ -2115,6 +2259,7 @@ def test_post_shared_ingest_starts_inline_when_queue_disabled(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
         "run_id": "shared-run-123",
@@ -2142,6 +2287,29 @@ def test_post_shared_ingest_starts_inline_when_queue_disabled(
     assert body["execution_mode_canonical"] == "inline"
     assert body["execution_owner"] == "local_api"
     assert execute_mock.called is True
+
+
+def test_post_shared_ingest_requires_modal_when_queue_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.repositories.social_season_analytics.ingest_shared_accounts") as ingest_mock:
+            response = client.post(
+                "/api/v1/admin/socials/shared/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"source_scope": "bravo", "platforms": ["instagram", "twitter"]},
+            )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_WORKER_REQUIRED"
+    assert body["detail"]["required_platforms"] == ["instagram", "twitter"]
+    assert body["detail"]["required_execution_backend"] == "modal"
+    ingest_mock.assert_not_called()
 
 
 def test_post_shared_ingest_accepts_internal_admin_token_without_supabase_jwt(
@@ -3462,6 +3630,31 @@ def test_ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled(
     ingest_mock.assert_not_called()
 
 
+def test_ingest_returns_503_when_modal_required_platforms_and_queue_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload = {"source_scope": "bravo", "platforms": ["twitter"]}
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.repositories.social_season_analytics.ingest_season") as ingest_mock:
+            response = client.post(
+                f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_WORKER_REQUIRED"
+    assert body["detail"]["required_platforms"] == ["twitter"]
+    assert body["detail"]["required_execution_backend"] == "modal"
+    ingest_mock.assert_not_called()
+
+
 def test_ingest_returns_503_when_remote_job_plane_enforced_and_worker_missing_even_with_inline_fallback(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3618,6 +3811,7 @@ def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {
@@ -4274,10 +4468,17 @@ def test_create_sync_session_endpoint_returns_payload(client: TestClient, monkey
         "completeness_snapshot": {"up_to_date": False},
     }
 
-    with patch(
-        "trr_backend.repositories.social_sync_orchestrator.create_sync_session",
-        return_value=expected,
-    ) as mocked:
+    with (
+        patch(
+            "trr_backend.repositories.social_sync_orchestrator.create_sync_session",
+            return_value=expected,
+        ) as mocked,
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value={"healthy": True, "healthy_workers": 1},
+        ),
+    ):
         response = client.post(
             f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions",
             headers={"Authorization": f"Bearer {token}"},
@@ -4303,6 +4504,7 @@ def test_create_sync_session_endpoint_blocks_when_workers_unhealthy(
     from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "instagram,tiktok")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
@@ -4335,6 +4537,49 @@ def test_create_sync_session_endpoint_blocks_when_workers_unhealthy(
     body = response.json()
     assert body["detail"]["code"] == "SOCIAL_WORKER_UNAVAILABLE"
     assert body["detail"]["worker_health"]["reason"] == "no_workers"
+
+
+def test_create_sync_session_endpoint_requires_remote_worker_for_configured_platforms(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "twitter,facebook")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "api.routers.socials.is_remote_job_plane_enabled",
+            return_value=False,
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "worker unavailable",
+                worker_health={"healthy": False, "healthy_workers": 0, "reason": "no_workers"},
+            ),
+        ),
+    ):
+        response = client.post(
+            f"/api/v1/admin/socials/seasons/{season_id}/sync-sessions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "source_scope": "bravo",
+                "platforms": ["facebook", "twitter"],
+                "date_start": "2026-01-01T00:00:00Z",
+                "date_end": "2026-01-08T00:00:00Z",
+            },
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_REMOTE_WORKER_REQUIRED"
+    assert body["detail"]["required_platforms"] == ["facebook", "twitter"]
+    assert "facebook, twitter" in body["detail"]["message"]
 
 
 def test_get_sync_session_endpoint_returns_payload(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

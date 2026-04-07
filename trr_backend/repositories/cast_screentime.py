@@ -102,9 +102,10 @@ def update_media_upload_session(upload_session_id: str, payload: dict[str, Any])
 def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
     sql = (
         "INSERT INTO ml.analysis_media_assets "
-        "(id, episode_id, season_id, show_id, media_asset_id, source_url, source_json, duration_seconds, metadata, "
-        " video_class, promo_subtype, media_type, media_kind, source_import_type) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "(id, episode_id, season_id, show_id, media_asset_id, legacy_screenalytics_video_asset_id, "
+        " source_url, source_json, duration_seconds, metadata, video_class, promo_subtype, "
+        " media_type, media_kind, source_import_type) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "RETURNING *"
     )
     rows = pg.execute_returning(
@@ -115,6 +116,7 @@ def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
             _normalize(payload.get("season_id")),
             _normalize(payload.get("show_id")),
             _normalize(payload.get("media_asset_id")),
+            _normalize(payload.get("legacy_screenalytics_video_asset_id")),
             payload.get("source_url"),
             _json(payload.get("source_json", {})),
             payload.get("duration_seconds"),
@@ -131,6 +133,22 @@ def create_video_asset(payload: dict[str, Any]) -> dict[str, Any]:
 
 def get_video_asset(video_asset_id: str) -> dict[str, Any] | None:
     return pg.fetch_one("SELECT * FROM ml.analysis_media_assets WHERE id = %s", [video_asset_id])
+
+
+def get_video_asset_by_legacy_screenalytics_id(legacy_video_asset_id: str) -> dict[str, Any] | None:
+    return pg.fetch_one(
+        """
+        SELECT *
+        FROM ml.analysis_media_assets
+        WHERE legacy_screenalytics_video_asset_id = %s::uuid
+        LIMIT 1
+        """,
+        [legacy_video_asset_id],
+    )
+
+
+def resolve_video_asset(video_asset_id: str) -> dict[str, Any] | None:
+    return get_video_asset(video_asset_id) or get_video_asset_by_legacy_screenalytics_id(video_asset_id)
 
 
 def get_video_asset_upload_session_status(video_asset_id: str) -> str | None:
@@ -662,6 +680,7 @@ def get_run_with_video_asset(run_id: str) -> dict[str, Any] | None:
           va.season_id,
           va.show_id,
           va.media_asset_id,
+          va.legacy_screenalytics_video_asset_id,
           va.source_url,
           va.source_json,
           va.duration_seconds,
@@ -933,6 +952,22 @@ def list_segments(run_id: str) -> list[dict[str, Any]]:
     )
 
 
+def get_segment(run_id: str, segment_key: str) -> dict[str, Any] | None:
+    return pg.fetch_one(
+        """
+        SELECT
+          seg.*,
+          p.full_name AS display_name
+        FROM ml.screentime_segments seg
+        LEFT JOIN core.people p ON p.id = seg.person_id
+        WHERE seg.run_id = %s
+          AND seg.segment_key = %s
+        LIMIT 1
+        """,
+        [_normalize(run_id), segment_key],
+    )
+
+
 def list_evidence(run_id: str) -> list[dict[str, Any]]:
     return pg.fetch_all(
         """
@@ -996,6 +1031,7 @@ def list_runs_for_show(
           va.show_id,
           va.season_id,
           va.episode_id,
+          va.legacy_screenalytics_video_asset_id,
           va.video_class,
           va.promo_subtype,
           va.media_type,
@@ -1033,6 +1069,7 @@ def list_publish_versions(video_asset_id: str) -> list[dict[str, Any]]:
           r.status AS run_status,
           r.review_status,
           r.effective_runtime_seconds,
+          va.legacy_screenalytics_video_asset_id,
           va.video_class,
           va.promo_subtype,
           va.media_type,
@@ -1388,6 +1425,7 @@ def list_current_published_versions_for_show(show_id: str) -> list[dict[str, Any
           va.show_id,
           va.season_id,
           va.episode_id,
+          va.legacy_screenalytics_video_asset_id,
           va.video_class,
           va.promo_subtype,
           va.media_type,
@@ -1411,6 +1449,7 @@ def list_current_published_versions_for_season(season_id: str) -> list[dict[str,
           va.show_id,
           va.season_id,
           va.episode_id,
+          va.legacy_screenalytics_video_asset_id,
           va.video_class,
           va.promo_subtype,
           va.media_type,

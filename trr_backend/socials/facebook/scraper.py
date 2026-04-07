@@ -361,6 +361,12 @@ class FacebookScraper:
         self._request_count = 0
         self._last_429_at: float = 0.0
         self._consecutive_success: int = 0
+        # Shared Playwright browser for reuse within a single scrape() call.
+        # Avoids launching a new browser per post during enrichment.
+        self._shared_pw: Any = None
+        self._shared_browser: Any = None
+        self._shared_context: Any = None
+        self._shared_skip_cookies_context: Any = None
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
@@ -479,6 +485,53 @@ class FacebookScraper:
                 logger.debug("[facebook] failed to load cookies into playwright context", exc_info=True)
         return browser, context
 
+    def _open_shared_browser(self) -> None:
+        """Start a shared Playwright browser for reuse across enrichment calls."""
+        if self._shared_browser is not None:
+            return
+        try:
+            from playwright.sync_api import sync_playwright
+
+            self._shared_pw = sync_playwright().start()
+            self._shared_browser = self._shared_pw.chromium.launch(headless=True)
+            ua = self._headers().get("user-agent", "")
+            # Authenticated context (with cookies)
+            self._shared_context = self._shared_browser.new_context(user_agent=ua, locale="en-US")
+            cookies = self._playwright_cookie_list()
+            if cookies:
+                try:
+                    self._shared_context.add_cookies(cookies)
+                except Exception:  # noqa: BLE001
+                    pass
+            # Unauthenticated context (for SPA view-count enrichment)
+            self._shared_skip_cookies_context = self._shared_browser.new_context(user_agent=ua, locale="en-US")
+        except Exception:  # noqa: BLE001
+            logger.debug("[facebook] failed to open shared playwright browser", exc_info=True)
+            self._close_shared_browser()
+
+    def _close_shared_browser(self) -> None:
+        """Tear down the shared Playwright browser."""
+        for ctx in (self._shared_context, self._shared_skip_cookies_context):
+            if ctx is not None:
+                try:
+                    ctx.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if self._shared_browser is not None:
+            try:
+                self._shared_browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._shared_pw is not None:
+            try:
+                self._shared_pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self._shared_pw = None
+        self._shared_browser = None
+        self._shared_context = None
+        self._shared_skip_cookies_context = None
+
     def _fetch_html(
         self, url: str, *, delay_seconds: float, referer: str | None = None, fast_mode: bool = False
     ) -> str:
@@ -515,6 +568,18 @@ class FacebookScraper:
         wait_for_spa: bool = False,
         skip_cookies: bool = False,
     ) -> str:
+        # Reuse the shared browser when available (set up by scrape()).
+        if self._shared_browser is not None:
+            context = self._shared_skip_cookies_context if skip_cookies else self._shared_context
+            if context is not None:
+                return self._fetch_page_in_context(
+                    context, url,
+                    delay_seconds=delay_seconds,
+                    wait_for_spa=wait_for_spa,
+                )
+
+        # Fallback: launch a one-off browser (used by standalone calls like
+        # fetch_comments or scrape_post outside of scrape()).
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
@@ -522,8 +587,6 @@ class FacebookScraper:
 
         with sync_playwright() as playwright:
             if skip_cookies:
-                # Unauthenticated context: Facebook's SPA render includes view
-                # counts in og:title when no session cookies are present.
                 browser = playwright.chromium.launch(headless=True)
                 context = browser.new_context(
                     user_agent=self._headers(referer=referer).get("user-agent", ""),
@@ -531,10 +594,26 @@ class FacebookScraper:
                 )
             else:
                 browser, context = self._new_playwright_context(playwright, referer=referer)
-            page = context.new_page()
+            html_text = self._fetch_page_in_context(
+                context, url,
+                delay_seconds=delay_seconds,
+                wait_for_spa=wait_for_spa,
+            )
+            browser.close()
+            return html_text
+
+    @staticmethod
+    def _fetch_page_in_context(
+        context: Any,
+        url: str,
+        *,
+        delay_seconds: float = 0,
+        wait_for_spa: bool = False,
+    ) -> str:
+        """Load a URL in the given browser context and return page HTML."""
+        page = context.new_page()
+        try:
             if wait_for_spa:
-                # SPA enrichment: wait for network to settle so async payloads
-                # containing view/play counts are loaded into the DOM.
                 page.goto(url, wait_until="networkidle", timeout=60_000)
                 page.wait_for_timeout(3000)
             else:
@@ -545,9 +624,9 @@ class FacebookScraper:
                 page.keyboard.press("Escape")
             except Exception:  # noqa: BLE001
                 pass
-            html_text = page.content() or ""
-            browser.close()
-            return html_text
+            return page.content() or ""
+        finally:
+            page.close()
 
     @staticmethod
     def _build_search_filters_param(date_start: datetime | None, date_end: datetime | None) -> str | None:
@@ -1772,6 +1851,11 @@ class FacebookScraper:
                 logger.warning("[facebook] scroll scrape failed for %s: %s — falling back to static fetch", handle, exc)
                 surface_fetch_failures += 1
 
+        # Open a shared Playwright browser for reuse across per-post enrichment.
+        # Must happen AFTER the scroll phase (which uses its own Playwright instance).
+        if self._playwright_fallback_enabled():
+            self._open_shared_browser()
+
         # Process scroll-discovered feed candidates first.
         if feed_candidates_from_scroll:
             feed_url = f"{self.BASE_URL}/{handle}"
@@ -1972,6 +2056,9 @@ class FacebookScraper:
                             "matched_posts": matched_posts,
                         }
                     )
+
+        # Close the shared Playwright browser now that all enrichment is done.
+        self._close_shared_browser()
 
         scrape_elapsed = time.monotonic() - scrape_start
         self.last_retrieval_meta = {

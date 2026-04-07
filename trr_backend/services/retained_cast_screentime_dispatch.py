@@ -1,16 +1,21 @@
-"""Transitional dispatch boundary for retained cast-screentime flows."""
+"""Retained dispatch boundary for backend-owned cast-screentime flows."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from trr_backend.clients import screenalytics_cast_screentime
+from trr_backend.services import retained_cast_screentime_runtime
 
-RetainedCastScreentimeDispatchError = screenalytics_cast_screentime.ScreenalyticsCastScreentimeClientError
+
+class RetainedCastScreentimeDispatchError(RuntimeError):
+    """Raised when retained screentime dispatch cannot start or fulfill work."""
 
 
 def start_run(run_id: str) -> dict[str, Any]:
-    return screenalytics_cast_screentime.start_run(run_id)
+    try:
+        return retained_cast_screentime_runtime.enqueue_run(run_id)
+    except Exception as exc:  # noqa: BLE001
+        raise RetainedCastScreentimeDispatchError(str(exc)) from exc
 
 
 def generate_segment_clip(
@@ -21,10 +26,13 @@ def generate_segment_clip(
     duration_seconds: int | None = None,
     ttl_days: int = 7,
 ) -> dict[str, Any]:
-    return screenalytics_cast_screentime.generate_segment_clip(
-        run_id,
-        segment_key=segment_key,
-        mode=mode,
-        duration_seconds=duration_seconds,
-        ttl_days=ttl_days,
-    )
+    try:
+        return retained_cast_screentime_runtime.generate_segment_clip(
+            run_id,
+            segment_key=segment_key,
+            mode=mode,
+            duration_seconds=duration_seconds,
+            ttl_days=ttl_days,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RetainedCastScreentimeDispatchError(str(exc)) from exc

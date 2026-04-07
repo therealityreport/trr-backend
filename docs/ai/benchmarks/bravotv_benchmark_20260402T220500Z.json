@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-04-02T22:05:00.350466+00:00",
+  "date_start": "2026-03-26T22:05:00.350466+00:00",
+  "date_end": "2026-04-02T22:05:00.350466+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "tiktok": {
+      "status": "ok",
+      "posts": 0,
+      "duration": "1.1s",
+      "sample": [],
+      "meta": {
+        "retrieval_mode": "none",
+        "api_fail_reason": "non_json_response",
+        "api_preflight_fail_reason": "non_json_response",
+        "api_pagination_blocked_reason": "non_json_response",
+        "pages_scanned": 0,
+        "videos_scanned": 0,
+        "first_page_count": 0,
+        "total_posts": 10200,
+        "profile_snapshot": {
+          "username": "bravotv",
+          "sec_uid": "MS4wLjABAAAAPCEnSMIAOyPpQ03mDa-LwpXdbscJ_5ef9QnEPDeatI24o-PxdOhGcx7BLeglzQIA",
+          "display_name": "Bravo",
+          "bio": "Activating all-new seasons.\n\ud83d\udc1aReal Housewives of Rhode Island 4/2\n\ud83c\udf51Real Housewives of Atlanta 4/5",
+          "avatar_url": "https://p16-common-sign.tiktokcdn-us.com/tos-useast8-avt-0068-tx2/2319d7ccb1187799787e05a95b97eb03~tplv-tiktokx-cropcenter:1080:1080.jpeg?dr=9640&refresh_token=1311ecb2&x-expires=1775340000&x-signature=l1g6o8N9clyUbK%2FCJRNbVHyecCE%3D&t=4d5b0474&ps=13740610&shp=a5d48078&shcp=81f88b70&idc=useast5",
+          "profile_url": "https://www.tiktok.com/@bravotv",
+          "follower_count": 1500000,
+          "following_count": 305,
+          "total_posts": 10200,
+          "is_verified": true
+        }
+      }
+    }
+  }
+}

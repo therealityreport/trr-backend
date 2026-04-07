@@ -174,16 +174,6 @@
       "definition": "CREATE UNIQUE INDEX media_links_one_primary_per_entity_kind ON core.media_links USING btree (entity_type, entity_id, kind) WHERE (is_primary = true)"
     },
     {
-      "name": "media_links_one_primary_uq",
-      "columns": [
-        "entity_type",
-        "entity_id",
-        "kind) WHERE (is_primary = true"
-      ],
-      "unique": true,
-      "definition": "CREATE UNIQUE INDEX media_links_one_primary_uq ON core.media_links USING btree (entity_type, entity_id, kind) WHERE (is_primary = true)"
-    },
-    {
       "name": "media_links_pkey",
       "columns": [
         "id"

@@ -109,6 +109,14 @@
   "unique_constraints": [],
   "indexes": [
     {
+      "name": "core_episode_source_history_source_id_idx",
+      "columns": [
+        "source_id"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_episode_source_history_source_id_idx ON core.episode_source_history USING btree (source_id)"
+    },
+    {
       "name": "episode_source_history_lookup_idx",
       "columns": [
         "episode_id",

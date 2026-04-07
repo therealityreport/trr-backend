@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-04-02T22:10:10.877363+00:00",
+  "date_start": "2026-03-26T22:10:10.877363+00:00",
+  "date_end": "2026-04-02T22:10:10.877363+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "facebook": {
+      "status": "ok",
+      "posts": 27,
+      "duration": "302.8s",
+      "sample": [
+        {
+          "id": "1318021296857714",
+          "type": "photo",
+          "caption": "Strut, don't walk! The limited-edition Bravo x Reebok collab is available now, w",
+          "likes": 2,
+          "views": 0,
+          "posted_at": 1775161870,
+          "url": "https://www.facebook.com/photo/?fbid=1318021033524407"
+        },
+        {
+          "id": "1317704000222777",
+          "type": "photo",
+          "caption": "",
+          "likes": 1,
+          "views": 0,
+          "posted_at": 1775131231,
+          "url": "https://www.facebook.com/photo/?fbid=1317703936889450"
+        },
+        {
+          "id": "1317062910286886",
+          "type": "photo",
+          "caption": "The captain weighed in on Ellie and Chef Ben's galley argument during the #Below",
+          "likes": 76,
+          "views": 0,
+          "posted_at": 1775062836,
+          "url": "https://www.facebook.com/photo/?fbid=1317062886953555"
+        }
+      ],
+      "meta": {
+        "source": "scroll_and_static",
+        "pages_scanned": 1,
+        "posts_checked": 44,
+        "matched_posts": 27,
+        "cookies_supplied": true,
+        "surface_fetch_failures": 0,
+        "candidate_fetch_failures": 0,
+        "scrape_elapsed_seconds": 302.8,
+        "timed_out": true
+      }
+    }
+  }
+}
