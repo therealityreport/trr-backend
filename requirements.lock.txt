@@ -307,6 +307,7 @@ oauthlib==3.3.1
     # via requests-oauthlib
 opencv-python==4.13.0.92
     # via
+    #   -r requirements.in
     #   deepface
     #   retina-face
 opt-einsum==3.4.0
