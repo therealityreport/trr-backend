@@ -2514,7 +2514,6 @@ def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> No
     with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["bravo"]}):
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
             fetch_all.side_effect = [
-                [],
                 [
                     {
                         "id": person_id,
@@ -2526,18 +2525,23 @@ def test_discover_people_links_generates_imdb_tmdb_links_from_person_ids() -> No
                         "cast_tmdb_wikidata_id": "Q123",
                     }
                 ],
+                [],
             ]
             with patch(
-                "api.routers.admin_show_links._validated_or_carried_person_source_url",
-                side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
+                "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                return_value=([{"person_id": person_id}], 1),
             ):
                 with patch(
-                    "api.routers.admin_show_links._validated_person_knowledge_url",
-                    side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                    "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                    side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
                 ):
-                    with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                        with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
-                            links = _discover_people_links(show_id)
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                    ):
+                        with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                            with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                                links = _discover_people_links(show_id)
 
     imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
     tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]
@@ -2582,16 +2586,20 @@ def test_discover_people_links_can_target_single_person() -> None:
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
             fetch_all.side_effect = lambda query, params: person_rows if "FROM core.v_show_cast sc" in query else []
             with patch(
-                "api.routers.admin_show_links._validated_or_carried_person_source_url",
-                side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
+                "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                return_value=([{"person_id": selected_person_id}], 1),
             ):
                 with patch(
-                    "api.routers.admin_show_links._validated_person_knowledge_url",
-                    side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                    "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                    side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
                 ):
-                    with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                        with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
-                            links = _discover_people_links(show_id, person_ids={selected_person_id})
+                    with patch(
+                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        side_effect=lambda url, kind, expected_name=None, **kwargs: url,
+                    ):
+                        with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                            with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
+                                links = _discover_people_links(show_id, person_ids={selected_person_id})
 
     assert links
     assert {str(link.get("entity_id")) for link in links} == {selected_person_id}
@@ -2629,25 +2637,29 @@ def test_discover_people_links_emits_social_links_from_cast_tmdb_fields() -> Non
                     [],
                 ]
                 with patch(
-                    "api.routers.admin_show_links._validated_or_carried_person_source_url",
-                    side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], 1),
                 ):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                            url if kind == "wikipedia" else None
-                        ),
+                        "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                        side_effect=lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url,
                     ):
                         with patch(
-                            "api.routers.admin_show_links._validated_person_social_url",
-                            side_effect=lambda url, kind: url,
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind == "wikipedia" else None
+                            ),
                         ):
-                            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                                with patch(
-                                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
-                                    return_value=[],
-                                ):
-                                    links = _discover_people_links(show_id)
+                            with patch(
+                                "api.routers.admin_show_links._validated_person_social_url",
+                                side_effect=lambda url, kind: url,
+                            ):
+                                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                                    with patch(
+                                        "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                        return_value=[],
+                                    ):
+                                        links = _discover_people_links(show_id)
 
     social_links = [link for link in links if link.get("link_group") == "social"]
     social_kinds = {str(link.get("link_kind") or "") for link in social_links}
@@ -2688,49 +2700,53 @@ def test_discover_people_links_fetches_tmdb_external_ids_when_missing_social_fie
                     [],
                 ]
                 with patch(
-                    "api.routers.admin_show_links._fetch_tmdb_external_ids_payload",
-                    return_value={
-                        "imdb_id": "nm0001086",
-                        "wikidata_id": "Q316629",
-                        "freebase_id": "",
-                        "freebase_mid": "",
-                        "facebook_id": "",
-                        "instagram_id": "alancummingreally",
-                        "tiktok_id": "",
-                        "twitter_id": "alan_cumming",
-                        "youtube_id": "",
-                    },
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], 1),
                 ):
-                    with patch("api.routers.admin_show_links._persist_tmdb_external_ids_for_person") as persist_tmdb:
-                        with patch(
-                            "api.routers.admin_show_links._validated_or_carried_person_source_url",
-                            side_effect=(
-                                lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url
-                            ),
-                        ):
+                    with patch(
+                        "api.routers.admin_show_links._fetch_tmdb_external_ids_payload",
+                        return_value={
+                            "imdb_id": "nm0001086",
+                            "wikidata_id": "Q316629",
+                            "freebase_id": "",
+                            "freebase_mid": "",
+                            "facebook_id": "",
+                            "instagram_id": "alancummingreally",
+                            "tiktok_id": "",
+                            "twitter_id": "alan_cumming",
+                            "youtube_id": "",
+                        },
+                    ):
+                        with patch("api.routers.admin_show_links._persist_tmdb_external_ids_for_person") as persist_tmdb:
                             with patch(
-                                "api.routers.admin_show_links._validated_person_knowledge_url",
-                                side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                                    url if kind == "wikipedia" else None
+                                "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                                side_effect=(
+                                    lambda person_id, candidate_url, kind, expected_name=None, **kwargs: candidate_url
                                 ),
                             ):
                                 with patch(
-                                    "api.routers.admin_show_links._validated_person_social_url",
-                                    side_effect=lambda url, kind: url,
+                                    "api.routers.admin_show_links._validated_person_knowledge_url",
+                                    side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                        url if kind == "wikipedia" else None
+                                    ),
                                 ):
                                     with patch(
-                                        "api.routers.admin_show_links._fetch_wikidata_summary",
-                                        return_value=(None, True),
+                                        "api.routers.admin_show_links._validated_person_social_url",
+                                        side_effect=lambda url, kind: url,
                                     ):
                                         with patch(
-                                            "api.routers.admin_show_links.search_real_housewives_wiki",
-                                            return_value=None,
+                                            "api.routers.admin_show_links._fetch_wikidata_summary",
+                                            return_value=(None, True),
                                         ):
                                             with patch(
-                                                "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
-                                                return_value=[],
+                                                "api.routers.admin_show_links.search_real_housewives_wiki",
+                                                return_value=None,
                                             ):
-                                                links = _discover_people_links(show_id)
+                                                with patch(
+                                                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                                    return_value=[],
+                                                ):
+                                                    links = _discover_people_links(show_id)
 
     persist_tmdb.assert_called_once_with(
         person_id,
@@ -2771,10 +2787,9 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
     show_id = str(uuid4())
     person_id = str(uuid4())
 
-    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["bravo"]}):
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None}):
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
             fetch_all.side_effect = [
-                [],
                 [
                     {
                         "id": person_id,
@@ -2786,22 +2801,27 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
                         "cast_tmdb_wikidata_id": None,
                     }
                 ],
+                [],
             ]
-            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                with patch(
-                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
-                    return_value=[
-                        "https://teen-wolf.fandom.com/wiki/Lisa_Barlow",
-                        "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
-                    ],
-                ):
+            with patch(
+                "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                return_value=([{"person_id": person_id}], 1),
+            ):
+                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                            url if kind == "fandom" and "real-housewives.fandom.com" in url else None
-                        ),
+                        "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                        return_value=[
+                            "https://teen-wolf.fandom.com/wiki/Lisa_Barlow",
+                            "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+                        ],
                     ):
-                        links = _discover_people_links(show_id)
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind == "fandom" and "real-housewives.fandom.com" in url else None
+                            ),
+                        ):
+                            links = _discover_people_links(show_id)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 4
@@ -2819,10 +2839,9 @@ def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_
     show_id = str(uuid4())
     person_id = str(uuid4())
 
-    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"networks": ["bravo"]}):
+    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None}):
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
             fetch_all.side_effect = [
-                [],
                 [
                     {
                         "id": person_id,
@@ -2834,20 +2853,25 @@ def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_
                         "cast_tmdb_wikidata_id": None,
                     }
                 ],
+                [],
             ]
-            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                with patch(
-                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
-                    return_value=[
-                        "https://real-housewives.fandom.com/wiki/Lisa",
-                        "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
-                    ],
-                ):
+            with patch(
+                "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                return_value=([{"person_id": person_id}], 1),
+            ):
+                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, **kwargs: url,
+                        "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                        return_value=[
+                            "https://real-housewives.fandom.com/wiki/Lisa",
+                            "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+                        ],
                     ):
-                        links = _discover_people_links(show_id)
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, **kwargs: url,
+                        ):
+                            links = _discover_people_links(show_id)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 5
@@ -2899,14 +2923,18 @@ def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_doma
                     return []
 
                 with patch(
-                    "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
-                    side_effect=_search,
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], 1),
                 ):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                        "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                        side_effect=_search,
                     ):
-                        links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                        ):
+                            links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 2
@@ -2945,12 +2973,16 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
                     ],
                     [],
                 ]
-                with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
-                    with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
-                    ):
-                        links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
+                with patch(
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], 1),
+                ):
+                    with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                        ):
+                            links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 2
@@ -3462,53 +3494,58 @@ def test_discover_people_links_uses_show_wikidata_cast_claims_when_missing_on_pe
                             "cast_tmdb_wikidata_id": None,
                         }
                     ],
+                    [],
                 ]
                 with patch(
-                    "api.routers.admin_show_links._fetch_wikidata_summary",
-                    side_effect=[
-                        (
-                            {
-                                "cast_item_ids": [cast_wikidata_id],
-                                "season_item_ids": [],
-                                "label": "The Traitors",
-                                "enwiki_title": "The Traitors (American TV series)",
-                                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
-                            },
-                            False,
-                        ),
-                        (
-                            {
-                                "cast_item_ids": [],
-                                "season_item_ids": [],
-                                "label": "Arie Luyendyk Jr.",
-                                "enwiki_title": "Arie Luyendyk Jr.",
-                                "enwiki_url": "https://en.wikipedia.org/wiki/Arie_Luyendyk_Jr.",
-                                "imdb_id": "nm1741766",
-                                "tmdb_person_id": "2543898",
-                            },
-                            False,
-                        ),
-                        (
-                            {
-                                "cast_item_ids": [],
-                                "season_item_ids": [],
-                                "label": "Arie Luyendyk Jr.",
-                                "enwiki_title": "Arie Luyendyk Jr.",
-                                "enwiki_url": "https://en.wikipedia.org/wiki/Arie_Luyendyk_Jr.",
-                                "imdb_id": "nm1741766",
-                                "tmdb_person_id": "2543898",
-                            },
-                            False,
-                        ),
-                    ],
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], 1),
                 ):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                            url if kind in {"wikidata", "wikipedia"} else None
-                        ),
+                        "api.routers.admin_show_links._fetch_wikidata_summary",
+                        side_effect=[
+                            (
+                                {
+                                    "cast_item_ids": [cast_wikidata_id],
+                                    "season_item_ids": [],
+                                    "label": "The Traitors",
+                                    "enwiki_title": "The Traitors (American TV series)",
+                                    "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                                },
+                                False,
+                            ),
+                            (
+                                {
+                                    "cast_item_ids": [],
+                                    "season_item_ids": [],
+                                    "label": "Arie Luyendyk Jr.",
+                                    "enwiki_title": "Arie Luyendyk Jr.",
+                                    "enwiki_url": "https://en.wikipedia.org/wiki/Arie_Luyendyk_Jr.",
+                                    "imdb_id": "nm1741766",
+                                    "tmdb_person_id": "2543898",
+                                },
+                                False,
+                            ),
+                            (
+                                {
+                                    "cast_item_ids": [],
+                                    "season_item_ids": [],
+                                    "label": "Arie Luyendyk Jr.",
+                                    "enwiki_title": "Arie Luyendyk Jr.",
+                                    "enwiki_url": "https://en.wikipedia.org/wiki/Arie_Luyendyk_Jr.",
+                                    "imdb_id": "nm1741766",
+                                    "tmdb_person_id": "2543898",
+                                },
+                                False,
+                            ),
+                        ],
                     ):
-                        links = _discover_people_links(show_id)
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind in {"wikidata", "wikipedia"} else None
+                            ),
+                        ):
+                            links = _discover_people_links(show_id)
 
     wikidata_links = [link for link in links if link.get("link_kind") == "wikidata"]
     assert len(wikidata_links) == 1
@@ -3543,61 +3580,65 @@ def test_discover_people_links_uses_season_wikidata_cast_claims_when_show_claims
                     [],
                 ]
                 with patch(
-                    "api.routers.admin_show_links._fetch_wikidata_summary",
-                    side_effect=[
-                        (
-                            {
-                                "cast_item_ids": [],
-                                "season_item_ids": [season_wikidata_id],
-                                "label": "The Traitors",
-                                "enwiki_title": "The Traitors (American TV series)",
-                                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
-                            },
-                            False,
-                        ),
-                        (
-                            {
-                                "cast_item_ids": [cast_wikidata_id],
-                                "season_item_ids": [],
-                                "label": "The Traitors season 2",
-                                "enwiki_title": "The Traitors (American TV series) season 2",
-                                "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_2",
-                            },
-                            False,
-                        ),
-                        (
-                            {
-                                "cast_item_ids": [],
-                                "season_item_ids": [],
-                                "label": "Alan Cumming",
-                                "enwiki_title": "Alan Cumming",
-                                "enwiki_url": "https://en.wikipedia.org/wiki/Alan_Cumming",
-                                "imdb_id": "nm0001086",
-                                "tmdb_person_id": "9346",
-                            },
-                            False,
-                        ),
-                        (
-                            {
-                                "cast_item_ids": [],
-                                "season_item_ids": [],
-                                "label": "Alan Cumming",
-                                "enwiki_title": "Alan Cumming",
-                                "enwiki_url": "https://en.wikipedia.org/wiki/Alan_Cumming",
-                                "imdb_id": "nm0001086",
-                                "tmdb_person_id": "9346",
-                            },
-                            False,
-                        ),
-                    ],
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], 1),
                 ):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                            url if kind in {"wikidata", "wikipedia"} else None
-                        ),
+                        "api.routers.admin_show_links._fetch_wikidata_summary",
+                        side_effect=[
+                            (
+                                {
+                                    "cast_item_ids": [],
+                                    "season_item_ids": [season_wikidata_id],
+                                    "label": "The Traitors",
+                                    "enwiki_title": "The Traitors (American TV series)",
+                                    "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)",
+                                },
+                                False,
+                            ),
+                            (
+                                {
+                                    "cast_item_ids": [cast_wikidata_id],
+                                    "season_item_ids": [],
+                                    "label": "The Traitors season 2",
+                                    "enwiki_title": "The Traitors (American TV series) season 2",
+                                    "enwiki_url": "https://en.wikipedia.org/wiki/The_Traitors_(American_TV_series)_season_2",
+                                },
+                                False,
+                            ),
+                            (
+                                {
+                                    "cast_item_ids": [],
+                                    "season_item_ids": [],
+                                    "label": "Alan Cumming",
+                                    "enwiki_title": "Alan Cumming",
+                                    "enwiki_url": "https://en.wikipedia.org/wiki/Alan_Cumming",
+                                    "imdb_id": "nm0001086",
+                                    "tmdb_person_id": "9346",
+                                },
+                                False,
+                            ),
+                            (
+                                {
+                                    "cast_item_ids": [],
+                                    "season_item_ids": [],
+                                    "label": "Alan Cumming",
+                                    "enwiki_title": "Alan Cumming",
+                                    "enwiki_url": "https://en.wikipedia.org/wiki/Alan_Cumming",
+                                    "imdb_id": "nm0001086",
+                                    "tmdb_person_id": "9346",
+                                },
+                                False,
+                            ),
+                        ],
                     ):
-                        links = _discover_people_links(show_id)
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind in {"wikidata", "wikipedia"} else None
+                            ),
+                        ):
+                            links = _discover_people_links(show_id)
 
     wikidata_links = [link for link in links if link.get("link_kind") == "wikidata"]
     assert len(wikidata_links) == 1
@@ -4142,20 +4183,25 @@ def test_discover_people_links_skips_imdb_and_tmdb_when_validation_fails() -> No
                         "cast_tmdb_wikidata_id": None,
                     }
                 ],
+                [],
             ]
             with patch(
-                "api.routers.admin_show_links._validate_person_knowledge_url",
-                return_value=(None, "invalid"),
+                "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                return_value=([{"person_id": person_id}], 1),
             ):
                 with patch(
-                    "api.routers.admin_show_links._load_preapproved_person_source_url",
-                    return_value=None,
+                    "api.routers.admin_show_links._validate_person_knowledge_url",
+                    return_value=(None, "invalid"),
                 ):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                        "api.routers.admin_show_links._load_preapproved_person_source_url",
                         return_value=None,
                     ):
-                        links = _discover_people_links(show_id)
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            return_value=None,
+                        ):
+                            links = _discover_people_links(show_id)
 
     assert not any(link.get("link_kind") == "imdb" for link in links)
     assert not any(link.get("link_kind") == "tmdb" for link in links)
@@ -4179,20 +4225,25 @@ def test_discover_people_links_carries_forward_imdb_when_validation_fetch_errors
                         "cast_tmdb_wikidata_id": None,
                     }
                 ],
+                [],
             ]
             with patch(
-                "api.routers.admin_show_links._validate_person_knowledge_url",
-                return_value=(None, "fetch_error"),
+                "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                return_value=([{"person_id": person_id}], 1),
             ):
                 with patch(
-                    "api.routers.admin_show_links._load_preapproved_person_source_url",
-                    return_value="https://www.imdb.com/name/nm0169212/",
+                    "api.routers.admin_show_links._validate_person_knowledge_url",
+                    return_value=(None, "fetch_error"),
                 ):
                     with patch(
-                        "api.routers.admin_show_links._validated_person_knowledge_url",
-                        return_value=None,
+                        "api.routers.admin_show_links._load_preapproved_person_source_url",
+                        return_value="https://www.imdb.com/name/nm0169212/",
                     ):
-                        links = _discover_people_links(show_id)
+                        with patch(
+                            "api.routers.admin_show_links._validated_person_knowledge_url",
+                            return_value=None,
+                        ):
+                            links = _discover_people_links(show_id)
 
     imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
     assert len(imdb_links) == 1
@@ -4826,36 +4877,40 @@ def test_discover_people_links_derives_imdb_and_tmdb_from_wikidata_summary() -> 
                     [],
                 ]
                 with patch(
-                    "api.routers.admin_show_links._fetch_wikidata_summary",
-                    return_value=(
-                        {
-                            "item_id": "Q316629",
-                            "imdb_id": "nm0001086",
-                            "tmdb_person_id": "5190",
-                            "label": "Alan Cumming",
-                            "enwiki_title": "Alan Cumming",
-                        },
-                        False,
-                    ),
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], 1),
                 ):
                     with patch(
-                        "api.routers.admin_show_links._validated_or_carried_person_source_url",
-                        side_effect=lambda person_id, candidate_url, kind, expected_name, fandom_allowlist=None: (
-                            candidate_url
+                        "api.routers.admin_show_links._fetch_wikidata_summary",
+                        return_value=(
+                            {
+                                "item_id": "Q316629",
+                                "imdb_id": "nm0001086",
+                                "tmdb_person_id": "5190",
+                                "label": "Alan Cumming",
+                                "enwiki_title": "Alan Cumming",
+                            },
+                            False,
                         ),
                     ):
                         with patch(
-                            "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                                url if kind in {"wikidata", "wikipedia"} else None
+                            "api.routers.admin_show_links._validated_or_carried_person_source_url",
+                            side_effect=lambda person_id, candidate_url, kind, expected_name, fandom_allowlist=None: (
+                                candidate_url
                             ),
                         ):
-                            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
-                                with patch(
-                                    "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
-                                    return_value=[],
-                                ):
-                                    links = _discover_people_links(show_id)
+                            with patch(
+                                "api.routers.admin_show_links._validated_person_knowledge_url",
+                                side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                    url if kind in {"wikidata", "wikipedia"} else None
+                                ),
+                            ):
+                                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                                    with patch(
+                                        "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                        return_value=[],
+                                    ):
+                                        links = _discover_people_links(show_id)
 
     imdb_links = [link for link in links if link.get("link_kind") == "imdb"]
     tmdb_links = [link for link in links if link.get("link_kind") == "tmdb"]

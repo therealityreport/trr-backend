@@ -1660,6 +1660,7 @@ def test_get_season_shared_status_route(client: TestClient, monkeypatch: pytest.
 
 def test_ingest_allows_zero_comments_limit(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
 
@@ -2028,6 +2029,7 @@ def test_ingest_maps_structured_validation_errors_to_400(
     from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
@@ -3549,6 +3551,7 @@ def test_cancel_ingest_run_endpoint(client: TestClient, monkeypatch: pytest.Monk
 
 def test_ingest_returns_400_when_queue_schema_missing(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
@@ -3575,6 +3578,7 @@ def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
     from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
 
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {"source_scope": "bravo", "platforms": ["instagram"]}
@@ -3867,6 +3871,7 @@ def test_ingest_inline_background_failure_runs_recovery_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     season_id = str(uuid4())
     payload = {
@@ -4104,7 +4109,7 @@ def test_ingest_with_queue_enabled_and_worker_present_succeeds(
     assert response.json()["execution_mode_canonical"] == "queued"
     assert response.json()["execution_mode_legacy"] == "queue"
     assert response.json()["execution_mode_deprecation"]["field"] == "execution_mode_legacy"
-    worker_guard.assert_called_once_with()
+    worker_guard.assert_called_once_with(required_execution_backend="modal")
 
 
 def test_get_worker_health_endpoint_returns_health_payload(
@@ -4815,6 +4820,7 @@ def test_get_health_dot_endpoint_returns_lightweight_payload(
         "workers": {
             "healthy": True,
             "healthy_workers": 2,
+            "shared_account_backfill_readiness": None,
         },
         "queue": {
             "by_status": {
