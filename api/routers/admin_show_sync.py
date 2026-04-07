@@ -4010,7 +4010,12 @@ def refresh_show_stream(
     }
 
     # If remote mode + Modal supported, use parallel orchestrator
-    if is_remote_job_plane_enabled() and supports_admin_operation("admin_show_refresh"):
+    # Guard against re-entrant calls from the local fallback producer path.
+    if (
+        is_remote_job_plane_enabled()
+        and supports_admin_operation("admin_show_refresh")
+        and not _is_internal_raw_stream_request(request)
+    ):
         client_session_id = str(request.headers.get("x-trr-tab-session-id") or "").strip() or None
         client_workflow_id = str(request.headers.get("x-trr-flow-key") or "").strip() or None
         orchestrator = ShowRefreshOrchestrator(

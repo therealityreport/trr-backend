@@ -834,9 +834,10 @@ async def parent_operation_stream_generator(
             )
             payload["event_id"] = event_id
             event_type = str(event.get("event_type") or "message")
-            yield _sse_chunk(event_type, payload)
-            if event_id > next_event_id:
-                next_event_id = event_id
+            if event_id > 0:
+                yield _sse_chunk(event_type, payload)
+                if event_id > next_event_id:
+                    next_event_id = event_id
 
         # Check if parent is terminal (all children done)
         parent_status = await run_in_threadpool(
@@ -863,7 +864,10 @@ async def parent_operation_stream_generator(
                 )
                 payload["event_id"] = event_id
                 event_type = str(event.get("event_type") or "message")
-                yield _sse_chunk(event_type, payload)
+                if event_id > 0:
+                    yield _sse_chunk(event_type, payload)
+                    if event_id > next_event_id:
+                        next_event_id = event_id
 
             # Final parent-level terminal event
             yield _sse_chunk(

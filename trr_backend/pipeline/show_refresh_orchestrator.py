@@ -66,7 +66,7 @@ class ShowRefreshOrchestrator:
     def __init__(
         self,
         *,
-        show_id: int,
+        show_id: int | str,
         targets: list[str],
         initiated_by: str | None = None,
         request_payload: dict[str, Any] | None = None,
