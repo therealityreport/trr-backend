@@ -315,8 +315,10 @@ def _run_operation_worker(
                     error_payload=payload,
                     progress_payload=payload,
                 )
+                finalize_sub_operation(operation_id, "cancelled")  # no-op if not a sub-operation
             else:
                 admin_operations.update_operation_status(operation_id, status="completed")
+                finalize_sub_operation(operation_id, "completed")  # no-op if not a sub-operation
     except Exception as exc:  # noqa: BLE001
         logger.exception("Admin operation worker failed: operation_id=%s", operation_id)
         payload = {
@@ -329,6 +331,7 @@ def _run_operation_worker(
             _append_event_and_update(operation_id, event_type="error", payload=payload, request_id=request_id)
         finally:
             admin_operations.mark_operation_failed(operation_id, error_payload=payload)
+            finalize_sub_operation(operation_id, "failed")  # no-op if not a sub-operation
     finally:
         with _FUTURES_LOCK:
             _FUTURES.pop(operation_id, None)
@@ -563,6 +566,7 @@ def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
             error_payload=payload,
             progress_payload=payload,
         )
+        finalize_sub_operation(operation_id, "failed")  # no-op if not a sub-operation
         admin_operations.release_operation_claim(operation_id, claim_token=claim_token)
         return
 
@@ -901,6 +905,53 @@ def operation_stream_response_for_parent(
         media_type="text/event-stream",
         headers=_stream_headers(),
     )
+
+
+def finalize_sub_operation(operation_id: str, status: str) -> str | None:
+    """Called when a sub-operation reaches terminal status.
+
+    Updates the sub-operation status, recomputes the parent's aggregate,
+    and emits a parent-level complete/error event if all children are done.
+
+    Returns the parent's new status, or None if not a sub-operation.
+    """
+    op = admin_operations.get_operation(operation_id)
+    if not op:
+        return None
+
+    parent_id = op.get("parent_operation_id")
+    if not parent_id:
+        return None
+
+    # Update this sub-operation's status
+    admin_operations.update_operation_status(operation_id, status)
+
+    # Recompute parent
+    parent_status = admin_operations.aggregate_parent_status(parent_id)
+    if parent_status in ("completed", "failed", "cancelled"):
+        admin_operations.update_operation_status(parent_id, parent_status)
+
+        # Emit parent-level terminal event
+        children = admin_operations.get_sub_operations(parent_id)
+        summary = {
+            c.get("refresh_target", "unknown"): c.get("status", "unknown")
+            for c in children
+        }
+        admin_operations.append_operation_event(
+            parent_id,
+            event_type="complete" if parent_status == "completed" else "error",
+            event_payload={
+                "operation_id": parent_id,
+                "status": parent_status,
+                "sub_operation_summary": summary,
+            },
+        )
+        logger.info(
+            "Parent operation finalized: parent_id=%s status=%s summary=%s",
+            parent_id, parent_status, summary,
+        )
+
+    return parent_status
 
 
 def wait_for_sub_operation_dependencies(
