@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-04-02T22:07:15.624190+00:00",
+  "date_start": "2026-03-26T22:07:15.624190+00:00",
+  "date_end": "2026-04-02T22:07:15.624190+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "facebook": {
+      "status": "ok",
+      "posts": 10,
+      "duration": "146.2s",
+      "sample": [
+        {
+          "id": "1318065636853280",
+          "type": "reel",
+          "caption": "Descriptions by Dolores. #RHORI premieres TONIGHT before moving to SUNDAYS!",
+          "likes": 7,
+          "views": 0,
+          "posted_at": 1775167247,
+          "url": "https://www.facebook.com/reel/3855296564767198/"
+        },
+        {
+          "id": "1318036593522851",
+          "type": "reel",
+          "caption": "All of the above. #TheValley is all-new every WEDNESDAY!",
+          "likes": 46,
+          "views": 19000,
+          "posted_at": 1775163646,
+          "url": "https://www.facebook.com/reel/1464586855162718/"
+        },
+        {
+          "id": "1318006150192562",
+          "type": "reel",
+          "caption": "BFF energy only. Shamea and Kelli return to #RHOA SUNDAY!",
+          "likes": 257,
+          "views": 25000,
+          "posted_at": 1775160044,
+          "url": "https://www.facebook.com/reel/1673157377360170/"
+        }
+      ],
+      "meta": {
+        "source": "public_meta_fallback",
+        "pages_scanned": 2,
+        "posts_checked": 21,
+        "matched_posts": 10,
+        "cookies_supplied": true,
+        "surface_fetch_failures": 1,
+        "candidate_fetch_failures": 0,
+        "scrape_elapsed_seconds": 144.9,
+        "timed_out": false
+      }
+    }
+  }
+}

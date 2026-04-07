@@ -19,9 +19,18 @@ from pydantic import BaseModel, Field
 
 from api.auth import CastScreentimeAdminUser
 from api.screenalytics_auth import require_screenalytics_service_token
-from trr_backend.media.s3_mirror import build_public_object_url, get_cdn_base_url, get_s3_bucket, get_s3_client
+from trr_backend.media.s3_mirror import (
+    build_public_object_url,
+    get_cdn_base_url,
+    get_s3_bucket,
+    get_s3_client,
+)
 from trr_backend.repositories import cast_screentime
-from trr_backend.services import retained_cast_screentime_dispatch
+from trr_backend.services import (
+    cast_screentime_artifacts,
+    retained_cast_screentime_dispatch,
+    retained_cast_screentime_review,
+)
 from trr_backend.socials.youtube import YouTubeScraper, resolve_youtube_media
 
 router = APIRouter(tags=["admin-cast-screentime"])
@@ -279,6 +288,12 @@ def _annotate_video_asset_row(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {}
     payload = dict(row)
+    source_json = payload.get("source_json")
+    payload["source_json"] = source_json if isinstance(source_json, dict) else {}
+    metadata = payload.get("metadata")
+    payload["metadata"] = metadata if isinstance(metadata, dict) else {}
+    legacy_screenalytics_video_asset_id = str(payload.get("legacy_screenalytics_video_asset_id") or "").strip()
+    payload["legacy_screenalytics_video_asset_id"] = legacy_screenalytics_video_asset_id or None
     show_id = str(payload.get("show_id") or "").strip() or None
     season_id = str(payload.get("season_id") or "").strip() or None
     episode_id = str(payload.get("episode_id") or "").strip() or None
@@ -291,9 +306,12 @@ def _annotate_video_asset_row(row: dict[str, Any] | None) -> dict[str, Any]:
     payload["owner_scope"] = _derive_owner_scope(show_id, season_id, episode_id)
     payload["owner_id"] = episode_id or season_id or show_id
     payload.update(media)
+    payload["publication_mode"] = retained_cast_screentime_review.publication_mode_for_media_type(media["media_type"])
+    payload["is_canonical_publication"] = retained_cast_screentime_review.is_canonical_publication(media["media_type"])
+    payload["supports_reference_publication"] = True
     payload["is_publishable"] = media["media_type"] == "episode"
     if media["media_type"] != "episode":
-        payload["publish_block_reason"] = "non_episode_assets_are_not_publishable"
+        payload["publish_block_reason"] = "non_episode_assets_are_not_canonical_publications"
     else:
         payload["publish_block_reason"] = None
     return payload
@@ -303,6 +321,13 @@ def _annotate_run_row(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {}
     return _annotate_video_asset_row(row)
+
+
+def _resolve_video_asset_or_404(video_asset_id: str) -> dict[str, Any]:
+    video_asset = cast_screentime.resolve_video_asset(video_asset_id)
+    if not video_asset:
+        raise HTTPException(status_code=404, detail="Video asset not found")
+    return video_asset
 
 
 def _read_run_artifact_payload(run_id: str, artifact_key: str) -> tuple[dict[str, Any], Any]:
@@ -325,8 +350,8 @@ def _read_run_artifact_payload(run_id: str, artifact_key: str) -> tuple[dict[str
 
 
 def _build_publish_metrics_snapshot(run: dict[str, Any]) -> dict[str, Any]:
+    review_summary = retained_cast_screentime_review.build_review_summary(run)
     run_id = str(run["id"])
-    leaderboard = cast_screentime.list_leaderboard(run_id)
     return {
         "run_id": run_id,
         "video_asset_id": str(run["video_asset_id"]),
@@ -334,7 +359,13 @@ def _build_publish_metrics_snapshot(run: dict[str, Any]) -> dict[str, Any]:
         "season_id": str(run.get("season_id") or "") or None,
         "episode_id": str(run.get("episode_id") or "") or None,
         "effective_runtime_seconds": run.get("effective_runtime_seconds"),
-        "leaderboard": leaderboard,
+        "publication_mode": review_summary["publication_mode"],
+        "is_canonical_publication": review_summary["is_canonical_publication"],
+        "leaderboard": review_summary["reviewed_leaderboard"],
+        "raw_leaderboard": review_summary["raw_leaderboard"],
+        "excluded_section_count": review_summary["excluded_section_count"],
+        "excluded_overlap_ms": review_summary["excluded_overlap_ms"],
+        "decision_counts": review_summary["decision_counts"],
     }
 
 
@@ -426,6 +457,13 @@ def _artifact_payload_or_default(run_id: str, artifact_key: str, *, default: Any
             return default
         raise
     return payload
+
+
+def _artifact_default_payload(artifact_key: str) -> Any:
+    artifact = cast_screentime_artifacts.ARTIFACT_REGISTRY.get(artifact_key)
+    if artifact is None:
+        return []
+    return artifact.default_payload
 
 
 def _temp_upload_key(upload_session_id: str, filename: str) -> str:
@@ -1246,10 +1284,7 @@ def complete_upload_session(
 
 @router.get("/admin/cast-screentime/video-assets/{video_asset_id}")
 def get_video_asset(video_asset_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
-    video_asset = cast_screentime.get_video_asset(str(video_asset_id))
-    if not video_asset:
-        raise HTTPException(status_code=404, detail="Video asset not found")
-    return _annotate_video_asset_row(video_asset)
+    return _annotate_video_asset_row(_resolve_video_asset_or_404(str(video_asset_id)))
 
 
 @router.post("/admin/cast-screentime/video-assets/import")
@@ -1490,12 +1525,11 @@ def create_run(
     request: CreateRunRequest,
     _: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
-    video_asset = cast_screentime.get_video_asset(str(video_asset_id))
-    if not video_asset:
-        raise HTTPException(status_code=404, detail="Video asset not found")
+    video_asset = _resolve_video_asset_or_404(str(video_asset_id))
+    canonical_video_asset_id = str(video_asset["id"])
 
-    upload_status = cast_screentime.get_video_asset_upload_session_status(str(video_asset_id))
-    if upload_status not in {"verified", "promoted"}:
+    upload_status = cast_screentime.get_video_asset_upload_session_status(canonical_video_asset_id)
+    if upload_status not in {"verified", "promoted"} and not video_asset.get("legacy_screenalytics_video_asset_id"):
         raise HTTPException(status_code=409, detail="Video asset upload session is not verified")
 
     run_config = _merge_run_config(video_asset, request.run_config_json)
@@ -1505,7 +1539,7 @@ def create_run(
 
     annotated_asset = _annotate_video_asset_row(video_asset)
     snapshot_bundle = cast_screentime.build_candidate_cast_snapshot(
-        video_asset_id=str(video_asset_id),
+        video_asset_id=canonical_video_asset_id,
         show_id=str(video_asset.get("show_id") or "") or None,
         season_id=str(video_asset.get("season_id") or "") or None,
         episode_id=str(video_asset.get("episode_id") or "") or None,
@@ -1516,7 +1550,7 @@ def create_run(
     run_config["cast_coverage_summary"] = snapshot_bundle.get("cast_coverage_summary") or {}
     run = cast_screentime.create_run(
         {
-            "video_asset_id": str(video_asset_id),
+            "video_asset_id": canonical_video_asset_id,
             "status": "pending",
             "run_type": "cast_screentime",
             "pipeline_version": str(run_config.get("pipeline_version") or "cast_screentime_v1"),
@@ -1633,6 +1667,12 @@ def get_excluded_sections(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str,
     return {"run_id": str(run_id), "excluded_sections": cast_screentime.list_excluded_sections(str(run_id))}
 
 
+@router.get("/admin/cast-screentime/runs/{run_id}/review-summary")
+def get_review_summary(run_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
+    run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
+    return retained_cast_screentime_review.build_review_summary(_annotate_run_row(run))
+
+
 @router.post("/admin/cast-screentime/runs/{run_id}/review-status")
 def set_review_status(
     run_id: UUID,
@@ -1674,9 +1714,9 @@ def publish_run(
     admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
-    media_type = str(_annotate_run_row(run).get("media_type") or "episode")
-    if media_type != "episode":
-        raise HTTPException(status_code=409, detail="Only episode assets can be published into canonical rollups")
+    annotated_run = _annotate_run_row(run)
+    media_type = str(annotated_run.get("media_type") or "episode")
+    publication_mode = retained_cast_screentime_review.publication_mode_for_media_type(media_type)
     if str(run.get("status") or "") != "success":
         raise HTTPException(status_code=409, detail="Only successful runs can be published")
     if str(run.get("review_status") or "draft") != "approved":
@@ -1684,7 +1724,12 @@ def publish_run(
 
     existing = cast_screentime.get_publish_version_for_run(str(run_id))
     if existing:
-        return {"publish_version": existing, "reference_fingerprint_count": 0, "already_published": True}
+        return {
+            "publish_version": {**existing, "publication_mode": publication_mode},
+            "publication_mode": publication_mode,
+            "reference_fingerprint_count": 0,
+            "already_published": True,
+        }
 
     metrics_snapshot = _build_publish_metrics_snapshot(run)
     publish_version = cast_screentime.publish_run(
@@ -1695,14 +1740,26 @@ def publish_run(
         metrics_snapshot_json=metrics_snapshot,
     )
 
-    raw_reference_fingerprints = _artifact_payload_or_default(str(run_id), "reference_fingerprints.json", default=[])
+    raw_reference_fingerprints = _artifact_payload_or_default(
+        str(run_id),
+        cast_screentime_artifacts.REFERENCE_FINGERPRINTS.key,
+        default=_artifact_default_payload(cast_screentime_artifacts.REFERENCE_FINGERPRINTS.key),
+    )
     raw_title_card_references = _artifact_payload_or_default(
-        str(run_id), "title_card_reference_signatures.json", default=[]
+        str(run_id),
+        cast_screentime_artifacts.TITLE_CARD_REFERENCE_SIGNATURES.key,
+        default=_artifact_default_payload(cast_screentime_artifacts.TITLE_CARD_REFERENCE_SIGNATURES.key),
     )
     if not isinstance(raw_reference_fingerprints, list):
-        raise HTTPException(status_code=500, detail="reference_fingerprints.json must be a JSON array")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{cast_screentime_artifacts.REFERENCE_FINGERPRINTS.key} must be a JSON array",
+        )
     if not isinstance(raw_title_card_references, list):
-        raise HTTPException(status_code=500, detail="title_card_reference_signatures.json must be a JSON array")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{cast_screentime_artifacts.TITLE_CARD_REFERENCE_SIGNATURES.key} must be a JSON array",
+        )
     reference_fingerprints = [item for item in raw_reference_fingerprints if isinstance(item, dict)]
     title_card_references = [item for item in raw_title_card_references if isinstance(item, dict)]
     inserted = cast_screentime.replace_reference_fingerprints_for_run(
@@ -1724,7 +1781,8 @@ def publish_run(
     )
 
     return {
-        "publish_version": publish_version,
+        "publish_version": {**publish_version, "publication_mode": publication_mode},
+        "publication_mode": publication_mode,
         "reference_fingerprint_count": reference_fingerprint_count,
         "already_published": False,
     }
@@ -1732,17 +1790,26 @@ def publish_run(
 
 @router.get("/admin/cast-screentime/video-assets/{video_asset_id}/publish-history")
 def get_publish_history(video_asset_id: UUID, _: CastScreentimeAdminUser) -> dict[str, Any]:
-    video_asset = cast_screentime.get_video_asset(str(video_asset_id))
-    if not video_asset:
-        raise HTTPException(status_code=404, detail="Video asset not found")
+    video_asset = _resolve_video_asset_or_404(str(video_asset_id))
     annotated = _annotate_video_asset_row(video_asset)
     return {
-        "video_asset_id": str(video_asset_id),
+        "video_asset_id": str(video_asset["id"]),
         "media_type": annotated.get("media_type"),
         "media_kind": annotated.get("media_kind"),
         "video_class": annotated.get("video_class"),
         "promo_subtype": annotated.get("promo_subtype"),
-        "publish_history": cast_screentime.list_publish_versions(str(video_asset_id)),
+        "publish_history": [
+            {
+                **item,
+                "publication_mode": retained_cast_screentime_review.publication_mode_for_media_type(
+                    str(item.get("media_type") or "") or None
+                ),
+                "is_canonical_publication": retained_cast_screentime_review.is_canonical_publication(
+                    str(item.get("media_type") or "") or None
+                ),
+            }
+            for item in cast_screentime.list_publish_versions(str(video_asset["id"]))
+        ],
     }
 
 
@@ -1824,9 +1891,16 @@ def set_suggestion_decision(
     admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
-    suggestions_payload = _artifact_payload_or_default(str(run_id), "cast_suggestions.json", default=[])
+    suggestions_payload = _artifact_payload_or_default(
+        str(run_id),
+        cast_screentime_artifacts.CAST_SUGGESTIONS.key,
+        default=_artifact_default_payload(cast_screentime_artifacts.CAST_SUGGESTIONS.key),
+    )
     if not isinstance(suggestions_payload, list):
-        raise HTTPException(status_code=500, detail="cast_suggestions.json must be a JSON array")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{cast_screentime_artifacts.CAST_SUGGESTIONS.key} must be a JSON array",
+        )
     suggestion = next(
         (
             item
@@ -1877,9 +1951,16 @@ def set_unknown_review_decision(
     admin_user: CastScreentimeAdminUser,
 ) -> dict[str, Any]:
     run = _assert_cast_screentime_run(cast_screentime.get_run_with_video_asset(str(run_id)))
-    queues_payload = _artifact_payload_or_default(str(run_id), "unknown_review_queues.json", default=[])
+    queues_payload = _artifact_payload_or_default(
+        str(run_id),
+        cast_screentime_artifacts.UNKNOWN_REVIEW_QUEUES.key,
+        default=_artifact_default_payload(cast_screentime_artifacts.UNKNOWN_REVIEW_QUEUES.key),
+    )
     if not isinstance(queues_payload, list):
-        raise HTTPException(status_code=500, detail="unknown_review_queues.json must be a JSON array")
+        raise HTTPException(
+            status_code=500,
+            detail=f"{cast_screentime_artifacts.UNKNOWN_REVIEW_QUEUES.key} must be a JSON array",
+        )
     queue = next(
         (item for item in queues_payload if isinstance(item, dict) and str(item.get("queue_key") or "") == queue_key),
         None,

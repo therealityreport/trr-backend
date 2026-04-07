@@ -31,6 +31,7 @@ id
 
 ## Indexes
 
+- core_season_source_history_source_id_idx (non-unique): source_id
 - season_source_history_lookup_idx (non-unique): season_id, source_id, variant, fetched_at DESC
 - season_source_history_pkey (unique): id
 

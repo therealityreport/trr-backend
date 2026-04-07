@@ -35,6 +35,8 @@ id
 
 ## Indexes
 
+- core_show_cast_role_assignments_person_id_idx (non-unique): person_id
+- core_show_cast_role_assignments_season_id_idx (non-unique): season_id) WHERE (season_id IS NOT NULL
 - show_cast_role_assignments_pkey (unique): id
 - show_cast_role_assignments_role_idx (non-unique): role_id
 - show_cast_role_assignments_show_person_idx (non-unique): show_id, person_id, season_number

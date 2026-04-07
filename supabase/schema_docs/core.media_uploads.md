@@ -40,6 +40,8 @@ id
 
 ## Indexes
 
+- core_media_uploads_media_asset_id_idx (non-unique): media_asset_id) WHERE (media_asset_id IS NOT NULL
+- core_media_uploads_media_link_id_idx (non-unique): media_link_id) WHERE (media_link_id IS NOT NULL
 - media_uploads_entity_idx (non-unique): entity_type, entity_id, kind
 - media_uploads_pkey (unique): id
 - media_uploads_status_idx (non-unique): status, expires_at

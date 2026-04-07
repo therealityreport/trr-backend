@@ -49,6 +49,7 @@ class _FakePool:
         self.putconn_calls = 0
         self.getconn_calls = 0
         self.closed_putconn_calls = 0
+        self.closeall_calls = 0
         self._pool: list[object] = []
         self._used: dict[int, object] = {}
 
@@ -65,7 +66,13 @@ class _FakePool:
         self._used.pop(id(_conn), None)
 
     def closeall(self) -> None:
-        return None
+        self.closeall_calls += 1
+
+
+class _FakePoolClosedOnGetconn(_FakePool):
+    def getconn(self) -> _FakeConnection:
+        self.getconn_calls += 1
+        raise PoolError("connection pool is closed")
 
 
 class _FakePoolExhaustThenSuccess(_FakePool):
@@ -301,7 +308,11 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
 
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
-    monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
+    monkeypatch.setattr(
+        pg,
+        "reset_pool",
+        lambda **_kwargs: calls.__setitem__("reset", calls["reset"] + 1),
+    )
 
     result = pg.fetch_one("select 1")
 
@@ -411,7 +422,11 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
 
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
-    monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
+    monkeypatch.setattr(
+        pg,
+        "reset_pool",
+        lambda **_kwargs: calls.__setitem__("reset", calls["reset"] + 1),
+    )
 
     result = pg.fetch_one("select 1")
 
@@ -453,7 +468,11 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_all_with_cursor", _fetch_all_with_cursor)
-    monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
+    monkeypatch.setattr(
+        pg,
+        "reset_pool",
+        lambda **_kwargs: calls.__setitem__("reset", calls["reset"] + 1),
+    )
 
     result = pg.fetch_all("select 1")
 
@@ -477,7 +496,11 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
-    monkeypatch.setattr(pg, "reset_pool", lambda: calls.__setitem__("reset", calls["reset"] + 1))
+    monkeypatch.setattr(
+        pg,
+        "reset_pool",
+        lambda **_kwargs: calls.__setitem__("reset", calls["reset"] + 1),
+    )
 
     result = pg.fetch_one("select 1")
 
@@ -521,6 +544,72 @@ def test_db_connection_retries_pool_acquire_on_pool_exhaustion(monkeypatch: pyte
 
     assert fake_pool.getconn_calls == 3
     assert fake_pool.putconn_calls == 1
+
+
+def test_reset_pool_rotates_active_pool_without_closing_checked_out_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_pool = _FakePool()
+    second_pool = _FakePool()
+    pools = [first_pool, second_pool]
+
+    def _pool_factory(*_args, **_kwargs):
+        return pools.pop(0)
+
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
+
+    with pg.db_connection() as first_conn:
+        assert first_conn is first_pool.connection
+        pg.reset_pool()
+        assert first_pool.closeall_calls == 0
+
+        with pg.db_connection() as second_conn:
+            assert second_conn is second_pool.connection
+
+    assert first_pool.closeall_calls == 1
+    assert second_pool.closeall_calls == 0
+    assert pg._pool is second_pool
+
+
+def test_reset_pool_expected_pool_ignores_stale_pool_reference() -> None:
+    stale_pool = _FakePool()
+    active_pool = _FakePool()
+    pg._pool = active_pool
+    pg._active_pool_dsn = "postgresql://db.example.com/postgres"
+
+    pg.reset_pool(expected_pool=stale_pool)
+
+    assert pg._pool is active_pool
+    assert active_pool.closeall_calls == 0
+
+
+def test_get_connection_with_retry_uses_new_pool_after_closed_pool_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed_pool = _FakePoolClosedOnGetconn()
+    replacement_pool = _FakePool()
+
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: replacement_pool)
+    pg._pool = closed_pool
+    pg._active_pool_dsn = "postgresql://db.example.com/postgres"
+
+    pool, conn, checkout_id = pg._get_connection_with_retry(label="fetch_one")
+
+    assert pool is replacement_pool
+    assert conn is replacement_pool.connection
+    assert checkout_id > 0
+    assert closed_pool.closeall_calls == 1
+    assert replacement_pool.closeall_calls == 0
 
 
 def test_build_pool_for_session_mode_supavisor_uses_local_dev_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,0 +1,39 @@
+{
+  "generated_at": "2026-04-02T22:05:01.662516+00:00",
+  "date_start": "2026-03-26T22:05:01.662516+00:00",
+  "date_end": "2026-04-02T22:05:01.662516+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "threads": {
+      "status": "ok",
+      "posts": 1,
+      "duration": "4.6s",
+      "sample": [
+        {
+          "id": "DRILNx6Etbh",
+          "text": "",
+          "likes": 0,
+          "views": 0,
+          "url": "https://www.threads.com/@bravotv/post/DRILNx6Etbh"
+        }
+      ],
+      "meta": {
+        "source": "playwright_profile_discovery",
+        "pages_scanned": 1,
+        "posts_checked": 1,
+        "matched_posts": 1,
+        "cookies_supplied": true,
+        "candidate_urls_found": 6,
+        "failed_candidate_fetches": 0,
+        "profile_fetch_mode": "authenticated"
+      }
+    }
+  }
+}

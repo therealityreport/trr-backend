@@ -11,7 +11,7 @@ from api.auth import require_cast_screentime_admin
 from api.main import app
 from api.routers import admin_cast_screentime as router_module
 from trr_backend.repositories import cast_screentime as repo
-from trr_backend.services import retained_cast_screentime_dispatch
+from trr_backend.services import cast_screentime_artifacts, retained_cast_screentime_dispatch
 
 
 @pytest.fixture(autouse=True)
@@ -84,12 +84,28 @@ def fake_repo(monkeypatch):
         return row
 
     def create_video_asset(payload):
-        record = {**payload}
+        record = {
+            "legacy_screenalytics_video_asset_id": None,
+            **payload,
+        }
         store["video_assets"][record["id"]] = record
         return record
 
     def get_video_asset(video_asset_id):
         return store["video_assets"].get(video_asset_id)
+
+    def get_video_asset_by_legacy_screenalytics_id(legacy_video_asset_id):
+        return next(
+            (
+                row
+                for row in store["video_assets"].values()
+                if row.get("legacy_screenalytics_video_asset_id") == legacy_video_asset_id
+            ),
+            None,
+        )
+
+    def resolve_video_asset(video_asset_id):
+        return get_video_asset(video_asset_id) or get_video_asset_by_legacy_screenalytics_id(video_asset_id)
 
     def get_video_asset_upload_session_status(video_asset_id):
         for session in store["sessions"].values():
@@ -462,6 +478,8 @@ def fake_repo(monkeypatch):
     monkeypatch.setattr(repo, "update_media_upload_session", update_media_upload_session)
     monkeypatch.setattr(repo, "create_video_asset", create_video_asset)
     monkeypatch.setattr(repo, "get_video_asset", get_video_asset)
+    monkeypatch.setattr(repo, "get_video_asset_by_legacy_screenalytics_id", get_video_asset_by_legacy_screenalytics_id)
+    monkeypatch.setattr(repo, "resolve_video_asset", resolve_video_asset)
     monkeypatch.setattr(repo, "get_video_asset_upload_session_status", get_video_asset_upload_session_status)
     monkeypatch.setattr(repo, "list_video_asset_cast_candidates", list_video_asset_cast_candidates)
     monkeypatch.setattr(repo, "resolve_owner_context", resolve_owner_context)
@@ -666,11 +684,48 @@ def test_upload_complete_and_run_flow():
     assert payload["run"]["candidate_scope_policy_json"]["preferred_facebank_coverage"] is True
 
 
+def test_create_run_accepts_backend_dispatch_payload(monkeypatch):
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch,
+        "start_run",
+        lambda run_id: {"run_id": run_id, "state": "queued", "job_id": f"backend:{run_id}", "mode": "backend"},
+    )
+
+    client = TestClient(app)
+    episode_id = uuid4()
+    create_response = client.post(
+        "/api/v1/admin/cast-screentime/upload-sessions",
+        json={
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
+    )
+    upload_session_id = create_response.json()["upload_session_id"]
+    complete_response = client.post(
+        f"/api/v1/admin/cast-screentime/upload-sessions/{upload_session_id}/complete",
+        json={"upload_session_id": upload_session_id},
+    )
+    video_asset_id = complete_response.json()["video_asset"]["id"]
+
+    response = client.post(
+        f"/api/v1/admin/cast-screentime/video-assets/{video_asset_id}/runs",
+        json={"run_config_json": {"processing_mode": "balanced"}},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dispatch_state"] == "queued"
+    assert payload["dispatch_result"]["mode"] == "backend"
+    assert payload["run"]["dispatch_job_id"].startswith("backend:")
+    assert payload["run"]["status"] == "queued"
+
+
 def test_create_run_marks_dispatch_failures_failed(monkeypatch):
     def _raise_dispatch_error(_run_id):
-        raise retained_cast_screentime_dispatch.RetainedCastScreentimeDispatchError(
-            "SCREENALYTICS_SERVICE_TOKEN is not configured"
-        )
+        raise retained_cast_screentime_dispatch.RetainedCastScreentimeDispatchError("backend runtime unavailable")
 
     monkeypatch.setattr(retained_cast_screentime_dispatch, "start_run", _raise_dispatch_error)
 
@@ -704,7 +759,7 @@ def test_create_run_marks_dispatch_failures_failed(monkeypatch):
 
     assert payload["dispatch_state"] == "dispatch_failed"
     assert payload["run"]["status"] == "failed"
-    assert payload["run"]["error_message"] == "SCREENALYTICS_SERVICE_TOKEN is not configured"
+    assert payload["run"]["error_message"] == "backend runtime unavailable"
     assert payload["run"]["completed_at"] is not None
     assert payload["run"]["review_status"] == "draft"
 
@@ -853,6 +908,98 @@ def test_import_external_url_uses_external_import_type_without_youtube_channel_c
     video_asset = response.json()["video_asset"]
     assert video_asset["source_import_type"] == "external_url_import"
     assert youtube_metadata_calls == []
+
+
+def test_get_video_asset_resolves_legacy_screenalytics_id(monkeypatch):
+    legacy_id = str(uuid4())
+    canonical_id = str(uuid4())
+
+    monkeypatch.setattr(
+        repo,
+        "resolve_video_asset",
+        lambda video_asset_id: {
+            "id": canonical_id,
+            "legacy_screenalytics_video_asset_id": legacy_id,
+            "show_id": str(uuid4()),
+            "season_id": str(uuid4()),
+            "episode_id": None,
+            "source_url": "s3://test-bucket/source/videos/demo/original.mp4",
+            "source_json": {"object_key": "source/videos/demo/original.mp4"},
+            "metadata": {"legacy_bridge": {"source_table": "screenalytics.video_assets"}},
+            "duration_seconds": 42.5,
+            "video_class": "promo",
+            "promo_subtype": "trailer",
+            "media_type": "trailer",
+            "media_kind": None,
+            "source_import_type": "external_url_import",
+        }
+        if video_asset_id == legacy_id
+        else None,
+    )
+
+    client = TestClient(app)
+    response = client.get(f"/api/v1/admin/cast-screentime/video-assets/{legacy_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == canonical_id
+    assert payload["legacy_screenalytics_video_asset_id"] == legacy_id
+    assert payload["media_type"] == "trailer"
+
+
+def test_create_run_accepts_legacy_screenalytics_asset_id(monkeypatch):
+    legacy_id = str(uuid4())
+    canonical_id = str(uuid4())
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+
+    monkeypatch.setattr(
+        repo,
+        "resolve_video_asset",
+        lambda video_asset_id: {
+            "id": canonical_id,
+            "legacy_screenalytics_video_asset_id": legacy_id,
+            "show_id": show_id,
+            "season_id": season_id,
+            "episode_id": None,
+            "source_url": "s3://test-bucket/source/videos/demo/original.mp4",
+            "source_json": {"object_key": "source/videos/demo/original.mp4"},
+            "metadata": {"legacy_bridge": {"source_table": "screenalytics.video_assets"}},
+            "duration_seconds": 42.5,
+            "video_class": "promo",
+            "promo_subtype": "trailer",
+            "media_type": "trailer",
+            "media_kind": None,
+            "source_import_type": "external_url_import",
+        }
+        if video_asset_id == legacy_id
+        else None,
+    )
+    monkeypatch.setattr(repo, "get_video_asset_upload_session_status", lambda _video_asset_id: None)
+
+    client = TestClient(app)
+    response = client.post(
+        f"/api/v1/admin/cast-screentime/video-assets/{legacy_id}/runs",
+        json={"run_config_json": {"processing_mode": "balanced"}},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run"]["video_asset_id"] == canonical_id
+    assert payload["dispatch_state"] == "queued"
+
+
+def test_artifact_registry_covers_phase1_retained_contract():
+    assert cast_screentime_artifacts.SHOTS.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.SEGMENTS.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.SCENES.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.EXCLUDED_SECTIONS.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.PERSON_METRICS.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.REFERENCE_FINGERPRINTS.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.CAST_SUGGESTIONS.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.UNKNOWN_REVIEW_QUEUES.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.TITLE_CARD_CANDIDATES.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
+    assert cast_screentime_artifacts.CONFESSIONAL_CANDIDATES.key in cast_screentime_artifacts.ARTIFACT_REGISTRY
 
 
 def test_upload_complete_fails_when_ffprobe_rejects_upload(monkeypatch):
@@ -1117,6 +1264,47 @@ def test_publish_episode_run_creates_current_version_and_rollups(monkeypatch):
         },
     )
     client.post(
+        f"/api/v1/internal/screenalytics/cast-screentime/runs/{run_id}/segments:replace",
+        headers=_service_headers(),
+        json={
+            "segments": [
+                {
+                    "segment_key": "segment-1",
+                    "person_id": str(uuid4()),
+                    "start_ms": 0,
+                    "end_ms": 10000,
+                    "duration_ms": 10000,
+                    "frame_count": 120,
+                    "confidence_score": 0.93,
+                    "similarity_score": 0.9,
+                    "pose_bucket": "frontal",
+                    "assignment_source": "retained_backend_runtime",
+                    "is_counted": True,
+                    "classification_json": {},
+                    "metadata": {"display_name": "Test Person"},
+                }
+            ]
+        },
+    )
+    client.post(
+        f"/api/v1/internal/screenalytics/cast-screentime/runs/{run_id}/excluded-sections:replace",
+        headers=_service_headers(),
+        json={
+            "excluded_sections": [
+                {
+                    "section_key": "cold-open",
+                    "section_type": "intro",
+                    "start_ms": 2500,
+                    "end_ms": 5000,
+                    "duration_ms": 2500,
+                    "detection_source": "manual",
+                    "confidence_score": 1.0,
+                    "metadata": {"reason": "credits"},
+                }
+            ]
+        },
+    )
+    client.post(
         f"/api/v1/internal/screenalytics/cast-screentime/runs/{run_id}/person-metrics:replace",
         headers=_service_headers(),
         json={
@@ -1156,15 +1344,17 @@ def test_publish_episode_run_creates_current_version_and_rollups(monkeypatch):
     assert publish_body["publish_version"]["version_number"] == 1
     assert publish_body["publish_version"]["is_current"] is True
     assert publish_body["reference_fingerprint_count"] == 1
+    assert publish_body["publication_mode"] == "canonical_episode"
 
     history_response = client.get(f"/api/v1/admin/cast-screentime/video-assets/{video_asset_id}/publish-history")
     assert history_response.status_code == 200
     assert history_response.json()["publish_history"][0]["version_number"] == 1
+    assert history_response.json()["publish_history"][0]["publication_mode"] == "canonical_episode"
 
     show_rollup = client.get(f"/api/v1/admin/cast-screentime/shows/{show_id}/published-rollups")
     assert show_rollup.status_code == 200
     assert show_rollup.json()["published_asset_count"] == 1
-    assert show_rollup.json()["leaderboard"][0]["screen_time_seconds"] == 12.5
+    assert show_rollup.json()["leaderboard"][0]["screen_time_seconds"] == 7.5
 
     season_rollup = client.get(f"/api/v1/admin/cast-screentime/seasons/{season_id}/published-rollups")
     assert season_rollup.status_code == 200
@@ -1255,7 +1445,104 @@ def test_suggestion_and_unknown_review_decisions_persist_for_run_context(monkeyp
     assert "rerun" in payload["decision_effect_summary"].lower()
 
 
-def test_publish_rejects_promo_assets():
+def test_review_summary_returns_reviewed_leaderboard_and_publication_mode():
+    client = TestClient(app)
+    episode_id = uuid4()
+    create_response = client.post(
+        "/api/v1/admin/cast-screentime/upload-sessions",
+        json={
+            "owner_scope": "episode",
+            "owner_id": str(episode_id),
+            "filename": "episode.mp4",
+            "content_type": "video/mp4",
+            "expected_size_bytes": 1024,
+        },
+    )
+    upload_session_id = create_response.json()["upload_session_id"]
+    complete_response = client.post(
+        f"/api/v1/admin/cast-screentime/upload-sessions/{upload_session_id}/complete",
+        json={"upload_session_id": upload_session_id},
+    )
+    video_asset_id = complete_response.json()["video_asset"]["id"]
+    person_id = uuid4()
+    run_response = client.post(f"/api/v1/admin/cast-screentime/video-assets/{video_asset_id}/runs", json={})
+    run_id = run_response.json()["run"]["id"]
+
+    client.post(
+        f"/api/v1/internal/screenalytics/cast-screentime/runs/{run_id}/segments:replace",
+        headers=_service_headers(),
+        json={
+            "segments": [
+                {
+                    "segment_key": "segment-1",
+                    "person_id": str(person_id),
+                    "start_ms": 0,
+                    "end_ms": 8000,
+                    "duration_ms": 8000,
+                    "frame_count": 96,
+                    "confidence_score": 0.91,
+                    "similarity_score": 0.88,
+                    "pose_bucket": "frontal",
+                    "assignment_source": "retained_backend_runtime",
+                    "is_counted": True,
+                    "classification_json": {},
+                    "metadata": {"display_name": "Test Person"},
+                }
+            ]
+        },
+    )
+    client.post(
+        f"/api/v1/internal/screenalytics/cast-screentime/runs/{run_id}/excluded-sections:replace",
+        headers=_service_headers(),
+        json={
+            "excluded_sections": [
+                {
+                    "section_key": "cold-open",
+                    "section_type": "intro",
+                    "start_ms": 1000,
+                    "end_ms": 3000,
+                    "duration_ms": 2000,
+                    "detection_source": "manual",
+                    "confidence_score": 1.0,
+                    "metadata": {"reason": "credits"},
+                }
+            ]
+        },
+    )
+    client.post(
+        f"/api/v1/internal/screenalytics/cast-screentime/runs/{run_id}/person-metrics:replace",
+        headers=_service_headers(),
+        json={
+            "metrics": [
+                {
+                    "person_id": str(person_id),
+                    "screen_time_seconds": 12.5,
+                    "frame_count": 96,
+                    "confidence_avg": 0.91,
+                    "metadata": {"display_name": "Test Person"},
+                }
+            ]
+        },
+    )
+    client.post(
+        f"/api/v1/internal/screenalytics/cast-screentime/runs/{run_id}/finalize",
+        headers=_service_headers(),
+        json={"status": "success", "effective_runtime_seconds": 42.5},
+    )
+
+    response = client.get(f"/api/v1/admin/cast-screentime/runs/{run_id}/review-summary")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["publication_mode"] == "canonical_episode"
+    assert payload["is_canonical_publication"] is True
+    assert payload["excluded_section_count"] == 1
+    assert payload["excluded_overlap_ms"] == 2000
+    assert payload["raw_leaderboard"][0]["screen_time_seconds"] == 12.5
+    assert payload["reviewed_leaderboard"][0]["screen_time_seconds"] == 6.0
+
+
+def test_publish_allows_supplementary_internal_reference_without_rollup_contamination():
     client = TestClient(app)
     season_id = uuid4()
     create_response = client.post(
@@ -1300,8 +1587,19 @@ def test_publish_rejects_promo_assets():
         f"/api/v1/admin/cast-screentime/runs/{run_id}/publish",
         json={"notes": {"source": "pytest"}},
     )
-    assert response.status_code == 409
-    assert "only episode assets" in response.json()["detail"].lower()
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["publication_mode"] == "supplementary_reference"
+    assert payload["publish_version"]["is_current"] is True
+
+    history_response = client.get(f"/api/v1/admin/cast-screentime/video-assets/{video_asset_id}/publish-history")
+    assert history_response.status_code == 200
+    assert history_response.json()["publish_history"][0]["publication_mode"] == "supplementary_reference"
+
+    published_show_id = complete_response.json()["video_asset"]["show_id"]
+    show_rollup = client.get(f"/api/v1/admin/cast-screentime/shows/{published_show_id}/published-rollups")
+    assert show_rollup.status_code == 200
+    assert show_rollup.json()["published_asset_count"] == 0
 
 
 def test_list_show_runs_rejects_service_role_without_internal_secret_header(monkeypatch, no_admin_override):

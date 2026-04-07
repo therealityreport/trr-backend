@@ -8,9 +8,11 @@ def test_load_person_facebank_centroids_uses_ml_reference_embeddings(monkeypatch
     engine._FACE_MATCH_CACHE["expires_at"] = 0.0
 
     class _Cursor:
-        def execute(self, sql: str) -> None:
+        def execute(self, sql: str, params=None) -> None:
             assert "FROM ml.face_reference_images AS fri" in sql
             assert "JOIN ml.face_reference_embeddings AS fre" in sql
+            assert "coalesce(fre.metadata->>'contract_key', '') = %s" in sql
+            assert params == [engine.FACE_REFERENCE_EMBEDDING_CONTRACT_KEY]
 
         def fetchall(self):
             return [

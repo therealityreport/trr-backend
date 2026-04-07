@@ -128,11 +128,23 @@ of the following are true:
 - a bounded canary (`Sync Recent` first, then `Resume Tail` if needed) succeeds
   before a full-history `Backfill Posts` run is launched
 
+`Sync Recent`, `Sync Newer`, `Resume Tail`, and `Backfill Posts` are all variants of the
+same shared-profile catalog backfill pipeline. The operator choice changes the seed scope,
+not the pipeline family.
+
 Preferred shared Instagram canary order:
 
 1. `Sync Recent`
 2. `Resume Tail` if the run has a resumable frontier
 3. `Backfill Posts` only after the first two checks are green
+
+Use `Sync Newer` as the same-pipeline bounded head-gap repair when diagnostics show the newest stored post lags the live profile. It is not a separate worker path.
+
+Rollback gates before allowing a full shared-profile backfill:
+
+- `scripts/modal/verify_modal_readiness.py` must return `ok: true`
+- worker-health must show remote Instagram auth and shared-account backfill readiness as green
+- no canary run may show runtime-version drift, stale frontier ownership, dispatch-blocked alerts, or classify backlog that never drains after scrape completion
 
 If `shared_account_backfill_readiness.ready` is false, read the reason in this
 order:
@@ -147,6 +159,44 @@ Use those fields to distinguish:
 - dispatcher heartbeat missing or stale
 - remote Instagram auth missing in the worker plane
 - queue backlog or stale-running recovery issues after dispatch has already succeeded
+
+## Alert Contract
+
+The social worker-health and catalog-progress payloads now expose additive
+`alerts` arrays. Preserve them in logs and automation outputs; they are the
+operator-facing reason codes for whether a run should continue.
+
+Worker-health alert codes to watch:
+
+- `dispatcher_not_ready`
+- `dispatcher_heartbeat_stale`
+- `auth_preflight_not_ready`
+- `stale_running_jobs`
+- `queue_wait_exceeded`
+- `dispatch_blocked_jobs`
+- `retry_loop_detected`
+
+Catalog-progress alert codes to watch:
+
+- `runtime_version_drift`
+- `frontier_lease_stale`
+- `modal_capacity_wait_exceeded`
+- `dispatch_blocked`
+- `retry_loop_detected`
+- `classify_backlog_after_scrape`
+
+Interpretation:
+
+- `runtime_version_drift`: the app/backend view of the worker build does not match the Modal worker that processed the run; stop and verify deploy state before retrying.
+- `frontier_lease_stale`: a frontier lease heartbeat has expired or was not reclaimed correctly; do not assume the next retry is safe until ownership is reconciled.
+- `modal_capacity_wait_exceeded`: jobs are dispatched but stuck pending in Modal longer than the configured threshold; treat this as capacity pressure, not a duplicate backfill.
+- `classify_backlog_after_scrape`: scrape stages are complete but classify fanout has not drained in time; pause follow-up backfills until the backlog clears or the cause is understood.
+- `dispatch_blocked` / `dispatch_blocked_jobs`: the control plane could not hand work to Modal; do not keep scheduling new runs.
+- `retry_loop_detected`: the same frontier or job type is retrying repeatedly; investigate before the next launch.
+
+One catalog run can legitimately fan out into multiple classify jobs. Multiple
+queued classify jobs are downstream work from the same run, not proof that the
+operator clicked the backfill button more than once.
 
 After deploy, capture the public backend URL from the readiness output and point
 the deployed TRR-APP runtime at the Render service URL before running admin

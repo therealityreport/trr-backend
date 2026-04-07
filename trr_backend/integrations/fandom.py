@@ -834,40 +834,61 @@ def search_fandom_community_wiki_candidates(
                             return candidates[:limit]
 
     api_url = f"https://{domain}/api.php"
-    api_query_url = (
-        f"{api_url}?"
-        f"{urlencode({'action': 'query', 'list': 'search', 'srsearch': query, 'srlimit': limit, 'format': 'json'})}"
-    )
-    status, body, _ = fetch_html(api_query_url, timeout=timeout_seconds, headers=headers)
-    if status != 200 or not body:
-        return candidates[:limit]
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return candidates[:limit]
+    offset = 0
+    seen_offsets: set[int] = set()
+    while len(candidates) < limit and offset not in seen_offsets:
+        seen_offsets.add(offset)
+        api_params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": str(limit),
+            "format": "json",
+        }
+        if offset > 0:
+            api_params["sroffset"] = str(offset)
+        api_query_url = f"{api_url}?{urlencode(api_params)}"
+        status, body, _ = fetch_html(api_query_url, timeout=timeout_seconds, headers=headers)
+        if status != 200 or not body:
+            break
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            break
 
-    query_block = payload.get("query") if isinstance(payload, dict) else None
-    if not isinstance(query_block, dict):
-        return candidates[:limit]
-    results = query_block.get("search")
-    if not isinstance(results, list) or not results:
-        return candidates[:limit]
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        title = result.get("title")
-        if isinstance(title, str) and title.strip():
-            add_candidate(build_fandom_wiki_url_from_name(title, domain))
-            if len(candidates) >= limit:
-                break
+        query_block = payload.get("query") if isinstance(payload, dict) else None
+        results = query_block.get("search") if isinstance(query_block, dict) else None
+        if isinstance(results, list):
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                title = result.get("title")
+                if isinstance(title, str) and title.strip():
+                    add_candidate(build_fandom_wiki_url_from_name(title, domain))
+                    if len(candidates) >= limit:
+                        break
+
+        continuation = payload.get("continue") if isinstance(payload, dict) else None
+        next_offset = continuation.get("sroffset") if isinstance(continuation, dict) else None
+        try:
+            offset = int(next_offset) if next_offset is not None else -1
+        except (TypeError, ValueError):
+            offset = -1
+        if offset < 0:
+            break
 
     if len(candidates) < limit:
         special_search_url = (
             f"https://{domain}/wiki/Special:Search?"
             f"{urlencode({'scope': 'internal', 'navigationSearch': 'true', 'query': query})}"
         )
-        status, body, _ = fetch_html(special_search_url, timeout=timeout_seconds, headers=headers)
-        if status == 200 and body:
+        seen_page_urls: set[str] = set()
+        next_page_url: str | None = special_search_url
+        while len(candidates) < limit and next_page_url and next_page_url not in seen_page_urls:
+            seen_page_urls.add(next_page_url)
+            status, body, _ = fetch_html(next_page_url, timeout=timeout_seconds, headers=headers)
+            if status != 200 or not body:
+                break
             for candidate in _extract_fandom_search_result_candidates_from_html(
                 body,
                 community_domain=domain,
@@ -876,6 +897,13 @@ def search_fandom_community_wiki_candidates(
                 add_candidate(candidate)
                 if len(candidates) >= limit:
                     break
+            if len(candidates) >= limit:
+                break
+            next_page_url = _extract_fandom_search_next_page_url(
+                body,
+                community_domain=domain,
+                current_url=next_page_url,
+            )
 
     if len(candidates) < limit:
         for candidate in _search_fandom_allpages_candidates(

@@ -71,6 +71,34 @@ class TestRequestTimeoutMiddleware:
         response = client.get("/api/v1/admin/some-resource/stream")
         assert response.status_code == 200
 
+    def test_cast_screentime_upload_complete_endpoint_exempt(self):
+        """Large screentime promotion requests must bypass the global request timeout."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.post("/api/v1/admin/cast-screentime/upload-sessions/upload-123/complete")
+        async def upload_complete_endpoint():
+            await asyncio.sleep(1)  # Would timeout if not exempt
+            return {"promoted": True}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/admin/cast-screentime/upload-sessions/upload-123/complete")
+        assert response.status_code == 200
+        assert response.json() == {"promoted": True}
+
+    def test_cast_screentime_run_create_endpoint_exempt(self):
+        """Live run creation can exceed the generic timeout while snapshotting candidate cast."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.post("/api/v1/admin/cast-screentime/video-assets/asset-123/runs")
+        async def create_run_endpoint():
+            await asyncio.sleep(1)  # Would timeout if not exempt
+            return {"queued": True}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/admin/cast-screentime/video-assets/asset-123/runs")
+        assert response.status_code == 200
+        assert response.json() == {"queued": True}
+
     def test_timeout_response_forwards_trace_headers(self):
         """504 response includes trace headers from the original request."""
         app = _make_app(timeout_seconds=0.1)

@@ -52,7 +52,8 @@ The TRR Backend Data Pipeline is a Supabase-first data processing system that tr
 4. **Add credentials**
   - Set the runtime Postgres URL in `.env`: `TRR_DB_URL` (Supavisor session mode on `pooler.supabase.com:5432`)
   - Optional secondary DSN: set `TRR_DB_FALLBACK_URL` to another session-mode pooler URL (`pooler.supabase.com:5432`); both `TRR_DB_URL` (primary) and `TRR_DB_FALLBACK_URL` (secondary) must use session pooler `:5432`
-  - Set auth/runtime secrets in `.env`: `SUPABASE_JWT_SECRET`, `TRR_INTERNAL_ADMIN_SHARED_SECRET`, `SCREENALYTICS_SERVICE_TOKEN`
+  - Set auth/runtime secrets in `.env`: `SUPABASE_JWT_SECRET`, `TRR_INTERNAL_ADMIN_SHARED_SECRET`
+  - Optional legacy compatibility only: `SCREENALYTICS_SERVICE_TOKEN` if you still call `/api/v1/screenalytics/*` with the old service-token pattern
   - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `TVDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
   - Optional: `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_PUBLIC_BASE_URL` for media mirroring
 

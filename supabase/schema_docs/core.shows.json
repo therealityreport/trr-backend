@@ -468,6 +468,30 @@
       "definition": "CREATE INDEX core_shows_networks_gin ON core.shows USING gin (networks)"
     },
     {
+      "name": "core_shows_primary_backdrop_image_id_idx",
+      "columns": [
+        "primary_backdrop_image_id) WHERE (primary_backdrop_image_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_primary_backdrop_image_id_idx ON core.shows USING btree (primary_backdrop_image_id) WHERE (primary_backdrop_image_id IS NOT NULL)"
+    },
+    {
+      "name": "core_shows_primary_logo_image_id_idx",
+      "columns": [
+        "primary_logo_image_id) WHERE (primary_logo_image_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_primary_logo_image_id_idx ON core.shows USING btree (primary_logo_image_id) WHERE (primary_logo_image_id IS NOT NULL)"
+    },
+    {
+      "name": "core_shows_primary_poster_image_id_idx",
+      "columns": [
+        "primary_poster_image_id) WHERE (primary_poster_image_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_shows_primary_poster_image_id_idx ON core.shows USING btree (primary_poster_image_id) WHERE (primary_poster_image_id IS NOT NULL)"
+    },
+    {
       "name": "core_shows_slug_unique",
       "columns": [
         "slug) WHERE ((slug IS NOT NULL) AND (btrim(slug) <> ''::text)"

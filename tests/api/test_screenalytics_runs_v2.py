@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
 from trr_backend.repositories import screenalytics_runs as repo
+from trr_backend.security.internal_admin import (
+    DEFAULT_INTERNAL_ADMIN_ISSUER,
+    INTERNAL_ADMIN_AUDIENCE,
+    INTERNAL_ADMIN_SCOPE,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -126,10 +133,46 @@ def _auth_headers():
     return {"Authorization": "Bearer test-token"}
 
 
+def _internal_admin_headers(secret: str) -> dict[str, str]:
+    now = datetime.now(tz=UTC)
+    token = jwt.encode(
+        {
+            "sub": "screenalytics-legacy-client",
+            "iat": int(now.timestamp()),
+            "nbf": int(now.timestamp()),
+            "exp": int((now + timedelta(minutes=5)).timestamp()),
+            "iss": DEFAULT_INTERNAL_ADMIN_ISSUER,
+            "aud": INTERNAL_ADMIN_AUDIENCE,
+            "scope": INTERNAL_ADMIN_SCOPE,
+        },
+        secret,
+        algorithm="HS256",
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_requires_token():
     client = TestClient(app)
     response = client.post("/api/v1/screenalytics/v2/video-assets", json={})
     assert response.status_code == 401
+
+
+def test_screenalytics_v2_accepts_internal_admin_when_service_token_not_configured(monkeypatch):
+    monkeypatch.delenv("SCREENALYTICS_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/screenalytics/v2/video-assets",
+        headers=_internal_admin_headers("internal-secret"),
+        json={
+            "show_id": str(uuid4()),
+            "source_url": "https://example.com/video.mp4",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["source_url"] == "https://example.com/video.mp4"
 
 
 def test_screenalytics_flow():

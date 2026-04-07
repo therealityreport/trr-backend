@@ -76,6 +76,9 @@ id
 - core_shows_keywords_gin (non-unique): keywords
 - core_shows_listed_on_gin (non-unique): listed_on
 - core_shows_networks_gin (non-unique): networks
+- core_shows_primary_backdrop_image_id_idx (non-unique): primary_backdrop_image_id) WHERE (primary_backdrop_image_id IS NOT NULL
+- core_shows_primary_logo_image_id_idx (non-unique): primary_logo_image_id) WHERE (primary_logo_image_id IS NOT NULL
+- core_shows_primary_poster_image_id_idx (non-unique): primary_poster_image_id) WHERE (primary_poster_image_id IS NOT NULL
 - core_shows_slug_unique (unique): slug) WHERE ((slug IS NOT NULL) AND (btrim(slug) <> ''::text)
 - core_shows_streaming_providers_gin (non-unique): streaming_providers
 - core_shows_tags_gin (non-unique): tags

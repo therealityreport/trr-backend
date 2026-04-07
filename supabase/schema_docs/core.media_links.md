@@ -37,7 +37,6 @@ id
 - media_links_kind_position_idx (non-unique): entity_type, entity_id, kind, position
 - media_links_media_asset_idx (non-unique): media_asset_id
 - media_links_one_primary_per_entity_kind (unique): entity_type, entity_id, kind) WHERE (is_primary = true
-- media_links_one_primary_uq (unique): entity_type, entity_id, kind) WHERE (is_primary = true
 - media_links_pkey (unique): id
 
 ## RLS Enabled

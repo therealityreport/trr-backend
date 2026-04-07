@@ -1,0 +1,74 @@
+{
+  "generated_at": "2026-04-02T22:04:53.622604+00:00",
+  "date_start": "2026-03-26T22:04:53.622604+00:00",
+  "date_end": "2026-04-02T22:04:53.622604+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "twitter": {
+      "status": "ok",
+      "tweets": 20,
+      "duration": "2.3s",
+      "sample": [
+        {
+          "id": "2039825384913694820",
+          "text": "Descriptions by Dolores. #RHORI premieres TONIGHT before moving to SUNDAYS!",
+          "likes": 2,
+          "views": 0,
+          "url": "https://x.com/BravoTV/status/2039825384913694820"
+        },
+        {
+          "id": "2039795190471577633",
+          "text": "BFF energy only. Shamea and Kelli return to #RHOA SUNDAY!",
+          "likes": 131,
+          "views": 0,
+          "url": "https://x.com/BravoTV/status/2039795190471577633"
+        },
+        {
+          "id": "2039780090440282375",
+          "text": "My Fair Lady (2026). #LadiesOfLondon is all-new TONIGHT at a special time 10/9c!",
+          "likes": 68,
+          "views": 0,
+          "url": "https://x.com/BravoTV/status/2039780090440282375"
+        }
+      ],
+      "meta": {
+        "retrieval_mode": "syndication",
+        "search_query": "from:BravoTV since:2026-03-26 until:2026-04-03",
+        "window_start": "2026-03-26T00:00:00+00:00",
+        "window_end": "2026-04-03T00:00:00+00:00",
+        "window_start_day": "2026-03-26",
+        "window_end_day_inclusive": "2026-04-02",
+        "window_end_day_exclusive": "2026-04-03",
+        "window_contract": "whole_day",
+        "from_query": true,
+        "fast_mode": true,
+        "graphql_404_count": 1,
+        "graphql_failed": false,
+        "fallback_triggered": true,
+        "fallback_attempts": [
+          "syndication"
+        ],
+        "retryable": false,
+        "error_code": null,
+        "twikit_failure_reason": null,
+        "playwright_failure_reason": null,
+        "pages_scanned": 2,
+        "posts_checked": 20,
+        "filtered_out_of_window": 0,
+        "stop_reason": "max_pages_reached",
+        "tweet_count": 20,
+        "twikit_checked": 0,
+        "syndication_checked": 20,
+        "playwright_checked": 0,
+        "complete": false
+      }
+    }
+  }
+}

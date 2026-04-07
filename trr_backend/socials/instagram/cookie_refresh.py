@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,7 @@ def refresh_instagram_cookies(
     headless: bool = True,
     timeout_seconds: int = 120,
     validation_username: str | None = None,
+    validator: Callable[[dict[str, str]], tuple[bool, str | None]] | None = None,
 ) -> dict[str, str]:
     """Log into Instagram and persist fresh cookies to disk."""
 
@@ -189,6 +191,14 @@ def refresh_instagram_cookies(
             cookies = _cookie_payload(context.cookies())
             if not cookies.get("sessionid"):
                 raise RuntimeError("Instagram session cookie disappeared before refresh completed")
+
+            if validator is not None:
+                is_valid, validation_reason = validator(cookies)
+                if not is_valid:
+                    normalized_reason = str(validation_reason or "").strip() or "graphql_validation_failed"
+                    raise RuntimeError(
+                        f"Instagram login produced cookies that failed GraphQL validation ({normalized_reason})"
+                    )
 
             _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
                 account_id,

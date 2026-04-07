@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,13 @@ EXEMPT_PATHS: frozenset[str] = frozenset(
 # SSE/streaming route path suffixes that must be exempt.
 # These are identified from the Phase 0 route inventory.
 EXEMPT_STREAM_SUFFIXES: tuple[str, ...] = ("/stream",)
+
+# Long-running screentime promotion requests can exceed the generic API timeout
+# when they verify and promote large uploaded videos into canonical assets.
+EXEMPT_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^/api/v1/admin/cast-screentime/upload-sessions/[^/]+/complete$"),
+    re.compile(r"^/api/v1/admin/cast-screentime/video-assets/[^/]+/runs$"),
+)
 
 
 def _parse_timeout_from_env() -> float:
@@ -65,7 +73,9 @@ def _is_exempt(path: str) -> bool:
     if path in EXEMPT_PATHS:
         return True
     # SSE/streaming routes end with /stream
-    return any(path.endswith(suffix) for suffix in EXEMPT_STREAM_SUFFIXES)
+    if any(path.endswith(suffix) for suffix in EXEMPT_STREAM_SUFFIXES):
+        return True
+    return any(pattern.match(path) for pattern in EXEMPT_PATH_PATTERNS)
 
 
 class RequestTimeoutMiddleware:

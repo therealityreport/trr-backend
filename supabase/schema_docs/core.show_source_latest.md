@@ -31,6 +31,7 @@
 
 ## Indexes
 
+- core_show_source_latest_source_id_idx (non-unique): source_id
 - show_source_latest_show_id_source_id_variant_key (unique): show_id, source_id, variant
 
 ## RLS Enabled

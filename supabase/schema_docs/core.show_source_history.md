@@ -31,6 +31,7 @@ id
 
 ## Indexes
 
+- core_show_source_history_source_id_idx (non-unique): source_id
 - show_source_history_lookup_idx (non-unique): show_id, source_id, variant, fetched_at DESC
 - show_source_history_pkey (unique): id
 

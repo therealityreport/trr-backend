@@ -31,6 +31,7 @@ id
 
 ## Indexes
 
+- core_episode_source_history_source_id_idx (non-unique): source_id
 - episode_source_history_lookup_idx (non-unique): episode_id, source_id, variant, fetched_at DESC
 - episode_source_history_pkey (unique): id
 

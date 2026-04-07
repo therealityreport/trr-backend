@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-04-02T22:04:33.248969+00:00",
+  "date_start": "2026-03-26T22:04:33.248969+00:00",
+  "date_end": "2026-04-02T22:04:33.248969+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "instagram": {
+      "status": "ok",
+      "posts": 0,
+      "duration": "20.1s",
+      "sample": [],
+      "meta": {
+        "retrieval_mode": "browser_intercept",
+        "posts_checked": 0,
+        "pages_scanned": 5,
+        "stop_reason": "no_new_data",
+        "scrape_elapsed_seconds": 20.1,
+        "timed_out": false
+      }
+    }
+  }
+}

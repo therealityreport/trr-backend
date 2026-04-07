@@ -7222,6 +7222,45 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
 class TestUpdateFacebankSeed:
     """Test PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed."""
 
+    def test_allows_allowlist_user_and_syncs_reference_candidate(self, client, monkeypatch):
+        monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+        monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")
+        monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+        person_id = str(uuid4())
+        link_id = str(uuid4())
+        token = _make_allowlist_user_token("test-secret-32-bytes-minimum-abcdef", "admin@example.com")
+
+        mock_db = MagicMock()
+        _mock_media_link_lookup(
+            mock_db,
+            {
+                "id": link_id,
+                "entity_id": person_id,
+                "entity_type": "person",
+                "kind": "gallery",
+                "facebank_seed": False,
+            },
+        )
+
+        with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+            with patch(
+                "api.routers.admin_person_images.update_media_link_facebank_seed",
+                return_value={"id": link_id, "facebank_seed": True},
+            ):
+                with patch("api.routers.admin_person_images.face_references.sync_face_reference_image") as sync_mock:
+                    response = client.patch(
+                        f"/api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed",
+                        json={"facebank_seed": True},
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["link_id"] == link_id
+        assert data["person_id"] == person_id
+        assert data["facebank_seed"] is True
+        sync_mock.assert_called_once_with(link_id=link_id, enabled=True)
+
     def test_allows_allowlist_user(self, client, monkeypatch):
         monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
         monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@example.com")

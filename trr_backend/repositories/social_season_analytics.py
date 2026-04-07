@@ -71,6 +71,16 @@ _SOCIAL_HOT_PATH_CACHE_LOCK = Lock()
 
 SUPPORTED_PLATFORMS = SOCIAL_SUPPORTED_PLATFORMS
 SUPPORTED_SCOPES = ("bravo", "creator", "community")
+SHARED_PROFILE_KIND_BY_SCOPE = {
+    "bravo": "network_streaming",
+    "creator": "creator",
+    "community": "community",
+}
+SHARED_PROFILE_ASSIGNMENT_MODE_BY_KIND = {
+    "network_streaming": "multi_show_match",
+    "creator": "creator_match",
+    "community": "community_match",
+}
 SUPPORTED_INGEST_MODES = ("posts_only", "posts_and_comments", "comments_only", "details_refresh")
 SUPPORTED_PIPELINE_INGEST_MODES = (
     "legacy_season_targeted",
@@ -132,6 +142,7 @@ CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY = "cursor_breakpoints"
 CATALOG_FULL_HISTORY_DATE_WINDOW_PARTITION_STRATEGY = "date_window"
 CATALOG_FULL_HISTORY_FRONTIER_STRATEGY = "newest_first_frontier"
 SHARED_ACCOUNT_FRONTIER_STATUSES = ("queued", "running", "retrying", "completed", "failed", "cancelled")
+SHARED_CLASSIFY_BATCH_SIZE_DEFAULT = 100
 SOCIAL_MODAL_MIRROR_LAG_PENDING_DEFAULT = 500
 SOCIAL_PROFILE_TOTAL_POSTS_CACHE_TTL_SECONDS_DEFAULT = 300
 QUEUE_STATUS_STAGES = ("queued", "pending", "running", "retrying", "cancelling", "failed", "cancelled", "completed")
@@ -215,6 +226,16 @@ PLATFORM_POST_TABLES = {
     "threads": "meta_threads_posts",
 }
 CATALOG_SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube", "facebook", "threads")
+REMOTE_AUTH_REQUIRED_PLATFORMS = ("instagram", "tiktok", "twitter", "facebook", "threads")
+REMOTE_AUTH_MISSING_HINTS = {
+    "instagram": ["SOCIAL_INSTAGRAM_COOKIES_JSON|SOCIAL_INSTAGRAM_COOKIES_FILE"],
+    "tiktok": ["SOCIAL_TIKTOK_COOKIES_JSON|SOCIAL_TIKTOK_COOKIES_FILE|TIKTOK_COOKIES_JSON|TIKTOK_COOKIES_FILE"],
+    "twitter": [
+        "SOCIAL_TWITTER_COOKIES_JSON|SOCIAL_TWITTER_COOKIES_FILE|SOCIAL_TWITTER_BEARER_TOKEN|TWIKIT_USERNAME/TWIKIT_PASSWORD"
+    ],
+    "facebook": ["SOCIAL_FACEBOOK_COOKIES_JSON|SOCIAL_FACEBOOK_COOKIES_FILE"],
+    "threads": ["SOCIAL_THREADS_COOKIES_JSON|SOCIAL_THREADS_COOKIES_FILE"],
+}
 PLATFORM_CATALOG_POST_TABLES = {
     "instagram": "instagram_account_catalog_posts",
     "tiktok": "tiktok_account_catalog_posts",
@@ -1193,6 +1214,22 @@ def _catalog_backfill_has_bounded_window(*, date_start: datetime | None, date_en
     return bounded_start is not None and bounded_end is not None and bounded_end >= bounded_start
 
 
+def _normalize_catalog_backfill_window(
+    *,
+    date_start: datetime | None,
+    date_end: datetime | None,
+) -> tuple[datetime | None, datetime | None]:
+    bounded_start = _coerce_dt(date_start)
+    bounded_end = _coerce_dt(date_end)
+    if bounded_start is None or bounded_end is None or bounded_end < bounded_start:
+        return bounded_start, bounded_end
+    # Treat midnight end bounds as inclusive whole-day windows so a bounded
+    # backfill does not silently omit the final day on literal-timestamp scrapers.
+    if bounded_end.hour == 0 and bounded_end.minute == 0 and bounded_end.second == 0 and bounded_end.microsecond == 0:
+        bounded_end = bounded_end + timedelta(days=1) - timedelta(seconds=1)
+    return bounded_start, bounded_end
+
+
 def _shared_account_catalog_requires_modal_executor(
     *,
     platform: Any,
@@ -1200,7 +1237,10 @@ def _shared_account_catalog_requires_modal_executor(
 ) -> bool:
     normalized_platform = _normalize_platform_name(platform)
     normalized_ingest_mode = str(pipeline_ingest_mode or SHARED_ACCOUNT_ASYNC_INGEST_MODE).strip().lower()
-    return normalized_platform == "instagram" and normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+    return (
+        normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS)
+        and normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+    )
 
 
 def _shared_account_catalog_requires_trusted_local_worker_lane(
@@ -1463,7 +1503,11 @@ def _stale_running_count() -> int:
     return max(0, int(row.get("total") or 0))
 
 
-def _build_modal_executor_health_payload(*, reason: str | None = None) -> dict[str, Any]:
+def _build_modal_executor_health_payload(
+    *,
+    reason: str | None = None,
+    platform: str | None = None,
+) -> dict[str, Any]:
     workers_payload = _query_worker_health()
     dispatcher_id = _modal_social_dispatcher_worker_id()
     dispatcher_readiness = _modal_social_dispatch_resolution()
@@ -1477,6 +1521,13 @@ def _build_modal_executor_health_payload(*, reason: str | None = None) -> dict[s
     )
     dispatcher_metadata = _metadata_dict((dispatcher_row or {}).get("metadata"))
     remote_auth_capabilities = workers_payload.get("remote_auth_capabilities")
+    target_platform = _normalize_platform_name(platform) or "instagram"
+    target_remote_auth = (
+        remote_auth_capabilities.get(target_platform)
+        if isinstance(remote_auth_capabilities, dict)
+        and isinstance(remote_auth_capabilities.get(target_platform), dict)
+        else {}
+    )
     instagram_remote_auth = (
         remote_auth_capabilities.get("instagram")
         if isinstance(remote_auth_capabilities, dict) and isinstance(remote_auth_capabilities.get("instagram"), dict)
@@ -1487,6 +1538,8 @@ def _build_modal_executor_health_payload(*, reason: str | None = None) -> dict[s
     dispatch_enabled = bool(dispatcher_metadata.get("dispatch_enabled")) if dispatcher_row else modal_dispatch_enabled()
     dispatcher_heartbeat_fresh = bool(dispatcher_row.get("is_fresh")) if dispatcher_row else False
     dispatcher_resolved = bool(dispatcher_readiness.get("resolved"))
+    target_platform_requires_auth = _platform_requires_remote_auth(target_platform)
+    target_remote_auth_ready = bool(target_remote_auth.get("ready")) if target_platform_requires_auth else True
     instagram_remote_auth_ready = bool(instagram_remote_auth.get("ready"))
     shared_account_backfill_ready_reason = None
     if not dispatcher_resolved:
@@ -1495,10 +1548,35 @@ def _build_modal_executor_health_payload(*, reason: str | None = None) -> dict[s
         )
     elif not dispatcher_heartbeat_fresh:
         shared_account_backfill_ready_reason = "modal_dispatcher_heartbeat_missing"
-    elif not instagram_remote_auth_ready:
+    elif target_platform_requires_auth and not target_remote_auth_ready:
         shared_account_backfill_ready_reason = (
-            str(instagram_remote_auth.get("reason") or "").strip() or "instagram_remote_auth_unavailable"
+            str(target_remote_auth.get("reason") or "").strip() or f"{target_platform}_remote_auth_unavailable"
         )
+    platform_backfill_readiness = {}
+    for candidate_platform in CATALOG_SUPPORTED_PLATFORMS:
+        candidate_requires_auth = _platform_requires_remote_auth(candidate_platform)
+        candidate_remote_auth = (
+            remote_auth_capabilities.get(candidate_platform)
+            if isinstance(remote_auth_capabilities, dict)
+            and isinstance(remote_auth_capabilities.get(candidate_platform), dict)
+            else {}
+        )
+        candidate_auth_ready = bool(candidate_remote_auth.get("ready")) if candidate_requires_auth else True
+        candidate_reason = None
+        if not dispatcher_resolved:
+            candidate_reason = str(dispatcher_readiness.get("reason") or "").strip() or "modal_dispatch_unavailable"
+        elif not dispatcher_heartbeat_fresh:
+            candidate_reason = "modal_dispatcher_heartbeat_missing"
+        elif candidate_requires_auth and not candidate_auth_ready:
+            candidate_reason = (
+                str(candidate_remote_auth.get("reason") or "").strip()
+                or f"{candidate_platform}_remote_auth_unavailable"
+            )
+        platform_backfill_readiness[candidate_platform] = {
+            "requires_remote_auth": candidate_requires_auth,
+            "ready": dispatcher_resolved and dispatcher_heartbeat_fresh and candidate_auth_ready,
+            "reason": candidate_reason,
+        }
     workers_payload.update(
         {
             "healthy": True,
@@ -1522,14 +1600,24 @@ def _build_modal_executor_health_payload(*, reason: str | None = None) -> dict[s
             ),
             "dispatcher_readiness": dispatcher_readiness,
             "shared_account_backfill_readiness": {
-                "ready": dispatcher_resolved and dispatcher_heartbeat_fresh and instagram_remote_auth_ready,
+                "ready": dispatcher_resolved and dispatcher_heartbeat_fresh and target_remote_auth_ready,
                 "reason": shared_account_backfill_ready_reason,
                 "dispatcher_ready": dispatcher_resolved,
                 "dispatcher_heartbeat_fresh": dispatcher_heartbeat_fresh,
+                "platform": target_platform,
+                "platform_requires_remote_auth": target_platform_requires_auth,
+                "platform_remote_auth_ready": target_remote_auth_ready,
+                "platform_remote_auth_reason": (
+                    str(target_remote_auth.get("reason") or "").strip() or None
+                    if target_platform_requires_auth
+                    else None
+                ),
+                "platform_backfill_readiness": platform_backfill_readiness,
                 "instagram_remote_auth_ready": instagram_remote_auth_ready,
             },
         }
     )
+    workers_payload["alerts"] = _build_worker_health_alerts(workers_payload)
     return workers_payload
 
 
@@ -1558,6 +1646,138 @@ _SOCIAL_HOT_PATH_CACHE_TTL_SECONDS = max(
     1,
     int((os.getenv("TRR_SOCIAL_HOT_PATH_CACHE_TTL_SECONDS") or "").strip() or "5"),
 )
+
+
+def _alert_threshold_seconds(env_name: str, default: int, *, minimum: int = 60, maximum: int = 86_400) -> int:
+    return max(minimum, min(_resolve_positive_int_env(env_name, default, minimum=minimum), maximum))
+
+
+def _new_alert(*, code: str, severity: str, message: str, **details: Any) -> dict[str, Any]:
+    payload = {
+        "code": str(code or "").strip().lower(),
+        "severity": str(severity or "warning").strip().lower(),
+        "message": str(message or "").strip(),
+    }
+    for key, value in details.items():
+        if value is None or value == "":
+            continue
+        payload[key] = value
+    return payload
+
+
+def _append_alert(target: list[dict[str, Any]], *, code: str, severity: str, message: str, **details: Any) -> None:
+    normalized_code = str(code or "").strip().lower()
+    if not normalized_code or any(str(item.get("code") or "").strip().lower() == normalized_code for item in target):
+        return
+    target.append(_new_alert(code=normalized_code, severity=severity, message=message, **details))
+
+
+def _build_worker_health_alerts(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+    shared_readiness = _metadata_dict(payload.get("shared_account_backfill_readiness"))
+    if shared_readiness:
+        dispatcher_ready = bool(shared_readiness.get("dispatcher_ready"))
+        dispatcher_heartbeat_fresh = bool(shared_readiness.get("dispatcher_heartbeat_fresh"))
+        instagram_remote_auth_ready = bool(shared_readiness.get("instagram_remote_auth_ready"))
+        readiness_reason = str(shared_readiness.get("reason") or "").strip() or None
+        if not dispatcher_ready:
+            _append_alert(
+                alerts,
+                code="dispatcher_not_ready",
+                severity="error",
+                message=(
+                    "Modal shared-account dispatch is not resolved yet. "
+                    "Block new shared-profile backfills until dispatcher readiness is green."
+                ),
+                reason=readiness_reason,
+            )
+        elif not dispatcher_heartbeat_fresh:
+            _append_alert(
+                alerts,
+                code="dispatcher_heartbeat_stale",
+                severity="error",
+                message=(
+                    "Modal dispatcher heartbeat is stale or missing. "
+                    "Shared-profile backfills should not start until a fresh dispatcher heartbeat is visible."
+                ),
+                reason=readiness_reason,
+            )
+        elif not instagram_remote_auth_ready:
+            _append_alert(
+                alerts,
+                code="auth_preflight_not_ready",
+                severity="error",
+                message=(
+                    "Remote Instagram auth is not ready in the Modal worker plane. "
+                    "Shared-profile backfills should stay blocked until auth preflight turns green."
+                ),
+                reason=readiness_reason,
+            )
+
+    stale_running_count = _normalize_non_negative_int(payload.get("stale_running_count"))
+    if stale_running_count > 0:
+        _append_alert(
+            alerts,
+            code="stale_running_jobs",
+            severity="error",
+            message=(
+                f"{stale_running_count} social job{'s are' if stale_running_count != 1 else ' is'} stale "
+                "and need operator attention or recovery."
+            ),
+            count=stale_running_count,
+        )
+
+    oldest_queued_age_seconds = _normalize_non_negative_int(payload.get("oldest_queued_age_seconds"))
+    queue_wait_threshold = _alert_threshold_seconds(
+        "SOCIAL_QUEUE_ALERT_OLDEST_QUEUED_SECONDS",
+        900,
+        minimum=60,
+        maximum=86_400,
+    )
+    if oldest_queued_age_seconds >= queue_wait_threshold:
+        _append_alert(
+            alerts,
+            code="queue_wait_exceeded",
+            severity="warning",
+            message="The social queue has been waiting longer than the healthy backlog threshold.",
+            oldest_queued_age_seconds=oldest_queued_age_seconds,
+            threshold_seconds=queue_wait_threshold,
+        )
+
+    return alerts
+
+
+def _build_queue_status_alerts(
+    *,
+    workers_payload: Mapping[str, Any],
+    queue_payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    alerts = [dict(item) for item in list(workers_payload.get("alerts") or []) if isinstance(item, dict)]
+    dispatch_blocked_total = _normalize_non_negative_int(queue_payload.get("dispatch_blocked_jobs_total"))
+    if dispatch_blocked_total > 0:
+        _append_alert(
+            alerts,
+            code="dispatch_blocked_jobs",
+            severity="error",
+            message=(
+                f"{dispatch_blocked_total} queued social job{'s are' if dispatch_blocked_total != 1 else ' is'} "
+                "blocked before any Modal worker could claim them."
+            ),
+            count=dispatch_blocked_total,
+        )
+    retrying_dispatch_total = _normalize_non_negative_int(queue_payload.get("retrying_dispatch_jobs_total"))
+    if retrying_dispatch_total > 0:
+        _append_alert(
+            alerts,
+            code="retry_loop_detected",
+            severity="warning",
+            message=(
+                f"{retrying_dispatch_total} social job{'s are' if retrying_dispatch_total != 1 else ' is'} "
+                "retrying remote dispatch after a stale or unclaimed lease."
+            ),
+            count=retrying_dispatch_total,
+        )
+    return alerts
 
 
 def _get_social_hot_path_cache(cache_key: tuple[Any, ...]) -> Any | None:
@@ -1596,7 +1816,7 @@ def _worker_heartbeat_schema_ready() -> bool:
     return result
 
 
-def get_worker_auth_capabilities() -> dict[str, bool]:
+def get_worker_auth_capabilities() -> dict[str, Any]:
     """Describe platform auth capabilities for the current worker environment."""
     instagram_cookies = _load_instagram_cookies()
     tiktok_cookies = _load_tiktok_cookies()
@@ -1604,14 +1824,93 @@ def get_worker_auth_capabilities() -> dict[str, bool]:
     twikit_creds = _load_twikit_credentials(twitter_cookies)
     facebook_cookies = _load_facebook_cookies()
     threads_cookies = _load_threads_cookies()
+    instagram_authenticated = False
+    instagram_auth_reason: str | None = None
+    if instagram_cookies.get("sessionid"):
+        instagram_authenticated, instagram_auth_reason = _validate_instagram_cookie_health(instagram_cookies)
+    else:
+        instagram_auth_reason = "sessionid_missing"
     return {
-        "instagram_authenticated": bool(instagram_cookies.get("sessionid")),
+        "instagram_authenticated": instagram_authenticated,
+        "instagram_auth_reason": None if instagram_authenticated else instagram_auth_reason,
         "tiktok_authenticated": bool(tiktok_cookies.get("sessionid") or tiktok_cookies.get("sid_tt")),
         "twitter_authenticated": bool(
             (twitter_cookies.get("auth_token") and twitter_cookies.get("ct0")) or twitter_bearer or twikit_creds
         ),
         "facebook_authenticated": bool(facebook_cookies.get("c_user") and facebook_cookies.get("xs")),
         "threads_authenticated": bool(threads_cookies.get("sessionid") and threads_cookies.get("csrftoken")),
+    }
+
+
+def _platform_requires_remote_auth(platform: Any) -> bool:
+    return _normalize_platform_name(platform) in set(REMOTE_AUTH_REQUIRED_PLATFORMS)
+
+
+def _remote_auth_capability_from_workers(
+    *,
+    platform: str,
+    workers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_platform = _normalize_platform_name(platform)
+    auth_key = f"{normalized_platform}_authenticated"
+    counts = {
+        "total_authenticated_workers": 0,
+        "fresh_authenticated_workers": 0,
+        "healthy_authenticated_workers": 0,
+    }
+    auth_failure_reasons: Counter[str] = Counter()
+    for worker in workers:
+        metadata = _metadata_dict(worker.get("metadata"))
+        auth_capabilities = _metadata_dict(metadata.get("auth_capabilities"))
+        execution_backend = str(metadata.get("execution_backend_canonical") or "").strip().lower() or (
+            "modal" if str(worker.get("worker_id") or "").strip().lower().startswith("modal:") else "local"
+        )
+        if execution_backend != "modal":
+            continue
+        supported_platforms = {
+            _normalize_platform_name(item)
+            for item in (worker.get("supported_platforms") or CATALOG_SUPPORTED_PLATFORMS)
+            if _normalize_platform_name(item)
+        }
+        if normalized_platform not in supported_platforms:
+            continue
+        if not bool(auth_capabilities.get(auth_key)):
+            auth_reason = str(auth_capabilities.get(f"{normalized_platform}_auth_reason") or "").strip().lower()
+            if auth_reason:
+                auth_failure_reasons[auth_reason] += 1
+            continue
+        counts["total_authenticated_workers"] += 1
+        if bool(worker.get("is_fresh")):
+            counts["fresh_authenticated_workers"] += 1
+        if bool(worker.get("is_healthy")):
+            counts["healthy_authenticated_workers"] += 1
+
+    reason: str | None = None
+    if counts["total_authenticated_workers"] <= 0:
+        reason = (
+            auth_failure_reasons.most_common(1)[0][0]
+            if auth_failure_reasons
+            else (f"no_remote_authenticated_{normalized_platform}_workers")
+        )
+    elif counts["fresh_authenticated_workers"] <= 0:
+        reason = f"no_recent_remote_authenticated_{normalized_platform}_workers"
+    elif counts["healthy_authenticated_workers"] <= 0:
+        reason = f"no_healthy_remote_authenticated_{normalized_platform}_workers"
+
+    return {
+        "required": True,
+        "executor_backend": "modal",
+        **counts,
+        "ready": counts["healthy_authenticated_workers"] > 0,
+        "reason": reason,
+        "missing_hints": list(REMOTE_AUTH_MISSING_HINTS.get(normalized_platform) or []) if reason else [],
+    }
+
+
+def _build_remote_auth_capabilities(workers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        platform: _remote_auth_capability_from_workers(platform=platform, workers=workers)
+        for platform in REMOTE_AUTH_REQUIRED_PLATFORMS
     }
 
 
@@ -1797,61 +2096,9 @@ def _query_worker_health(*, stale_after_seconds: int | None = None) -> dict[str,
                           count(*) filter (
                             where last_seen_at >= now() - (%s * interval '1 second')
                           )::int as fresh_workers
-                          ,
-                          count(*) filter (
-                            where 'instagram' = any(
-                              coalesce(
-                                supported_platforms,
-                                array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
-                              )
-                            )
-                              and coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
-                              and coalesce(
-                                nullif(lower(coalesce(metadata->>'execution_backend_canonical', '')), ''),
-                                case
-                                  when lower(coalesce(worker_id, '')) like 'modal:%%' then 'modal'
-                                  else 'local'
-                                end
-                              ) = 'modal'
-                          )::int as total_instagram_remote_auth_workers,
-                          count(*) filter (
-                            where last_seen_at >= now() - (%s * interval '1 second')
-                              and 'instagram' = any(
-                                coalesce(
-                                  supported_platforms,
-                                  array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
-                                )
-                              )
-                              and coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
-                              and coalesce(
-                                nullif(lower(coalesce(metadata->>'execution_backend_canonical', '')), ''),
-                                case
-                                  when lower(coalesce(worker_id, '')) like 'modal:%%' then 'modal'
-                                  else 'local'
-                                end
-                              ) = 'modal'
-                          )::int as fresh_instagram_remote_auth_workers,
-                          count(*) filter (
-                            where status in ('starting', 'idle', 'working')
-                              and last_seen_at >= now() - (%s * interval '1 second')
-                              and 'instagram' = any(
-                                coalesce(
-                                  supported_platforms,
-                                  array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
-                                )
-                              )
-                              and coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
-                              and coalesce(
-                                nullif(lower(coalesce(metadata->>'execution_backend_canonical', '')), ''),
-                                case
-                                  when lower(coalesce(worker_id, '')) like 'modal:%%' then 'modal'
-                                  else 'local'
-                                end
-                              ) = 'modal'
-                          )::int as healthy_instagram_remote_auth_workers
                         from social.scrape_workers
                         """,
-                        [stale_seconds, stale_seconds, stale_seconds, stale_seconds],
+                        [stale_seconds, stale_seconds],
                     )
                     or {}
                 )
@@ -1890,9 +2137,6 @@ def _query_worker_health(*, stale_after_seconds: int | None = None) -> dict[str,
     fresh_workers = int(summary_row.get("fresh_workers") or 0)
     total_workers = int(summary_row.get("total_workers") or 0)
     active_workers = int(summary_row.get("active_workers") or 0)
-    total_instagram_remote_auth_workers = int(summary_row.get("total_instagram_remote_auth_workers") or 0)
-    fresh_instagram_remote_auth_workers = int(summary_row.get("fresh_instagram_remote_auth_workers") or 0)
-    healthy_instagram_remote_auth_workers = int(summary_row.get("healthy_instagram_remote_auth_workers") or 0)
     stale_workers = max(0, total_workers - fresh_workers)
     visible_stale_workers = sum(1 for worker in workers if not bool(worker.get("is_fresh")))
     stale_hidden_count = max(0, stale_workers - visible_stale_workers)
@@ -1915,17 +2159,11 @@ def _query_worker_health(*, stale_after_seconds: int | None = None) -> dict[str,
             if bool(worker.get("is_fresh")):
                 platform_bucket["fresh"] += 1
     reason: str | None = None
-    instagram_remote_auth_reason: str | None = None
     if total_workers <= 0:
         reason = "no_workers"
     elif healthy_workers <= 0:
         reason = "no_healthy_workers"
-    if total_instagram_remote_auth_workers <= 0:
-        instagram_remote_auth_reason = "no_remote_authenticated_instagram_workers"
-    elif fresh_instagram_remote_auth_workers <= 0:
-        instagram_remote_auth_reason = "no_recent_remote_authenticated_instagram_workers"
-    elif healthy_instagram_remote_auth_workers <= 0:
-        instagram_remote_auth_reason = "no_healthy_remote_authenticated_instagram_workers"
+    remote_auth_capabilities = _build_remote_auth_capabilities(workers)
     payload.update(
         {
             "healthy": healthy_workers > 0,
@@ -1937,22 +2175,7 @@ def _query_worker_health(*, stale_after_seconds: int | None = None) -> dict[str,
             "total_workers": total_workers,
             "by_stage": by_stage,
             "by_platform": by_platform,
-            "remote_auth_capabilities": {
-                "instagram": {
-                    "required": True,
-                    "executor_backend": "modal",
-                    "total_authenticated_workers": total_instagram_remote_auth_workers,
-                    "fresh_authenticated_workers": fresh_instagram_remote_auth_workers,
-                    "healthy_authenticated_workers": healthy_instagram_remote_auth_workers,
-                    "ready": healthy_instagram_remote_auth_workers > 0,
-                    "reason": instagram_remote_auth_reason,
-                    "missing_hints": (
-                        ["SOCIAL_INSTAGRAM_COOKIES_JSON|SOCIAL_INSTAGRAM_COOKIES_FILE"]
-                        if instagram_remote_auth_reason
-                        else []
-                    ),
-                }
-            },
+            "remote_auth_capabilities": remote_auth_capabilities,
             "workers": workers,
             "reason": reason,
         }
@@ -2007,6 +2230,8 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     payload = _query_worker_health(stale_after_seconds=stale_after_seconds)
     if modal_executor_enabled:
         payload = _build_modal_executor_health_payload(reason=modal_executor_reason)
+    else:
+        payload["alerts"] = _build_worker_health_alerts(payload)
     with _worker_health_cache_lock:
         _worker_health_cache = (time_module.monotonic(), stale_after_seconds, payload)
     return copy.deepcopy(payload)
@@ -2351,7 +2576,10 @@ def assert_worker_available_when_queue_enabled(
     if str(required_execution_backend or "").strip().lower() == "modal":
         ready, reason = _modal_social_dispatch_ready()
         if not (is_modal_remote_executor_enabled() and ready):
-            payload = _build_modal_executor_health_payload(reason=reason or "modal_executor_required")
+            payload = _build_modal_executor_health_payload(
+                reason=reason or "modal_executor_required",
+                platform=platform,
+            )
             raise SocialWorkerUnavailableError(
                 "Modal social dispatch is required for this social ingest job.",
                 worker_health=payload,
@@ -2362,12 +2590,20 @@ def assert_worker_available_when_queue_enabled(
                 "last_dispatch_success_at": _iso(_now_utc()),
             }
         )
-        return _build_modal_executor_health_payload(reason="modal_executor_ready")
+        payload = _build_modal_executor_health_payload(reason="modal_executor_ready", platform=platform)
+        platform_readiness = _metadata_dict(payload.get("shared_account_backfill_readiness"))
+        if platform and not bool(platform_readiness.get("ready")):
+            normalized_platform = _normalize_platform_name(platform) or str(platform).strip().lower()
+            raise SocialWorkerUnavailableError(
+                f"Modal social dispatch auth preflight is not ready for {normalized_platform}.",
+                worker_health=payload,
+            )
+        return payload
 
     if is_modal_remote_executor_enabled():
         ready, reason = _modal_social_dispatch_ready()
         if not ready:
-            payload = _build_modal_executor_health_payload(reason=reason)
+            payload = _build_modal_executor_health_payload(reason=reason, platform=platform)
             raise SocialWorkerUnavailableError(
                 "Modal social dispatch is not configured for remote execution.",
                 worker_health=payload,
@@ -2378,7 +2614,7 @@ def assert_worker_available_when_queue_enabled(
                 "last_dispatch_success_at": _iso(_now_utc()),
             }
         )
-        return _build_modal_executor_health_payload(reason="modal_executor_ready")
+        return _build_modal_executor_health_payload(reason="modal_executor_ready", platform=platform)
 
     health = get_worker_health()
     if bool(health.get("healthy")):
@@ -3264,6 +3500,7 @@ def get_queue_status(
             "workers": [],
             "reason": "health_query_failed",
         }
+        workers_payload["alerts"] = _build_worker_health_alerts(workers_payload)
 
     if errors:
         stale_fallback_seconds = _resolve_positive_int_env(
@@ -3285,6 +3522,7 @@ def get_queue_status(
             "remote_plane": _configured_execution_metadata(),
             "workers": workers_payload,
             "queue": queue_payload,
+            "alerts": _build_queue_status_alerts(workers_payload=workers_payload, queue_payload=queue_payload),
         }
     )
 
@@ -5497,8 +5735,16 @@ def _instagram_cookie_refresh_target_path() -> Path:
 
 
 def _instagram_auth_credentials() -> tuple[str | None, str | None]:
-    username = (os.getenv("SOCIAL_AUTH_INSTAGRAM_USERNAME") or "").strip() or None
-    password = (os.getenv("SOCIAL_AUTH_INSTAGRAM_PASSWORD") or "").strip() or None
+    username = (
+        (os.getenv("SOCIAL_AUTH_INSTAGRAM_USERNAME") or "").strip()
+        or (os.getenv("INSTAGRAM_USERNAME") or "").strip()
+        or None
+    )
+    password = (
+        (os.getenv("SOCIAL_AUTH_INSTAGRAM_PASSWORD") or "").strip()
+        or (os.getenv("INSTAGRAM_PASSWORD") or "").strip()
+        or None
+    )
     return username, password
 
 
@@ -5636,6 +5882,7 @@ def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str
                 minimum=30,
             ),
             validation_username=_instagram_cookie_validation_username(),
+            validator=_validate_instagram_cookie_health,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -7290,6 +7537,12 @@ def _shared_source_defaults(*, source_scope: str = "bravo") -> list[dict[str, An
         return rows
     for platform in sorted(SUPPORTED_PLATFORMS):
         for rank, account_handle in enumerate(_default_platform_accounts(platform), start=1):
+            profile_contract = _shared_profile_contract(
+                source_scope=source_scope,
+                platform=platform,
+                account_handle=account_handle,
+                metadata={"is_default": True},
+            )
             rows.append(
                 {
                     "id": f"default:{platform}:{account_handle}",
@@ -7298,7 +7551,7 @@ def _shared_source_defaults(*, source_scope: str = "bravo") -> list[dict[str, An
                     "account_handle": account_handle,
                     "is_active": True,
                     "scrape_priority": rank * 10,
-                    "metadata": {"is_default": True},
+                    "metadata": {"is_default": True, **profile_contract},
                     "last_scrape_status": None,
                     "last_scrape_run_id": None,
                     "last_scrape_job_id": None,
@@ -7308,6 +7561,9 @@ def _shared_source_defaults(*, source_scope: str = "bravo") -> list[dict[str, An
                     "created_at": None,
                     "updated_at": None,
                     "is_default": True,
+                    "profile_kind": profile_contract["profile_kind"],
+                    "assignment_mode": profile_contract["assignment_mode"],
+                    "assignment_rules": profile_contract["assignment_rules"],
                 }
             )
     return rows
@@ -7360,6 +7616,14 @@ def get_shared_account_sources(
             _normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip()
         )
         payload["metadata"] = dict(row.get("metadata") or {})
+        payload.update(
+            _shared_profile_contract(
+                source_scope=str(row.get("source_scope") or source_scope),
+                platform=platform,
+                account_handle=payload["account_handle"],
+                metadata=payload["metadata"],
+            )
+        )
         payload["is_default"] = bool(payload["metadata"].get("is_default"))
         payload_rows.append(payload)
     if payload_rows:
@@ -7401,13 +7665,22 @@ def put_shared_account_sources(
         if key in seen_pairs:
             continue
         seen_pairs.add(key)
+        metadata = dict(source.get("metadata") or {})
+        metadata.update(
+            _shared_profile_contract(
+                source_scope=source_scope,
+                platform=platform,
+                account_handle=account_handle,
+                metadata=metadata,
+            )
+        )
         normalized_sources.append(
             {
                 "platform": platform,
                 "account_handle": account_handle,
                 "is_active": bool(source.get("is_active", True)),
                 "scrape_priority": max(1, int(source.get("scrape_priority") or 100)),
-                "metadata": dict(source.get("metadata") or {}),
+                "metadata": metadata,
             }
         )
 
@@ -7444,7 +7717,7 @@ def put_shared_account_sources(
                         row["account_handle"],
                         row["is_active"],
                         row["scrape_priority"],
-                        json.dumps(row["metadata"]),
+                        _json_dumps(_metadata_dict(row["metadata"])),
                         updated_by,
                     ],
                 )
@@ -8057,7 +8330,7 @@ def _touch_worker_heartbeat_for_job(
           and w.worker_id = j.worker_id
         returning w.worker_id
         """,
-        [_normalize_worker_status(status), json.dumps(metadata or {}), job_id],
+        [_normalize_worker_status(status), _json_dumps(_metadata_dict(metadata)), job_id],
     )
 
 
@@ -8085,7 +8358,7 @@ def _clear_worker_heartbeat_for_job(
           and w.worker_id = j.worker_id
         returning w.worker_id
         """,
-        [_normalize_worker_status(status), json.dumps(metadata or {}), job_id],
+        [_normalize_worker_status(status), _json_dumps(_metadata_dict(metadata)), job_id],
     )
 
 
@@ -8235,7 +8508,7 @@ def _create_job(
                 run_id,
                 platform,
                 job_type,
-                json.dumps(config),
+                _json_dumps(_metadata_dict(config)),
                 effective_status,
                 _coerce_dt(available_at),
                 priority,
@@ -8243,7 +8516,7 @@ def _create_job(
                 context.season_id if context is not None else None,
                 source_scope,
                 initiated_by,
-                json.dumps({"stage": stage}),
+                _json_dumps(_job_runtime_metadata(stage)),
                 worker_id,
                 preclaim,
                 preclaim,
@@ -8380,7 +8653,7 @@ def _touch_job_dispatch_metadata(
         where id = %s::uuid
         returning id::text
         """,
-        [json.dumps(existing_metadata), job_id],
+        [_json_dumps(existing_metadata), job_id],
     )
 
 
@@ -8581,7 +8854,7 @@ def _update_job_config(job_id: str, *, config_updates: Mapping[str, Any] | None 
             where id = %s::uuid
             returning config
             """,
-            [json.dumps(updates), job_id],
+            [_json_dumps(updates), job_id],
         )
         or {}
     )
@@ -8637,7 +8910,7 @@ def _update_job_progress(
           and status in ('queued', 'pending', 'retrying', 'running')
         returning id::text
         """,
-        [items_found, json.dumps(metadata or {}), job_id],
+        [items_found, _json_dumps(_metadata_dict(metadata)), job_id],
     )
     _touch_worker_heartbeat_for_job(
         job_id=job_id,
@@ -8702,7 +8975,7 @@ def _finish_job(
             status,
             items_found,
             error_message,
-            json.dumps(metadata or {}),
+            _json_dumps(_metadata_dict(metadata)),
             last_error_code,
             last_error_class,
             next_available_at,
@@ -13936,21 +14209,149 @@ def _pg_upsert(
         return pg.fetch_one_with_cursor(cur, sql, list(adapted.values()))
 
 
+def _json_serializer(obj: Any) -> Any:
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_serializer)
+
+
 def _adapt_payload_json_values(payload: Mapping[str, Any]) -> dict[str, Any]:
     from psycopg2.extras import Json as PgJson
-
-    def _json_serializer(obj: Any) -> Any:
-        if hasattr(obj, "isoformat"):
-            return obj.isoformat()
-        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
     adapted: dict[str, Any] = {}
     for key, value in payload.items():
         if isinstance(value, (dict, list)):
-            adapted[key] = PgJson(value, dumps=lambda v: json.dumps(v, default=_json_serializer))
+            adapted[key] = PgJson(value, dumps=_json_dumps)
         else:
             adapted[key] = value
     return adapted
+
+
+@lru_cache(maxsize=1)
+def _resolve_runtime_version_stamp() -> dict[str, Any]:
+    commit_sha = ""
+    for env_name in (
+        "TRR_RUNTIME_VERSION",
+        "TRR_DEPLOY_VERSION",
+        "RENDER_GIT_COMMIT",
+        "VERCEL_GIT_COMMIT_SHA",
+        "RAILWAY_GIT_COMMIT_SHA",
+        "COMMIT_SHA",
+        "GIT_COMMIT_SHA",
+    ):
+        value = str(os.getenv(env_name) or "").strip()
+        if value:
+            commit_sha = value
+            break
+    modal_image = str(os.getenv("MODAL_IMAGE_ID") or os.getenv("MODAL_IMAGE_TAG") or "").strip() or None
+    modal_env = modal_environment_name() or None
+    modal_function = modal_social_job_function_name() or None
+    execution_backend = execution_backend_canonical()
+    return {
+        "commit_sha": commit_sha or None,
+        "modal_image": modal_image,
+        "modal_environment": modal_env,
+        "modal_function": modal_function,
+        "execution_backend": execution_backend,
+        "label": " · ".join(
+            part
+            for part in (
+                (commit_sha[:12] if commit_sha else None),
+                (f"modal:{modal_env}" if modal_env else None),
+                modal_image,
+            )
+            if part
+        )
+        or execution_backend,
+    }
+
+
+def _job_runtime_metadata(stage: str) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "runtime_version": dict(_resolve_runtime_version_stamp()),
+    }
+
+
+@lru_cache(maxsize=1)
+def _shared_classify_batch_size() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_SHARED_CLASSIFY_BATCH_SIZE",
+        SHARED_CLASSIFY_BATCH_SIZE_DEFAULT,
+        minimum=1,
+        maximum=1000,
+    )
+
+
+def _chunk_unique_source_ids(source_ids: Sequence[Any], *, chunk_size: int | None = None) -> list[list[str]]:
+    normalized_chunk_size = max(1, int(chunk_size or _shared_classify_batch_size()))
+    deduped = sorted({str(source_id).strip() for source_id in source_ids if str(source_id).strip()})
+    if not deduped:
+        return []
+    return [deduped[index : index + normalized_chunk_size] for index in range(0, len(deduped), normalized_chunk_size)]
+
+
+def _shared_profile_kind(source_scope: str, metadata: Mapping[str, Any] | None = None) -> str:
+    metadata_dict = _metadata_dict(metadata)
+    explicit_kind = str(metadata_dict.get("profile_kind") or "").strip().lower()
+    if explicit_kind:
+        return explicit_kind
+    return SHARED_PROFILE_KIND_BY_SCOPE.get(str(source_scope or "").strip().lower(), "community")
+
+
+def _shared_profile_network_name(source_scope: str, metadata: Mapping[str, Any] | None = None) -> str:
+    metadata_dict = _metadata_dict(metadata)
+    for key in ("network_name", "display_name", "brand_name", "publisher_name"):
+        value = str(metadata_dict.get(key) or "").strip()
+        if value:
+            return value
+    normalized_scope = str(source_scope or "").strip().lower() or "network"
+    return normalized_scope.replace("_", " ").title()
+
+
+def _shared_profile_contract(
+    *,
+    source_scope: str,
+    platform: str,
+    account_handle: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata_dict = _metadata_dict(metadata)
+    profile_kind = _shared_profile_kind(source_scope, metadata_dict)
+    assignment_mode = str(
+        metadata_dict.get("assignment_mode") or ""
+    ).strip().lower() or SHARED_PROFILE_ASSIGNMENT_MODE_BY_KIND.get(profile_kind, "community_match")
+    explicit_rules = metadata_dict.get("assignment_rules")
+    assignment_rules = explicit_rules if isinstance(explicit_rules, dict) else {}
+    if not assignment_rules:
+        assignment_rules = {
+            "use_hashtags": True,
+            "use_mentions": True,
+            "use_collaborators": str(platform or "").strip().lower() == "instagram",
+            "use_configured_aliases": True,
+            "allow_multi_show_candidates": profile_kind == "network_streaming",
+        }
+    return {
+        "source_scope": str(source_scope or "").strip().lower() or "bravo",
+        "profile_kind": profile_kind,
+        "network_name": _shared_profile_network_name(source_scope, metadata_dict),
+        "assignment_mode": assignment_mode,
+        "assignment_rules": assignment_rules,
+        "account_handle": _normalize_account_handle(account_handle) or str(account_handle or "").strip(),
+        "platform": _normalize_platform_name(platform),
+    }
+
+
+def _shared_account_frontier_lease_deadline(platform: str) -> datetime:
+    safe_lease_seconds = max(
+        30,
+        _resolve_social_job_stale_seconds(platform=platform, stage=SHARED_ACCOUNT_POSTS_STAGE),
+    )
+    return _now_utc() + timedelta(seconds=safe_lease_seconds)
 
 
 def _pg_upsert_many(
@@ -23142,8 +23543,8 @@ def _touch_shared_account_source(
             job_id,
             last_scrape_status,
             last_classified_at,
-            json.dumps(_metadata_dict(metadata_updates)),
-            json.dumps(_metadata_dict(metadata_updates)),
+            _json_dumps(_metadata_dict(metadata_updates)),
+            _json_dumps(_metadata_dict(metadata_updates)),
             source_scope,
             platform,
             normalized_account,
@@ -24135,8 +24536,8 @@ def _shared_catalog_summary_totals(platform: str, account_handle: str) -> dict[s
                 where nullif(trim(coalesce(caption, text, '')), '') is not null
               )::int as caption_rows,
               coalesce(sum(jsonb_array_length(coalesce(hashtags, '[]'::jsonb))), 0)::int as stored_hashtag_instances
-            from social.{table}
-            where lower(source_account) = %s
+            from social.{table} p
+            where lower(p.source_account) = %s
             """,
                 [normalized_account],
             )
@@ -24403,7 +24804,16 @@ def _social_account_profile_hashtag_items(
     analysis_rows = (
         preloaded_rows
         if preloaded_rows is not None
-        else _social_account_profile_analysis_rows(normalized_platform, normalized_account, limit=limit)
+        else _social_account_profile_analysis_rows(
+            normalized_platform,
+            normalized_account,
+            limit=limit,
+            posted_since=(
+                (_now_utc() - timedelta(days=int(lookback_days)))
+                if lookback_days is not None and lookback_days > 0
+                else None
+            ),
+        )
     )
     if lookback_days is not None and lookback_days > 0:
         window_start = _now_utc() - timedelta(days=int(lookback_days))
@@ -24628,11 +25038,13 @@ def _social_account_profile_window_to_lookback_days(window: str | None) -> int |
     normalized_window = str(window or "").strip().lower()
     if not normalized_window or normalized_window == "all":
         return None
+    if normalized_window in {"7d", "week", "this_week"}:
+        return 7
     if normalized_window in {"30d", "month", "this_month"}:
         return 30
     if normalized_window in {"365d", "year", "this_year"}:
         return 365
-    raise ValueError("Unsupported hashtag window. Use one of: all, 30d, 365d.")
+    raise ValueError("Unsupported hashtag window. Use one of: all, 7d, 30d, 365d.")
 
 
 def _catalog_recent_runs(platform: str, account_handle: str, *, limit: int = 10) -> list[dict[str, Any]]:
@@ -24972,7 +25384,7 @@ def _ensure_shared_account_run_frontier(
             str(last_transport or "").strip().lower() or None,
             max(0, int(retry_count)),
             bool(exhausted),
-            json.dumps(_metadata_dict(metadata)),
+            _json_dumps(_metadata_dict(metadata)),
         ],
     )
     return _shared_account_frontier_row_to_payload(row)
@@ -25032,7 +25444,7 @@ def _update_shared_account_run_frontier(
         _append("exhausted", bool(exhausted))
     if metadata_updates:
         assignments.append("metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb")
-        params.append(json.dumps(_metadata_dict(metadata_updates)))
+        params.append(_json_dumps(_metadata_dict(metadata_updates)))
     assignments.append("updated_at = now()")
     params.extend(
         [
@@ -25171,11 +25583,11 @@ def _claim_shared_account_run_frontier(
 ) -> dict[str, Any]:
     if not _shared_account_run_frontiers_table_ready():
         return {}
-    safe_lease_seconds = max(
-        30,
-        int(lease_seconds or _resolve_social_job_stale_seconds(platform=platform, stage=SHARED_ACCOUNT_POSTS_STAGE)),
-    )
-    lease_expires_at = _now_utc() + timedelta(seconds=safe_lease_seconds)
+    if lease_seconds is not None:
+        safe_lease_seconds = max(30, int(lease_seconds))
+        lease_expires_at = _now_utc() + timedelta(seconds=safe_lease_seconds)
+    else:
+        lease_expires_at = _shared_account_frontier_lease_deadline(platform)
     row = pg.fetch_one(
         """
         update social.shared_account_run_frontiers
@@ -26097,6 +26509,39 @@ def _shared_instagram_frontier_auth_validation(config: Mapping[str, Any] | None 
     return True, None
 
 
+def _shared_instagram_frontier_auth_state(
+    config: Mapping[str, Any] | None = None,
+    *,
+    frontier_metadata: Mapping[str, Any] | None = None,
+) -> tuple[bool, str | None]:
+    metadata = _metadata_dict(config)
+    if metadata.get("frontier_auth_allowed") is True:
+        return True, None
+    if metadata.get("frontier_auth_allowed") is False:
+        return False, str(metadata.get("frontier_auth_reason") or "").strip().lower() or None
+
+    normalized_frontier_metadata = _metadata_dict(frontier_metadata)
+    if normalized_frontier_metadata.get("auth_allowed") is True:
+        return True, None
+    if normalized_frontier_metadata.get("auth_allowed") is False:
+        return False, str(normalized_frontier_metadata.get("auth_reason") or "").strip().lower() or None
+
+    return _shared_instagram_frontier_auth_validation(metadata)
+
+
+def _shared_instagram_frontier_auth_error_code(auth_reason: str | None) -> str:
+    normalized_reason = str(auth_reason or "").strip().lower()
+    if normalized_reason == "checkpoint_required":
+        return "instagram_graphql_checkpoint_required"
+    if normalized_reason == "sessionid_missing":
+        return "instagram_graphql_sessionid_missing"
+    if normalized_reason == "graphql_validation_failed":
+        return "instagram_graphql_auth_validation_failed"
+    if normalized_reason:
+        return f"instagram_graphql_auth_{normalized_reason}"
+    return "instagram_graphql_auth_blocked"
+
+
 def _shared_account_retry_config_updates(
     config: Mapping[str, Any] | None,
     *,
@@ -26469,7 +26914,7 @@ def _run_shared_account_discovery_frontier_stage(
         }
     )
     if source_ids:
-        _enqueue_shared_classify_job(
+        _enqueue_shared_classify_jobs_batched(
             run_id=run_id,
             platform=platform,
             source_scope=source_scope,
@@ -27710,6 +28155,47 @@ def _enqueue_shared_classify_job(
     )
 
 
+def _enqueue_shared_classify_jobs_batched(
+    *,
+    run_id: str,
+    platform: str,
+    source_scope: str,
+    account_handle: str,
+    source_ids: Sequence[Any],
+    pipeline_ingest_mode: str,
+    worker_id: str | None = None,
+) -> list[str]:
+    job_ids: list[str] = []
+    for batch_index, source_id_batch in enumerate(_chunk_unique_source_ids(source_ids), start=1):
+        job_ids.append(
+            _create_job(
+                None,
+                run_id=run_id,
+                platform=platform,
+                source_scope=source_scope,
+                job_type=POST_CLASSIFY_JOB_TYPE,
+                stage=POST_CLASSIFY_STAGE,
+                config={
+                    "stage": POST_CLASSIFY_STAGE,
+                    "platform": platform,
+                    "source_scope": source_scope,
+                    "account": account_handle,
+                    "source_ids": source_id_batch,
+                    "pipeline_ingest_mode": pipeline_ingest_mode,
+                    "batch_index": batch_index,
+                    "batch_total_source_ids": len(source_id_batch),
+                    "batch_strategy": "size_bounded",
+                },
+                initiated_by=None,
+                status="queued" if is_queue_enabled() else "pending",
+                priority=150,
+                worker_id=worker_id,
+                preclaim=bool(worker_id),
+            )
+        )
+    return job_ids
+
+
 def _enqueue_shared_materialize_job(
     *,
     run_id: str,
@@ -27791,6 +28277,8 @@ def _enqueue_shared_discovery_job(
     required_execution_backend: str | None = None,
     resume_frontier_cursor: str | None = None,
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
+    catalog_action: str | None = None,
+    catalog_action_scope: str | None = None,
     initiated_by: str | None = None,
     worker_id: str | None = None,
     priority: int = 100,
@@ -27820,6 +28308,8 @@ def _enqueue_shared_discovery_job(
             "required_execution_backend": str(required_execution_backend or "").strip().lower() or None,
             "resume_frontier_cursor": normalized_resume_cursor,
             "resume_frontier_snapshot": dict(resume_frontier_snapshot or {}) if normalized_resume_cursor else None,
+            "catalog_action": str(catalog_action or "").strip().lower() or None,
+            "catalog_action_scope": str(catalog_action_scope or "").strip().lower() or None,
         },
         initiated_by=initiated_by,
         status="queued" if is_queue_enabled() else "pending",
@@ -28153,9 +28643,12 @@ def _run_shared_account_frontier_posts_stage(
 
     _flush_progress(force=True)
     next_cursor = str(claimed_frontier.get("next_cursor") or "").strip() or None
-    auth_allowed = bool(config.get("frontier_auth_allowed"))
-    if not auth_allowed:
-        auth_allowed = bool(_metadata_dict(claimed_frontier.get("metadata")).get("auth_allowed"))
+    frontier_metadata = _metadata_dict(claimed_frontier.get("metadata"))
+    auth_allowed, auth_reason = (
+        _shared_instagram_frontier_auth_state(config, frontier_metadata=frontier_metadata)
+        if platform == "instagram"
+        else (True, None)
+    )
     selected_transport = (
         str(config.get("frontier_transport") or "").strip().lower()
         or str(claimed_frontier.get("last_transport") or "").strip().lower()
@@ -28164,9 +28657,71 @@ def _run_shared_account_frontier_posts_stage(
     last_retrieval_meta: dict[str, Any] = {}
     seen_cursors: set[str] = set()
     classify_job_count = 0
+    pending_classify_source_ids: list[str] = []
     frontier_release_status: str | None = None
 
+    def _flush_pending_classify_jobs(*, worker_hint: str | None = None) -> int:
+        nonlocal classify_job_count, pending_classify_source_ids
+        if not pending_classify_source_ids:
+            return 0
+        created_jobs = _enqueue_shared_classify_jobs_batched(
+            run_id=run_id,
+            platform=platform,
+            source_scope=source_scope,
+            account_handle=account_handle,
+            source_ids=pending_classify_source_ids,
+            pipeline_ingest_mode=ingest_mode,
+            worker_id=worker_hint,
+        )
+        classify_job_count += len(created_jobs)
+        pending_classify_source_ids = []
+        return len(created_jobs)
+
     try:
+        if platform == "instagram" and next_cursor and not auth_allowed:
+            error_code = _shared_instagram_frontier_auth_error_code(auth_reason)
+            error_message = (
+                f"Shared-account frontier auth blocked for @{account_handle}: {auth_reason or 'auth_blocked'}"
+            )
+            claimed_frontier = _update_shared_account_run_frontier(
+                run_id=run_id,
+                platform=platform,
+                account_handle=account_handle,
+                status="failed",
+                exhausted=False,
+                retry_count=_normalize_non_negative_int(claimed_frontier.get("retry_count")),
+                last_transport=selected_transport,
+                lease_owner=lease_holder,
+                lease_expires_at=_shared_account_frontier_lease_deadline(platform),
+                metadata_updates={
+                    "auth_allowed": False,
+                    "auth_reason": auth_reason,
+                    "last_error_code": error_code,
+                    "last_error_class": SharedStageRuntimeError.__name__,
+                    "last_error_message": error_message,
+                    "cooldown_until": None,
+                    "graphql_cursor": next_cursor,
+                },
+            )
+            frontier_release_status = "failed"
+            raise SharedStageRuntimeError(
+                error_message,
+                error_code=error_code,
+                retryable=False,
+                runtime_metadata={
+                    "retrieval_meta": {
+                        "error_code": error_code,
+                        "error_class": SharedStageRuntimeError.__name__,
+                        "error_message": auth_reason or "auth_blocked",
+                        "retryable": False,
+                        "graphql_cursor": next_cursor,
+                        "auth_allowed": False,
+                        "auth_reason": auth_reason,
+                        "transport": selected_transport,
+                    },
+                    "frontier": claimed_frontier,
+                },
+            )
         while next_cursor:
             if next_cursor in seen_cursors:
                 _update_shared_account_run_frontier(
@@ -28200,6 +28755,7 @@ def _run_shared_account_frontier_posts_stage(
             if not page_posts:
                 retry_count = _normalize_non_negative_int(claimed_frontier.get("retry_count")) + 1
                 cooldown_until = _iso(_now_utc() + timedelta(seconds=_retry_backoff_seconds(retry_count)))
+                _flush_pending_classify_jobs()
                 _update_shared_account_run_frontier(
                     run_id=run_id,
                     platform=platform,
@@ -28207,6 +28763,8 @@ def _run_shared_account_frontier_posts_stage(
                     status="retrying" if bool(retrieval_meta.get("retryable", True)) else "failed",
                     retry_count=retry_count,
                     last_transport=selected_transport,
+                    lease_owner=lease_holder,
+                    lease_expires_at=_shared_account_frontier_lease_deadline(platform),
                     metadata_updates={
                         "last_error_code": retrieval_meta.get("error_code"),
                         "last_error_class": retrieval_meta.get("error_class"),
@@ -28252,6 +28810,8 @@ def _run_shared_account_frontier_posts_stage(
                 posts_saved=total_posts_saved,
                 pages_scanned=total_pages_scanned,
                 last_transport=selected_transport,
+                lease_owner=lease_holder,
+                lease_expires_at=_shared_account_frontier_lease_deadline(platform),
                 exhausted=exhausted,
                 metadata_updates={
                     "last_error_code": None,
@@ -28262,16 +28822,12 @@ def _run_shared_account_frontier_posts_stage(
             )
             frontier_release_status = "completed" if bool(claimed_frontier.get("exhausted")) else None
             if source_ids:
-                classify_job_count += 1
-                _enqueue_shared_classify_job(
-                    run_id=run_id,
-                    platform=platform,
-                    source_scope=source_scope,
-                    account_handle=account_handle,
-                    source_ids=source_ids,
-                    pipeline_ingest_mode=ingest_mode,
-                    worker_id=None,
-                )
+                pending_classify_source_ids.extend(source_ids)
+                pending_unique_source_ids = {
+                    str(item).strip() for item in pending_classify_source_ids if str(item).strip()
+                }
+                if len(pending_unique_source_ids) >= _shared_classify_batch_size():
+                    _flush_pending_classify_jobs()
             activity.update(
                 {
                     "phase": "catalog_fetch_page",
@@ -28284,6 +28840,7 @@ def _run_shared_account_frontier_posts_stage(
             )
             _flush_progress(force=True)
             if exhausted and expected_total_posts > 0 and total_posts_checked < expected_total_posts:
+                _flush_pending_classify_jobs()
                 _update_shared_account_run_frontier(
                     run_id=run_id,
                     platform=platform,
@@ -28291,6 +28848,8 @@ def _run_shared_account_frontier_posts_stage(
                     status="retrying",
                     exhausted=False,
                     retry_count=_normalize_non_negative_int(claimed_frontier.get("retry_count")) + 1,
+                    lease_owner=lease_holder,
+                    lease_expires_at=_shared_account_frontier_lease_deadline(platform),
                     metadata_updates={
                         "last_error_code": "catalog_incomplete",
                         "expected_total_posts": expected_total_posts,
@@ -28326,6 +28885,7 @@ def _run_shared_account_frontier_posts_stage(
             status=frontier_release_status,
         )
 
+    _flush_pending_classify_jobs()
     activity["phase"] = "catalog_fetch_end"
     activity["pages_scanned"] = total_pages_scanned
     activity["posts_checked"] = total_posts_checked
@@ -28536,7 +29096,7 @@ def _run_shared_account_posts_stage(
         metadata_updates={"profile_snapshot": _metadata_dict(retrieval_meta.get("profile_snapshot"))},
     )
     if source_ids:
-        _enqueue_shared_classify_job(
+        _enqueue_shared_classify_jobs_batched(
             run_id=run_id,
             platform=platform,
             source_scope=source_scope,
@@ -31001,6 +31561,8 @@ def ingest_shared_accounts(
     allow_local_dev_inline_bypass: bool = False,
     resume_frontier_cursor: str | None = None,
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
+    catalog_action: str | None = None,
+    catalog_action_scope: str | None = None,
 ) -> dict[str, Any]:
     _assert_social_queue_schema_ready()
     if source_scope not in SUPPORTED_SCOPES:
@@ -31038,6 +31600,8 @@ def ingest_shared_accounts(
     full_history_partition_enabled = (
         normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and not bounded_window
     )
+    normalized_catalog_action = str(catalog_action or "").strip().lower() or None
+    normalized_catalog_action_scope = str(catalog_action_scope or "").strip().lower() or None
 
     expected_total_posts_by_account: dict[str, int] = {}
     modal_executor_required = False
@@ -31065,10 +31629,21 @@ def ingest_shared_accounts(
     effective_modal_executor_required = modal_executor_required and not allow_local_dev_inline_bypass
 
     if effective_modal_executor_required and is_queue_enabled():
-        assert_worker_available_when_queue_enabled(
-            required_execution_backend="modal",
-            platform="instagram",
+        modal_required_platforms = sorted(
+            {
+                _normalize_platform_name(row.get("platform"))
+                for row in sources
+                if _shared_account_catalog_requires_modal_executor(
+                    platform=row.get("platform"),
+                    pipeline_ingest_mode=normalized_ingest_mode,
+                )
+            }
         )
+        for modal_platform in modal_required_platforms:
+            assert_worker_available_when_queue_enabled(
+                required_execution_backend="modal",
+                platform=modal_platform,
+            )
 
     catalog_runner_count = 1
     catalog_runner_strategy = "single_runner"
@@ -31145,6 +31720,8 @@ def ingest_shared_accounts(
         "required_execution_backend": "modal" if effective_modal_executor_required else None,
         "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
         "resume_frontier_cursor": str(resume_frontier_cursor or "").strip() or None,
+        "catalog_action": normalized_catalog_action,
+        "catalog_action_scope": normalized_catalog_action_scope,
         **_configured_execution_metadata(),
     }
     run_id = _create_run(
@@ -31235,6 +31812,8 @@ def ingest_shared_accounts(
                             else None
                         ),
                         "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
+                        "catalog_action": normalized_catalog_action,
+                        "catalog_action_scope": normalized_catalog_action_scope,
                         "expected_total_posts": _shared_account_expected_total_posts_from_config(
                             {"expected_total_posts_by_account": expected_total_posts_by_account},
                             platform=platform,
@@ -31278,6 +31857,8 @@ def ingest_shared_accounts(
                     else None
                 ),
                 "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
+                "catalog_action": normalized_catalog_action,
+                "catalog_action_scope": normalized_catalog_action_scope,
                 "expected_total_posts": _shared_account_expected_total_posts_from_config(
                     {"expected_total_posts_by_account": expected_total_posts_by_account},
                     platform=platform,
@@ -31333,6 +31914,8 @@ def ingest_shared_accounts(
                     required_execution_backend=job_config.get("required_execution_backend"),
                     resume_frontier_cursor=resume_frontier_cursor,
                     resume_frontier_snapshot=resume_frontier_snapshot,
+                    catalog_action=normalized_catalog_action,
+                    catalog_action_scope=normalized_catalog_action_scope,
                     initiated_by=initiated_by,
                     worker_id=inline_worker_id,
                     priority=max(1, int(row.get("scrape_priority") or 100)),
@@ -31403,6 +31986,8 @@ def ingest_shared_accounts(
         "execution_owner": run_config["execution_owner"],
         "execution_mode_canonical": run_config["execution_mode_canonical"],
         "execution_backend_canonical": run_config["execution_backend_canonical"],
+        "catalog_action": normalized_catalog_action,
+        "catalog_action_scope": normalized_catalog_action_scope,
     }
 
 
@@ -32886,6 +33471,234 @@ def _resolve_run_progress_worker_runtime(
     return effective_runner_strategy, effective_runner_count, effective_partition_strategy
 
 
+def _resolve_run_progress_runtime_versions(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    versions: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for row in job_rows:
+        metadata = _metadata_dict(row.get("metadata"))
+        runtime_candidates = [
+            _metadata_dict(metadata.get("runtime_version")),
+            _metadata_dict(_metadata_dict(metadata.get("retrieval_meta")).get("runtime_version")),
+        ]
+        for runtime_version in runtime_candidates:
+            label = str(runtime_version.get("label") or "").strip()
+            if not label or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            versions.append(runtime_version)
+    current = dict(_resolve_runtime_version_stamp())
+    if not seen_labels:
+        versions.append(current)
+    return {
+        "current": current,
+        "observed": versions[:5],
+        "drift_detected": len(
+            {str(item.get("label") or "").strip() for item in versions if str(item.get("label") or "").strip()}
+        )
+        > 1,
+    }
+
+
+def _queued_jobs_by_type(stages_payload: Mapping[str, Any]) -> dict[str, int]:
+    queued: dict[str, int] = {}
+    for stage_name, stage_payload in _metadata_dict(stages_payload).items():
+        waiting_jobs = _normalize_non_negative_int(_metadata_dict(stage_payload).get("jobs_waiting"))
+        if waiting_jobs > 0:
+            queued[str(stage_name)] = waiting_jobs
+    return queued
+
+
+def _derive_catalog_run_state(
+    *,
+    run_status: str,
+    scrape_complete: bool,
+    classify_incomplete: bool,
+    stages_payload: Mapping[str, Any],
+    frontier_progress: Mapping[str, Any],
+) -> str:
+    normalized_status = str(run_status or "").strip().lower()
+    frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
+    if frontier_metadata.get("auth_allowed") is False and str(frontier_metadata.get("auth_reason") or "").strip():
+        return "failed"
+    if normalized_status == "cancelled":
+        return "cancelled"
+    if scrape_complete:
+        if classify_incomplete:
+            return "classifying"
+        if normalized_status == "failed":
+            return "failed"
+        return "completed"
+    if normalized_status == "failed":
+        return "failed"
+    discovery_stage = _metadata_dict(stages_payload.get(SHARED_ACCOUNT_DISCOVERY_STAGE))
+    posts_stage = _metadata_dict(stages_payload.get(SHARED_ACCOUNT_POSTS_STAGE))
+    if _normalize_non_negative_int(discovery_stage.get("jobs_active")) > 0 or (
+        _normalize_non_negative_int(discovery_stage.get("jobs_completed")) <= 0
+        and _normalize_non_negative_int(posts_stage.get("jobs_total")) <= 0
+    ):
+        return "discovering"
+    if _normalize_non_negative_int(posts_stage.get("jobs_total")) > 0 or str(
+        frontier_progress.get("status") or ""
+    ).strip().lower() in {"queued", "running", "retrying"}:
+        return "fetching"
+    if classify_incomplete:
+        return "classifying"
+    return "discovering"
+
+
+def _frontier_lease_stale(*, frontier_progress: Mapping[str, Any], platform: str) -> bool:
+    lease_owner = str(frontier_progress.get("lease_owner") or "").strip()
+    if not lease_owner:
+        return False
+    lease_expires_at = _coerce_dt(frontier_progress.get("lease_expires_at"))
+    if lease_expires_at is not None and lease_expires_at < _now_utc():
+        return True
+    updated_at = _coerce_dt(frontier_progress.get("updated_at"))
+    if updated_at is None:
+        return False
+    stale_after_seconds = max(
+        30,
+        _resolve_social_job_stale_seconds(platform=platform, stage=SHARED_ACCOUNT_POSTS_STAGE),
+    )
+    return updated_at < (_now_utc() - timedelta(seconds=stale_after_seconds))
+
+
+def _build_catalog_run_progress_alerts(
+    *,
+    platform: str,
+    frontier_progress: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+    frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
+    worker_runtime = _metadata_dict(payload.get("worker_runtime"))
+    if bool(worker_runtime.get("runtime_version_drift")):
+        _append_alert(
+            alerts,
+            code="runtime_version_drift",
+            severity="warning",
+            message=(
+                "This run was observed on more than one worker runtime version. "
+                "Deploy drift can make scraper behavior inconsistent until all workers converge."
+            ),
+            observed_versions=list(worker_runtime.get("runtime_versions_observed") or [])[:3],
+        )
+
+    frontier_auth_allowed = frontier_metadata.get("auth_allowed")
+    frontier_auth_reason = str(frontier_metadata.get("auth_reason") or "").strip().lower() or None
+    frontier_auth_error_code = str(frontier_metadata.get("last_error_code") or "").strip().lower() or (
+        _shared_instagram_frontier_auth_error_code(frontier_auth_reason)
+        if frontier_auth_allowed is False and frontier_auth_reason
+        else None
+    )
+    if frontier_auth_allowed is False and frontier_auth_reason:
+        _append_alert(
+            alerts,
+            code="frontier_auth_blocked",
+            severity="error",
+            message=(
+                "Instagram frontier scraping is blocked by account auth health. "
+                "Refresh or repair the authenticated session before rerunning the replay."
+            ),
+            auth_reason=frontier_auth_reason,
+            error_code=frontier_auth_error_code,
+            frontier_status=str(frontier_progress.get("status") or "").strip().lower() or None,
+        )
+
+    if _frontier_lease_stale(frontier_progress=frontier_progress, platform=platform):
+        _append_alert(
+            alerts,
+            code="frontier_lease_stale",
+            severity="error",
+            message=(
+                "The shared-account frontier lease looks stale or unreclaimed. "
+                "Retry recovery or cancel the run before starting another backfill."
+            ),
+            lease_owner=str(frontier_progress.get("lease_owner") or "").strip() or None,
+            frontier_status=str(frontier_progress.get("status") or "").strip().lower() or None,
+        )
+
+    dispatch_health = _metadata_dict(payload.get("dispatch_health"))
+    latest_dispatch_requested_at = _coerce_dt(dispatch_health.get("latest_dispatch_requested_at"))
+    modal_capacity_wait_seconds = (
+        int((_now_utc() - latest_dispatch_requested_at).total_seconds()) if latest_dispatch_requested_at else 0
+    )
+    modal_capacity_wait_threshold = _alert_threshold_seconds(
+        "SOCIAL_CATALOG_MODAL_CAPACITY_ALERT_SECONDS",
+        900,
+        minimum=60,
+        maximum=86_400,
+    )
+    if (
+        _normalize_non_negative_int(dispatch_health.get("modal_pending_jobs"))
+        + _normalize_non_negative_int(dispatch_health.get("modal_running_unclaimed_jobs"))
+    ) > 0 and modal_capacity_wait_seconds >= modal_capacity_wait_threshold:
+        _append_alert(
+            alerts,
+            code="modal_capacity_wait_exceeded",
+            severity="warning",
+            message="Modal has been waiting on capacity longer than the healthy threshold for this catalog run.",
+            waited_seconds=modal_capacity_wait_seconds,
+            threshold_seconds=modal_capacity_wait_threshold,
+        )
+
+    if _normalize_non_negative_int(dispatch_health.get("dispatch_blocked_jobs")) > 0:
+        _append_alert(
+            alerts,
+            code="dispatch_blocked",
+            severity="error",
+            message="One or more catalog jobs were blocked before any Modal worker could claim them.",
+            reason=str(dispatch_health.get("latest_remote_blocked_reason") or "").strip() or None,
+            error_code=str(dispatch_health.get("latest_dispatch_error_code") or "").strip() or None,
+        )
+
+    retry_count = max(
+        _normalize_non_negative_int(dispatch_health.get("retrying_dispatch_jobs")),
+        _normalize_non_negative_int(frontier_progress.get("retry_count")),
+    )
+    if retry_count > 0:
+        _append_alert(
+            alerts,
+            code="retry_loop_detected",
+            severity="warning",
+            message=(
+                "This catalog run is retrying shared-account fetch or dispatch work. "
+                "Repeated retries usually mean capacity, auth, or lease recovery problems."
+            ),
+            retry_count=retry_count,
+        )
+
+    if bool(payload.get("scrape_complete")) and bool(payload.get("classify_incomplete")):
+        queued_jobs_by_type = _metadata_dict(payload.get("queued_jobs_by_type"))
+        classify_queue_total = max(
+            _normalize_non_negative_int(
+                _metadata_dict(_metadata_dict(payload.get("stages")).get(POST_CLASSIFY_STAGE)).get("jobs_waiting")
+            ),
+            _normalize_non_negative_int(
+                _metadata_dict(_metadata_dict(payload.get("stages")).get(POST_CLASSIFY_STAGE)).get("jobs_active")
+            ),
+            _normalize_non_negative_int(queued_jobs_by_type.get(POST_CLASSIFY_STAGE)),
+        )
+        classify_backlog_threshold = _resolve_positive_int_env(
+            "SOCIAL_CATALOG_CLASSIFY_BACKLOG_ALERT_JOBS",
+            1,
+            minimum=1,
+        )
+        if classify_queue_total >= classify_backlog_threshold:
+            _append_alert(
+                alerts,
+                code="classify_backlog_after_scrape",
+                severity="warning",
+                message=(
+                    "Scrape finished, but classification still has queued or active backlog. "
+                    "One backfill click can fan out into multiple classify jobs."
+                ),
+                queued_jobs=classify_queue_total,
+            )
+
+    return alerts
+
+
 def _build_run_progress_snapshot_payload(
     *,
     run_row: Mapping[str, Any],
@@ -33094,6 +33907,7 @@ def _build_run_progress_snapshot_payload(
     effective_runner_strategy, effective_runner_count, effective_partition_strategy = (
         _resolve_run_progress_worker_runtime(run_config, job_rows)
     )
+    runtime_versions = _resolve_run_progress_runtime_versions(job_rows)
     scheduler_lanes = _catalog_backfill_run_scheduler_lanes(effective_runner_count)
     stage_sort_order = {
         "posts": 0,
@@ -33159,12 +33973,16 @@ def _build_run_progress_snapshot_payload(
             "scheduler_lanes": scheduler_lanes,
             "active_workers_now": len(active_worker_ids),
             "worker_ids_sample": sorted(active_worker_ids)[:12],
+            "runtime_version": runtime_versions["current"],
+            "runtime_versions_observed": runtime_versions["observed"],
+            "runtime_version_drift": runtime_versions["drift_detected"],
         },
         "post_progress": {
             "completed_posts": completed_posts,
             "matched_posts": matched_posts,
             "total_posts": total_posts,
         },
+        "runtime_version": runtime_versions["current"],
         "dispatch_health": _build_run_dispatch_health(job_rows),
         "summary": _metadata_dict(summary_override if summary_override is not None else run_row.get("summary")),
         "updated_at": _iso(_now_utc()),
@@ -33659,6 +34477,46 @@ def get_social_account_catalog_run_progress(
         <= 0
     ):
         payload["run_status"] = "failed"
+    source_row = _load_shared_account_source_row(
+        source_scope=str(run_row.get("source_scope") or payload.get("source_scope") or "bravo"),
+        platform=normalized_platform,
+        account_handle=normalized_account,
+    )
+    shared_profile = _shared_profile_contract(
+        source_scope=str(run_row.get("source_scope") or payload.get("source_scope") or "bravo"),
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        metadata=_metadata_dict((source_row or {}).get("metadata")),
+    )
+    queued_jobs_by_type = _queued_jobs_by_type(stages_payload)
+    dispatch_health = _metadata_dict(payload.get("dispatch_health"))
+    payload["shared_profile"] = shared_profile
+    payload["network_name"] = shared_profile["network_name"]
+    payload["profile_kind"] = shared_profile["profile_kind"]
+    payload["assignment_mode"] = shared_profile["assignment_mode"]
+    payload["assignment_rules"] = shared_profile["assignment_rules"]
+    payload["queued_jobs_by_type"] = queued_jobs_by_type
+    payload["capacity_waiting"] = (
+        _normalize_non_negative_int(dispatch_health.get("modal_pending_jobs"))
+        + _normalize_non_negative_int(dispatch_health.get("modal_running_unclaimed_jobs"))
+    ) > 0
+    payload["active_transport"] = (
+        str(frontier_progress.get("transport") or "").strip().lower()
+        or str((_metadata_dict(payload.get("worker_runtime")).get("active_transport")) or "").strip().lower()
+        or None
+    )
+    payload["run_state"] = _derive_catalog_run_state(
+        run_status=str(payload.get("run_status") or ""),
+        scrape_complete=bool(payload.get("scrape_complete")),
+        classify_incomplete=bool(payload.get("classify_incomplete")),
+        stages_payload=stages_payload,
+        frontier_progress=frontier_progress,
+    )
+    payload["alerts"] = _build_catalog_run_progress_alerts(
+        platform=normalized_platform,
+        frontier_progress=frontier_progress,
+        payload=payload,
+    )
     return payload
 
 
@@ -45973,13 +46831,23 @@ def _fetch_instagram_touching_catalog_rows(
     account_handle: str,
     *,
     limit: int | None = None,
+    posted_since: datetime | None = None,
 ) -> list[dict[str, Any]]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_posted_since: datetime | None = None
+    if posted_since is not None:
+        normalized_posted_since = (
+            posted_since.astimezone(UTC) if posted_since.tzinfo else posted_since.replace(tzinfo=UTC)
+        )
     normalized_handle_sql = (
         "nullif(regexp_replace(lower(regexp_replace(coalesce(%s, ''), '^@+', '')), '[^a-z0-9._-]+', '', 'g'), '')"
     )
     limit_clause = ""
     owner_params: list[Any] = [normalized_account]
+    posted_since_clause = ""
+    if normalized_posted_since is not None:
+        posted_since_clause = "and p.posted_at >= %s"
+        owner_params.append(normalized_posted_since)
     if limit is not None:
         limit_clause = "limit %s"
         owner_params.append(max(1, int(limit)))
@@ -46007,6 +46875,7 @@ def _fetch_instagram_touching_catalog_rows(
             f"""
             {select_sql}
             where lower(p.source_account) = %s
+              {posted_since_clause}
             order by p.posted_at desc nulls last, p.id desc
             {limit_clause}
             """,
@@ -46018,6 +46887,8 @@ def _fetch_instagram_touching_catalog_rows(
         collaborator_limit = None if limit is None else max(1, int(limit) - len(owner_rows))
         collaborator_limit_clause = ""
         collaborator_params: list[Any] = [normalized_account, normalized_account, normalized_account]
+        if normalized_posted_since is not None:
+            collaborator_params.append(normalized_posted_since)
         collaborator_value_sql = normalized_handle_sql.replace("%s", "collaborator.value")
         collaborator_detail_value_sql = normalized_handle_sql.replace("%s", "collaborator_detail.value ->> 'username'")
         if collaborator_limit is not None:
@@ -46027,6 +46898,7 @@ def _fetch_instagram_touching_catalog_rows(
             f"""
             {select_sql}
             where lower(p.source_account) <> %s
+              {posted_since_clause}
               and (
                     exists (
                         select 1
@@ -46075,11 +46947,21 @@ def _instagram_social_account_profile_dataset_rows(
     *,
     search: str | None = None,
     limit: int | None = None,
+    posted_since: datetime | None = None,
 ) -> list[dict[str, Any]]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     fetch_limit = max(1, int(limit)) if limit is not None else None
-    materialized_rows = _fetch_social_account_profile_rows("instagram", normalized_account, limit=fetch_limit)
-    catalog_rows = _fetch_instagram_touching_catalog_rows(normalized_account, limit=fetch_limit)
+    materialized_rows = _fetch_social_account_profile_rows(
+        "instagram",
+        normalized_account,
+        limit=fetch_limit,
+        posted_since=posted_since,
+    )
+    catalog_rows = _fetch_instagram_touching_catalog_rows(
+        normalized_account,
+        limit=fetch_limit,
+        posted_since=posted_since,
+    )
     combined_rows: list[dict[str, Any]] = []
 
     for row in materialized_rows:
@@ -46204,11 +47086,16 @@ def _social_account_profile_analysis_rows(
     account_handle: str,
     *,
     limit: int | None = None,
+    posted_since: datetime | None = None,
 ) -> list[dict[str, Any]]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     if normalized_platform == "instagram":
-        rows = _instagram_social_account_profile_dataset_rows(normalized_account, limit=limit)
+        rows = _instagram_social_account_profile_dataset_rows(
+            normalized_account,
+            limit=limit,
+            posted_since=posted_since,
+        )
         if limit is not None:
             return rows[: max(1, int(limit))]
         return rows
@@ -46221,6 +47108,7 @@ def _social_account_profile_analysis_rows(
         normalized_account,
         limit=limit,
         projection="summary",
+        posted_since=posted_since,
     )
 
 
@@ -46293,11 +47181,19 @@ def _fetch_social_account_profile_rows(
     offset: int = 0,
     search: str | None = None,
     projection: Literal["detail", "summary"] = "detail",
+    posted_since: datetime | None = None,
 ) -> list[dict[str, Any]]:
     table, source_id_column, posted_at_column = _social_account_profile_base_query_parts(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     owner_match_clause = _social_account_profile_owner_match_sql(platform, alias="p")
     params: list[Any] = [normalized_account]
+    posted_since_clause = ""
+    if posted_since is not None:
+        normalized_posted_since = (
+            posted_since.astimezone(UTC) if posted_since.tzinfo else posted_since.replace(tzinfo=UTC)
+        )
+        posted_since_clause = f"and p.{posted_at_column} >= %s"
+        params.append(normalized_posted_since)
     search_clause, search_params = _social_account_profile_search_sql_parts(platform, search=search)
     params.extend(search_params)
     limit_clause = ""
@@ -46371,6 +47267,7 @@ def _fetch_social_account_profile_rows(
         left join core.seasons s on s.id = p.season_id
         left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
         where {owner_match_clause}
+          {posted_since_clause}
           {search_clause}
         order by p.{posted_at_column} desc nulls last, p.id desc
         {limit_clause}
@@ -47063,9 +47960,30 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
         _social_account_profile_avatar_url(normalized_platform, normalized_account, analysis_rows),
         identity_fields.pop("avatar_url", None),
     )
+    primary_source_metadata = _metadata_dict((source_rows[0] or {}).get("metadata")) if source_rows else {}
+    shared_profile = _shared_profile_contract(
+        source_scope=str((source_rows[0] or {}).get("source_scope") or "bravo"),
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        metadata=primary_source_metadata,
+    )
+    source_status_rows = []
+    for row in source_rows:
+        payload = dict(row)
+        payload["metadata"] = _metadata_dict(payload.get("metadata"))
+        payload.update(
+            _shared_profile_contract(
+                source_scope=str(payload.get("source_scope") or "bravo"),
+                platform=normalized_platform,
+                account_handle=normalized_account,
+                metadata=payload["metadata"],
+            )
+        )
+        source_status_rows.append(payload)
     return {
         "platform": normalized_platform,
         "account_handle": normalized_account,
+        "network_name": shared_profile["network_name"],
         "profile_url": resolved_profile_url,
         "avatar_url": resolved_avatar_url,
         "total_posts": _best_known_social_account_total_posts(
@@ -47100,7 +48018,7 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
         "top_hashtags": hashtag_items[:10],
         "top_collaborators": entity_payload.get("collaborators", [])[:10],
         "top_tags": entity_payload.get("tags", [])[:10],
-        "source_status": source_rows,
+        "source_status": source_status_rows,
         **identity_fields,
     }
 
@@ -47196,7 +48114,11 @@ def get_social_account_profile_hashtag_timeline(
         window_start = _now_utc() - timedelta(days=lookback_days)
         filtered_rows = [
             row
-            for row in _social_account_profile_analysis_rows(normalized_platform, normalized_account)
+            for row in _social_account_profile_analysis_rows(
+                normalized_platform,
+                normalized_account,
+                posted_since=window_start,
+            )
             if (posted_at := _social_account_profile_row_datetime(row.get("posted_at"))) is not None
             and posted_at >= window_start
         ]
@@ -47970,6 +48892,45 @@ def _social_account_catalog_start_lock_key(platform: str, account_handle: str) -
     ) % (2**31)
 
 
+def resolve_social_account_catalog_action_seed(
+    *,
+    date_start: datetime | None = None,
+    date_end: datetime | None = None,
+    resume_frontier_cursor: str | None = None,
+    catalog_action: str | None = None,
+    catalog_action_scope: str | None = None,
+) -> dict[str, Any]:
+    normalized_date_start, normalized_date_end = _normalize_catalog_backfill_window(
+        date_start=date_start,
+        date_end=date_end,
+    )
+    normalized_resume_cursor = str(resume_frontier_cursor or "").strip() or None
+    bounded_window = _catalog_backfill_has_bounded_window(
+        date_start=normalized_date_start,
+        date_end=normalized_date_end,
+    )
+    normalized_action = str(catalog_action or "").strip().lower() or None
+    normalized_scope = str(catalog_action_scope or "").strip().lower() or None
+    if normalized_action is None:
+        normalized_action = "resume_tail" if normalized_resume_cursor else "backfill"
+    if normalized_scope is None:
+        if normalized_action == "sync_recent":
+            normalized_scope = "recent_window"
+        elif normalized_action == "sync_newer":
+            normalized_scope = "head_gap"
+        elif normalized_action == "resume_tail":
+            normalized_scope = "frontier_resume"
+        else:
+            normalized_scope = "bounded_window" if bounded_window else "full_history"
+    return {
+        "date_start": normalized_date_start,
+        "date_end": normalized_date_end,
+        "resume_frontier_cursor": normalized_resume_cursor,
+        "catalog_action": normalized_action,
+        "catalog_action_scope": normalized_scope,
+    }
+
+
 def start_social_account_catalog_backfill(
     platform: str,
     account_handle: str,
@@ -47982,10 +48943,23 @@ def start_social_account_catalog_backfill(
     allow_local_dev_inline_bypass: bool = False,
     resume_frontier_cursor: str | None = None,
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
+    catalog_action: str | None = None,
+    catalog_action_scope: str | None = None,
 ) -> dict[str, Any]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    normalized_resume_cursor = str(resume_frontier_cursor or "").strip() or None
+    action_seed = resolve_social_account_catalog_action_seed(
+        date_start=date_start,
+        date_end=date_end,
+        resume_frontier_cursor=resume_frontier_cursor,
+        catalog_action=catalog_action,
+        catalog_action_scope=catalog_action_scope,
+    )
+    normalized_date_start = action_seed["date_start"]
+    normalized_date_end = action_seed["date_end"]
+    normalized_resume_cursor = action_seed["resume_frontier_cursor"]
+    normalized_catalog_action = action_seed["catalog_action"]
+    normalized_catalog_action_scope = action_seed["catalog_action_scope"]
     if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
         raise ValueError("Catalog backfill is not supported for this platform.")
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
@@ -48039,14 +49013,16 @@ def start_social_account_catalog_backfill(
                 platforms=[normalized_platform],
                 source_scope=source_scope,
                 accounts_override=[normalized_account],
-                date_start=date_start,
-                date_end=date_end,
+                date_start=normalized_date_start,
+                date_end=normalized_date_end,
                 pipeline_ingest_mode=SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
                 initiated_by=initiated_by,
                 inline_worker_id=inline_worker_id,
                 allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
                 resume_frontier_cursor=normalized_resume_cursor,
                 resume_frontier_snapshot=resume_frontier_snapshot,
+                catalog_action=normalized_catalog_action,
+                catalog_action_scope=normalized_catalog_action_scope,
             )
         finally:
             try:
@@ -48155,6 +49131,8 @@ def sync_recent_social_account_catalog(
         initiated_by=initiated_by,
         inline_worker_id=inline_worker_id,
         allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
+        catalog_action="sync_recent",
+        catalog_action_scope="recent_window",
     )
 
 
@@ -48191,6 +49169,8 @@ def sync_newer_social_account_catalog(
         initiated_by=initiated_by,
         inline_worker_id=inline_worker_id,
         allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
+        catalog_action="sync_newer",
+        catalog_action_scope="head_gap",
     )
 
 
@@ -48242,6 +49222,8 @@ def resume_tail_social_account_catalog(
             "pages_scanned": frontier.get("pages_scanned") or 0,
             "last_transport": frontier.get("last_transport"),
         },
+        catalog_action="resume_tail",
+        catalog_action_scope="frontier_resume",
     )
     return {
         **result,

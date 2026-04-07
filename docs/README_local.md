@@ -29,15 +29,36 @@ Python 3.11+ is required.
    - `TRR_DB_URL`
    - `SUPABASE_JWT_SECRET`
    - `TRR_INTERNAL_ADMIN_SHARED_SECRET`
-   - `SCREENALYTICS_SERVICE_TOKEN`
    - `TMDB_API_KEY`
    - `TVDB_API_KEY`
    - `IMDB_API_KEY`
+
+   Optional legacy compatibility only:
+   - `SCREENALYTICS_SERVICE_TOKEN` for old `/api/v1/screenalytics/*` callers that still use service-token auth
 
 3. **Verify environment**
    ```bash
    make doctor
    ```
+
+## Preferred Validation Path
+
+For migration and schema verification, prefer an isolated remote Supabase branch or other disposable database target over a local Docker-backed replay.
+
+1. Create or select an isolated branch/disposable database target.
+2. Export `TRR_DB_URL` to that isolated target.
+3. Push migrations there:
+   ```bash
+   supabase db push --db-url "$TRR_DB_URL" --include-all
+   ```
+4. Run the schema-doc verification against that same isolated target:
+   ```bash
+   make schema-docs-check
+   ```
+
+Safety rules:
+- Never run destructive replay or reset verification against production or other long-lived shared persistent databases.
+- Use `make schema-docs-reset-check` only as an explicit local Docker fallback when you intentionally need a fully local replay.
 
 ## Common Commands
 

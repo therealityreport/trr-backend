@@ -153,6 +153,27 @@ def test_require_internal_admin_accepts_signed_internal_token(monkeypatch):
     assert response.json() == {"user_id": "internal-admin-proxy", "role": "internal_admin"}
 
 
+def test_require_internal_admin_rejects_non_allowlisted_user_token(monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    monkeypatch.setenv("ADMIN_EMAIL_ALLOWLIST", "admin@thereality.report")
+    app = _build_app()
+    client = TestClient(app)
+
+    token = _make_token(
+        "test-secret-32-bytes-minimum-abcdef",
+        "user-123",
+        timedelta(minutes=5),
+        issuer="https://project123.supabase.co/auth/v1",
+        extra_claims={"ref": "project123", "email": "viewer@thereality.report", "role": "authenticated"},
+    )
+
+    response = client.get("/auth/internal-admin", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Allowlist admin access required"}
+
+
 def test_require_admin_accepts_service_role(monkeypatch):
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")

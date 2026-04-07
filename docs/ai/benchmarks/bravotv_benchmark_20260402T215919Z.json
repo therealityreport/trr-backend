@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-04-02T21:59:19.484612+00:00",
+  "date_start": "2026-03-26T21:59:19.484612+00:00",
+  "date_end": "2026-04-02T21:59:19.484612+00:00",
+  "handles": {
+    "facebook": "Bravo",
+    "youtube": "bravo",
+    "instagram": "bravotv",
+    "tiktok": "bravotv",
+    "twitter": "BravoTV",
+    "threads": "bravotv"
+  },
+  "platforms": {
+    "facebook": {
+      "status": "ok",
+      "posts": 23,
+      "duration": "307.0s",
+      "sample": [
+        {
+          "id": "1318036593522851",
+          "type": "reel",
+          "caption": "All of the above. #TheValley is all-new every WEDNESDAY!",
+          "likes": 45,
+          "views": 18000,
+          "posted_at": 1775163646,
+          "url": "https://www.facebook.com/reel/1464586855162718/"
+        },
+        {
+          "id": "1318021296857714",
+          "type": "feed",
+          "caption": "Strut, don't walk! The limited-edition Bravo x Reebok collab is available now, w",
+          "likes": 2,
+          "views": 0,
+          "posted_at": 1775161870,
+          "url": "https://www.facebook.com/Bravo/posts/pfbid02Xq5M2SZ61NLUM966VP6PybsHsrHFinGScXLjS1aAQqePRGxf8iAbdtSUn75EMtval"
+        },
+        {
+          "id": "1317704000222777",
+          "type": "photo",
+          "caption": "",
+          "likes": 1,
+          "views": 0,
+          "posted_at": 1775131231,
+          "url": "https://www.facebook.com/photo/?fbid=1317703936889450"
+        }
+      ],
+      "meta": {
+        "source": "scroll_and_static",
+        "pages_scanned": 1,
+        "posts_checked": 34,
+        "matched_posts": 23,
+        "cookies_supplied": true,
+        "surface_fetch_failures": 0,
+        "candidate_fetch_failures": 0,
+        "scrape_elapsed_seconds": 307.0,
+        "timed_out": true
+      }
+    }
+  }
+}

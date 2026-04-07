@@ -181,6 +181,22 @@
   "unique_constraints": [],
   "indexes": [
     {
+      "name": "core_media_uploads_media_asset_id_idx",
+      "columns": [
+        "media_asset_id) WHERE (media_asset_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_media_uploads_media_asset_id_idx ON core.media_uploads USING btree (media_asset_id) WHERE (media_asset_id IS NOT NULL)"
+    },
+    {
+      "name": "core_media_uploads_media_link_id_idx",
+      "columns": [
+        "media_link_id) WHERE (media_link_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX core_media_uploads_media_link_id_idx ON core.media_uploads USING btree (media_link_id) WHERE (media_link_id IS NOT NULL)"
+    },
+    {
       "name": "media_uploads_entity_idx",
       "columns": [
         "entity_type",

@@ -510,12 +510,13 @@ def get_admin_show_cast(
     roster_mode: str = Query("episode_evidence"),
     photo_fallback: str = Query("none"),
     include_photos: bool = Query(True),
+    eligibility_mode: str = Query("default"),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     cache_key = (
         f"show-cast:{show_id}:{limit}:{offset}:{min_episodes if min_episodes is not None else ''}:"
-        f"{1 if exclude_zero_episode_members else 0}:{1 if require_image else 0}:{roster_mode}:{photo_fallback}:"
+        f"{1 if exclude_zero_episode_members else 0}:{1 if require_image else 0}:{roster_mode}:{photo_fallback}:{eligibility_mode}:"
         f"{1 if include_photos else 0}"
     )
 
@@ -533,6 +534,7 @@ def get_admin_show_cast(
             roster_mode=roster_mode,
             photo_fallback=photo_fallback,
             include_photos=include_photos,
+            eligibility_mode=eligibility_mode,
         ),
     )
     _log_read("show-cast", query_count=query_count, payload=payload, cache_status=cache_status, started_at=started_at)

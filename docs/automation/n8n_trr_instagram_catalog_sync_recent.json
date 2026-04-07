@@ -31,7 +31,7 @@
             },
             {
               "name": "accountHandle",
-              "value": "bravotv"
+              "value": "REPLACE_WITH_NETWORK_ACCOUNT_HANDLE"
             },
             {
               "name": "sourceScope",

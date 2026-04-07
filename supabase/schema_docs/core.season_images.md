@@ -54,6 +54,8 @@ id
 ## Indexes
 
 - core_season_images_season_id_idx (non-unique): season_id
+- core_season_images_show_id_idx (non-unique): show_id
+- core_season_images_show_season_hosted_idx (non-unique): show_id, season_number) WHERE (hosted_url IS NOT NULL
 - core_season_images_tmdb_series_season_idx (non-unique): tmdb_series_id, season_number
 - core_season_images_unique (unique): tmdb_series_id, season_number, source, file_path
 - season_images_fetch_method_idx (non-unique): fetch_method

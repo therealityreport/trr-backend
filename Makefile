@@ -21,22 +21,27 @@ doctor:
 schema-docs:
 	@$(PYTHON) scripts/supabase/generate_schema_docs.py
 
-# Verify schema docs and diagrams are in sync with database
-# IMPORTANT: Requires fresh DB state. If local DB has drifted, run:
+# Verify schema docs and diagrams are in sync with the selected validation database.
+# Preferred contract: push migrations to an isolated remote branch/disposable DB,
+# export TRR_DB_URL to that target, then run:
+#   supabase db push --db-url "$TRR_DB_URL" --include-all && make schema-docs-check
+# Local Docker-backed replay is fallback-only when you intentionally need a fully
+# local reset:
 #   supabase start && supabase db reset --yes && make schema-docs-check
-# Or use the convenience target: make schema-docs-reset-check
 schema-docs-check:
 	@$(PYTHON) scripts/supabase/generate_schema_docs.py
 	git diff --exit-code supabase/schema_docs
 
-# Reset database to migrations and verify schema docs are in sync
-# This is a convenience target that ensures DB is fresh before checking
+# Reset a local Supabase database to migrations and verify schema docs are in sync.
+# This is an explicit Docker-backed fallback for local replay work, not the default
+# milestone verification path.
 schema-docs-reset-check:
 	@echo "Resetting database to migrations..."
 	@supabase db reset --yes
 	@echo "Verifying schema docs..."
 	@$(MAKE) schema-docs-check
 
+# Docker-backed local CI lane for fully local replay parity only.
 ci-local:
 	@bash -c 'set -euo pipefail; \
 	trap "supabase stop --no-backup" EXIT; \
