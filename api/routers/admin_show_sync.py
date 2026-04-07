@@ -22,8 +22,8 @@ from threading import Lock, Thread, current_thread
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import scripts.sync.sync_episode_appearances as sync_episode_appearances
@@ -68,8 +68,9 @@ from trr_backend.media.s3_mirror import (
     upload_bytes_to_s3,
 )
 from trr_backend.job_plane import is_remote_job_plane_enabled
-from trr_backend.modal_dispatch import supports_admin_operation
+from trr_backend.modal_dispatch import dispatch_admin_operation, supports_admin_operation
 from trr_backend.pipeline.admin_operations import (
+    ensure_operation_execution,
     operation_stream_response,
     operation_stream_response_for_parent,
     start_operation_for_stream,
@@ -88,6 +89,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-sync"])
 STREAM_HEARTBEAT_INTERVAL_SECONDS = 10
+VALID_REFRESH_TARGETS = frozenset({"show_core", "links", "bravo", "cast_profiles", "cast_media"})
 
 
 def _maybe_reload_postgrest_schema_cache(enabled: bool) -> None:
@@ -4393,6 +4395,53 @@ def build_show_refresh_operation_producer(
         return body_iterator
 
     return _producer
+
+
+@router.post("/{show_id}/refresh/target/{target}/retry")
+async def retry_refresh_target(
+    show_id: str,
+    target: str,
+    request: Request,
+    payload: dict = Body(...),
+    db: SupabaseAdminClient = None,
+):
+    """Retry a single failed refresh target by creating a new sub-operation."""
+    if target not in VALID_REFRESH_TARGETS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid target: {target}", "valid_targets": sorted(VALID_REFRESH_TARGETS)},
+        )
+
+    parent_operation_id = str(payload.get("parent_operation_id") or "").strip()
+    if not parent_operation_id:
+        return JSONResponse(status_code=400, content={"error": "parent_operation_id is required"})
+
+    request_id = (request.headers.get("x-trr-request-id") or "").strip() or None
+
+    child = admin_operations_repo.create_sub_operation(
+        parent_operation_id=parent_operation_id,
+        operation_type="admin_show_refresh",
+        refresh_target=target,
+        request_payload={"show_id": show_id, "targets": [target]},
+        initiated_by=request_id,
+        request_id=request_id,
+    )
+
+    # Reset parent to running since we have a new pending child
+    admin_operations_repo.update_operation_status(parent_operation_id, "running")
+
+    # Dispatch to Modal or local
+    if supports_admin_operation("admin_show_refresh") and is_remote_job_plane_enabled():
+        dispatch_admin_operation(operation_id=child["id"], operation_type="admin_show_refresh")
+    else:
+        producer = build_show_refresh_operation_producer(
+            request_payload=child.get("request_payload", {}),
+            operation_id=child["id"],
+            db=db,
+        )
+        ensure_operation_execution(child["id"], producer=producer, request_id=request_id)
+
+    return child
 
 
 @router.post("/{show_id}/refresh-photos/stream")
