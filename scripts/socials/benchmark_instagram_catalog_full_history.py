@@ -39,6 +39,11 @@ def _collect_catalog_run_metrics(job_rows: list[dict[str, Any]], *, elapsed_seco
     total_pages_scanned = 0
     transports: list[str] = []
     seen_transports: set[str] = set()
+    discovery_pages = 0
+    discovery_partitions = 0
+    posts_pages = 0
+    posts_upserted = 0
+    partition_jobs = 0
 
     for row in job_rows:
         metadata = dict(row.get("metadata") or {})
@@ -46,18 +51,16 @@ def _collect_catalog_run_metrics(job_rows: list[dict[str, Any]], *, elapsed_seco
         activity = dict(metadata.get("activity") or {})
         persist_counters = dict(metadata.get("persist_counters") or {})
         retrieval_persist_counters = dict(retrieval_meta.get("persist_counters") or {})
-        total_posts_checked += max(
-            int(activity.get("posts_checked") or 0), int(retrieval_meta.get("posts_checked") or 0)
-        )
+        row_posts_checked = max(int(activity.get("posts_checked") or 0), int(retrieval_meta.get("posts_checked") or 0))
+        total_posts_checked += row_posts_checked
         posts_saved = int(persist_counters.get("posts_upserted") or 0)
         if posts_saved <= 0:
             posts_saved = int(retrieval_persist_counters.get("posts_upserted") or 0)
         if posts_saved <= 0:
             posts_saved = int(row.get("items_found") or 0)
         total_posts_saved += max(0, posts_saved)
-        total_pages_scanned += max(
-            int(activity.get("pages_scanned") or 0), int(retrieval_meta.get("pages_scanned") or 0)
-        )
+        row_pages = max(int(activity.get("pages_scanned") or 0), int(retrieval_meta.get("pages_scanned") or 0))
+        total_pages_scanned += row_pages
         for candidate in (
             retrieval_meta.get("retrieval_transport"),
             retrieval_meta.get("transport"),
@@ -67,6 +70,15 @@ def _collect_catalog_run_metrics(job_rows: list[dict[str, Any]], *, elapsed_seco
             if label and label not in seen_transports:
                 seen_transports.add(label)
                 transports.append(label)
+        # Phase-level accumulation
+        stage = str(metadata.get("stage") or "").strip().lower()
+        if stage == "shared_account_discovery":
+            discovery_pages += row_pages
+            discovery_partitions += max(0, int(row.get("items_found") or 0))
+        elif stage == "shared_account_posts":
+            posts_pages += row_pages
+            posts_upserted += row_posts_checked
+            partition_jobs += 1
 
     return {
         "elapsed_seconds": round(elapsed_seconds, 2),
@@ -76,6 +88,15 @@ def _collect_catalog_run_metrics(job_rows: list[dict[str, Any]], *, elapsed_seco
         "posts_per_minute": _safe_rate(total_posts_checked, elapsed_seconds),
         "pages_per_minute": _safe_rate(total_pages_scanned, elapsed_seconds),
         "transport_used": transports,
+        "discovery_phase": {
+            "pages_scanned": discovery_pages,
+            "partitions_discovered": discovery_partitions,
+        },
+        "posts_phase": {
+            "pages_scanned": posts_pages,
+            "posts_upserted": posts_upserted,
+        },
+        "partition_jobs_total": partition_jobs,
     }
 
 

@@ -24364,15 +24364,15 @@ def _shared_catalog_instagram_post_payload(
             account_handle=account_handle,
             source_id=shortcode,
             explicit=_first_non_empty_str(
-                getattr(post, "post_url", None), getattr(post, "permalink_url", None),
+                getattr(post, "post_url", None),
+                getattr(post, "permalink_url", None),
             ),
         ),
         caption=str(getattr(post, "caption", "") or "") or None,
         media_type=str(getattr(post, "post_type", "") or "").strip() or None,
         media_urls=media_urls,
         thumbnail_url=(
-            str(getattr(post, "thumbnail_url", "") or "").strip()
-            or (media_urls[0] if media_urls else None)
+            str(getattr(post, "thumbnail_url", "") or "").strip() or (media_urls[0] if media_urls else None)
         ),
         hashtags=_as_text_list(getattr(post, "hashtags", []), strip_prefix="#"),
         mentions=_as_text_list(getattr(post, "mentions", []), prefix="@", strip_prefix="@"),
@@ -24397,14 +24397,22 @@ def _batch_upsert_shared_catalog_instagram_posts(
     payloads = [
         p
         for post in posts
-        if (p := _shared_catalog_instagram_post_payload(
-            run_id=run_id, account_handle=account_handle, post=post,
-        )) is not None
+        if (
+            p := _shared_catalog_instagram_post_payload(
+                run_id=run_id,
+                account_handle=account_handle,
+                post=post,
+            )
+        )
+        is not None
     ]
     if not payloads:
         return []
     return _pg_upsert_many(
-        PLATFORM_CATALOG_POST_TABLES["instagram"], payloads, conflict_col="source_id", conn=conn,
+        PLATFORM_CATALOG_POST_TABLES["instagram"],
+        payloads,
+        conflict_col="source_id",
+        conn=conn,
     )
 
 
@@ -27292,6 +27300,7 @@ def _discover_instagram_cursor_partitions(
     runner_count: int,
     auth_allowed: bool,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    partition_callback: Callable[[SharedAccountCursorPartition, int | None], None] | None = None,
 ) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
     with _shared_instagram_account_execution(account_handle):
         public_scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
@@ -27303,6 +27312,7 @@ def _discover_instagram_cursor_partitions(
         # Avoid the public web_profile_info endpoint here; on Modal it frequently
         # 429s before we ever reach the warmed public GraphQL path.
         total_posts = None
+        expected_partition_count: int | None = None
         base_delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
         catalog_page_size = _shared_instagram_catalog_graphql_page_size()
         target_posts_per_shard = _catalog_full_history_posts_per_shard("instagram")
@@ -27353,6 +27363,8 @@ def _discover_instagram_cursor_partitions(
                 break
             if total_posts is None:
                 total_posts = public_scraper._extract_profile_total_posts(data, source="graphql")
+                if total_posts is not None and total_posts > 0 and target_posts_per_shard > 0:
+                    expected_partition_count = -(-total_posts // target_posts_per_shard)
             posts_checked += page_posts
             partition_posts += page_posts
             partition_pages += 1
@@ -27388,22 +27400,23 @@ def _discover_instagram_cursor_partitions(
                     cursor_start=partition_start_cursor,
                     cursor_end=next_cursor,
                 )
-                partitions.append(
-                    SharedAccountCursorPartition(
-                        partition_key=partition_key,
-                        shard_index=shard_index,
-                        shard_total=0,
-                        runner_lane=lanes[shard_index % len(lanes)],
-                        cursor_start=partition_start_cursor,
-                        cursor_end=next_cursor,
-                        boundary_start_at=partition_start_at,
-                        boundary_end_at=page_oldest_at,
-                        metadata={
-                            "pages_scanned": partition_pages,
-                            "posts_discovered": partition_posts,
-                        },
-                    )
+                partition = SharedAccountCursorPartition(
+                    partition_key=partition_key,
+                    shard_index=shard_index,
+                    shard_total=0,
+                    runner_lane=lanes[shard_index % len(lanes)],
+                    cursor_start=partition_start_cursor,
+                    cursor_end=next_cursor,
+                    boundary_start_at=partition_start_at,
+                    boundary_end_at=page_oldest_at,
+                    metadata={
+                        "pages_scanned": partition_pages,
+                        "posts_discovered": partition_posts,
+                    },
                 )
+                partitions.append(partition)
+                if partition_callback:
+                    partition_callback(partition, expected_partition_count)
                 shard_index += 1
                 partition_start_cursor = next_cursor
                 partition_start_at = None
@@ -27607,6 +27620,7 @@ def _discover_shared_account_cursor_partitions(
     runner_count: int,
     auth_allowed: bool = True,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    partition_callback: Callable[[SharedAccountCursorPartition, int | None], None] | None = None,
 ) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
     normalized_platform = _normalize_platform_name(platform)
     if normalized_platform == "instagram":
@@ -27615,6 +27629,7 @@ def _discover_shared_account_cursor_partitions(
             runner_count=runner_count,
             auth_allowed=auth_allowed,
             progress_cb=progress_cb,
+            partition_callback=partition_callback,
         )
     if normalized_platform == "tiktok":
         return _discover_tiktok_cursor_partitions(
@@ -27692,7 +27707,9 @@ def _scrape_shared_instagram_posts_partitioned(
                 break
             posts_checked += len(page_posts)
             batch_rows = _batch_upsert_shared_catalog_instagram_posts(
-                run_id=run_id, account_handle=account_handle, posts=page_posts,
+                run_id=run_id,
+                account_handle=account_handle,
+                posts=page_posts,
             )
             rows.extend(batch_rows)
             if progress_cb:
@@ -28783,22 +28800,117 @@ def _run_shared_account_discovery_stage(
     auth_allowed, auth_reason = (
         _shared_instagram_frontier_auth_validation(config) if platform == "instagram" else (True, None)
     )
+    # Pre-compute values needed by the eager partition dispatch callback.
+    expected_total_posts = _shared_account_expected_total_posts_from_config(
+        config,
+        platform=platform,
+        account_handle=account_handle,
+    )
+    scheduler_lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
+    dispatched_partitions: dict[str, tuple[dict[str, Any], str]] = {}
+
+    def _on_partition_discovered(
+        partition: SharedAccountCursorPartition,
+        expected_partition_count: int | None,
+    ) -> None:
+        """Eagerly dispatch a partition job as soon as its boundary is discovered."""
+        shard_total_estimate = max(1, expected_partition_count or 1)
+        p_key = _shared_account_partition_key(
+            run_id=run_id,
+            platform=platform,
+            account_handle=account_handle,
+            shard_index=partition.shard_index,
+            cursor_start=partition.cursor_start,
+            cursor_end=partition.cursor_end,
+        )
+        partition_row = _upsert_shared_account_run_partition(
+            run_id=run_id,
+            platform=platform,
+            account_handle=account_handle,
+            partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            partition_key=p_key,
+            shard_index=partition.shard_index,
+            shard_total=shard_total_estimate,
+            cursor_start=partition.cursor_start,
+            cursor_end=partition.cursor_end,
+            boundary_start_at=partition.boundary_start_at,
+            boundary_end_at=partition.boundary_end_at,
+            status="discovered",
+            metadata=partition.metadata,
+        )
+        partition_metadata = _metadata_dict(partition_row.get("metadata"))
+        shard_job_id = _create_job(
+            None,
+            run_id=run_id,
+            platform=platform,
+            source_scope=source_scope,
+            job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            stage=SHARED_ACCOUNT_POSTS_STAGE,
+            config={
+                "stage": SHARED_ACCOUNT_POSTS_STAGE,
+                "platform": platform,
+                "source_scope": source_scope,
+                "account": account_handle,
+                "shared_account_source_id": config.get("shared_account_source_id"),
+                "pipeline_ingest_mode": config.get("pipeline_ingest_mode"),
+                "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                "partition_id": partition_row.get("id"),
+                "partition_key": partition_row.get("partition_key"),
+                "cursor_start": partition_row.get("cursor_start"),
+                "cursor_end": partition_row.get("cursor_end"),
+                "boundary_start_at": _iso(_coerce_dt(partition_row.get("boundary_start_at"))),
+                "boundary_end_at": _iso(_coerce_dt(partition_row.get("boundary_end_at"))),
+                "shard_index": partition_row.get("shard_index"),
+                "shard_total": shard_total_estimate,
+                "runner_lane": scheduler_lanes[int(partition_row.get("shard_index") or 0) % len(scheduler_lanes)],
+                "runner_count": runner_count,
+                "runner_strategy": "full_history_cursor_breakpoints",
+                "max_posts_per_target": 0,
+                "discovery_total_posts": None,
+                "expected_total_posts": expected_total_posts,
+                "sec_uid": partition_metadata.get("sec_uid"),
+                "profile_snapshot": None,
+                "required_worker_lane": config.get("required_worker_lane"),
+                "required_execution_backend": config.get("required_execution_backend"),
+                "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
+                "frontier_auth_reason": auth_reason if platform == "instagram" else None,
+            },
+            initiated_by=None,
+            status="queued" if is_queue_enabled() else "pending",
+            priority=max(1, 100 + partition.shard_index),
+            worker_id=None,
+            preclaim=False,
+        )
+        _upsert_shared_account_run_partition(
+            run_id=run_id,
+            platform=platform,
+            account_handle=account_handle,
+            partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            partition_key=str(partition_row.get("partition_key") or ""),
+            shard_index=int(partition_row.get("shard_index") or 0),
+            shard_total=shard_total_estimate,
+            cursor_start=partition_row.get("cursor_start"),
+            cursor_end=partition_row.get("cursor_end"),
+            boundary_start_at=_coerce_dt(partition_row.get("boundary_start_at")),
+            boundary_end_at=_coerce_dt(partition_row.get("boundary_end_at")),
+            status="queued",
+            job_id=shard_job_id,
+            metadata=partition_metadata,
+        )
+        dispatched_partitions[p_key] = (partition_row, shard_job_id)
+
     partitions, discovery_meta = _discover_shared_account_cursor_partitions(
         platform=platform,
         account_handle=account_handle,
         runner_count=runner_count,
         auth_allowed=auth_allowed,
         progress_cb=_on_discovery_progress,
+        partition_callback=_on_partition_discovered,
     )
     activity["phase"] = "discovery_enqueue_shards"
     activity["pages_scanned"] = _normalize_non_negative_int(discovery_meta.get("pages_scanned"))
     activity["posts_checked"] = _normalize_non_negative_int(discovery_meta.get("posts_checked"))
     activity["matched_posts"] = len(partitions)
-    expected_total_posts = _shared_account_expected_total_posts_from_config(
-        config,
-        platform=platform,
-        account_handle=account_handle,
-    )
     if discovery_meta.get("total_posts") is not None:
         activity["total_posts"] = _normalize_non_negative_int(discovery_meta.get("total_posts"))
     elif expected_total_posts > 0:
@@ -28872,10 +28984,12 @@ def _run_shared_account_discovery_stage(
                 ),
             },
         )
-    created_partition_rows: list[dict[str, Any]] = []
-    scheduler_lanes = _catalog_backfill_run_scheduler_lanes(runner_count)
+    # Reconcile shard_total on early-dispatched partitions now that the final count
+    # is known, and dispatch any partitions that the callback did not handle.
+    final_shard_total = max(1, len(partitions))
+    created_partition_count = len(dispatched_partitions)
     for partition in partitions:
-        partition_key = _shared_account_partition_key(
+        p_key = _shared_account_partition_key(
             run_id=run_id,
             platform=platform,
             account_handle=account_handle,
@@ -28883,24 +28997,43 @@ def _run_shared_account_discovery_stage(
             cursor_start=partition.cursor_start,
             cursor_end=partition.cursor_end,
         )
-        created_partition_rows.append(
-            _upsert_shared_account_run_partition(
-                run_id=run_id,
-                platform=platform,
-                account_handle=account_handle,
-                partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-                partition_key=partition_key,
-                shard_index=partition.shard_index,
-                shard_total=max(1, len(partitions)),
-                cursor_start=partition.cursor_start,
-                cursor_end=partition.cursor_end,
-                boundary_start_at=partition.boundary_start_at,
-                boundary_end_at=partition.boundary_end_at,
-                status="discovered",
-                metadata=partition.metadata,
-            )
+        if p_key in dispatched_partitions:
+            # Already dispatched during discovery — reconcile shard_total if needed.
+            partition_row, shard_job_id = dispatched_partitions[p_key]
+            if int(partition_row.get("shard_total") or 0) != final_shard_total:
+                _upsert_shared_account_run_partition(
+                    run_id=run_id,
+                    platform=platform,
+                    account_handle=account_handle,
+                    partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                    partition_key=str(partition_row.get("partition_key") or ""),
+                    shard_index=int(partition_row.get("shard_index") or 0),
+                    shard_total=final_shard_total,
+                    cursor_start=partition_row.get("cursor_start"),
+                    cursor_end=partition_row.get("cursor_end"),
+                    boundary_start_at=_coerce_dt(partition_row.get("boundary_start_at")),
+                    boundary_end_at=_coerce_dt(partition_row.get("boundary_end_at")),
+                    status="queued",
+                    job_id=shard_job_id,
+                    metadata=_metadata_dict(partition_row.get("metadata")),
+                )
+            continue
+        # Fallback: dispatch partitions not handled by the callback (e.g. TikTok).
+        partition_row = _upsert_shared_account_run_partition(
+            run_id=run_id,
+            platform=platform,
+            account_handle=account_handle,
+            partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            partition_key=p_key,
+            shard_index=partition.shard_index,
+            shard_total=final_shard_total,
+            cursor_start=partition.cursor_start,
+            cursor_end=partition.cursor_end,
+            boundary_start_at=partition.boundary_start_at,
+            boundary_end_at=partition.boundary_end_at,
+            status="discovered",
+            metadata=partition.metadata,
         )
-    for partition_row in created_partition_rows:
         partition_metadata = _metadata_dict(partition_row.get("metadata"))
         shard_job_id = _create_job(
             None,
@@ -28951,7 +29084,7 @@ def _run_shared_account_discovery_stage(
             partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
             partition_key=str(partition_row.get("partition_key") or ""),
             shard_index=int(partition_row.get("shard_index") or 0),
-            shard_total=max(1, int(partition_row.get("shard_total") or len(partitions) or 1)),
+            shard_total=max(1, int(partition_row.get("shard_total") or final_shard_total)),
             cursor_start=partition_row.get("cursor_start"),
             cursor_end=partition_row.get("cursor_end"),
             boundary_start_at=_coerce_dt(partition_row.get("boundary_start_at")),
@@ -28960,8 +29093,9 @@ def _run_shared_account_discovery_stage(
             job_id=shard_job_id,
             metadata=partition_metadata,
         )
+        created_partition_count += 1
     activity["phase"] = "shared_account_discovery_end"
-    activity["saved_posts"] = len(created_partition_rows)
+    activity["saved_posts"] = created_partition_count
     _flush_progress(force=True)
     return (
         0,
@@ -28971,7 +29105,7 @@ def _run_shared_account_discovery_stage(
             "platform": platform,
             "account": account_handle,
             "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
-            "discovered_partition_count": len(created_partition_rows),
+            "discovered_partition_count": created_partition_count,
             "retrieval_meta": discovery_meta,
             "expected_total_posts": expected_total_posts,
             "activity": dict(activity),
@@ -34365,7 +34499,9 @@ def _build_run_progress_snapshot_payload(
     effective_run_status = _derive_run_progress_status(run_row.get("status"), job_rows)
     required_runtime_version = _metadata_dict(run_config.get("required_runtime_version"))
     required_runtime_label = _runtime_version_label(required_runtime_version)
-    current_runtime_label = _runtime_version_label(runtime_versions["current"])
+    # Compare against observed worker runtime (not the local reporting process).
+    observed_runtime = runtime_versions["observed"][0] if runtime_versions["observed"] else runtime_versions["current"]
+    observed_runtime_label = _runtime_version_label(observed_runtime)
 
     return {
         "season_id": str(run_row.get("season_id") or season_id or ""),
@@ -34393,7 +34529,7 @@ def _build_run_progress_snapshot_payload(
             "runtime_version": runtime_versions["current"],
             "required_runtime_version": required_runtime_version or None,
             "runtime_version_pin_mismatch": bool(
-                required_runtime_label and current_runtime_label and required_runtime_label != current_runtime_label
+                required_runtime_label and observed_runtime_label and required_runtime_label != observed_runtime_label
             ),
             "runtime_versions_observed": runtime_versions["observed"],
             "runtime_version_drift": runtime_versions["drift_detected"],

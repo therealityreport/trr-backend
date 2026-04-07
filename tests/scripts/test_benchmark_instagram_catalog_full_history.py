@@ -38,6 +38,59 @@ def test_collect_catalog_run_metrics_computes_throughput() -> None:
     assert metrics["transport_used"] == ["authenticated"]
 
 
+def test_collect_catalog_run_metrics_reports_discovery_and_posts_phase_rates() -> None:
+    metrics = cli._collect_catalog_run_metrics(
+        [
+            {
+                "items_found": 0,
+                "metadata": {
+                    "stage": "shared_account_discovery",
+                    "activity": {"posts_checked": 1640, "pages_scanned": 33},
+                    "persist_counters": {"posts_upserted": 0},
+                    "retrieval_meta": {
+                        "posts_checked": 1640,
+                        "pages_scanned": 33,
+                        "retrieval_transport": "authenticated",
+                    },
+                },
+            },
+            {
+                "items_found": 900,
+                "metadata": {
+                    "stage": "shared_account_posts",
+                    "activity": {"posts_checked": 900, "pages_scanned": 18},
+                    "persist_counters": {"posts_upserted": 900},
+                    "retrieval_meta": {
+                        "posts_checked": 900,
+                        "pages_scanned": 18,
+                        "retrieval_transport": "authenticated",
+                    },
+                },
+            },
+            {
+                "items_found": 740,
+                "metadata": {
+                    "stage": "shared_account_posts",
+                    "activity": {"posts_checked": 740, "pages_scanned": 15},
+                    "persist_counters": {"posts_upserted": 740},
+                    "retrieval_meta": {
+                        "posts_checked": 740,
+                        "pages_scanned": 15,
+                        "retrieval_transport": "authenticated",
+                    },
+                },
+            },
+        ],
+        elapsed_seconds=600.0,
+    )
+
+    assert metrics["discovery_phase"]["pages_scanned"] == 33
+    assert metrics["discovery_phase"]["partitions_discovered"] == 0  # not in items_found
+    assert metrics["posts_phase"]["pages_scanned"] == 33  # 18 + 15
+    assert metrics["posts_phase"]["posts_upserted"] == 1640  # 900 + 740
+    assert metrics["partition_jobs_total"] == 2
+
+
 def test_benchmark_instagram_catalog_full_history_polls_until_completion(monkeypatch) -> None:
     class _StubRepo:
         def __init__(self) -> None:

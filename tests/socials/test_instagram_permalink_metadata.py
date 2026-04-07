@@ -9,6 +9,7 @@ from trr_backend.socials.instagram.permalink_metadata import (
     _graphql_extract_collaborators,
     _graphql_extract_collaborators_detail,
     _metadata_from_graphql_node,
+    _shortcode_to_media_id,
     fetch_permalink_media_item,
     parse_permalink_metadata,
     resolve_instagram_media,
@@ -133,6 +134,15 @@ def test_fetch_permalink_media_item_rejects_malformed_shortcode_or_url() -> None
         session=_FakeSession(),  # type: ignore[arg-type]
     )
     assert found is None
+
+
+def test_shortcode_to_media_id_converts_known_good_shortcode() -> None:
+    assert _shortcode_to_media_id("ABC") == "66"
+
+
+def test_shortcode_to_media_id_rejects_invalid_character() -> None:
+    with pytest.raises(ValueError, match="!'"):
+        _shortcode_to_media_id("AB!")
 
 
 def test_parse_permalink_metadata_extracts_fields_from_media_item() -> None:

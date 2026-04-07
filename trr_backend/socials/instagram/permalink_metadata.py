@@ -43,6 +43,7 @@ _MENTION_RE = re.compile(r"(?<![\w.])@([A-Za-z0-9_.]+)")
 _GRAPHQL_URL = "https://www.instagram.com/graphql/query/"
 _MEDIA_INFO_URL = "https://www.instagram.com/api/v1/media/{media_id}/info/"
 _SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+_SHORTCODE_CHAR_MAP = {char: index for index, char in enumerate(_SHORTCODE_ALPHABET)}
 _DEFAULT_GRAPHQL_SHORTCODE_DOC_ID = "8845758582119845"
 
 _DEFAULT_HEADERS = {
@@ -613,7 +614,10 @@ def _extract_media_item_from_post_info(post_info: Any) -> dict[str, Any] | None:
 def _shortcode_to_media_id(shortcode: str) -> str:
     media_id = 0
     for char in shortcode:
-        media_id = media_id * 64 + _SHORTCODE_ALPHABET.index(char)
+        try:
+            media_id = media_id * 64 + _SHORTCODE_CHAR_MAP[char]
+        except KeyError as exc:
+            raise ValueError(f"Invalid Instagram shortcode character: {char!r}") from exc
     return str(media_id)
 
 

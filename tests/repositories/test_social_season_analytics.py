@@ -18762,7 +18762,11 @@ def test_fetch_shared_instagram_graphql_page_falls_back_to_authenticated_scraper
         last_retrieval_meta = {"error_code": "instagram_graphql_initial_empty_page"}
 
         def fetch_posts_graphql(
-            self, username: str, cursor: str | None, delay: float, **_kwargs: Any,
+            self,
+            username: str,
+            cursor: str | None,
+            delay: float,
+            **_kwargs: Any,
         ) -> dict[str, Any]:
             public_calls.append((username, cursor, delay))
             return {
@@ -18783,7 +18787,11 @@ def test_fetch_shared_instagram_graphql_page_falls_back_to_authenticated_scraper
         last_retrieval_meta = {}
 
         def fetch_posts_graphql(
-            self, username: str, cursor: str | None, delay: float, **_kwargs: Any,
+            self,
+            username: str,
+            cursor: str | None,
+            delay: float,
+            **_kwargs: Any,
         ) -> dict[str, Any]:
             auth_calls.append((username, cursor, delay))
             return {
@@ -18827,7 +18835,11 @@ def test_fetch_shared_instagram_graphql_page_skips_public_fallback_when_disabled
         last_retrieval_meta = {}
 
         def fetch_posts_graphql(
-            self, username: str, cursor: str | None, delay: float, **_kwargs: Any,
+            self,
+            username: str,
+            cursor: str | None,
+            delay: float,
+            **_kwargs: Any,
         ) -> dict[str, Any]:
             public_calls.append((username, cursor, delay))
             return {
@@ -18848,7 +18860,11 @@ def test_fetch_shared_instagram_graphql_page_skips_public_fallback_when_disabled
         last_retrieval_meta = {}
 
         def fetch_posts_graphql(
-            self, username: str, cursor: str | None, delay: float, **_kwargs: Any,
+            self,
+            username: str,
+            cursor: str | None,
+            delay: float,
+            **_kwargs: Any,
         ) -> dict[str, Any]:
             auth_calls.append((username, cursor, delay))
             return {
@@ -18935,8 +18951,8 @@ def test_scrape_shared_instagram_posts_partitioned_uses_authenticated_fallback(
     )
     monkeypatch.setattr(
         social_repo,
-        "_upsert_shared_catalog_post",
-        lambda **kwargs: upserted.append(kwargs["post"].shortcode) or {"source_id": kwargs["post"].shortcode},
+        "_batch_upsert_shared_catalog_instagram_posts",
+        lambda **kwargs: [upserted.append(p.shortcode) or {"source_id": p.shortcode} for p in kwargs["posts"]],
     )
 
     rows, retrieval_meta = social_repo._scrape_shared_instagram_posts_partitioned(
@@ -19003,8 +19019,8 @@ def test_scrape_shared_instagram_posts_partitioned_prefers_authenticated_transpo
     )
     monkeypatch.setattr(
         social_repo,
-        "_upsert_shared_catalog_post",
-        lambda **kwargs: {"source_id": kwargs["post"].shortcode},
+        "_batch_upsert_shared_catalog_instagram_posts",
+        lambda **kwargs: [{"source_id": p.shortcode} for p in kwargs["posts"]],
     )
 
     social_repo._scrape_shared_instagram_posts_partitioned(
@@ -21934,6 +21950,237 @@ def test_run_shared_account_discovery_stage_enqueues_partitioned_fallback_job(
     assert metadata["expected_total_posts"] == 16_454
 
 
+def test_run_shared_account_discovery_stage_dispatches_partitions_as_discovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partition jobs should be dispatched inside the discovery callback, not after."""
+    create_calls: list[dict[str, Any]] = []
+    partition_upsert_calls: list[dict[str, Any]] = []
+    dispatch_order: list[str] = []
+
+    def _fake_discover(**kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
+        callback = kwargs.get("partition_callback")
+        assert callback is not None, "partition_callback must be passed to discovery"
+        partitions = [
+            social_repo.SharedAccountCursorPartition(
+                partition_key="p0",
+                shard_index=0,
+                shard_total=0,
+                runner_lane="lane-0",
+                cursor_start=None,
+                cursor_end="cursor-900",
+                boundary_start_at=None,
+                boundary_end_at=None,
+                metadata={"pages_scanned": 18, "posts_discovered": 900},
+            ),
+            social_repo.SharedAccountCursorPartition(
+                partition_key="p1",
+                shard_index=1,
+                shard_total=0,
+                runner_lane="lane-1",
+                cursor_start="cursor-900",
+                cursor_end=None,
+                boundary_start_at=None,
+                boundary_end_at=None,
+                metadata={"pages_scanned": 15, "posts_discovered": 740},
+            ),
+        ]
+        for p in partitions:
+            dispatch_order.append(f"callback:{p.partition_key}")
+            callback(p, 2)
+        dispatch_order.append("discovery_returned")
+        return partitions, {
+            "pages_scanned": 33,
+            "posts_checked": 1640,
+            "total_posts": 16_454,
+            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "retrieval_transport": "authenticated",
+        }
+
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_discover_shared_account_cursor_partitions",
+        _fake_discover,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_shared_account_run_partition",
+        lambda **kwargs: partition_upsert_calls.append(kwargs)
+        or {
+            "id": f"part-{kwargs['shard_index']}",
+            "partition_key": kwargs["partition_key"],
+            "shard_index": kwargs["shard_index"],
+            "shard_total": kwargs["shard_total"],
+            "cursor_start": kwargs.get("cursor_start"),
+            "cursor_end": kwargs.get("cursor_end"),
+            "boundary_start_at": kwargs.get("boundary_start_at"),
+            "boundary_end_at": kwargs.get("boundary_end_at"),
+            "metadata": kwargs.get("metadata"),
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda _context, **kwargs: create_calls.append(kwargs) or f"shard-job-{len(create_calls) - 1}",
+    )
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_expected_total_posts_from_config",
+        lambda *_a, **_kw: 16_454,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_touch_shared_account_source",
+        lambda **_kw: None,
+    )
+
+    _posts, _comments, metadata = social_repo._run_shared_account_discovery_stage(
+        run_id="run-1",
+        platform="instagram",
+        source_scope="bravo",
+        account_handle="bravotv",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_DISCOVERY_STAGE,
+            "platform": "instagram",
+            "source_scope": "bravo",
+            "account": "bravotv",
+            "runner_strategy": "full_history_cursor_breakpoints",
+            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "expected_total_posts": 16_454,
+        },
+        job_id="job-1",
+    )
+
+    # Jobs were dispatched BEFORE discovery returned
+    assert dispatch_order == ["callback:p0", "callback:p1", "discovery_returned"]
+    # Two partition jobs created
+    assert len(create_calls) == 2
+    assert create_calls[0]["config"]["cursor_start"] is None
+    assert create_calls[0]["config"]["cursor_end"] == "cursor-900"
+    assert create_calls[1]["config"]["cursor_start"] == "cursor-900"
+    assert create_calls[1]["config"]["cursor_end"] is None
+    assert create_calls[0]["config"]["partition_strategy"] == social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
+    # shard_total should reflect expected_partition_count from callback
+    assert create_calls[0]["config"]["shard_total"] == 2
+    assert metadata["discovered_partition_count"] == 2
+
+
+def test_discover_instagram_cursor_partitions_invokes_partition_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """partition_callback should fire as each partition boundary is discovered."""
+    callback_calls: list[tuple[Any, int | None]] = []
+    page_num = 0
+
+    @contextmanager
+    def _fake_account_execution(account_handle: str):
+        yield account_handle
+
+    class _FakeScraper:
+        def _iter_posts_from_graphql(self, data: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+            connection = data["data"]["xdt_api__v1__feed__user_timeline_graphql_connection"]
+            page_info = connection.get("page_info", {})
+            return [(edge["node"], page_info) for edge in connection.get("edges", [])]
+
+        def _extract_timestamp(self, node: dict[str, Any]) -> int:
+            return node.get("taken_at", 0)
+
+        def _extract_profile_total_posts(self, data: dict[str, Any], *, source: str) -> int | None:
+            del source
+            return int(data["data"]["xdt_api__v1__feed__user_timeline_graphql_connection"]["count"])
+
+        def _parse_post_node(self, node: dict[str, Any], config: Any) -> Any:
+            del config
+            return node
+
+    monkeypatch.setattr(social_repo, "_shared_instagram_account_execution", _fake_account_execution)
+    monkeypatch.setattr(
+        social_repo,
+        "_build_shared_instagram_scraper",
+        lambda authenticated=False, browser_account_id=None: _FakeScraper(),
+    )
+    # Return 2 pages, each with enough posts to trigger a partition boundary
+    monkeypatch.setattr(social_repo, "_catalog_full_history_posts_per_shard", lambda _platform: 2)
+
+    def _fake_fetch_page(**kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], str]:
+        nonlocal page_num
+        page_num += 1
+        if page_num == 1:
+            return (
+                {
+                    "data": {
+                        "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                            "count": 6,
+                            "edges": [
+                                {"node": {"code": "A", "taken_at": 1700000000}},
+                                {"node": {"code": "B", "taken_at": 1699000000}},
+                            ],
+                            "page_info": {"has_next_page": True, "end_cursor": "c1"},
+                        }
+                    }
+                },
+                {"transport": "authenticated", "total_posts": 6},
+                "authenticated",
+            )
+        if page_num == 2:
+            return (
+                {
+                    "data": {
+                        "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                            "count": 6,
+                            "edges": [
+                                {"node": {"code": "C", "taken_at": 1698000000}},
+                                {"node": {"code": "D", "taken_at": 1697000000}},
+                            ],
+                            "page_info": {"has_next_page": True, "end_cursor": "c2"},
+                        }
+                    }
+                },
+                {"transport": "authenticated", "total_posts": 6},
+                "authenticated",
+            )
+        # Last page
+        return (
+            {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "count": 6,
+                        "edges": [
+                            {"node": {"code": "E", "taken_at": 1696000000}},
+                            {"node": {"code": "F", "taken_at": 1695000000}},
+                        ],
+                        "page_info": {"has_next_page": False, "end_cursor": None},
+                    }
+                }
+            },
+            {"transport": "authenticated", "total_posts": 6},
+            "authenticated",
+        )
+
+    monkeypatch.setattr(social_repo, "_fetch_shared_instagram_graphql_page", _fake_fetch_page)
+
+    def _on_partition(partition: Any, expected_count: int | None) -> None:
+        callback_calls.append((partition, expected_count))
+
+    partitions, meta = social_repo._discover_instagram_cursor_partitions(
+        account_handle="bravotv",
+        runner_count=4,
+        auth_allowed=True,
+        partition_callback=_on_partition,
+    )
+
+    assert len(partitions) == 3
+    assert len(callback_calls) == 3
+    # expected_partition_count should be ceil(6 / 2) = 3
+    assert all(c[1] == 3 for c in callback_calls)
+    assert callback_calls[0][0].shard_index == 0
+    assert callback_calls[1][0].shard_index == 1
+    assert callback_calls[2][0].shard_index == 2
+
+
 def test_run_shared_account_discovery_stage_bootstraps_frontier_and_enqueues_fetch_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -24188,7 +24435,9 @@ def test_shared_catalog_instagram_post_payload_builds_correct_dict():
     )
     post.to_dict = lambda: {"shortcode": "ABC123"}
     payload = social_repo._shared_catalog_instagram_post_payload(
-        run_id="run-1", account_handle="bravotv", post=post,
+        run_id="run-1",
+        account_handle="bravotv",
+        post=post,
     )
     assert payload is not None
     assert payload["source_id"] == "ABC123"
@@ -24200,7 +24449,9 @@ def test_shared_catalog_instagram_post_payload_returns_none_for_no_shortcode():
     """Posts with no shortcode should be skipped."""
     post = SimpleNamespace(shortcode="", caption="test")
     payload = social_repo._shared_catalog_instagram_post_payload(
-        run_id="run-1", account_handle="bravotv", post=post,
+        run_id="run-1",
+        account_handle="bravotv",
+        post=post,
     )
     assert payload is None
 
@@ -24218,16 +24469,30 @@ def test_batch_upsert_shared_catalog_instagram_posts_calls_pg_upsert_many(monkey
     posts = []
     for i, sc in enumerate(["A", "B", "C"]):
         p = SimpleNamespace(
-            shortcode=sc, taken_at=1700000000 + i, post_url=None, permalink_url=None,
-            caption=f"cap-{sc}", post_type="image", media_urls=[], thumbnail_url=None,
-            hashtags=[], mentions=[], collaborators=[], profile_tags=[],
-            likes=i, comments=0, video_views=0, video_views_observed=0,
+            shortcode=sc,
+            taken_at=1700000000 + i,
+            post_url=None,
+            permalink_url=None,
+            caption=f"cap-{sc}",
+            post_type="image",
+            media_urls=[],
+            thumbnail_url=None,
+            hashtags=[],
+            mentions=[],
+            collaborators=[],
+            profile_tags=[],
+            likes=i,
+            comments=0,
+            video_views=0,
+            video_views_observed=0,
         )
         p.to_dict = lambda: {}
         posts.append(p)
 
     rows = social_repo._batch_upsert_shared_catalog_instagram_posts(
-        run_id="run-1", account_handle="bravotv", posts=posts,
+        run_id="run-1",
+        account_handle="bravotv",
+        posts=posts,
     )
 
     assert len(captured_calls) == 1

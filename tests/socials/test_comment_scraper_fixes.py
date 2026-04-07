@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -2706,6 +2708,49 @@ def test_instagram_fetch_comments_handles_request_error_without_response_object(
     comments = scraper.fetch_comments("ABC123", fetch_replies=False, delay=0)
     assert comments == []
     assert scraper.last_comment_fetch_reason == "request_error"
+
+
+def test_instagram_rate_limit_uses_lock_for_concurrent_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+    start_gate = threading.Barrier(4)
+    errors: list[BaseException] = []
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    def _worker() -> None:
+        try:
+            start_gate.wait()
+            scraper._rate_limit(0.01)  # noqa: SLF001
+            scraper._track_response_status(200)  # noqa: SLF001
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert scraper._request_count == 4  # noqa: SLF001
+    assert scraper._consecutive_success == 4  # noqa: SLF001
+
+
+def test_instagram_rate_limit_non_fast_mode_uses_gentler_ramp(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "ok"})
+    observed_sleeps: list[float] = []
+
+    monkeypatch.setattr(time, "sleep", lambda seconds: observed_sleeps.append(seconds))
+
+    scraper._request_count = 1  # noqa: SLF001
+    scraper._consecutive_success = 0  # noqa: SLF001
+    scraper._rate_limit(2.0)  # noqa: SLF001
+
+    scraper._request_count = 1  # noqa: SLF001
+    scraper._consecutive_success = 25  # noqa: SLF001
+    scraper._rate_limit(2.0)  # noqa: SLF001
+
+    assert observed_sleeps == [1.5, 1.0]
 
 
 def test_tiktok_parse_post_item_populates_media_urls_and_thumbnail() -> None:
