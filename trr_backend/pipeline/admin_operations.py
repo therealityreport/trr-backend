@@ -901,3 +901,70 @@ def operation_stream_response_for_parent(
         media_type="text/event-stream",
         headers=_stream_headers(),
     )
+
+
+def wait_for_sub_operation_dependencies(
+    operation_id: str,
+    *,
+    poll_interval_seconds: float = 2.0,
+    timeout_seconds: float = 3600.0,
+) -> bool:
+    """Block until this sub-operation's dependency targets are complete.
+
+    Returns True if dependencies satisfied, False if timed out or a dependency failed.
+    """
+    from trr_backend.pipeline.show_refresh_orchestrator import TARGET_DEPENDENCY_GRAPH
+
+    op = admin_operations.get_operation(operation_id)
+    if not op:
+        return False
+
+    parent_id = op.get("parent_operation_id")
+    target = op.get("refresh_target")
+    if not parent_id or not target:
+        return True  # Not a sub-operation — no dependencies
+
+    deps = TARGET_DEPENDENCY_GRAPH.get(target, [])
+    if not deps:
+        return True  # No dependencies — safe to run
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        siblings = admin_operations.get_sub_operations(parent_id)
+        dep_statuses = {
+            s["refresh_target"]: s["status"]
+            for s in siblings
+            if s.get("refresh_target") in deps
+        }
+
+        # All deps completed → proceed
+        if all(st == "completed" for st in dep_statuses.values()):
+            return True
+
+        # Any dep failed → abort
+        if any(st in ("failed", "cancelled") for st in dep_statuses.values()):
+            logger.warning(
+                "Sub-operation dependency failed: operation_id=%s target=%s failed_deps=%s",
+                operation_id, target,
+                [t for t, s in dep_statuses.items() if s in ("failed", "cancelled")],
+            )
+            return False
+
+        # Deps missing from sibling list → they weren't requested, treat as satisfied
+        if len(dep_statuses) < len(deps):
+            missing = set(deps) - set(dep_statuses.keys())
+            logger.info(
+                "Sub-operation deps not in sibling set (treating as satisfied): %s",
+                missing,
+            )
+            present_statuses = list(dep_statuses.values())
+            if all(st == "completed" for st in present_statuses) or not present_statuses:
+                return True
+
+        time.sleep(poll_interval_seconds)
+
+    logger.error(
+        "Sub-operation dependency wait timed out: operation_id=%s target=%s timeout=%s",
+        operation_id, target, timeout_seconds,
+    )
+    return False

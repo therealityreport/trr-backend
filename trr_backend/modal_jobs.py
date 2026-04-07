@@ -319,9 +319,24 @@ def serve_backend_api():
 
 
 def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str, object]:
-    from trr_backend.pipeline.admin_operations import claim_and_execute_operation
+    from trr_backend.pipeline.admin_operations import (
+        claim_and_execute_operation,
+        wait_for_sub_operation_dependencies,
+    )
 
     worker_id = f"modal:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+    # If this is a sub-operation, wait for dependency targets to complete
+    deps_satisfied = wait_for_sub_operation_dependencies(operation_id)
+    if not deps_satisfied:
+        return {
+            "operation_id": operation_id,
+            "operation_type": operation_type,
+            "claimed": False,
+            "worker_id": worker_id,
+            "reason": "dependency_not_satisfied",
+        }
+
     claimed = claim_and_execute_operation(
         operation_id=operation_id,
         worker_id=worker_id,
