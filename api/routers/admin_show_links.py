@@ -29,7 +29,7 @@ from trr_backend.ingestion.show_cast_matrix_scraper import (
     is_missing_fandom_page,
     is_missing_wikipedia_page,
 )
-from trr_backend.repositories import admin_show_reads as show_reads_repo
+from trr_backend.repositories import admin_show_reads as show_reads_repo, brands_franchises
 from trr_backend.integrations.fandom import (
     build_fandom_wiki_url_from_name,
     is_allowlisted_fandom_domain,
@@ -42,7 +42,10 @@ from trr_backend.integrations.fandom import (
     search_fandom_person_related_pages,
     search_real_housewives_wiki,
 )
-from trr_backend.integrations.fandom_discovery import discover_fandom_candidate_pages
+from trr_backend.integrations.fandom_discovery import (
+    discover_fandom_candidate_pages,
+    parse_allpages_html_page,
+)
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.scraping.bravo_parser import parse_person_page
 from trr_backend.socials.platforms import infer_platform_from_url
@@ -771,6 +774,38 @@ def _curated_show_fandom_domains(show_name: str | None) -> set[str]:
     return domains
 
 
+def _resolve_show_fandom_rule_context(
+    *,
+    show_id: str,
+    show_name: str | None,
+    network_values: Sequence[str] | None,
+) -> dict[str, Any]:
+    normalized_networks = tuple(
+        str(value).strip()
+        for value in (network_values or [])
+        if isinstance(value, str) and str(value).strip()
+    )
+    try:
+        return brands_franchises.resolve_show_fandom_rule_context(
+            show_id=show_id,
+            show_name=str(show_name or "").strip(),
+            networks=normalized_networks,
+        )
+    except Exception:  # noqa: BLE001
+        return {
+            "rule_key": None,
+            "fallback_rule_key": None,
+            "effective_rule_key": None,
+            "effective_source": "none",
+            "effective_fandom_url": None,
+            "primary_url": None,
+            "review_allpages_url": None,
+            "community_domains": [],
+            "include_allpages_scan": False,
+            "candidate_urls": [],
+        }
+
+
 def _extract_season_number_from_text(value: str | None) -> int | None:
     text = str(value or "").strip()
     if not text:
@@ -793,6 +828,18 @@ def _extract_wiki_slug_title(path: str | None) -> str | None:
     if not slug:
         return None
     return slug.split("?", 1)[0].split("#", 1)[0]
+
+
+def _extract_fandom_page_path_segments(url: str | None) -> tuple[str, ...]:
+    parsed = urlparse(str(url or "").strip())
+    slug = _extract_wiki_slug_title(unquote(parsed.path or ""))
+    if not slug:
+        return ()
+    return tuple(part.strip() for part in slug.split("/") if part.strip())
+
+
+def _is_fandom_noncanonical_subpage_url(url: str | None) -> bool:
+    return len(_extract_fandom_page_path_segments(url)) > 1
 
 
 def _is_fandom_seed_url(url: str | None) -> bool:
@@ -988,6 +1035,8 @@ def _extract_fandom_wiki_urls_from_html(html: str, *, base_url: str, max_results
         title = _extract_fandom_page_title_from_url(resolved)
         if not title:
             continue
+        if _is_fandom_noncanonical_subpage_url(resolved):
+            continue
         key = _url_key(resolved)
         if key in seen:
             continue
@@ -1030,20 +1079,6 @@ def _search_fandom_allpages_html_candidates(
     candidates: list[str] = []
     seen: set[str] = set()
 
-    def extract_next_page_url(html: str, *, current_url: str) -> str | None:
-        if not html:
-            return None
-        soup = BeautifulSoup(html, "html.parser")
-        for anchor in soup.select("a[href]"):
-            label = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip().casefold()
-            if "next page" not in label:
-                continue
-            href = str(anchor.get("href") or "").strip()
-            if not href:
-                continue
-            return urljoin(current_url, href)
-        return None
-
     for prefix in _fandom_allpages_prefixes(query):
         if not _can_attempt_fandom_candidate(stats):
             break
@@ -1060,7 +1095,11 @@ def _search_fandom_allpages_html_candidates(
             if status_code is None or status_code >= 400 or not html:
                 break
             resolved = _canonicalize_url(resolved_url or next_page_url) or next_page_url
-            for page_url in _extract_fandom_wiki_urls_from_html(html, base_url=resolved, max_results=max_results):
+            titles, next_candidate_url = parse_allpages_html_page(html, current_url=resolved)
+            for title in titles:
+                page_url = build_fandom_wiki_url_from_name(title, host)
+                if not page_url or _is_fandom_noncanonical_subpage_url(page_url):
+                    continue
                 key = _url_key(page_url)
                 if key in seen:
                     continue
@@ -1068,7 +1107,7 @@ def _search_fandom_allpages_html_candidates(
                 candidates.append(page_url)
                 if len(candidates) >= max_results:
                     return candidates[:max_results]
-            next_page_url = extract_next_page_url(html, current_url=resolved)
+            next_page_url = next_candidate_url
     return candidates[:max_results]
 
 
@@ -1176,6 +1215,7 @@ def _collect_seeded_fandom_candidate_urls_by_domain(
     seed_urls: list[str],
     *,
     fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+    include_allpages_scan: bool = True,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, list[str]]:
     resolved_allowlist = fandom_allowlist if fandom_allowlist is not None else load_fandom_community_allowlist()
@@ -1231,18 +1271,22 @@ def _collect_seeded_fandom_candidate_urls_by_domain(
         for page_url in _extract_fandom_wiki_urls_from_html(html, base_url=resolved):
             add_candidate(page_url)
 
-        all_pages_url = f"https://{host}/wiki/Special:AllPages"
-        if not _can_attempt_fandom_candidate(stats):
-            break
-        status_code, html, resolved_url, _ = _fetch_html_with_status(
-            all_pages_url,
-            timeout=_source_timeout_seconds("fandom"),
-        )
-        if status_code is None or status_code >= 400 or not html:
-            continue
-        resolved_all_pages = _canonicalize_url(resolved_url or all_pages_url) or all_pages_url
-        for page_url in _extract_fandom_wiki_urls_from_html(html, base_url=resolved_all_pages):
-            add_candidate(page_url)
+        if include_allpages_scan:
+            all_pages_url = f"https://{host}/wiki/Special:AllPages"
+            if not _can_attempt_fandom_candidate(stats):
+                break
+            status_code, html, resolved_url, _ = _fetch_html_with_status(
+                all_pages_url,
+                timeout=_source_timeout_seconds("fandom"),
+            )
+            if status_code is None or status_code >= 400 or not html:
+                continue
+            resolved_all_pages = _canonicalize_url(resolved_url or all_pages_url) or all_pages_url
+            titles, _ = parse_allpages_html_page(html, current_url=resolved_all_pages)
+            for title in titles:
+                page_url = build_fandom_wiki_url_from_name(title, host)
+                if page_url:
+                    add_candidate(page_url)
     return by_domain
 
 
@@ -3438,6 +3482,8 @@ def _validate_person_knowledge_url(
         allowlist=resolved_allowlist,
     ):
         return None, "invalid"
+    if normalized_kind == "fandom" and _is_fandom_noncanonical_subpage_url(candidate):
+        return None, "invalid"
 
     timeout_source = (
         "wikipedia" if normalized_kind == "wikipedia" else "fandom" if normalized_kind == "fandom" else "wikidata"
@@ -3465,6 +3511,8 @@ def _validate_person_knowledge_url(
         resolved,
         allowlist=resolved_allowlist,
     ):
+        return None, "invalid"
+    if normalized_kind == "fandom" and _is_fandom_noncanonical_subpage_url(resolved):
         return None, "invalid"
     if expected_name and not _person_page_matches_expected_name(expected_name, html, resolved):
         return None, "invalid"
@@ -3681,11 +3729,22 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                 show_x_topic_id = candidate_x_topic_id
             if not show_ratinggraph_tv_show_id and candidate_ratinggraph_tv_show_id:
                 show_ratinggraph_tv_show_id = candidate_ratinggraph_tv_show_id
+    fandom_rule_context = _resolve_show_fandom_rule_context(
+        show_id=show_id,
+        show_name=show_name,
+        network_values=network_values,
+    )
+    include_allpages_scan = (
+        bool(fandom_rule_context.get("include_allpages_scan"))
+        if is_real_housewives_show and fandom_rule_context.get("effective_rule_key")
+        else True
+    )
     curated_fandom_domains = _curated_show_fandom_domains(show_name)
     fandom_allowlist = _effective_fandom_allowlist(
         show_name=show_name,
         network_tokens=networks,
         base_allowlist=load_fandom_community_allowlist(),
+        additional_domains=fandom_rule_context.get("community_domains"),
     )
 
     discovered: list[dict[str, Any]] = []
@@ -3744,6 +3803,10 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
             raw_url = str(row.get("url") or "").strip()
             if raw_url:
                 fandom_candidates.append((raw_url, "core.entity_links"))
+        for raw_url in fandom_rule_context.get("candidate_urls") or []:
+            candidate_url = str(raw_url or "").strip()
+            if candidate_url:
+                fandom_candidates.append((candidate_url, "franchise_rule"))
         fandom_candidates.extend((url, "curated_fandom_base") for url in _curated_show_fandom_base_urls(show_name))
         if is_real_housewives_show and show_name:
             bravo_wiki_candidate = search_real_housewives_wiki(show_name)
@@ -3761,6 +3824,8 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
         ) -> str | None:
             normalized = _canonicalize_url(resolved_url or candidate_url)
             if not normalized:
+                return None
+            if _is_fandom_noncanonical_subpage_url(normalized):
                 return None
             title = str(title_hint or "").strip() or None
             if not title:
@@ -3826,14 +3891,15 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                             max_results=12,
                         )
                     )
-                derived_candidates.extend(
-                    _search_fandom_allpages_html_candidates(
-                        community_domain=candidate_host,
-                        query=show_name,
-                        max_results=40,
-                        stats=stats,
+                if include_allpages_scan:
+                    derived_candidates.extend(
+                        _search_fandom_allpages_html_candidates(
+                            community_domain=candidate_host,
+                            query=show_name,
+                            max_results=40,
+                            stats=stats,
+                        )
                     )
-                )
                 ranked = sorted(
                     {_canonicalize_url(candidate) for candidate in derived_candidates if _canonicalize_url(candidate)},
                     key=lambda candidate: _score_fandom_show_candidate_url(candidate, show_name=show_name),
@@ -3885,7 +3951,7 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                     entity_kind="show",
                     manual_page_urls=ranked_page_candidates or None,
                     community_domains=[candidate_host],
-                    include_allpages_scan=True,
+                    include_allpages_scan=include_allpages_scan,
                     allpages_max_pages=5,
                     max_candidates=25,
                 )
@@ -4182,6 +4248,7 @@ def _collect_show_fandom_seed_urls(
     *,
     show_name: str | None,
     show_fandom_seed_urls: list[str] | None,
+    franchise_rule_urls: list[str] | None = None,
     fandom_allowlist: list[str] | tuple[str, ...] | None = None,
 ) -> list[str]:
     resolved_allowlist = fandom_allowlist if fandom_allowlist is not None else load_fandom_community_allowlist()
@@ -4189,29 +4256,37 @@ def _collect_show_fandom_seed_urls(
     candidates: list[str] = []
     if show_fandom_seed_urls:
         candidates.extend(show_fandom_seed_urls)
+    if franchise_rule_urls:
+        candidates.extend(franchise_rule_urls)
     candidates.extend(_curated_show_fandom_base_urls(show_name))
     if _is_real_housewives_show_name(show_name):
         real_housewives_wiki_candidate = search_real_housewives_wiki(show_name or "")
         if real_housewives_wiki_candidate:
             candidates.append(real_housewives_wiki_candidate)
 
-    try:
-        existing_rows = pg.fetch_all(
-            """
-            SELECT url
-            FROM core.entity_links
-            WHERE show_id = %s
-              AND entity_type = 'show'
-              AND season_number = 0
-              AND lower(link_kind) IN ('fandom', 'wikia')
-              AND lower(status) <> 'rejected'
-            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
-            LIMIT 50
-            """,
-            [show_id],
-        )
-    except Exception:  # noqa: BLE001
-        existing_rows = []
+    existing_rows: list[dict[str, Any]] = []
+    should_load_existing_rows = (
+        not show_fandom_seed_urls
+        and (_is_real_housewives_show_name(show_name) or bool(franchise_rule_urls))
+    )
+    if should_load_existing_rows:
+        try:
+            existing_rows = pg.fetch_all(
+                """
+                SELECT url
+                FROM core.entity_links
+                WHERE show_id = %s
+                  AND entity_type = 'show'
+                  AND season_number = 0
+                  AND lower(link_kind) IN ('fandom', 'wikia')
+                  AND lower(status) <> 'rejected'
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+                LIMIT 50
+                """,
+                [show_id],
+            )
+        except Exception:  # noqa: BLE001
+            existing_rows = []
 
     for row in existing_rows:
         raw_url = str(row.get("url") or "").strip()
@@ -4362,6 +4437,8 @@ def _validated_fandom_season_url(
     canonical_candidate = _canonicalize_url(candidate_url)
     if not canonical_candidate:
         return None
+    if _is_fandom_noncanonical_subpage_url(canonical_candidate):
+        return None
     if not is_allowlisted_fandom_domain(canonical_candidate, allowlist=resolved_allowlist):
         return None
 
@@ -4374,6 +4451,8 @@ def _validated_fandom_season_url(
 
     resolved = _canonicalize_url(final_url or canonical_candidate)
     if not resolved:
+        return None
+    if _is_fandom_noncanonical_subpage_url(resolved):
         return None
     if is_missing_fandom_page(html, resolved):
         return None
@@ -4421,15 +4500,27 @@ def _discover_season_links(
         str(value).strip() for value in ((show_name_row or {}).get("networks") or []) if isinstance(value, str)
     ]
     network_tokens = _normalize_show_network_tokens(network_values)
+    fandom_rule_context = _resolve_show_fandom_rule_context(
+        show_id=show_id,
+        show_name=show_name,
+        network_values=network_values,
+    )
+    include_allpages_scan = (
+        bool(fandom_rule_context.get("include_allpages_scan"))
+        if _is_real_housewives_show_name(show_name) and fandom_rule_context.get("effective_rule_key")
+        else True
+    )
     fandom_allowlist = _effective_fandom_allowlist(
         show_name=show_name,
         network_tokens=network_tokens,
         base_allowlist=load_fandom_community_allowlist(),
+        additional_domains=fandom_rule_context.get("community_domains"),
     )
     season_fandom_seed_urls = _collect_show_fandom_seed_urls(
         show_id,
         show_name=show_name,
         show_fandom_seed_urls=show_fandom_seed_urls,
+        franchise_rule_urls=fandom_rule_context.get("candidate_urls"),
         fandom_allowlist=fandom_allowlist,
     )
     fandom_domains = _extract_fandom_domains_from_urls(season_fandom_seed_urls, fandom_allowlist=fandom_allowlist)
@@ -4446,6 +4537,7 @@ def _discover_season_links(
     seeded_fandom_candidates_by_domain = _collect_seeded_fandom_candidate_urls_by_domain(
         season_fandom_seed_urls,
         fandom_allowlist=fandom_allowlist,
+        include_allpages_scan=include_allpages_scan,
         stats=stats,
     )
     per_domain_candidate_cap = _link_discovery_season_fandom_candidates_per_domain_cap()
@@ -4787,7 +4879,7 @@ def _discover_season_links(
                         else None
                     ),
                     community_domains=[fandom_domain],
-                    include_allpages_scan=True,
+                    include_allpages_scan=include_allpages_scan,
                     allpages_max_pages=5,
                     max_candidates=25,
                 )
@@ -4887,6 +4979,7 @@ def _discover_fandom_candidates_for_person(
     seeded_domain_candidates: dict[str, list[str]] | None,
     is_real_housewives_show: bool,
     fandom_allowlist: list[str] | tuple[str, ...],
+    include_allpages_scan: bool = True,
     stats: dict[str, Any] | None = None,
 ) -> list[str]:
     max_candidates_per_person = _link_discovery_people_fandom_candidates_per_person_cap()
@@ -4911,15 +5004,16 @@ def _discover_fandom_candidates_for_person(
                 for candidate in search_candidates[:max_candidates_per_person]:
                     if candidate and _score_fandom_candidate_url(candidate, expected_name=name) > 0:
                         candidates.append(candidate)
-            allpages_candidates = _search_fandom_allpages_html_candidates(
-                community_domain=fandom_domain,
-                query=name,
-                max_results=max_candidates_per_person,
-                stats=stats,
-            )
-            for candidate in allpages_candidates[:max_candidates_per_person]:
-                if candidate and _score_fandom_candidate_url(candidate, expected_name=name) > 0:
-                    candidates.append(candidate)
+            if include_allpages_scan:
+                allpages_candidates = _search_fandom_allpages_html_candidates(
+                    community_domain=fandom_domain,
+                    query=name,
+                    max_results=max_candidates_per_person,
+                    stats=stats,
+                )
+                for candidate in allpages_candidates[:max_candidates_per_person]:
+                    if candidate and _score_fandom_candidate_url(candidate, expected_name=name) > 0:
+                        candidates.append(candidate)
             if len(candidates) >= max_candidates_per_person:
                 break
     if not is_real_housewives_show or not name:
@@ -5027,6 +5121,8 @@ def _discover_related_person_fandom_urls(
         normalized = _canonicalize_url(candidate)
         if not normalized:
             continue
+        if _is_fandom_noncanonical_subpage_url(normalized):
+            continue
         key = _url_key(normalized)
         if key in seen:
             continue
@@ -5053,10 +5149,21 @@ def _discover_people_links(
     is_bravo_show = "bravo" in networks
     is_real_housewives_show = _is_real_housewives_show_name(show_name)
     show_wikidata_id = _resolve_show_wikidata_id(show_id, show.get("wikidata_id"))
+    fandom_rule_context = _resolve_show_fandom_rule_context(
+        show_id=show_id,
+        show_name=show_name,
+        network_values=network_values,
+    )
+    include_allpages_scan = (
+        bool(fandom_rule_context.get("include_allpages_scan"))
+        if is_real_housewives_show and fandom_rule_context.get("effective_rule_key")
+        else True
+    )
     fandom_allowlist = _effective_fandom_allowlist(
         show_name=show_name,
         network_tokens=networks,
         base_allowlist=load_fandom_community_allowlist(),
+        additional_domains=fandom_rule_context.get("community_domains"),
     )
 
     show_cast_wikidata_candidates: dict[str, dict[str, str]] = {}
@@ -5165,12 +5272,14 @@ def _discover_people_links(
         show_id,
         show_name=show_name,
         show_fandom_seed_urls=show_fandom_seed_urls,
+        franchise_rule_urls=fandom_rule_context.get("candidate_urls"),
         fandom_allowlist=fandom_allowlist,
     )
     show_fandom_domains = _extract_fandom_domains_from_urls(people_fandom_seed_urls, fandom_allowlist=fandom_allowlist)
     seeded_fandom_candidates_by_domain = _collect_seeded_fandom_candidate_urls_by_domain(
         people_fandom_seed_urls,
         fandom_allowlist=fandom_allowlist,
+        include_allpages_scan=include_allpages_scan,
         stats=stats,
     )
     if stats is not None:
@@ -5490,6 +5599,7 @@ def _discover_people_links(
             seeded_domain_candidates=seeded_fandom_candidates_by_domain,
             is_real_housewives_show=is_real_housewives_show,
             fandom_allowlist=fandom_allowlist,
+            include_allpages_scan=include_allpages_scan,
             stats=stats,
         )
         max_candidates_per_person = _link_discovery_people_fandom_candidates_per_person_cap()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import nullcontext
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -314,6 +315,26 @@ def test_get_show_detail_builds_overview_fields_without_mutating_raw_values(monk
                     "buy": ["Apple TV"],
                 },
             ],
+            "watch_provider_regions": [
+                {
+                    "region": "DE",
+                    "stream": ["RTL+", "Joyn"],
+                    "free": [],
+                    "buy_rent": ["Apple TV", "Amazon Video"],
+                },
+                {
+                    "region": "US",
+                    "stream": ["Peacock", "Hayu", "Peacock"],
+                    "free": ["Bravo TV", "Hayu"],
+                    "buy_rent": ["Apple TV", "Prime Video", "Prime Video"],
+                },
+                {
+                    "region": "NZ",
+                    "stream": ["ThreeNow"],
+                    "free": [],
+                    "buy_rent": [],
+                },
+            ],
             "justwatch_url": "https://www.themoviedb.org/tv/110381-the-real-housewives-of-salt-lake-city/watch?locale=US",
             "tags": ["Housewives"],
             "primary_poster_image_id": "poster-1",
@@ -357,9 +378,128 @@ def test_get_show_detail_builds_overview_fields_without_mutating_raw_values(monk
             "buy": [],
         },
     ]
+    assert row["watch_provider_regions"] == [
+        {
+            "region": "US",
+            "stream": ["Hayu", "Peacock"],
+            "free": ["Bravo TV", "Hayu"],
+            "buy_rent": ["Apple TV", "Prime Video"],
+        },
+        {
+            "region": "DE",
+            "stream": ["Joyn", "RTL+"],
+            "free": [],
+            "buy_rent": ["Amazon Video", "Apple TV"],
+        },
+        {
+            "region": "NZ",
+            "stream": ["ThreeNow"],
+            "free": [],
+            "buy_rent": [],
+        },
+    ]
     assert row["derived_external_links"] == {
         "justwatch_url": "https://www.themoviedb.org/tv/110381-the-real-housewives-of-salt-lake-city/watch?locale=US"
     }
+
+
+def test_get_show_detail_normalizes_json_text_watch_availability_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repo,
+        "_fetch_one_row",
+        lambda query, params=None, cur=None: {
+            "id": "show-1",
+            "name": "The Real Housewives of Salt Lake City",
+            "slug": "rhoslc",
+            "canonical_slug": "rhoslc",
+            "alternative_names": ["RHOSLC"],
+            "networks": ["Bravo TV"],
+            "streaming_providers": ["Peacock Premium"],
+            "watch_providers": ["Amazon Video"],
+            "overview_watch_availability": json.dumps(
+                [
+                    {
+                        "region": "US",
+                        "stream": ["Peacock Premium"],
+                        "buy": ["Amazon Video"],
+                    },
+                    {
+                        "region": "DE",
+                        "stream": ["RTL+"],
+                        "buy": ["Apple TV"],
+                    },
+                ]
+            ),
+            "watch_provider_regions": json.dumps(
+                [
+                    {
+                        "region": "US",
+                        "stream": ["Peacock Premium", "YouTube TV"],
+                        "free": ["Bravo TV"],
+                        "buy_rent": ["Amazon Video", "Apple TV Store"],
+                    },
+                    {
+                        "region": "AU",
+                        "stream": ["BINGE"],
+                        "free": ["9Now"],
+                        "buy_rent": ["Amazon Video"],
+                    },
+                ]
+            ),
+            "justwatch_url": "https://www.themoviedb.org/tv/110381-the-real-housewives-of-salt-lake-city/watch?locale=US",
+            "tags": [],
+        },
+    )
+
+    row, query_count = repo.get_show_detail("show-1")
+
+    assert query_count == 1
+    assert row is not None
+    assert row["overview_watch_availability"] == [
+        {
+            "region": "US",
+            "stream": ["Peacock Premium"],
+            "buy": ["Amazon Video"],
+        },
+    ]
+    assert row["watch_provider_regions"] == [
+        {
+            "region": "US",
+            "stream": ["Peacock Premium", "YouTube TV"],
+            "free": ["Bravo TV"],
+            "buy_rent": ["Amazon Video", "Apple TV Store"],
+        },
+        {
+            "region": "AU",
+            "stream": ["BINGE"],
+            "free": ["9Now"],
+            "buy_rent": ["Amazon Video"],
+        },
+    ]
+
+
+def test_get_show_detail_query_projects_watch_availability_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fetch_one_row(query, params=None, cur=None):
+        captured["query"] = query
+        captured["params"] = params
+        return None
+
+    monkeypatch.setattr(repo, "_fetch_one_row", fake_fetch_one_row)
+
+    row, query_count = repo.get_show_detail("show-1")
+
+    assert row is None
+    assert query_count == 1
+    query = str(captured["query"])
+    assert "watch.overview_watch_availability" in query
+    assert "watch.watch_provider_regions" in query
+    assert captured["params"] == ["show-1"]
 
 
 def test_get_show_credits_filters_cast_to_curated_roles_and_groups_crew(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1332,7 +1472,7 @@ def test_fetch_show_cast_base_rows_can_skip_photo_enrichment(monkeypatch: pytest
 
     assert rows == []
     assert query_count == 1
-    assert captured["params"] == ["show-1", "show-1"]
+    assert captured["params"] == ["show-1", "show-1", "show-1"]
     assert "NULL::text AS photo_url" in captured["query"]
     assert "AS primary_photo ON TRUE" not in captured["query"]
     assert "core.v_cast_photos" not in captured["query"]

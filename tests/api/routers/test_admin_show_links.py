@@ -204,6 +204,39 @@ def test_collect_show_fandom_seed_urls_skips_real_housewives_wiki_for_non_housew
     assert seeds == []
 
 
+def test_collect_seeded_fandom_candidate_urls_by_domain_can_skip_allpages_scan() -> None:
+    requested_urls: list[str] = []
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        requested_urls.append(url)
+        if url == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City":
+            return (
+                200,
+                "<html><body><h1>The Real Housewives of Salt Lake City</h1></body></html>",
+                url,
+                None,
+            )
+        raise AssertionError(url)
+
+    with patch(
+        "api.routers.admin_show_links.load_fandom_community_allowlist",
+        return_value=("real-housewives.fandom.com",),
+    ):
+        with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+            candidates_by_domain = admin_show_links._collect_seeded_fandom_candidate_urls_by_domain(
+                ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"],
+                fandom_allowlist=("real-housewives.fandom.com",),
+                include_allpages_scan=False,
+            )
+
+    assert requested_urls == ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"]
+    assert candidates_by_domain == {
+        "real-housewives.fandom.com": [
+            "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+        ]
+    }
+
+
 def test_discover_show_links_prefers_core_entity_links_source_for_duplicate_fandom_url() -> None:
     show_id = str(uuid4())
     duplicate_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
@@ -236,6 +269,58 @@ def test_discover_show_links_prefers_core_entity_links_source_for_duplicate_fand
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 1
     assert fandom_links[0]["source"] == "core.entity_links"
+
+
+def test_discover_show_links_keeps_existing_fandom_link_and_adds_real_housewives_wiki() -> None:
+    show_id = str(uuid4())
+    existing_url = "https://another-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+    rh_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        if url in {existing_url, rh_url}:
+            return (
+                200,
+                "<html><body><h1>The Real Housewives of Salt Lake City</h1></body></html>",
+                url,
+                None,
+            )
+        if url == "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City":
+            return (404, "", url, None)
+        raise AssertionError(url)
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[{"url": existing_url}]):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": [],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_show_fandom_rule_context",
+                return_value={
+                    "effective_rule_key": "real_housewives",
+                    "community_domains": ["real-housewives.fandom.com", "another-housewives.fandom.com"],
+                    "candidate_urls": [rh_url],
+                    "include_allpages_scan": True,
+                },
+            ):
+                with patch(
+                    "api.routers.admin_show_links.load_fandom_community_allowlist",
+                    return_value=("real-housewives.fandom.com", "another-housewives.fandom.com"),
+                ):
+                    with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+                        links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    assert {str(link.get("url") or "") for link in fandom_links} == {existing_url, rh_url}
+    assert any(link.get("url") == existing_url and link.get("source") == "core.entity_links" for link in fandom_links)
+    assert any(link.get("url") == rh_url and link.get("source") == "franchise_rule" for link in fandom_links)
 
 
 def test_discover_show_links_expands_root_fandom_seed_to_show_page_candidates() -> None:
@@ -1111,8 +1196,11 @@ def test_search_fandom_allpages_html_candidates_uses_from_query_prefix_and_extra
                 """
                 <html>
                   <body>
-                    <a href="/wiki/Alan_Cumming">Alan Cumming</a>
-                    <a href="/wiki/Special:AllPages">Special</a>
+                    <a href="/wiki/Footer_Noise">Footer Noise</a>
+                    <div class="mw-allpages-body">
+                      <a href="/wiki/Alan_Cumming">Alan Cumming</a>
+                      <a href="/wiki/Special:AllPages">Special</a>
+                    </div>
                   </body>
                 </html>
                 """,
@@ -1207,9 +1295,11 @@ def test_search_fandom_allpages_html_candidates_follows_next_page() -> None:
                     <div class="mw-allpages-body">
                       <a href="/wiki/Lisa_Barlow/Gallery">Lisa Barlow/Gallery</a>
                     </div>
-                    <a href="/wiki/Special:AllPages?from=Erika_Jayne:_Bet_It_All_On_Blonde&to=&namespace=0">
-                      Next page (Erika Jayne: Bet It All On Blonde)
-                    </a>
+                    <div class="mw-allpages-nav">
+                      <a href="/wiki/Special:AllPages?from=Erika_Jayne:_Bet_It_All_On_Blonde&to=&namespace=0">
+                        Next page (Erika Jayne: Bet It All On Blonde)
+                      </a>
+                    </div>
                   </body>
                 </html>
                 """,
@@ -2802,34 +2892,49 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
                     }
                 ],
                 [],
+                [],
             ]
             with patch(
                 "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
                 return_value=([{"person_id": person_id}], 1),
             ):
-                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                with patch(
+                    "api.routers.admin_show_links.load_fandom_community_allowlist",
+                    return_value=("real-housewives.fandom.com",),
+                ):
                     with patch(
-                        "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
-                        return_value=[
-                            "https://teen-wolf.fandom.com/wiki/Lisa_Barlow",
-                            "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
-                        ],
+                        "api.routers.admin_show_links._resolve_show_fandom_rule_context",
+                        return_value={
+                            "effective_rule_key": "real_housewives",
+                            "community_domains": ["real-housewives.fandom.com"],
+                            "candidate_urls": [],
+                            "include_allpages_scan": True,
+                        },
                     ):
-                        with patch(
-                            "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
-                                url if kind == "fandom" and "real-housewives.fandom.com" in url else None
-                            ),
-                        ):
-                            links = _discover_people_links(show_id)
+                        with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                            with patch(
+                                "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                return_value=[
+                                    "https://teen-wolf.fandom.com/wiki/Lisa_Barlow",
+                                    "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+                                ],
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._discover_related_person_fandom_urls",
+                                    return_value=["https://real-housewives.fandom.com/wiki/Lisa_Barlow"],
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                                        side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                            url if kind == "fandom" and "real-housewives.fandom.com" in url else None
+                                        ),
+                                    ):
+                                        links = _discover_people_links(show_id)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
-    assert len(fandom_links) == 4
+    assert len(fandom_links) == 1
     assert {str(link.get("url") or "") for link in fandom_links} == {
         "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
-        "https://real-housewives.fandom.com/wiki/Lisa_Barlow/Gallery",
-        "https://real-housewives.fandom.com/wiki/Lisa_Barlow/Storylines",
-        "https://real-housewives.fandom.com/wiki/Lisa_Barlow/Connections",
     }
     assert all("real-housewives.fandom.com" in str(link.get("url") or "") for link in fandom_links)
     assert any(link.get("metadata", {}).get("site_title") == "Real Housewives Wiki" for link in fandom_links)
@@ -2854,27 +2959,47 @@ def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_
                     }
                 ],
                 [],
+                [],
             ]
             with patch(
                 "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
                 return_value=([{"person_id": person_id}], 1),
             ):
-                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                with patch(
+                    "api.routers.admin_show_links.load_fandom_community_allowlist",
+                    return_value=("real-housewives.fandom.com",),
+                ):
                     with patch(
-                        "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
-                        return_value=[
-                            "https://real-housewives.fandom.com/wiki/Lisa",
-                            "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
-                        ],
+                        "api.routers.admin_show_links._resolve_show_fandom_rule_context",
+                        return_value={
+                            "effective_rule_key": "real_housewives",
+                            "community_domains": ["real-housewives.fandom.com"],
+                            "candidate_urls": [],
+                            "include_allpages_scan": True,
+                        },
                     ):
-                        with patch(
-                            "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, **kwargs: url,
-                        ):
-                            links = _discover_people_links(show_id)
+                        with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                            with patch(
+                                "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                return_value=[
+                                    "https://real-housewives.fandom.com/wiki/Lisa",
+                                    "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
+                                ],
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._discover_related_person_fandom_urls",
+                                    side_effect=lambda **kwargs: [
+                                        kwargs["validated_fandom_url"],
+                                    ],
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._validated_person_knowledge_url",
+                                        side_effect=lambda url, **kwargs: url,
+                                    ):
+                                        links = _discover_people_links(show_id)
 
     fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
-    assert len(fandom_links) == 5
+    assert len(fandom_links) == 2
     assert any(link.get("url") == "https://real-housewives.fandom.com/wiki/Lisa_Barlow" for link in fandom_links)
     assert any(link.get("url") == "https://real-housewives.fandom.com/wiki/Lisa" for link in fandom_links)
 
@@ -3068,12 +3193,7 @@ def test_discover_people_links_expands_matching_fandom_person_related_pages() ->
         for link in links
         if link.get("entity_type") == "person" and link.get("link_kind") == "fandom"
     }
-    assert fandom_urls == {
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
-    }
+    assert fandom_urls == {"https://real-housewives.fandom.com/wiki/Angie_Katsanevas"}
 
 
 def test_score_fandom_candidate_url_rejects_weak_token_overlap_person_match() -> None:
@@ -4051,7 +4171,7 @@ def test_validated_person_knowledge_url_accepts_matching_fandom_person_page() ->
     assert resolved == "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
 
 
-def test_validated_person_knowledge_url_accepts_matching_fandom_person_subpage() -> None:
+def test_validated_person_knowledge_url_rejects_matching_fandom_person_subpage() -> None:
     _validated_person_knowledge_url.cache_clear()
     html = """
     <html>
@@ -4073,7 +4193,7 @@ def test_validated_person_knowledge_url_accepts_matching_fandom_person_subpage()
             kind="fandom",
             expected_name="Angie Katsanevas",
         )
-    assert resolved == "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery"
+    assert resolved is None
 
 
 def test_validate_person_knowledge_url_rejects_wikidata_mismatched_person() -> None:

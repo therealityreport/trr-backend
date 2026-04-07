@@ -17,6 +17,17 @@ from trr_backend.integrations.fandom import (
 
 _SPECIAL_ALLPAGES_PATH = "/wiki/Special:AllPages"
 _SEASON_TOKEN_RE = re.compile(r"\bseason\s+(\d{1,2})\b", re.IGNORECASE)
+_SKIPPED_ALLPAGES_PREFIXES = (
+    "special:",
+    "file:",
+    "category:",
+    "template:",
+    "user:",
+    "help:",
+    "forum:",
+    "talk:",
+    "message wall:",
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,44 @@ def _normalize_domain(value: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def _is_content_allpages_title(title: str) -> bool:
+    normalized = _normalize_space(title)
+    if not normalized:
+        return False
+    lowered = normalized.casefold()
+    return not any(lowered.startswith(prefix) for prefix in _SKIPPED_ALLPAGES_PREFIXES)
+
+
+def parse_allpages_html_page(
+    html: str,
+    *,
+    current_url: str,
+) -> tuple[list[str], str | None]:
+    if not html:
+        return [], None
+
+    soup = BeautifulSoup(html, "html.parser")
+    titles: list[str] = []
+    for anchor in soup.select("div.mw-allpages-body a[href]"):
+        title = _normalize_space(anchor.get_text(" ", strip=True))
+        if not _is_content_allpages_title(title):
+            continue
+        titles.append(title)
+
+    next_url: str | None = None
+    for anchor in soup.select("div.mw-allpages-nav a[href]"):
+        label = _normalize_space(anchor.get_text(" ", strip=True))
+        if "next page" not in label.casefold():
+            continue
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        next_url = urljoin(current_url, href)
+        break
+
+    return titles, next_url
 
 
 def _score_candidate(
@@ -156,18 +205,8 @@ def _allpages_html_titles(
         status, body, _error = fetch_html(url, timeout=timeout_seconds)
         if status != 200 or not body:
             break
-        soup = BeautifulSoup(body, "html.parser")
-        for anchor in soup.select("div.mw-allpages-body a[href]"):
-            title = _normalize_space(anchor.get_text(" ", strip=True))
-            if title:
-                titles.append(title)
-
-        next_url: str | None = None
-        for anchor in soup.select("a[href]"):
-            label = _normalize_space(anchor.get_text(" ", strip=True))
-            if "next page" in label.casefold():
-                next_url = urljoin(url, str(anchor.get("href")))
-                break
+        page_titles, next_url = parse_allpages_html_page(body, current_url=url)
+        titles.extend(page_titles)
         url = next_url
 
     return titles

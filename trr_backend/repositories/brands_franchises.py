@@ -539,6 +539,57 @@ def _classify_links(rows: list[dict[str, Any]]) -> _FandomLinkState:
     return _FandomLinkState(explicit_url=explicit_url, fallback_url=fallback_url, fallback_key=fallback_key)
 
 
+def resolve_show_fandom_rule_context(
+    *,
+    show_id: str,
+    show_name: str,
+    networks: tuple[str, ...],
+) -> dict[str, Any]:
+    rules_by_key = _merged_rules()
+    rule = _resolve_show_rule(show_name, networks, rules_by_key)
+    links = _classify_links(_fetch_fandom_links([show_id]).get(show_id, []))
+    fallback_rule = rules_by_key.get(links.fallback_key or "") if links.fallback_key else None
+    effective_rule = rule or fallback_rule
+
+    candidate_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for value in (
+        links.explicit_url,
+        links.fallback_url,
+        *(effective_rule.candidate_urls() if effective_rule else []),
+    ):
+        url = str(value or "").strip()
+        if not url:
+            continue
+        key = _url_key(url)
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        candidate_urls.append(url)
+
+    if links.explicit_url:
+        effective_source = "explicit"
+    elif links.fallback_url:
+        effective_source = "fallback"
+    elif effective_rule and effective_rule.primary_url:
+        effective_source = "rule_default"
+    else:
+        effective_source = "none"
+
+    return {
+        "rule_key": rule.key if rule else None,
+        "fallback_rule_key": fallback_rule.key if fallback_rule else None,
+        "effective_rule_key": effective_rule.key if effective_rule else None,
+        "effective_source": effective_source,
+        "effective_fandom_url": links.explicit_url or links.fallback_url or (effective_rule.primary_url if effective_rule else None),
+        "primary_url": effective_rule.primary_url if effective_rule else None,
+        "review_allpages_url": effective_rule.review_allpages_url if effective_rule else None,
+        "community_domains": list(effective_rule.community_domains) if effective_rule else [],
+        "include_allpages_scan": bool(effective_rule.include_allpages_scan) if effective_rule else False,
+        "candidate_urls": candidate_urls,
+    }
+
+
 def list_shows_franchises(*, q: str = "", limit: int = 300) -> dict[str, Any]:
     rules_by_key = _merged_rules()
     shows = _fetch_shows(q=q, limit=limit)

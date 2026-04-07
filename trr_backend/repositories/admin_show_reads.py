@@ -201,8 +201,24 @@ def _build_show_derived_external_links(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_json_list_payload(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
 def _normalize_overview_watch_availability(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
+    value = _normalize_json_list_payload(value)
+    if not value:
         return []
 
     region_order = {"US": 0, "GB": 1, "CA": 2, "AU": 3}
@@ -225,6 +241,44 @@ def _normalize_overview_watch_availability(value: Any) -> list[dict[str, Any]]:
             }
         )
     return sorted(rows, key=lambda row: region_order.get(str(row.get("region") or ""), 99))
+
+
+def _normalize_watch_provider_regions(value: Any) -> list[dict[str, Any]]:
+    value = _normalize_json_list_payload(value)
+    if not value:
+        return []
+
+    region_order = {"US": 0, "GB": 1, "CA": 2, "AU": 3}
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        region = str(item.get("region") or "").strip().upper()
+        if not region:
+            continue
+
+        stream = sorted(_dedupe_preserve_strings(_normalize_string_list(item.get("stream"))))
+        free = sorted(_dedupe_preserve_strings(_normalize_string_list(item.get("free"))))
+        buy_rent = sorted(_dedupe_preserve_strings(_normalize_string_list(item.get("buy_rent"))))
+        if not stream and not free and not buy_rent:
+            continue
+
+        rows.append(
+            {
+                "region": region,
+                "stream": stream,
+                "free": free,
+                "buy_rent": buy_rent,
+            }
+        )
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            region_order.get(str(row.get("region") or ""), 99),
+            str(row.get("region") or ""),
+        ),
+    )
 
 
 def _normalize_show_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -251,6 +305,7 @@ def _augment_show_detail_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized["overview_watch_availability"] = _normalize_overview_watch_availability(
         row.get("overview_watch_availability")
     )
+    normalized["watch_provider_regions"] = _normalize_watch_provider_regions(row.get("watch_provider_regions"))
     normalized["derived_external_links"] = _build_show_derived_external_links(row)
     normalized.pop("justwatch_url", None)
     return normalized
@@ -1971,6 +2026,8 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
             COALESCE(s.streaming_providers, ARRAY[]::text[]) AS streaming_providers,
             COALESCE(watch.provider_names, ARRAY[]::text[]) AS watch_providers,
             watch.justwatch_url,
+            watch.overview_watch_availability,
+            watch.watch_provider_regions,
             COALESCE(s.tags, ARRAY[]::text[]) AS tags,
             s.primary_poster_image_id,
             s.primary_backdrop_image_id,
@@ -2039,7 +2096,65 @@ def get_show_detail(show_id: str) -> tuple[dict[str, Any] | None, int]:
                   ) AS grouped
                 ),
                 '[]'::jsonb
-              ) AS overview_watch_availability
+              ) AS overview_watch_availability,
+              COALESCE(
+                (
+                  SELECT jsonb_agg(
+                    jsonb_build_object(
+                      'region',
+                      grouped.region,
+                      'stream',
+                      grouped.stream,
+                      'free',
+                      grouped.free,
+                      'buy_rent',
+                      grouped.buy_rent
+                    )
+                    ORDER BY grouped.sort_order, grouped.region
+                  )
+                  FROM (
+                    SELECT
+                      upper(btrim(swp_group.region)) AS region,
+                      CASE upper(btrim(swp_group.region))
+                        WHEN 'US' THEN 0
+                        WHEN 'GB' THEN 1
+                        WHEN 'CA' THEN 2
+                        WHEN 'AU' THEN 3
+                        ELSE 99
+                      END AS sort_order,
+                      COALESCE(
+                        ARRAY_AGG(DISTINCT btrim(wp_group.provider_name) ORDER BY btrim(wp_group.provider_name))
+                          FILTER (
+                            WHERE swp_group.offer_type IN ('flatrate', 'ads')
+                              AND btrim(COALESCE(wp_group.provider_name, '')) <> ''
+                          ),
+                        ARRAY[]::text[]
+                      ) AS stream,
+                      COALESCE(
+                        ARRAY_AGG(DISTINCT btrim(wp_group.provider_name) ORDER BY btrim(wp_group.provider_name))
+                          FILTER (
+                            WHERE swp_group.offer_type = 'free'
+                              AND btrim(COALESCE(wp_group.provider_name, '')) <> ''
+                          ),
+                        ARRAY[]::text[]
+                      ) AS free,
+                      COALESCE(
+                        ARRAY_AGG(DISTINCT btrim(wp_group.provider_name) ORDER BY btrim(wp_group.provider_name))
+                          FILTER (
+                            WHERE swp_group.offer_type IN ('buy', 'rent')
+                              AND btrim(COALESCE(wp_group.provider_name, '')) <> ''
+                          ),
+                        ARRAY[]::text[]
+                      ) AS buy_rent
+                    FROM core.show_watch_providers AS swp_group
+                    JOIN core.watch_providers AS wp_group ON wp_group.provider_id = swp_group.provider_id
+                    WHERE swp_group.show_id = s.id
+                      AND btrim(COALESCE(swp_group.region, '')) <> ''
+                    GROUP BY upper(btrim(swp_group.region))
+                  ) AS grouped
+                ),
+                '[]'::jsonb
+              ) AS watch_provider_regions
             FROM core.show_watch_providers AS swp
             JOIN core.watch_providers AS wp ON wp.provider_id = swp.provider_id
             WHERE swp.show_id = s.id
