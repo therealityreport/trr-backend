@@ -70,8 +70,12 @@ def _normalize_operation(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if claim_token is not None:
         normalized["claim_token"] = str(claim_token)
     # Sub-operation fields
-    normalized["parent_operation_id"] = str(row.get("parent_operation_id") or "") or None
-    normalized["refresh_target"] = str(row.get("refresh_target") or "") or None
+    parent_op_id = normalized.get("parent_operation_id")
+    if parent_op_id is not None:
+        normalized["parent_operation_id"] = str(parent_op_id) or None
+    refresh_tgt = normalized.get("refresh_target")
+    if refresh_tgt is not None:
+        normalized["refresh_target"] = str(refresh_tgt) or None
     return normalized
 
 
@@ -1320,11 +1324,12 @@ def get_sub_operations(parent_operation_id: str) -> list[dict[str, Any]]:
 
 
 def aggregate_parent_status(parent_operation_id: str) -> str:
-    """Derive parent status from children: failed > running/cancelling > pending > completed."""
+    """Derive parent status from children: failed > cancelled > running/cancelling > pending > completed."""
     row = pg.fetch_one(
         """
         select
           count(*) filter (where status = 'failed') as failed_count,
+          count(*) filter (where status = 'cancelled') as cancelled_count,
           count(*) filter (where status in ('running', 'cancelling')) as active_count,
           count(*) filter (where status = 'pending') as pending_count,
           count(*) filter (where status = 'completed') as completed_count,
@@ -1338,6 +1343,8 @@ def aggregate_parent_status(parent_operation_id: str) -> str:
         return "pending"
     if int(row.get("failed_count") or 0) > 0:
         return "failed"
+    if int(row.get("cancelled_count") or 0) > 0:
+        return "cancelled"
     if int(row.get("active_count") or 0) > 0:
         return "running"
     if int(row.get("pending_count") or 0) > 0:

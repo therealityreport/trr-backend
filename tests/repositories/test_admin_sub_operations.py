@@ -293,6 +293,7 @@ def test_aggregate_parent_status_failed_takes_priority_over_running() -> None:
         "fetch_one",
         return_value={
             "failed_count": 1,
+            "cancelled_count": 0,
             "active_count": 1,
             "pending_count": 0,
             "completed_count": 1,
@@ -302,3 +303,23 @@ def test_aggregate_parent_status_failed_takes_priority_over_running() -> None:
         status = admin_operations.aggregate_parent_status(parent_id)
 
     assert status == "failed"
+
+
+def test_aggregate_parent_status_returns_cancelled_when_any_child_cancelled() -> None:
+    parent_id = str(uuid4())
+
+    with patch.object(
+        admin_operations.pg,
+        "fetch_one",
+        return_value={
+            "failed_count": 0,
+            "cancelled_count": 1,
+            "active_count": 0,
+            "pending_count": 0,
+            "completed_count": 2,
+            "total_count": 3,
+        },
+    ):
+        status = admin_operations.aggregate_parent_status(parent_id)
+
+    assert status == "cancelled"
