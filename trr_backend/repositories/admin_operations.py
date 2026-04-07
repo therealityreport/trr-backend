@@ -39,6 +39,8 @@ _OPERATION_COLUMNS = """
   heartbeat_at,
   attempt_count,
   next_retry_at,
+  parent_operation_id,
+  refresh_target,
   started_at,
   completed_at,
   created_at,
@@ -67,6 +69,9 @@ def _normalize_operation(row: dict[str, Any] | None) -> dict[str, Any] | None:
     claim_token = normalized.get("claim_token")
     if claim_token is not None:
         normalized["claim_token"] = str(claim_token)
+    # Sub-operation fields
+    normalized["parent_operation_id"] = str(row.get("parent_operation_id") or "") or None
+    normalized["refresh_target"] = str(row.get("refresh_target") or "") or None
     return normalized
 
 
@@ -1244,3 +1249,97 @@ def mark_operation_failed(operation_id: str, *, error_payload: dict[str, Any]) -
 
 def now_iso() -> str:
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------------------
+# Sub-operation helpers (parent/child relationships for parallel dispatch)
+# ---------------------------------------------------------------------------
+
+
+def create_sub_operation(
+    *,
+    parent_operation_id: str,
+    operation_type: str,
+    refresh_target: str,
+    request_payload: dict[str, Any] | None = None,
+    initiated_by: str | None = None,
+    request_id: str | None = None,
+    client_session_id: str | None = None,
+    client_workflow_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a child operation linked to a parent."""
+    if not (parent_operation_id or "").strip():
+        raise ValueError("parent_operation_id is required")
+    if not (refresh_target or "").strip():
+        raise ValueError("refresh_target is required")
+
+    row = pg.fetch_one(
+        f"""
+        insert into core.admin_operations (
+          operation_type, status, initiated_by, request_id,
+          client_session_id, client_workflow_id,
+          request_payload, progress_payload,
+          parent_operation_id, refresh_target, attempt_count
+        )
+        values (
+          %s, 'pending', %s, %s, %s, %s,
+          %s::jsonb, '{{}}'::jsonb,
+          %s::uuid, %s, 0
+        )
+        returning {_OPERATION_COLUMNS}
+        """,
+        [
+            str(operation_type).strip(),
+            _clean_text(initiated_by),
+            _clean_text(request_id),
+            _clean_text(client_session_id),
+            _clean_text(client_workflow_id),
+            _to_json(request_payload),
+            parent_operation_id.strip(),
+            refresh_target.strip(),
+        ],
+    )
+    if not row:
+        raise RuntimeError("Failed to create sub-operation")
+    return _normalize_operation(row) or {}
+
+
+def get_sub_operations(parent_operation_id: str) -> list[dict[str, Any]]:
+    """Return all child operations for a parent, ordered by creation time."""
+    rows = pg.fetch_all(
+        f"""
+        select
+          {_OPERATION_COLUMNS}
+        from core.admin_operations
+        where parent_operation_id = %s::uuid
+        order by created_at asc
+        """,
+        [parent_operation_id],
+    )
+    return [_normalize_operation(row) or {} for row in (rows or [])]
+
+
+def aggregate_parent_status(parent_operation_id: str) -> str:
+    """Derive parent status from children: failed > running/cancelling > pending > completed."""
+    row = pg.fetch_one(
+        """
+        select
+          count(*) filter (where status = 'failed') as failed_count,
+          count(*) filter (where status in ('running', 'cancelling')) as active_count,
+          count(*) filter (where status = 'pending') as pending_count,
+          count(*) filter (where status = 'completed') as completed_count,
+          count(*) as total_count
+        from core.admin_operations
+        where parent_operation_id = %s::uuid
+        """,
+        [parent_operation_id],
+    )
+    if not row or int(row.get("total_count") or 0) == 0:
+        return "pending"
+    if int(row.get("failed_count") or 0) > 0:
+        return "failed"
+    if int(row.get("active_count") or 0) > 0:
+        return "running"
+    if int(row.get("pending_count") or 0) > 0:
+        return "pending"
+    return "completed"
