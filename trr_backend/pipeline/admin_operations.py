@@ -304,8 +304,15 @@ def _run_operation_worker(
         else:
             _consume_sync_chunks(operation_id, produced, request_id=request_id)
 
+        # Path B: SSE events (e.g. "complete" / "error") may have already driven
+        # the operation to a terminal status via _update_operation_from_event.
+        # In that case the block below is skipped, so we finalize here instead.
         op = admin_operations.get_operation(operation_id)
-        if op and not admin_operations.operation_is_terminal(str(op.get("status") or "")):
+        _current_status = str(op.get("status") or "") if op else ""
+        if op and admin_operations.operation_is_terminal(_current_status):
+            # Path B: terminal status was already set by an SSE-driven event.
+            finalize_sub_operation(operation_id, _current_status)  # no-op if not a sub-operation
+        elif op:
             if admin_operations.is_cancel_requested(operation_id):
                 payload = {"stage": "cancelled", "message": "Operation cancelled", "operation_id": operation_id}
                 _append_event_and_update(operation_id, event_type="error", payload=payload, request_id=request_id)
