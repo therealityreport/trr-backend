@@ -98,19 +98,27 @@ class ShowRefreshOrchestrator:
         self._parent_id = str(parent["id"])
 
         sub_ops = []
-        for target in self.targets:
-            child = admin_operations.create_sub_operation(
-                parent_operation_id=self._parent_id,
-                operation_type="admin_show_refresh",
-                refresh_target=target,
-                request_payload={**self.request_payload, "targets": [target]},
-                initiated_by=self.initiated_by,
-                request_id=self.request_id,
-                client_session_id=self.client_session_id,
-                client_workflow_id=self.client_workflow_id,
+        try:
+            for target in self.targets:
+                child = admin_operations.create_sub_operation(
+                    parent_operation_id=self._parent_id,
+                    operation_type="admin_show_refresh",
+                    refresh_target=target,
+                    request_payload={**self.request_payload, "targets": [target]},
+                    initiated_by=self.initiated_by,
+                    request_id=self.request_id,
+                    client_session_id=self.client_session_id,
+                    client_workflow_id=self.client_workflow_id,
+                )
+                self._sub_ops[target] = child
+                sub_ops.append(child)
+        except Exception:
+            logger.exception(
+                "Failed to create sub-operations: parent_id=%s created=%d/%d",
+                self._parent_id, len(sub_ops), len(self.targets),
             )
-            self._sub_ops[target] = child
-            sub_ops.append(child)
+            admin_operations.update_operation_status(self._parent_id, "failed")
+            raise
 
         return self._parent_id, sub_ops
 
@@ -152,9 +160,9 @@ class ShowRefreshOrchestrator:
                     target, op_id, self._parent_id,
                 )
             else:
-                logger.warning(
-                    "No producer_factory and Modal unavailable: target=%s operation_id=%s stuck pending",
-                    target, op_id,
+                raise RuntimeError(
+                    f"Cannot execute sub-operation: Modal unavailable and no producer_factory provided. "
+                    f"target={target} operation_id={op_id} parent={self._parent_id}"
                 )
 
         return modal_dispatched
