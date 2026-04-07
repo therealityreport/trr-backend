@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 DEFAULT_APP_NAME = "trr-backend-jobs"
@@ -17,6 +18,10 @@ DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_API_FUNCTION = "serve_backend_api"
 DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION = "probe_social_remote_auth"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from scripts._workspace_runtime_env import apply_workspace_runtime_env
 
 
 def _load_get_app_objects() -> Callable[..., dict[str, Any]]:
@@ -370,6 +375,7 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    apply_workspace_runtime_env(repo_root=Path(REPO_ROOT))
     args = _parse_args()
     summary = verify_modal_readiness(
         app_name=args.app_name,

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
 
 from trr_backend.repositories import social_season_analytics as social_repo
@@ -34,7 +36,12 @@ Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
 window.chrome = window.chrome || { runtime: {} };
 """
 _DEFAULT_SOCIALBLADE_VALIDATION_HANDLE = "socialblade"
-_DEFAULT_SHARED_CHROME_CDP_URL = "http://127.0.0.1:9222"
+_DEFAULT_SHARED_CHROME_CDP_URL = "http://127.0.0.1:9422"
+_DEFAULT_VISIBLE_CHROME_CDP_URL = "http://127.0.0.1:9222"
+_FALLBACK_SHARED_CHROME_CDP_URLS = (
+    "http://127.0.0.1:9422",
+    "http://127.0.0.1:9222",
+)
 
 
 def _default_socialblade_cookie_file_path() -> Path:
@@ -118,21 +125,48 @@ def normalize_socialblade_cookies(raw_payload: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _chrome_cdp_endpoint_reachable(cdp_url: str, *, timeout_seconds: float = 1.0) -> bool:
+    parsed = urlparse(cdp_url)
+    hostname = parsed.hostname
+    port = parsed.port
+    if not hostname or not port:
+        return False
+    try:
+        with socket.create_connection((hostname, port), timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
+
+
 def _socialblade_shared_chrome_cdp_url() -> str:
-    return str(os.getenv("SOCIALBLADE_SHARED_CHROME_CDP_URL") or _DEFAULT_SHARED_CHROME_CDP_URL).strip()
+    explicit_url = str(os.getenv("SOCIALBLADE_SHARED_CHROME_CDP_URL") or "").strip()
+    if explicit_url:
+        return explicit_url
+
+    for candidate in _FALLBACK_SHARED_CHROME_CDP_URLS:
+        if _chrome_cdp_endpoint_reachable(candidate):
+            return candidate
+    return _DEFAULT_SHARED_CHROME_CDP_URL
 
 
-def export_socialblade_cookies_from_shared_chrome() -> dict[str, str]:
+def _socialblade_visible_chrome_cdp_url() -> str:
+    explicit_url = str(os.getenv("SOCIALBLADE_VISIBLE_CHROME_CDP_URL") or "").strip()
+    if explicit_url:
+        return explicit_url
+    return _DEFAULT_VISIBLE_CHROME_CDP_URL
+
+
+def export_socialblade_cookies_from_shared_chrome(*, cdp_url: str | None = None) -> dict[str, str]:
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Playwright is required for SocialBlade cookie export") from exc
 
-    cdp_url = _socialblade_shared_chrome_cdp_url()
+    resolved_cdp_url = cdp_url or _socialblade_shared_chrome_cdp_url()
     validation_url = _socialblade_validation_url()
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        browser = playwright.chromium.connect_over_cdp(resolved_cdp_url)
         try:
             if not browser.contexts:
                 raise RuntimeError("Managed Chrome did not expose any browser contexts")
@@ -145,8 +179,8 @@ def export_socialblade_cookies_from_shared_chrome() -> dict[str, str]:
                 if _body_text_matches_access_denied(body_text):
                     raise RuntimeError("Managed Chrome SocialBlade session is blocked by Cloudflare")
                 cookies = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
-                if not cookies.get("session"):
-                    raise RuntimeError("Managed Chrome does not have an authenticated SocialBlade session cookie")
+                if not cookies.get("cf_clearance"):
+                    raise RuntimeError("Managed Chrome does not have a usable SocialBlade Cloudflare clearance cookie")
                 write_cookie_file(socialblade_cookie_file_path(), cookies)
                 return cookies
             finally:
@@ -155,12 +189,17 @@ def export_socialblade_cookies_from_shared_chrome() -> dict[str, str]:
             browser.close()
 
 
-def refresh_socialblade_cookies(reason: str | None = None) -> dict[str, str]:
+def refresh_socialblade_cookies(
+    reason: str | None = None,
+    *,
+    allow_headless_fallback: bool = True,
+) -> dict[str, str]:
     del reason
     try:
-        return export_socialblade_cookies_from_shared_chrome()
-    except Exception:  # noqa: BLE001
-        pass
+        return export_socialblade_cookies_from_shared_chrome(cdp_url=_socialblade_visible_chrome_cdp_url())
+    except Exception as exc:  # noqa: BLE001
+        if not allow_headless_fallback:
+            raise RuntimeError("Visible shared Chrome session could not provide a valid SocialBlade cookie set") from exc
 
     try:
         from playwright.sync_api import sync_playwright

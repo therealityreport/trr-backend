@@ -174,7 +174,7 @@ def test_list_cast_role_members_accepts_internal_admin_token_without_supabase_jw
     assert response.json()[0]["person_name"] == "Heather Gay"
 
 
-def test_list_cast_role_members_excludes_people_without_active_role_assignments(
+def test_list_cast_role_members_keeps_people_without_active_role_assignments(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -226,8 +226,9 @@ def test_list_cast_role_members_excludes_people_without_active_role_assignments(
 
     assert response.status_code == 200
     payload = response.json()
-    assert [row["person_name"] for row in payload] == ["Heather Gay"]
+    assert [row["person_name"] for row in payload] == ["Heather Gay", "Andy Cohen"]
     assert payload[0]["roles"] == ["Housewife"]
+    assert payload[1]["roles"] == []
 
 
 def test_list_cast_role_members_falls_back_to_base_roles_when_no_curated_assignments_exist(
@@ -620,6 +621,61 @@ def test_list_cast_with_roles_derives_latest_season_from_role_assignments() -> N
     assert payload[0]["seasons_appeared"] == 2
     assert payload[0]["season_numbers"] == [1, 3]
     assert sorted(payload[0]["roles"]) == ["Friend", "Guest", "Housewife"]
+
+
+def test_list_cast_with_roles_keeps_unassigned_people_with_empty_roles() -> None:
+    show_id = str(uuid4())
+
+    rows = [
+        {
+            "show_id": show_id,
+            "person_id": "person-heather",
+            "person_name": "Heather Gay",
+            "total_episodes": 80,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": ["Housewife"],
+            "photo_url": "https://cdn.example/heather.jpg",
+        },
+        {
+            "show_id": show_id,
+            "person_id": "person-andy",
+            "person_name": "Andy Cohen",
+            "total_episodes": 31,
+            "archive_episodes": 0,
+            "seasons_appeared": 4,
+            "season_numbers": [1, 2, 3, 4],
+            "latest_season": 4,
+            "roles": [],
+            "photo_url": "https://cdn.example/andy.jpg",
+        },
+    ]
+    role_rows = [
+        {
+            "person_id": "person-heather",
+            "role_names": ["Housewife"],
+            "assignment_seasons": [1, 2, 3, 4],
+        }
+    ]
+
+    with patch("api.routers.admin_show_roles._show_exists", return_value=True):
+        with patch("api.routers.admin_show_roles.pg.fetch_all", side_effect=[rows, role_rows]):
+            payload = list_cast_with_roles(
+                UUID(show_id),
+                {},
+                sort_by="episodes",
+                order="desc",
+                seasons=None,
+                roles=None,
+                has_image=None,
+                archive_mode="all",
+            )
+
+    assert [row["person_name"] for row in payload] == ["Heather Gay", "Andy Cohen"]
+    assert payload[0]["roles"] == ["Housewife"]
+    assert payload[1]["roles"] == []
 
 
 def test_list_cast_with_roles_emits_perf_logs_when_enabled() -> None:

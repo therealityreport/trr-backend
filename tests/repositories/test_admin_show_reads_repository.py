@@ -502,7 +502,7 @@ def test_get_show_detail_query_projects_watch_availability_fields(
     assert captured["params"] == ["show-1"]
 
 
-def test_get_show_credits_filters_cast_to_curated_roles_and_groups_crew(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_show_credits_keeps_unassigned_eligible_cast_and_groups_crew(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = [
         [
             {
@@ -526,7 +526,7 @@ def test_get_show_credits_filters_cast_to_curated_roles_and_groups_crew(monkeypa
                 "seasons_appeared": 6,
                 "season_numbers": [1, 2, 3, 4, 5, 6],
                 "latest_season": 6,
-                "roles": [],
+                "roles": ["Host"],
                 "photo_url": "https://cdn.example/andy.jpg",
             },
         ],
@@ -578,8 +578,9 @@ def test_get_show_credits_filters_cast_to_curated_roles_and_groups_crew(monkeypa
     payload, query_count = repo.get_show_credits("show-1")
 
     assert query_count == 4
-    assert [row["person_name"] for row in payload["cast_roster"]] == ["Heather Gay"]
+    assert [row["person_name"] for row in payload["cast_roster"]] == ["Heather Gay", "Andy Cohen"]
     assert payload["cast_roster"][0]["roles"] == ["Housewife"]
+    assert payload["cast_roster"][1]["roles"] == ["Host"]
     assert payload["cast_roster"][0]["total_episodes"] == 80
     assert payload["crew_sections"] == [
         {
@@ -597,6 +598,25 @@ def test_get_show_credits_filters_cast_to_curated_roles_and_groups_crew(monkeypa
                     "years_label": "2020-2026",
                     "imdb_name_id": "nm0169212",
                     "display_order": 2,
+                }
+            ],
+            "grouped_rows": [
+                {
+                    "person_id": "person-andy",
+                    "person_name": "Andy Cohen",
+                    "role_lines": [
+                        {
+                            "credit_id": "credit-1",
+                            "role": "executive producer",
+                            "billing_order": 2,
+                            "source_type": "imdb_fullcredits",
+                            "episode_count": 107,
+                            "episodes_label": "107 episodes",
+                            "years_label": "2020-2026",
+                            "imdb_name_id": "nm0169212",
+                            "display_order": 2,
+                        }
+                    ],
                 }
             ],
         }
@@ -652,6 +672,202 @@ def test_get_show_credits_falls_back_to_existing_cast_roles_when_curated_assignm
     assert query_count == 4
     assert [row["person_name"] for row in payload["cast_roster"]] == ["Heather Gay", "Meredith Marks"]
     assert payload["cast_roster"][0]["roles"] == ["Housewife"]
+
+
+def test_get_show_credits_excludes_voice_only_and_archive_only_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        [
+            {
+                "show_id": "show-1",
+                "person_id": "person-heather",
+                "person_name": "Heather Gay",
+                "total_episodes": 80,
+                "archive_episodes": 0,
+                "seasons_appeared": 4,
+                "season_numbers": [1, 2, 3, 4],
+                "latest_season": 4,
+                "roles": ["Housewife"],
+                "photo_url": "https://cdn.example/heather.jpg",
+            },
+            {
+                "show_id": "show-1",
+                "person_id": "person-voice",
+                "person_name": "Voice Guest",
+                "total_episodes": 8,
+                "archive_episodes": 0,
+                "seasons_appeared": 2,
+                "season_numbers": [1, 2],
+                "latest_season": 2,
+                "roles": ["Self (voice)"],
+                "photo_url": "https://cdn.example/voice.jpg",
+            },
+            {
+                "show_id": "show-1",
+                "person_id": "person-archive",
+                "person_name": "Archive Only",
+                "total_episodes": 0,
+                "archive_episodes": 3,
+                "seasons_appeared": 1,
+                "season_numbers": [1],
+                "latest_season": 1,
+                "roles": ["Self"],
+                "photo_url": "https://cdn.example/archive.jpg",
+            },
+        ],
+        [],
+        [],
+        [],
+    ]
+
+    def fake_fetch_all_rows(query: str, params: list[Any], cur: Any | None = None) -> list[dict[str, Any]]:
+        assert cur is None
+        assert query
+        assert params
+        return responses.pop(0)
+
+    monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all_rows)
+
+    payload, query_count = repo.get_show_credits("show-1")
+
+    assert query_count == 4
+    assert [row["person_name"] for row in payload["cast_roster"]] == ["Heather Gay"]
+
+
+def test_get_show_credits_groups_multiple_crew_lines_for_one_person(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        [
+            {
+                "show_id": "show-1",
+                "person_id": "person-heather",
+                "person_name": "Heather Gay",
+                "total_episodes": 80,
+                "archive_episodes": 0,
+                "seasons_appeared": 4,
+                "season_numbers": [1, 2, 3, 4],
+                "latest_season": 4,
+                "roles": ["Housewife"],
+                "photo_url": "https://cdn.example/heather.jpg",
+            }
+        ],
+        [],
+        [],
+        [
+            {
+                "credit_id": "credit-casey-1",
+                "show_id": "show-1",
+                "person_id": "person-casey",
+                "person_name": "Casey Allan",
+                "credit_category": "Producers",
+                "role": "supervising producer",
+                "billing_order": 1,
+                "source_type": "imdb_fullcredits",
+                "metadata": {
+                    "episode_count": 12,
+                    "episodes_label": "12 episodes",
+                    "years_label": "2020-2021",
+                    "imdb_name_id": "nm0000001",
+                    "display_order": 1,
+                },
+                "updated_at": "2026-03-31T12:00:00Z",
+                "imdb_id": "tt11363282",
+            },
+            {
+                "credit_id": "credit-casey-2",
+                "show_id": "show-1",
+                "person_id": "person-casey",
+                "person_name": "Casey Allan",
+                "credit_category": "Producers",
+                "role": "associate producer",
+                "billing_order": 2,
+                "source_type": "imdb_fullcredits",
+                "metadata": {
+                    "episode_count": 23,
+                    "episodes_label": "23 episodes",
+                    "years_label": "2021-2024",
+                    "imdb_name_id": "nm0000001",
+                    "display_order": 2,
+                },
+                "updated_at": "2026-03-31T12:00:00Z",
+                "imdb_id": "tt11363282",
+            },
+            {
+                "credit_id": "credit-casey-3",
+                "show_id": "show-1",
+                "person_id": "person-casey",
+                "person_name": "Casey Allan",
+                "credit_category": "Producers",
+                "role": "field producer",
+                "billing_order": 3,
+                "source_type": "imdb_fullcredits",
+                "metadata": {
+                    "episode_count": 18,
+                    "episodes_label": "18 episodes",
+                    "years_label": "2024-2026",
+                    "imdb_name_id": "nm0000001",
+                    "display_order": 3,
+                },
+                "updated_at": "2026-03-31T12:00:00Z",
+                "imdb_id": "tt11363282",
+            },
+        ],
+    ]
+
+    def fake_fetch_all_rows(query: str, params: list[Any], cur: Any | None = None) -> list[dict[str, Any]]:
+        assert cur is None
+        assert query
+        assert params
+        return responses.pop(0)
+
+    monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all_rows)
+
+    payload, query_count = repo.get_show_credits("show-1")
+
+    assert query_count == 4
+    assert payload["crew_sections"][0]["grouped_rows"] == [
+        {
+            "person_id": "person-casey",
+            "person_name": "Casey Allan",
+            "role_lines": [
+                {
+                    "credit_id": "credit-casey-1",
+                    "role": "supervising producer",
+                    "billing_order": 1,
+                    "source_type": "imdb_fullcredits",
+                    "episode_count": 12,
+                    "episodes_label": "12 episodes",
+                    "years_label": "2020-2021",
+                    "imdb_name_id": "nm0000001",
+                    "display_order": 1,
+                },
+                {
+                    "credit_id": "credit-casey-2",
+                    "role": "associate producer",
+                    "billing_order": 2,
+                    "source_type": "imdb_fullcredits",
+                    "episode_count": 23,
+                    "episodes_label": "23 episodes",
+                    "years_label": "2021-2024",
+                    "imdb_name_id": "nm0000001",
+                    "display_order": 2,
+                },
+                {
+                    "credit_id": "credit-casey-3",
+                    "role": "field producer",
+                    "billing_order": 3,
+                    "source_type": "imdb_fullcredits",
+                    "episode_count": 18,
+                    "episodes_label": "18 episodes",
+                    "years_label": "2024-2026",
+                    "imdb_name_id": "nm0000001",
+                    "display_order": 3,
+                },
+            ],
+        }
+    ]
 
 
 def test_get_show_credits_uses_self_credit_episode_count_metadata_when_occurrences_missing(

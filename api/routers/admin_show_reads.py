@@ -516,7 +516,8 @@ def get_admin_show_cast(
     started_at = time.perf_counter()
     cache_key = (
         f"show-cast:{show_id}:{limit}:{offset}:{min_episodes if min_episodes is not None else ''}:"
-        f"{1 if exclude_zero_episode_members else 0}:{1 if require_image else 0}:{roster_mode}:{photo_fallback}:{eligibility_mode}:"
+        f"{1 if exclude_zero_episode_members else 0}:{1 if require_image else 0}:"
+        f"{roster_mode}:{photo_fallback}:{eligibility_mode}:"
         f"{1 if include_photos else 0}"
     )
 

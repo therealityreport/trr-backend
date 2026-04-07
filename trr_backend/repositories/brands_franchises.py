@@ -581,7 +581,9 @@ def resolve_show_fandom_rule_context(
         "fallback_rule_key": fallback_rule.key if fallback_rule else None,
         "effective_rule_key": effective_rule.key if effective_rule else None,
         "effective_source": effective_source,
-        "effective_fandom_url": links.explicit_url or links.fallback_url or (effective_rule.primary_url if effective_rule else None),
+        "effective_fandom_url": links.explicit_url
+        or links.fallback_url
+        or (effective_rule.primary_url if effective_rule else None),
         "primary_url": effective_rule.primary_url if effective_rule else None,
         "review_allpages_url": effective_rule.review_allpages_url if effective_rule else None,
         "community_domains": list(effective_rule.community_domains) if effective_rule else [],

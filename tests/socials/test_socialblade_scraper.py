@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from trr_backend.socials.socialblade.scraper import (
+    SocialBladeEndpointError,
     _build_profile_stats_from_user_payload,
     _build_total_followers_chart_from_daily_deltas,
     _extract_profile_stats_from_body_text,
@@ -10,6 +11,7 @@ from trr_backend.socials.socialblade.scraper import (
     _history_rows_to_metrics,
     _normalize_table_data,
     _page_access_denied,
+    _scrape_socialblade_in_context,
 )
 
 BODY_TEXT = """
@@ -255,3 +257,215 @@ def test_build_total_followers_chart_from_daily_deltas_reconstructs_totals() -> 
             {"date": "2026-03-17", "followers": 150},
         ],
     }
+
+
+def test_scrape_context_retries_412_in_visible_shared_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyContext:
+        def add_init_script(self, _script: str) -> None:
+            return None
+
+        def add_cookies(self, _cookies) -> None:
+            return None
+
+        def new_page(self):
+            return DummyPage()
+
+    class DummyPage:
+        def goto(self, *_args, **_kwargs) -> None:
+            return None
+
+        def wait_for_timeout(self, *_args, **_kwargs) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.auth.normalize_socialblade_cookies",
+        lambda cookies: cookies,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._extract_body_text",
+        lambda _page: "Followers\n100\nFollowing\n10\nMedia Count\n5",
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._page_access_denied",
+        lambda _body_text: False,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._scrape_authenticated_api",
+        lambda _page, _handle: (_ for _ in ()).throw(
+            SocialBladeEndpointError("/api/trpc/instagram.monthly?batch=1", 412)
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper.scrape_socialblade_with_shared_browser_session",
+        lambda handle, playwright=None: {
+            "username": handle,
+            "platform": "instagram",
+            "history_source": "authenticated_api",
+            "stats_refreshed": True,
+        },
+    )
+
+    payload = _scrape_socialblade_in_context(
+        DummyContext(),
+        "heathergay",
+        playwright=None,
+        cookies=[],
+        allow_login_fallback=False,
+        allow_visible_browser_retry=True,
+    )
+
+    assert payload == {
+        "username": "heathergay",
+        "platform": "instagram",
+        "history_source": "authenticated_api",
+        "stats_refreshed": True,
+    }
+
+
+def test_scrape_context_retries_search_challenge_in_visible_shared_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyContext:
+        def add_init_script(self, _script: str) -> None:
+            return None
+
+        def add_cookies(self, _cookies) -> None:
+            return None
+
+        def new_page(self):
+            return DummyPage()
+
+    class DummyPage:
+        def goto(self, *_args, **_kwargs) -> None:
+            return None
+
+        def wait_for_timeout(self, *_args, **_kwargs) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.auth.normalize_socialblade_cookies",
+        lambda cookies: cookies,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._extract_body_text",
+        lambda _page: "Followers\n100\nFollowing\n10\nMedia Count\n5",
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._page_access_denied",
+        lambda _body_text: False,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._scrape_authenticated_api",
+        lambda _page, _handle: (_ for _ in ()).throw(
+            RuntimeError(
+                "SocialBlade returned non-JSON data for /api/trpc/instagram.search?input=%7B%22json%22%3A%7B%22query%22%3A%22heathergay%22%7D%7D"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper.scrape_socialblade_with_shared_browser_session",
+        lambda handle, playwright=None: {
+            "username": handle,
+            "platform": "instagram",
+            "history_source": "authenticated_api",
+            "stats_refreshed": True,
+        },
+    )
+
+    payload = _scrape_socialblade_in_context(
+        DummyContext(),
+        "heathergay",
+        playwright=None,
+        cookies=[],
+        allow_login_fallback=False,
+        allow_visible_browser_retry=True,
+    )
+
+    assert payload == {
+        "username": "heathergay",
+        "platform": "instagram",
+        "history_source": "authenticated_api",
+        "stats_refreshed": True,
+    }
+
+
+def test_scrape_context_configures_page_controls_before_table_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class DummyContext:
+        def add_init_script(self, _script: str) -> None:
+            return None
+
+        def add_cookies(self, _cookies) -> None:
+            return None
+
+        def new_page(self):
+            return DummyPage()
+
+    class DummyPage:
+        def goto(self, *_args, **_kwargs) -> None:
+            return None
+
+        def wait_for_timeout(self, *_args, **_kwargs) -> None:
+            return None
+
+        def evaluate(self, _script: str):
+            calls.append("evaluate_table")
+            return {
+                "data": [
+                    {
+                        "Date": "Wed2026-03-25",
+                        "Followers Delta": "10",
+                        "Followers Total": "100",
+                        "Following Delta": "1",
+                        "Following Total": "20",
+                        "Media Count Delta": "1",
+                        "Media Count Total": "5",
+                    }
+                ]
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.auth.normalize_socialblade_cookies",
+        lambda cookies: cookies,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._extract_body_text",
+        lambda _page: "Followers\n100\nFollowing\n20\nMedia Count\n5\nDaily Channel Metrics\nLast 60 Days",
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._page_access_denied",
+        lambda _body_text: False,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._scrape_authenticated_api",
+        lambda _page, _handle: (_ for _ in ()).throw(RuntimeError("authenticated API unavailable")),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._configure_socialblade_page_fallback_state",
+        lambda _page: calls.append("configure_controls"),
+    )
+
+    payload = _scrape_socialblade_in_context(
+        DummyContext(),
+        "heathergay",
+        playwright=None,
+        cookies=[],
+        allow_login_fallback=False,
+        allow_visible_browser_retry=False,
+    )
+
+    assert calls[:2] == ["configure_controls", "evaluate_table"]
+    assert payload["history_source"] == "table_fallback"
+    assert payload["daily_channel_metrics_60day"]["period"] == "Last 60 Days"

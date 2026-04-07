@@ -528,7 +528,7 @@ def test_get_social_account_catalog_gap_analysis(client: TestClient, monkeypatch
             "sample_missing_source_ids": ["ABC123"],
             "has_resumable_frontier": True,
             "needs_recent_sync": False,
-            "recommended_action": "resume_tail",
+            "recommended_action": "backfill_posts",
             "repair_window_start": None,
             "repair_window_end": None,
             "catalog_oldest_post_at": "2015-01-02T12:00:00Z",
@@ -551,7 +551,7 @@ def test_get_social_account_catalog_gap_analysis(client: TestClient, monkeypatch
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert response.json()["result"]["gap_type"] == "tail_gap"
-    assert response.json()["result"]["recommended_action"] == "resume_tail"
+    assert response.json()["result"]["recommended_action"] == "backfill_posts"
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
 
@@ -657,10 +657,14 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
                 )
 
     assert response.status_code == 200
-    assert response.json()["run_id"] == "catalog-run-1"
-    assert response.json()["status"] == "queued"
-    assert response.json()["catalog_action"] == "backfill"
-    assert response.json()["catalog_action_scope"] == "full_history"
+    body = response.json()
+    assert body["run_id"] == "catalog-run-1"
+    assert body["status"] == "queued"
+    assert body["catalog_action"] == "backfill"
+    assert body["catalog_action_scope"] == "full_history"
+    assert body["queue_enabled"] is True
+    assert body["used_inline_fallback"] is False
+    assert body["requires_modal_executor"] is True
     worker_guard.assert_called_once_with(
         required_execution_backend="modal",
         platform="instagram",
@@ -934,6 +938,53 @@ def test_post_social_account_catalog_backfill_allows_local_inline_fallback_for_i
     assert body["execution_mode"] == "inline"
     assert body["execution_mode_canonical"] == "inline_fallback"
     assert body["execution_mode_legacy"] == "inline_fallback"
+    assert body["queue_enabled"] is False
+    assert body["used_inline_fallback"] is True
+    assert body["requires_modal_executor"] is True
+    worker_guard.assert_not_called()
+    mocked_background.assert_called_once()
+    assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
+    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+
+
+def test_post_social_account_catalog_backfill_uses_local_admin_override_for_instagram_in_dev(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE", "1")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("api.routers.socials.is_remote_job_plane_enabled", return_value=True),
+        patch("api.routers.socials._start_runs_in_background") as mocked_background,
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+        ) as worker_guard,
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+            return_value={
+                "run_id": "catalog-run-inline-override-1",
+                "status": "pending",
+                "ingest_mode": "shared_account_catalog_backfill",
+            },
+        ) as mocked_start,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "catalog-run-inline-override-1"
+    assert body["status"] == "started"
+    assert body["execution_mode"] == "inline"
+    assert body["execution_mode_canonical"] == "inline_fallback"
+    assert body["execution_mode_legacy"] == "inline_fallback"
     worker_guard.assert_not_called()
     mocked_background.assert_called_once()
     assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
@@ -1044,10 +1095,14 @@ def test_post_social_account_catalog_sync_recent(client: TestClient, monkeypatch
                 )
 
     assert response.status_code == 200
-    assert response.json()["run_id"] == "catalog-run-2"
-    assert response.json()["status"] == "queued"
-    assert response.json()["catalog_action"] == "sync_recent"
-    assert response.json()["catalog_action_scope"] == "recent_window"
+    body = response.json()
+    assert body["run_id"] == "catalog-run-2"
+    assert body["status"] == "queued"
+    assert body["catalog_action"] == "sync_recent"
+    assert body["catalog_action_scope"] == "recent_window"
+    assert body["queue_enabled"] is True
+    assert body["used_inline_fallback"] is False
+    assert body["requires_modal_executor"] is True
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
     assert mocked.call_args.kwargs["lookback_days"] == 3
@@ -1127,8 +1182,10 @@ def test_post_social_account_catalog_resume_tail(client: TestClient, monkeypatch
         "run_id": "catalog-run-4",
         "status": "queued",
         "ingest_mode": "shared_account_catalog_backfill",
-        "catalog_action": "resume_tail",
-        "catalog_action_scope": "frontier_resume",
+        "catalog_action": "backfill",
+        "catalog_action_scope": "full_history",
+        "backfill_mode": "resume_frontier",
+        "resumed_from_cursor": True,
     }
 
     with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
@@ -1137,7 +1194,7 @@ def test_post_social_account_catalog_resume_tail(client: TestClient, monkeypatch
             return_value=None,
         ):
             with patch(
-                "trr_backend.repositories.social_season_analytics.resume_tail_social_account_catalog",
+                "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
                 return_value=expected,
             ) as mocked:
                 response = client.post(
@@ -1147,11 +1204,19 @@ def test_post_social_account_catalog_resume_tail(client: TestClient, monkeypatch
                 )
 
     assert response.status_code == 200
-    assert response.json()["run_id"] == "catalog-run-4"
-    assert response.json()["catalog_action"] == "resume_tail"
-    assert response.json()["catalog_action_scope"] == "frontier_resume"
+    body = response.json()
+    assert body["run_id"] == "catalog-run-4"
+    assert body["catalog_action"] == "backfill"
+    assert body["catalog_action_scope"] == "full_history"
+    assert body["backfill_mode"] == "resume_frontier"
+    assert body["deprecated_route"] is True
+    assert body["queue_enabled"] is True
+    assert body["used_inline_fallback"] is False
+    assert body["requires_modal_executor"] is True
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["catalog_action"] == "backfill"
+    assert mocked.call_args.kwargs["catalog_action_scope"] == "full_history"
 
 
 def test_post_social_account_catalog_resume_tail_returns_validation_error(
@@ -1170,10 +1235,10 @@ def test_post_social_account_catalog_resume_tail_returns_validation_error(
             return_value=None,
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.resume_tail_social_account_catalog",
+            "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
             side_effect=SocialIngestValidationError(
-                "NO_RESUMABLE_FRONTIER",
-                "No resumable frontier cursor found.",
+                "SOCIAL_REMOTE_WORKER_REQUIRED",
+                "Remote worker readiness is required.",
             ),
         ),
     ):
@@ -1184,7 +1249,51 @@ def test_post_social_account_catalog_resume_tail_returns_validation_error(
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "NO_RESUMABLE_FRONTIER"
+    assert response.json()["detail"]["code"] == "SOCIAL_REMOTE_WORKER_REQUIRED"
+
+
+def test_post_social_account_catalog_repair_auth_route(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "12345678-1234-1234-1234-123456789012"
+    expected = {
+        "run_id": run_id,
+        "status": "accepted",
+        "repair_status": "running",
+        "operational_state": "blocked_auth",
+        "repair_action": "repair_instagram_auth",
+        "resume_stage": "posts",
+    }
+
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.request_social_account_catalog_run_auth_repair",
+            return_value=expected,
+        ) as mocked_request,
+        patch(
+            "trr_backend.repositories.social_season_analytics.execute_social_account_catalog_run_auth_repair",
+            return_value={"ok": True},
+        ) as mocked_execute,
+        ):
+            response = client.post(
+            f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/repair-auth",
+                headers={"Authorization": f"Bearer {token}"},
+                json={},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == run_id
+    assert body["repair_status"] == "running"
+    assert body["operational_state"] == "blocked_auth"
+    assert body["resume_stage"] == "posts"
+    assert mocked_request.call_args.kwargs["platform"] == "instagram"
+    assert mocked_request.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked_request.call_args.kwargs["run_id"] == run_id
+    assert mocked_execute.called
 
 
 def test_post_social_account_catalog_sync_recent_returns_modal_dispatch_unavailable_when_target_unresolvable(
@@ -1303,6 +1412,9 @@ def test_post_social_account_catalog_sync_recent_allows_local_inline_fallback_fo
     assert body["execution_mode"] == "inline"
     assert body["execution_mode_canonical"] == "inline_fallback"
     assert body["execution_mode_legacy"] == "inline_fallback"
+    assert body["queue_enabled"] is False
+    assert body["used_inline_fallback"] is True
+    assert body["requires_modal_executor"] is True
     worker_guard.assert_not_called()
     mocked_background.assert_called_once()
     assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
@@ -4931,6 +5043,66 @@ def test_get_health_dot_endpoint_returns_500_on_unhandled_error(
 
     assert response.status_code == 500
     assert response.json()["detail"] == "health dot failed"
+
+
+def test_get_live_status_aggregates_health_queue_and_operations(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    queue_status = {
+        "queue_enabled": True,
+        "workers": {
+            "healthy": True,
+            "healthy_workers": 2,
+            "shared_account_backfill_readiness": {"ready": True},
+        },
+        "queue": {
+            "by_status": {
+                "running": 3,
+                "pending": 4,
+                "queued": 5,
+                "failed": 1,
+            },
+        },
+    }
+    operations_health = {
+        "summary": {
+            "active_total": 2,
+            "stale_total": 0,
+            "cancelling_total": 0,
+            "by_status": {"running": 2},
+            "by_type": {"sync": 2},
+            "runtime_split": {"modal": 1, "local": 1, "other": 0, "unknown": 0},
+            "stale_after_seconds": 120,
+            "cancelling_grace_seconds": 300,
+        },
+        "active_operations": [],
+    }
+
+    with patch("trr_backend.repositories.social_season_analytics.get_queue_status", return_value=queue_status) as mocked_queue:
+        with patch("trr_backend.repositories.admin_operations.get_admin_operations_health", return_value=operations_health) as mocked_ops:
+            response = client.get(
+                "/api/v1/admin/socials/live-status",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["health_dot"]["queue_enabled"] is True
+    assert body["health_dot"]["workers"]["healthy_workers"] == 2
+    assert body["queue_status"] == queue_status
+    assert body["admin_operations"] == operations_health
+    assert isinstance(body["generated_at"], str)
+    assert isinstance(body["sequence"], int)
+    mocked_queue.assert_called_once_with(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+    )
+    mocked_ops.assert_called_once()
 
 
 def test_cancel_stuck_jobs_endpoint_accepts_targeted_job_ids(

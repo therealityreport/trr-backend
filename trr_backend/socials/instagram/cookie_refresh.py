@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +73,61 @@ def _cookie_payload(cookies: list[dict[str, Any]]) -> dict[str, str]:
 
 def _write_cookie_file(cookie_file: Path, cookies: dict[str, str]) -> None:
     cookie_file.parent.mkdir(parents=True, exist_ok=True)
-    cookie_file.write_text(json.dumps(cookies, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = {
+        "_cookie_refreshed_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+        **cookies,
+    }
+    cookie_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_instagram_cookie_file_metadata(cookie_file: str | Path) -> dict[str, Any]:
+    target_file = Path(cookie_file).expanduser()
+    if not target_file.is_file():
+        return {}
+    try:
+        payload = json.loads(target_file.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed reading Instagram cookie metadata from %s", target_file, exc_info=True)
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if str(key).startswith("_")
+    }
+
+
+def _validate_session_via_graphql(page: Any, username: str, deadline: float) -> bool:
+    """Check that the browser's cookies work for Instagram's GraphQL API.
+
+    Makes a lightweight fetch() call from within the page context (so it
+    uses the browser's cookies) to see if the API returns real data.
+    """
+    try:
+        result = page.evaluate(
+            """async (username) => {
+                try {
+                    const resp = await fetch(
+                        `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}`,
+                        { credentials: 'include', headers: { 'X-IG-App-ID': '936619743392459' } }
+                    );
+                    return { status: resp.status, ok: resp.ok };
+                } catch (e) {
+                    return { status: 0, ok: false, error: e.message };
+                }
+            }""",
+            username,
+        )
+        status = int(result.get("status") or 0)
+        if status == 200:
+            logger.info("[instagram] GraphQL validation OK (status=%d)", status)
+            return True
+        logger.warning("[instagram] GraphQL validation failed (status=%d)", status)
+        return False
+    except Exception:  # noqa: BLE001
+        logger.warning("[instagram] GraphQL validation probe threw an exception", exc_info=True)
+        return False
 
 
 def _dismiss_optional_post_login_prompts(page: Any, *, deadline: float) -> None:
@@ -212,3 +267,182 @@ def refresh_instagram_cookies(
             raise RuntimeError("Timed out while refreshing Instagram cookies") from exc
         finally:
             browser.close()
+
+
+def interactive_chrome_login(
+    *,
+    chrome_profile_name: str = "entertainmentdatagroup@gmail.com",
+    cookie_file: str | Path = "data/instagram_cookies.json",
+    timeout_seconds: int = 300,
+    validation_username: str | None = None,
+    headless: bool = False,
+) -> dict[str, str]:
+    """Open Chrome with the user's real profile for Instagram login.
+
+    Args:
+        headless: If False (default), shows the browser so you can log in
+                  manually and watch it work. If True, runs in background.
+    """
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Playwright is required for interactive Chrome login") from exc
+
+    chrome_profile_dir = _find_chrome_profile_dir(chrome_profile_name)
+    target_file = Path(cookie_file).expanduser()
+    if not target_file.is_absolute():
+        target_file = Path(__file__).resolve().parent.parent.parent.parent / cookie_file
+    deadline = time.monotonic() + max(60, int(timeout_seconds))
+
+    mode_label = "headless" if headless else "headed"
+    logger.info(
+        "[instagram] opening %s Chrome (profile=%s) for login — you have %ds",
+        mode_label,
+        chrome_profile_name,
+        timeout_seconds,
+    )
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(chrome_profile_dir),
+            channel="chrome",
+            headless=headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+            viewport={"width": 1280, "height": 1400},
+        )
+        try:
+            page = context.new_page()
+            page.goto(
+                "https://www.instagram.com/",
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+
+            # Check if existing session is stale — if so, clear Instagram
+            # cookies so we don't immediately exit thinking we're logged in.
+            initial_cookies = _cookie_payload(context.cookies())
+            if initial_cookies.get("sessionid"):
+                # Validate the existing session by checking the page content
+                page.wait_for_timeout(2_000)
+                body_text = ""
+                try:
+                    body_text = page.locator("body").inner_text(timeout=3_000)
+                except Exception:  # noqa: BLE001
+                    pass
+                current_url = str(page.url or "").lower()
+                session_looks_valid = (
+                    "login" not in current_url
+                    and "accounts/login" not in current_url
+                    and not INVALID_CREDENTIAL_TEXT_RE.search(body_text)
+                    and not any(marker in current_url for marker in CHALLENGE_URL_MARKERS)
+                )
+                if not session_looks_valid:
+                    logger.info("[instagram] existing session cookie is stale — clearing for fresh login")
+                    # Delete Instagram cookies so we wait for a fresh login
+                    context.clear_cookies()
+                    page.goto(
+                        INSTAGRAM_LOGIN_URL,
+                        wait_until="domcontentloaded",
+                        timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
+                    )
+
+            # Poll for sessionid cookie — user handles auth manually
+            cookies: dict[str, str] = {}
+            if not headless:
+                print("\n*** Instagram is open — please log in manually if needed. ***")
+                print("*** The browser will close automatically once a valid session is detected. ***\n")
+            else:
+                print("\n*** Checking Instagram session in headless Chrome... ***\n")
+            while time.monotonic() < deadline:
+                cookies = _cookie_payload(context.cookies())
+                if cookies.get("sessionid"):
+                    # Validate session by navigating to a profile
+                    if validation_username:
+                        normalized = str(validation_username).strip().lstrip("@")
+                        try:
+                            page.goto(
+                                f"https://www.instagram.com/{normalized}/",
+                                wait_until="domcontentloaded",
+                                timeout=15_000,
+                            )
+                            page.wait_for_timeout(3_000)
+                            post_nav_url = str(page.url or "").lower()
+                            if "accounts/login" in post_nav_url:
+                                logger.info("[instagram] session cookie invalid — redirected to login, waiting for fresh auth")
+                                print("\n*** Session expired — please log in again. ***\n")
+                                context.clear_cookies()
+                                page.goto(
+                                    INSTAGRAM_LOGIN_URL,
+                                    wait_until="domcontentloaded",
+                                    timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
+                                )
+                                page.wait_for_timeout(2_000)
+                                continue
+                            # Validate via a lightweight GraphQL probe
+                            graphql_ok = _validate_session_via_graphql(page, normalized, deadline)
+                            if not graphql_ok:
+                                logger.info("[instagram] session cookies failed GraphQL validation — clearing for re-login")
+                                print("\n*** Session cookies don't work for GraphQL API — please log in again. ***\n")
+                                context.clear_cookies()
+                                page.goto(
+                                    INSTAGRAM_LOGIN_URL,
+                                    wait_until="domcontentloaded",
+                                    timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
+                                )
+                                page.wait_for_timeout(2_000)
+                                continue
+                            cookies = _cookie_payload(context.cookies())
+                        except Exception:  # noqa: BLE001
+                            pass
+                    break
+                page.wait_for_timeout(2_000)
+
+            if not cookies.get("sessionid"):
+                raise RuntimeError("Timed out waiting for Instagram login — no session cookie detected")
+
+            _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
+                validation_username or chrome_profile_name,
+                context.storage_state(),
+                fallback_account_id=validation_username or chrome_profile_name,
+            )
+            _write_cookie_file(target_file, cookies)
+            logger.info("Interactive login succeeded — cookies written to %s", target_file)
+            print(f"\nSession captured (sessionid={cookies['sessionid'][:8]}…)")
+            print(f"Cookies written to {target_file}")
+            return cookies
+        except PlaywrightTimeoutError as exc:
+            raise RuntimeError("Timed out during interactive Instagram login") from exc
+        finally:
+            context.close()
+
+
+def _find_chrome_profile_dir(profile_name: str) -> Path:
+    """Locate a Chrome profile directory by display name or email."""
+    chrome_base = (
+        Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+    )
+    for entry in chrome_base.iterdir():
+        prefs_file = entry / "Preferences"
+        if not prefs_file.is_file():
+            continue
+        try:
+            prefs = json.loads(prefs_file.read_text())
+            name = prefs.get("profile", {}).get("name", "")
+            account_info = prefs.get("account_info", [])
+            emails = [a.get("email", "") for a in account_info if isinstance(a, dict)]
+            if (
+                name.lower() == profile_name.lower()
+                or profile_name.lower() in [e.lower() for e in emails]
+            ):
+                return entry
+        except (json.JSONDecodeError, OSError):
+            continue
+    raise FileNotFoundError(
+        f"Chrome profile '{profile_name}' not found in {chrome_base}. "
+        "Check profile name in chrome://settings or pass the profile email."
+    )

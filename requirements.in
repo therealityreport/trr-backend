@@ -41,6 +41,9 @@ sse-starlette>=2.0.0
 # Claude computer use
 anthropic>=0.43.0
 
+# Apify (external scraper orchestration)
+apify-client>=1.8.0
+
 # Dev / test
 pytest>=8.0.0
 httpx>=0.28.0

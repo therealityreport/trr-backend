@@ -2537,6 +2537,13 @@ def _is_voice_only_show_cast_role(role: Any) -> bool:
     return bool(re.search(r"\bvoice\b", normalized))
 
 
+def _is_voice_only_show_cast_roles(roles: list[str]) -> bool:
+    normalized_roles = [str(role).strip() for role in roles if str(role).strip()]
+    if not normalized_roles:
+        return False
+    return all(_is_voice_only_show_cast_role(role) for role in normalized_roles)
+
+
 def _filter_show_cast_rows_for_links(
     rows: list[dict[str, Any]],
     *,
@@ -2825,7 +2832,6 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
         if role_names:
             role_map[person_id] = role_names
 
-    has_curated_roles = bool(role_map)
     self_credit_metadata_by_person: dict[str, dict[str, Any]] = {}
     for row in self_credit_metadata_rows:
         person_id = str(row.get("person_id") or "").strip()
@@ -2836,11 +2842,8 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
     cast_roster = []
     for row in cast_roster_rows:
         person_id = str(row.get("person_id") or "").strip()
-        if has_curated_roles:
-            selected_roles = role_map.get(person_id, [])
-            if not selected_roles:
-                continue
-        else:
+        selected_roles = role_map.get(person_id, [])
+        if not selected_roles:
             selected_roles = sorted(
                 {
                     str(value).strip()
@@ -2848,12 +2851,18 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
                     if isinstance(value, str) and str(value).strip()
                 }
             )
-        if not selected_roles and has_curated_roles:
-            continue
         fallback_metadata = self_credit_metadata_by_person.get(person_id, {})
         total_episodes = _normalize_int(row.get("total_episodes"))
         if not total_episodes:
             total_episodes = _read_people_count(fallback_metadata.get("episode_count"))
+        total_episodes = total_episodes or 0
+        archive_episodes = _normalize_int(row.get("archive_episodes"))
+        if archive_episodes > 0 and total_episodes <= 0:
+            continue
+        if _is_voice_only_show_cast_roles(selected_roles):
+            continue
+        if total_episodes <= 0:
+            continue
         cast_roster.append(
             {
                 "show_id": str(row.get("show_id") or show_id),
@@ -2861,7 +2870,7 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
                 "person_name": row.get("person_name"),
                 "photo_url": row.get("photo_url"),
                 "total_episodes": total_episodes,
-                "archive_episodes": _normalize_int(row.get("archive_episodes")),
+                "archive_episodes": archive_episodes,
                 "seasons_appeared": _normalize_int(row.get("seasons_appeared")),
                 "season_numbers": [value for value in (row.get("season_numbers") or []) if isinstance(value, int)],
                 "latest_season": _normalize_int(row.get("latest_season")) or None,
@@ -2870,6 +2879,7 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
         )
 
     crew_sections_by_category: dict[str, list[dict[str, Any]]] = {}
+    crew_grouped_sections_by_category: dict[str, dict[str, dict[str, Any]]] = {}
     latest_updated_at: str | None = None
     source_page_url: str | None = None
     show_imdb_id: str | None = None
@@ -2885,19 +2895,41 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
         )
         source_page_url = source_page_url or _metadata_text(metadata, "source_page_url")
         show_imdb_id = show_imdb_id or (str(row.get("imdb_id") or "").strip() or None)
-        crew_sections_by_category.setdefault(credit_category, []).append(
+        row_payload = {
+            "credit_id": str(row.get("credit_id") or ""),
+            "person_id": str(row.get("person_id") or ""),
+            "person_name": row.get("person_name"),
+            "role": row.get("role"),
+            "billing_order": _normalize_int(row.get("billing_order")) or None,
+            "source_type": row.get("source_type"),
+            "episode_count": _read_people_count(metadata.get("episode_count")),
+            "episodes_label": _metadata_text(metadata, "episodes_label"),
+            "years_label": _metadata_text(metadata, "years_label"),
+            "imdb_name_id": _metadata_text(metadata, "imdb_name_id"),
+            "display_order": _read_people_count(metadata.get("display_order")),
+        }
+        crew_sections_by_category.setdefault(credit_category, []).append(row_payload)
+        grouped_rows = crew_grouped_sections_by_category.setdefault(credit_category, {})
+        person_key = row_payload["person_id"] or row_payload["credit_id"]
+        grouped_row = grouped_rows.setdefault(
+            person_key,
             {
-                "credit_id": str(row.get("credit_id") or ""),
-                "person_id": str(row.get("person_id") or ""),
-                "person_name": row.get("person_name"),
-                "role": row.get("role"),
-                "billing_order": _normalize_int(row.get("billing_order")) or None,
-                "source_type": row.get("source_type"),
-                "episode_count": _read_people_count(metadata.get("episode_count")),
-                "episodes_label": _metadata_text(metadata, "episodes_label"),
-                "years_label": _metadata_text(metadata, "years_label"),
-                "imdb_name_id": _metadata_text(metadata, "imdb_name_id"),
-                "display_order": _read_people_count(metadata.get("display_order")),
+                "person_id": row_payload["person_id"],
+                "person_name": row_payload["person_name"],
+                "role_lines": [],
+            },
+        )
+        grouped_row["role_lines"].append(
+            {
+                "credit_id": row_payload["credit_id"],
+                "role": row_payload["role"],
+                "billing_order": row_payload["billing_order"],
+                "source_type": row_payload["source_type"],
+                "episode_count": row_payload["episode_count"],
+                "episodes_label": row_payload["episodes_label"],
+                "years_label": row_payload["years_label"],
+                "imdb_name_id": row_payload["imdb_name_id"],
+                "display_order": row_payload["display_order"],
             }
         )
 
@@ -2905,6 +2937,7 @@ def get_show_credits(show_id: str) -> tuple[dict[str, Any], int]:
         {
             "title": category,
             "rows": rows,
+            "grouped_rows": list(crew_grouped_sections_by_category.get(category, {}).values()),
         }
         for category, rows in sorted(
             crew_sections_by_category.items(),

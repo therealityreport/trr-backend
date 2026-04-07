@@ -62,6 +62,8 @@ If `REDIS_URL` is not set, the API uses an in-memory broker for WebSocket pub/su
 
 By default, `TRR_BACKEND_WORKERS` is `1` and `TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER=1`, so multi-worker mode is only enabled when `REDIS_URL` is configured. If `TRR_BACKEND_WORKERS > 1` is requested while `REDIS_URL` is missing, startup logs explicitly warn and fall back to a single worker.
 
+Container deployments use the same `start-api.sh` launcher in non-reload mode. The default container contract is a single `uvicorn` process per container; only raise `TRR_BACKEND_WORKERS` when you have a concrete reason and a Redis-backed realtime plane.
+
 ### CORS (Optional)
 
 | Variable | Description | Example |

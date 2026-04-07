@@ -15,6 +15,15 @@ from urllib.parse import quote
 logger = logging.getLogger(__name__)
 
 
+class SocialBladeEndpointError(RuntimeError):
+    """Raised when a SocialBlade endpoint returns a non-200 response."""
+
+    def __init__(self, endpoint: str, status: int):
+        self.endpoint = endpoint
+        self.status = status
+        super().__init__(f"SocialBlade endpoint {endpoint} returned HTTP {status}")
+
+
 def _log(msg: str) -> None:
     logger.info(msg)
     print(msg, file=sys.stderr)
@@ -65,6 +74,16 @@ _TRPC_FETCH_JS = """async ({ endpoint }) => {
         text: await response.text(),
     };
 }"""
+_SOCIALBLADE_RANGE_OPTIONS = (
+    "Last 14 Days",
+    "Last 30 Days",
+    "Last 60 Days",
+    "Last 180 Days",
+    "Last 365 Days",
+    "Last 3 Years",
+)
+_SOCIALBLADE_CHART_INTERVAL_OPTIONS = ("Daily", "Weekly", "Monthly")
+_SOCIALBLADE_CHART_METRIC_OPTIONS = ("Gained", "Total", "Averages")
 
 
 def _parse_int(value: str) -> int:
@@ -190,6 +209,42 @@ def _followers_chart_from_table(metrics: dict[str, Any]) -> dict[str, Any] | Non
     }
 
 
+def _set_socialblade_listbox_option(page: Any, current_options: tuple[str, ...], target_option: str) -> bool:
+    buttons = page.locator('button[id*="headlessui-listbox-button"]')
+    button_count = buttons.count()
+    for index in range(button_count):
+        button = buttons.nth(index)
+        label = button.inner_text(timeout=1_000).strip()
+        if label not in current_options:
+            continue
+        if label == target_option:
+            return False
+        button.click()
+        page.get_by_role("option", name=target_option, exact=True).click()
+        page.wait_for_timeout(1_000)
+        return True
+    raise RuntimeError(f"Could not find SocialBlade control for {target_option}")
+
+
+def _configure_socialblade_page_fallback_state(page: Any) -> None:
+    """Force the page fallback into the expected UI state.
+
+    SocialBlade defaults to a 14-day metrics table and Monthly/Gained charts.
+    When we fall back to page scraping, explicitly switch to the richer view
+    so the table and visible chart state match the stored dataset shape.
+    """
+
+    updates: list[str] = []
+    if _set_socialblade_listbox_option(page, _SOCIALBLADE_RANGE_OPTIONS, "Last 60 Days"):
+        updates.append("range=Last 60 Days")
+    if _set_socialblade_listbox_option(page, _SOCIALBLADE_CHART_INTERVAL_OPTIONS, "Daily"):
+        updates.append("chart_interval=Daily")
+    if _set_socialblade_listbox_option(page, _SOCIALBLADE_CHART_METRIC_OPTIONS, "Total"):
+        updates.append("chart_metric=Total")
+    if updates:
+        _log(f"Configured SocialBlade fallback controls: {', '.join(updates)}")
+
+
 def _format_ordinal_rank(value: int) -> str:
     if value <= 0:
         return ""
@@ -234,7 +289,7 @@ def _fetch_trpc_result(page: Any, endpoint: str, *, index: int | None = None) ->
     status = int(response.get("status") or 0)
     payload = _coerce_trpc_json(str(response.get("text") or ""), endpoint=endpoint)
     if status != 200:
-        raise RuntimeError(f"SocialBlade endpoint {endpoint} returned HTTP {status}")
+        raise SocialBladeEndpointError(endpoint, status)
     return _unwrap_trpc_result(payload, endpoint=endpoint, index=index)
 
 
@@ -305,6 +360,32 @@ def _scrape_authenticated_api(
 
 def _has_socialblade_login_credentials() -> bool:
     return bool((os.getenv("SOCIALBLADE_EMAIL") or "").strip() and (os.getenv("SOCIALBLADE_PASSWORD") or "").strip())
+
+
+def _should_retry_in_visible_shared_browser(error: Exception | None) -> bool:
+    if isinstance(error, SocialBladeEndpointError):
+        if error.status == 412 and "instagram.monthly" in error.endpoint:
+            return True
+        if error.status == 403 and "instagram.search" in error.endpoint:
+            return True
+    rendered = str(error or "").lower()
+    if "instagram.monthly" in rendered and "http 412" in rendered:
+        return True
+    return "returned non-json data for /api/trpc/instagram.search" in rendered
+
+
+def _format_scrape_failure_message(error: Exception | None) -> str:
+    if _should_retry_in_visible_shared_browser(error):
+        return "SocialBlade scrape failed: SocialBlade challenged the authenticated API before profile history could be fetched"
+
+    rendered = str(error or "").strip()
+    if "turnstile" in rendered.lower():
+        return "SocialBlade scrape failed: visible browser session could not complete challenge"
+    if rendered.startswith("SocialBlade scrape failed:"):
+        return rendered
+    if rendered:
+        return f"SocialBlade scrape failed: {rendered}"
+    return "SocialBlade scrape failed: incomplete profile stats or daily metrics data"
 
 
 def _build_profile_stats_from_user_payload(user: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
@@ -418,8 +499,183 @@ def _build_total_followers_chart_from_daily_deltas(
 # ---------------------------------------------------------------------------
 
 
-def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, Any]:
-    """Scrape SocialBlade Instagram data using headless Playwright.
+def _scrape_socialblade_in_context(
+    context: Any,
+    handle: str,
+    *,
+    playwright: Any | None,
+    cookies: list[dict[str, Any]] | None,
+    allow_login_fallback: bool,
+    allow_visible_browser_retry: bool,
+) -> dict[str, Any]:
+    from trr_backend.socials.socialblade.auth import (
+        SOCIALBLADE_STEALTH_INIT_SCRIPT,
+        normalize_socialblade_cookies,
+    )
+
+    sb_url = f"https://socialblade.com/instagram/user/{handle}"
+    context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
+
+    normalized_cookies = normalize_socialblade_cookies(cookies or [])
+    if normalized_cookies:
+        context.add_cookies(normalized_cookies)
+        _log(f"Injected {len(normalized_cookies)} cookies")
+
+    page = context.new_page()
+    try:
+        page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
+        page.wait_for_timeout(4_000)
+        _log(f"Navigated to {sb_url}")
+
+        body_text = _extract_body_text(page)
+        if _page_access_denied(body_text):
+            raise RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)")
+
+        chart_data = None
+        metrics = None
+        stats = None
+        rankings = None
+        history_source = "unavailable"
+
+        authenticated_api_error: Exception | None = None
+        try:
+            stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
+            history_source = "authenticated_api"
+            _log(
+                f"Authenticated API scrape: {stats['followers']} followers, "
+                f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
+            )
+        except Exception as exc:  # noqa: BLE001
+            authenticated_api_error = exc
+            _log(f"Authenticated API scrape unavailable: {exc}")
+            if allow_visible_browser_retry and _should_retry_in_visible_shared_browser(exc):
+                _log("Retrying SocialBlade scrape through visible shared Chrome session...")
+                return scrape_socialblade_with_shared_browser_session(handle, playwright=playwright)
+
+        if (not chart_data or not metrics) and allow_login_fallback and _has_socialblade_login_credentials():
+            try:
+                _log("Attempting SocialBlade login fallback for authenticated API access...")
+                _do_login(page, context)
+                page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(4_000)
+                body_text = _extract_body_text(page)
+                if _page_access_denied(body_text):
+                    raise RuntimeError("SocialBlade blocked by Cloudflare after login")
+                stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
+                history_source = "authenticated_api"
+                _log(
+                    f"Authenticated API scrape after login: {stats['followers']} followers, "
+                    f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
+                )
+            except Exception as exc:  # noqa: BLE001
+                authenticated_api_error = exc
+                _log(f"Authenticated API scrape still unavailable after login: {exc}")
+
+        if not chart_data or not metrics:
+            try:
+                _configure_socialblade_page_fallback_state(page)
+                body_text = _extract_body_text(page)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"Could not configure SocialBlade fallback controls: {exc}")
+
+        if not stats or not rankings:
+            _log("Extracting profile stats and rankings from page text...")
+            stats, rankings = _extract_profile_stats_from_body_text(body_text)
+            _log(f"Stats: {stats['followers']} followers, SB Rank: {rankings['sb_rank']}")
+
+        if not metrics:
+            raw_table_data = page.evaluate(_JS_EXTRACT_TABLE)
+            metrics = _normalize_table_data(raw_table_data, body_text)
+            _log(f"Table: {metrics['row_count']} rows ({metrics['period']})")
+
+        if not chart_data:
+            chart_data = _followers_chart_from_table(metrics)
+            if chart_data:
+                history_source = "table_fallback"
+                _log(
+                    f"Follower history fallback: {chart_data['total_data_points']} points, "
+                    f"{chart_data['date_range']['from']} -> {chart_data['date_range']['to']}"
+                )
+            else:
+                if authenticated_api_error is not None:
+                    _log(f"WARNING: Falling back after authenticated API failure: {authenticated_api_error}")
+                _log("WARNING: Could not derive follower history from authenticated API or daily metrics table")
+
+        stats_refreshed = bool(stats["followers"] > 0 and stats["following"] >= 0 and metrics["row_count"] > 0)
+        if not stats_refreshed:
+            raise RuntimeError(_format_scrape_failure_message(authenticated_api_error))
+
+        result: dict[str, Any] = {
+            "username": handle,
+            "platform": "instagram",
+            "scraped_at": datetime.now(tz=UTC).isoformat(),
+            "stats_refreshed": stats_refreshed,
+            "history_source": history_source,
+            "profile_stats": stats,
+            "rankings": rankings,
+            "daily_channel_metrics_60day": metrics
+            or {
+                "period": "Last 14 Days",
+                "row_count": 0,
+                "headers": [],
+                "data": [],
+            },
+            "daily_total_followers_chart": chart_data,
+        }
+
+        _log("Scrape complete")
+        return result
+    finally:
+        page.close()
+
+
+def scrape_socialblade_with_shared_browser_session(
+    handle: str,
+    *,
+    playwright: Any | None = None,
+) -> dict[str, Any]:
+    """Scrape SocialBlade via the visible shared Chrome session."""
+    from trr_backend.socials.socialblade.auth import _chrome_cdp_endpoint_reachable, _socialblade_visible_chrome_cdp_url
+
+    if playwright is None:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as sync_playwright_context:
+            return scrape_socialblade_with_shared_browser_session(
+                handle,
+                playwright=sync_playwright_context,
+            )
+
+    cdp_url = _socialblade_visible_chrome_cdp_url()
+    if not _chrome_cdp_endpoint_reachable(cdp_url):
+        raise RuntimeError(
+            "Visible shared Chrome session is not running on port 9222; start the manual browser session before retrying SocialBlade"
+        )
+
+    browser = playwright.chromium.connect_over_cdp(cdp_url)
+    try:
+        if not browser.contexts:
+            raise RuntimeError("Visible shared Chrome session is not available for SocialBlade scraping")
+        return _scrape_socialblade_in_context(
+            browser.contexts[0],
+            handle,
+            playwright=playwright,
+            cookies=None,
+            allow_login_fallback=False,
+            allow_visible_browser_retry=False,
+        )
+    finally:
+        browser.close()
+
+
+def scrape_socialblade(
+    handle: str,
+    cookies: list[dict[str, Any]],
+    *,
+    allow_login_fallback: bool = True,
+    allow_visible_browser_retry: bool = False,
+) -> dict[str, Any]:
+    """Scrape SocialBlade Instagram data using Playwright.
 
     Args:
         handle: Instagram username (e.g. "lisabarlow14").
@@ -433,12 +689,8 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
 
     from trr_backend.socials.browser_cookie_refresh import launch_browser
     from trr_backend.socials.socialblade.auth import (
-        SOCIALBLADE_STEALTH_INIT_SCRIPT,
         SOCIALBLADE_STEALTH_USER_AGENT,
-        normalize_socialblade_cookies,
     )
-
-    sb_url = f"https://socialblade.com/instagram/user/{handle}"
     _log(f"Scraping SocialBlade for @{handle}")
 
     with sync_playwright() as pw:
@@ -450,108 +702,14 @@ def scrape_socialblade(handle: str, cookies: list[dict[str, Any]]) -> dict[str, 
                 locale="en-US",
                 timezone_id="America/New_York",
             )
-            context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
-
-            # Inject SocialBlade cookies if provided
-            normalized_cookies = normalize_socialblade_cookies(cookies)
-            if normalized_cookies:
-                context.add_cookies(normalized_cookies)
-                _log(f"Injected {len(normalized_cookies)} cookies")
-
-            page = context.new_page()
-
-            page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(4_000)
-            _log(f"Navigated to {sb_url}")
-
-            body_text = _extract_body_text(page)
-            if _page_access_denied(body_text):
-                raise RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)")
-
-            chart_data = None
-            metrics = None
-            stats = None
-            rankings = None
-            history_source = "unavailable"
-
-            authenticated_api_error: Exception | None = None
-            try:
-                stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
-                history_source = "authenticated_api"
-                _log(
-                    f"Authenticated API scrape: {stats['followers']} followers, "
-                    f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
-                )
-            except Exception as exc:  # noqa: BLE001
-                authenticated_api_error = exc
-                _log(f"Authenticated API scrape unavailable: {exc}")
-
-            if (not chart_data or not metrics) and _has_socialblade_login_credentials():
-                try:
-                    _log("Attempting SocialBlade login fallback for authenticated API access...")
-                    _do_login(page, context)
-                    page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
-                    page.wait_for_timeout(4_000)
-                    body_text = _extract_body_text(page)
-                    if _page_access_denied(body_text):
-                        raise RuntimeError("SocialBlade blocked by Cloudflare after login")
-                    stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
-                    history_source = "authenticated_api"
-                    _log(
-                        f"Authenticated API scrape after login: {stats['followers']} followers, "
-                        f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    authenticated_api_error = exc
-                    _log(f"Authenticated API scrape still unavailable after login: {exc}")
-
-            if not stats or not rankings:
-                _log("Extracting profile stats and rankings from page text...")
-                stats, rankings = _extract_profile_stats_from_body_text(body_text)
-                _log(f"Stats: {stats['followers']} followers, SB Rank: {rankings['sb_rank']}")
-
-            if not metrics:
-                raw_table_data = page.evaluate(_JS_EXTRACT_TABLE)
-                metrics = _normalize_table_data(raw_table_data, body_text)
-                _log(f"Table: {metrics['row_count']} rows ({metrics['period']})")
-
-            if not chart_data:
-                chart_data = _followers_chart_from_table(metrics)
-                if chart_data:
-                    history_source = "table_fallback"
-                    _log(
-                        f"Follower history fallback: {chart_data['total_data_points']} points, "
-                        f"{chart_data['date_range']['from']} → {chart_data['date_range']['to']}"
-                    )
-                else:
-                    if authenticated_api_error is not None:
-                        _log(f"WARNING: Falling back after authenticated API failure: {authenticated_api_error}")
-                    _log("WARNING: Could not derive follower history from authenticated API or daily metrics table")
-
-            stats_refreshed = bool(stats["followers"] > 0 and stats["following"] >= 0 and metrics["row_count"] > 0)
-            if not stats_refreshed:
-                raise RuntimeError("SocialBlade scrape returned incomplete profile stats or table data")
-
-            result: dict[str, Any] = {
-                "username": handle,
-                "platform": "instagram",
-                "scraped_at": datetime.now(tz=UTC).isoformat(),
-                "stats_refreshed": stats_refreshed,
-                "history_source": history_source,
-                "profile_stats": stats,
-                "rankings": rankings,
-                "daily_channel_metrics_60day": metrics
-                or {
-                    "period": "Last 14 Days",
-                    "row_count": 0,
-                    "headers": [],
-                    "data": [],
-                },
-                "daily_total_followers_chart": chart_data,
-            }
-
-            _log("Scrape complete")
-            return result
+            return _scrape_socialblade_in_context(
+                context,
+                handle,
+                playwright=pw,
+                cookies=cookies,
+                allow_login_fallback=allow_login_fallback,
+                allow_visible_browser_retry=allow_visible_browser_retry,
+            )
 
         finally:
             browser.close()

@@ -38,6 +38,9 @@ class RunStatusUpdateRequest(BaseModel):
     status: str
     error_message: str | None = None
     manifest_key: str | None = None
+    result_contract_version: str | None = None
+    status_reason: str | None = None
+    summary_counts: dict[str, Any] | None = None
 
 
 class ArtifactItem(BaseModel):
@@ -157,6 +160,9 @@ def update_run_status(
         "status": request.status,
         "error_message": request.error_message,
         "manifest_key": request.manifest_key,
+        "result_contract_version": request.result_contract_version,
+        "status_reason": request.status_reason,
+        "summary_counts": request.summary_counts,
     }
 
     now = datetime.now(UTC).isoformat()
@@ -166,6 +172,17 @@ def update_run_status(
         payload["completed_at"] = now
 
     result = screenalytics_runs.update_run(str(run_id), payload)
+    if not result:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return result
+
+
+@router.get("/runs/{run_id}/result-bundle")
+def get_result_bundle(
+    run_id: UUID,
+    _: None = Depends(require_screenalytics_service_token),
+) -> dict[str, Any]:
+    result = screenalytics_runs.get_result_bundle(str(run_id))
     if not result:
         raise HTTPException(status_code=404, detail="Run not found")
     return result

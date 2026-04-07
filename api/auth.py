@@ -20,6 +20,13 @@ from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
 def get_bearer_token(request: Request) -> str | None:
     """
     Extract Bearer token from Authorization header.
@@ -46,6 +53,14 @@ def _build_internal_admin_identity(payload: dict[str, Any], token: str) -> dict[
         "issuer": payload.get("iss"),
         "scope": payload.get("scope"),
     }
+
+
+def _internal_admin_secret_matches(request: Request) -> bool:
+    if not _env_flag("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", True):
+        return False
+    secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
+    header_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
+    return bool(secret and header_secret and hmac.compare_digest(header_secret, secret))
 
 
 async def get_current_user(request: Request) -> dict | None:
@@ -181,6 +196,17 @@ async def require_internal_admin(request: Request) -> dict:
     if role == "service_role":
         return current_user
 
+    if _internal_admin_secret_matches(request):
+        logger.info("internal admin auth fallback accepted via raw shared secret header")
+        return {
+            "id": "internal-admin:shared-secret",
+            "email": None,
+            "role": "internal_admin",
+            "token": get_bearer_token(request),
+            "issuer": "shared-secret",
+            "scope": "internal_admin",
+        }
+
     token = get_bearer_token(request)
     internal_admin_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     attempted_internal_admin_verification = False
@@ -232,11 +258,9 @@ async def require_cast_screentime_admin(request: Request) -> dict:
     if allowlisted_user:
         return allowlisted_user
 
-    secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
-    header_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
     role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
     if role == "service_role":
-        if secret and header_secret and hmac.compare_digest(header_secret, secret):
+        if _internal_admin_secret_matches(request):
             return current_user
         raise HTTPException(status_code=403, detail="Allowlist admin access required")
 
@@ -271,11 +295,9 @@ async def require_facebank_seed_admin(request: Request) -> dict:
     if allowlisted_user:
         return allowlisted_user
 
-    secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
-    header_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
     role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
     if role == "service_role":
-        if secret and header_secret and hmac.compare_digest(header_secret, secret):
+        if _internal_admin_secret_matches(request):
             return current_user
         raise HTTPException(status_code=403, detail="Allowlist admin access required")
 

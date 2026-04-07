@@ -38,6 +38,7 @@ EXEMPT_STREAM_SUFFIXES: tuple[str, ...] = ("/stream",)
 EXEMPT_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/v1/admin/cast-screentime/upload-sessions/[^/]+/complete$"),
     re.compile(r"^/api/v1/admin/cast-screentime/video-assets/[^/]+/runs$"),
+    re.compile(r"^/api/v1/admin/people/[^/]+/socialblade/refresh$"),
 )
 
 

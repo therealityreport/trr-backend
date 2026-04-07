@@ -53,6 +53,127 @@ def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["force"] is True
 
 
+def test_single_refresh_runs_sync_pipeline_in_threadpool(monkeypatch: pytest.MonkeyPatch) -> None:
+    import api.routers.admin_socialblade as router_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        captured["kwargs"] = kwargs
+        return {
+            "username": kwargs["handle"],
+            "scraped_at": "2026-04-07T12:00:00Z",
+            "refresh_status": "refreshed",
+        }
+
+    async def fake_run_in_threadpool(func, /, *args, **kwargs):
+        captured["threadpool_func"] = func
+        captured["threadpool_args"] = args
+        captured["threadpool_kwargs"] = kwargs
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(router_module, "run_in_threadpool", fake_run_in_threadpool)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/people/person-1/socialblade/refresh",
+        json={"handle": "heathergay", "force": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["refresh_status"] == "refreshed"
+    assert captured["threadpool_func"] is fake_refresh_and_persist_socialblade
+    assert captured["threadpool_args"] == ()
+    assert captured["threadpool_kwargs"] == {
+        "person_id": "person-1",
+        "handle": "heathergay",
+        "scraper": router_module._scrape_socialblade_person_page,
+        "source": "person_page",
+        "force": True,
+    }
+
+
+def test_single_refresh_returns_structured_error_when_local_scrape_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.routers.admin_socialblade as router_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        return kwargs["scraper"](kwargs["handle"])
+
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(
+        router_module,
+        "_scrape_socialblade_person_page",
+        lambda handle: (_ for _ in ()).throw(
+            RuntimeError("SocialBlade scrape failed: visible browser session could not complete challenge")
+        ),
+    )
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        "/api/v1/admin/people/person-1/socialblade/refresh",
+        json={"handle": "lisabarlow14", "force": True},
+    )
+
+    assert response.status_code == 502
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "detail": "SocialBlade scrape failed: visible browser session could not complete challenge"
+    }
+
+
+def test_person_page_scrape_uses_visible_browser_retry_without_headless_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.routers.admin_socialblade as router_module
+    import trr_backend.job_plane as job_plane_module
+    import trr_backend.socials.socialblade.auth as auth_module
+    import trr_backend.socials.socialblade.scraper as scraper_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(job_plane_module, "is_modal_remote_executor_enabled", lambda: False)
+    monkeypatch.setattr(
+        auth_module,
+        "refresh_socialblade_cookies",
+        lambda reason=None, allow_headless_fallback=True: {"cf_clearance": "token"},
+    )
+    monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
+
+    def fake_scrape_socialblade(
+        handle: str,
+        cookies,
+        *,
+        allow_login_fallback: bool,
+        allow_visible_browser_retry: bool,
+    ):
+        captured.update(
+            {
+                "handle": handle,
+                "cookies": cookies,
+                "allow_login_fallback": allow_login_fallback,
+                "allow_visible_browser_retry": allow_visible_browser_retry,
+            }
+        )
+        return {"username": handle, "scraped_at": "2026-03-16T12:00:00Z"}
+
+    monkeypatch.setattr(scraper_module, "scrape_socialblade", fake_scrape_socialblade)
+
+    payload = router_module._scrape_socialblade_person_page("heathergay")
+
+    assert payload["username"] == "heathergay"
+    assert captured == {
+        "handle": "heathergay",
+        "cookies": {"cf_clearance": "token"},
+        "allow_login_fallback": False,
+        "allow_visible_browser_retry": True,
+    }
+
+
 def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     import api.routers.admin_socialblade as router_module
     import trr_backend.socials.socialblade.service as service_module

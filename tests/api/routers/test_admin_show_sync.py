@@ -155,6 +155,90 @@ class TestSyncFromLists:
         assert collect_kwargs["tmdb_lists"] == ["8301274"]
 
 
+def test_refresh_show_bravo_target_disables_cast_matrix_sync_for_unified_refresh() -> None:
+    from api.routers.admin_show_sync import _refresh_show_bravo_target
+
+    mock_db = MagicMock()
+    show_id = str(uuid4())
+
+    with patch("api.routers.admin_show_sync._show_is_bravo", return_value=True):
+        with patch("api.routers.admin_show_sync.admin_show_bravo._assert_show_sync_ready_for_bravo"):
+            with patch(
+                "api.routers.admin_show_sync._resolve_show_official_page_url",
+                return_value="https://www.bravotv.com/summer-house",
+            ):
+                with patch("api.routers.admin_show_sync.admin_show_bravo.commit_bravo_import") as commit_mock:
+                    _refresh_show_bravo_target(
+                        show_id=show_id,
+                        show_row={"id": show_id, "name": "Summer House", "networks": ["Bravo"]},
+                        db=mock_db,
+                        admin_user={"id": "admin"},
+                    )
+
+    payload = commit_mock.call_args.kwargs["payload"]
+    assert str(payload.show_url) == "https://www.bravotv.com/summer-house"
+    assert payload.sync_cast_matrix is False
+
+
+def test_cast_profiles_refresh_people_profiles_without_cast_matrix_sync() -> None:
+    from api.routers.admin_show_sync import _run_cast_person_refresh_stage
+
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    mock_db = MagicMock()
+
+    with patch(
+        "api.routers.admin_show_sync._list_refresh_cast_members",
+        return_value=[{"person_id": person_id, "person_name": "Carl Radke"}],
+    ):
+        with patch("api.routers.admin_show_sync.admin_show_roles.sync_cast_matrix_for_show") as sync_mock:
+            with patch(
+                "api.routers.admin_show_sync.admin_person_profile._run_person_profile_refresh",
+                return_value={"status": "ok", "failures": [], "skips": []},
+            ) as profile_mock:
+                with patch("api.routers.admin_show_sync.admin_person_images.refresh_person_images") as images_mock:
+                    result = _run_cast_person_refresh_stage(
+                        show_id=show_id,
+                        show_row={"id": show_id, "name": "Summer House", "networks": ["Bravo"]},
+                        db=mock_db,
+                        admin_user={"id": "admin@example.com"},
+                        mode="profile_only",
+                    )
+
+    assert result.status == "success"
+    sync_mock.assert_not_called()
+    images_mock.assert_not_called()
+    refresh_payload = profile_mock.call_args.kwargs["payload"]
+    assert refresh_payload.refresh_links is False
+    assert refresh_payload.refresh_credits is False
+    assert profile_mock.call_args.kwargs["person_id"] == person_id
+
+
+def test_cast_media_refresh_uses_only_allowed_show_level_sources() -> None:
+    from api.routers.admin_show_sync import _run_cast_person_refresh_stage
+
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    mock_db = MagicMock()
+
+    with patch(
+        "api.routers.admin_show_sync._list_refresh_cast_members",
+        return_value=[{"person_id": person_id, "person_name": "Paige DeSorbo"}],
+    ):
+        with patch("api.routers.admin_show_sync.admin_person_images.refresh_person_images") as images_mock:
+            result = _run_cast_person_refresh_stage(
+                show_id=show_id,
+                show_row={"id": show_id, "name": "Summer House", "networks": ["Bravo"]},
+                db=mock_db,
+                admin_user={"id": "admin"},
+                mode="media_only",
+            )
+
+    assert result.status == "success"
+    request = images_mock.call_args.kwargs["request"]
+    assert request.sources == ["imdb", "tmdb", "nbcumv"]
+
+
 class TestSyncNetworksStreaming:
     @pytest.fixture(autouse=True)
     def _mock_admin_client(self):

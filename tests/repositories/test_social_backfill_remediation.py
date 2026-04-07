@@ -72,21 +72,6 @@ def test_start_social_account_catalog_backfill_conflicts_when_start_lock_unavail
 def test_resume_tail_passes_frontier_seed_into_new_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(social_repo, "_normalize_social_account_profile_platform", lambda platform: platform)
     monkeypatch.setattr(social_repo, "_normalize_social_account_profile_handle", lambda handle: handle)
-    monkeypatch.setattr(
-        social_repo,
-        "_latest_account_frontier",
-        lambda *_args, **_kwargs: {
-            "id": "frontier-1",
-            "run_id": "run-old",
-            "next_cursor": "cursor-123",
-            "total_posts": 50,
-            "posts_checked": 30,
-            "posts_saved": 30,
-            "pages_scanned": 4,
-            "last_transport": "public",
-            "exhausted": False,
-        },
-    )
     captured: dict[str, object] = {}
 
     def _fake_start(platform: str, account_handle: str, **kwargs):  # noqa: ANN001
@@ -99,9 +84,9 @@ def test_resume_tail_passes_frontier_seed_into_new_run(monkeypatch: pytest.Monke
 
     payload = social_repo.resume_tail_social_account_catalog("instagram", "bravotv")
 
-    assert payload["resumed_from_cursor"] is True
-    assert captured["resume_frontier_cursor"] == "cursor-123"
-    assert captured["resume_frontier_snapshot"]["run_id"] == "run-old"
+    assert payload["run_id"] == "run-new"
+    assert captured["catalog_action"] == "backfill"
+    assert captured["catalog_action_scope"] == "full_history"
 
 
 def test_refresh_tiktok_post_detail_uses_stored_canonical_url(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,18 +6,33 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if [[ ! -f ".venv/bin/activate" ]]; then
-  echo "[trr-backend] ERROR: missing .venv. Run: (from workspace root) make bootstrap" >&2
+if [[ -f ".venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source ".venv/bin/activate"
+elif ! command -v uvicorn >/dev/null 2>&1; then
+  echo "[trr-backend] ERROR: missing .venv and uvicorn is not available on PATH." >&2
+  echo "[trr-backend] ERROR: run (from workspace root) make bootstrap or install runtime dependencies." >&2
   exit 1
+else
+  echo "[trr-backend] WARNING: .venv not found; using uvicorn from PATH." >&2
 fi
-
-# shellcheck disable=SC1091
-source ".venv/bin/activate"
 
 GRACEFUL_SHUTDOWN_SECONDS="${TRR_BACKEND_GRACEFUL_SHUTDOWN_SECONDS:-10}"
 if ! [[ "$GRACEFUL_SHUTDOWN_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "[trr-backend] WARNING: invalid TRR_BACKEND_GRACEFUL_SHUTDOWN_SECONDS='${GRACEFUL_SHUTDOWN_SECONDS}', using default 10." >&2
   GRACEFUL_SHUTDOWN_SECONDS="10"
+fi
+
+TRR_BACKEND_HOST="${TRR_BACKEND_HOST:-127.0.0.1}"
+if [[ -z "$TRR_BACKEND_HOST" ]]; then
+  echo "[trr-backend] WARNING: empty TRR_BACKEND_HOST, using default 127.0.0.1." >&2
+  TRR_BACKEND_HOST="127.0.0.1"
+fi
+
+TRR_BACKEND_PORT="${TRR_BACKEND_PORT:-${PORT:-8000}}"
+if ! [[ "$TRR_BACKEND_PORT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[trr-backend] WARNING: invalid TRR_BACKEND_PORT='${TRR_BACKEND_PORT}', using default 8000." >&2
+  TRR_BACKEND_PORT="8000"
 fi
 
 TRR_BACKEND_WORKERS="${TRR_BACKEND_WORKERS:-1}"
@@ -50,7 +65,8 @@ fi
 
 UVICORN_ARGS=(
   api.main:app
-  --port "${TRR_BACKEND_PORT:-8000}"
+  --host "$TRR_BACKEND_HOST"
+  --port "$TRR_BACKEND_PORT"
   --timeout-graceful-shutdown "$GRACEFUL_SHUTDOWN_SECONDS"
 )
 

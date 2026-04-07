@@ -14,6 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts._workspace_runtime_env import apply_workspace_runtime_env
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -35,6 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_dotenv()
+    apply_workspace_runtime_env(repo_root=REPO_ROOT)
 
     from trr_backend.repositories.social_season_analytics import get_social_account_catalog_verification
 

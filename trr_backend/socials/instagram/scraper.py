@@ -212,6 +212,7 @@ class InstagramPost:
     height: int | None = None
     is_comments_disabled: bool | None = None
     music_info: dict[str, Any] | None = None
+    audio_url: str | None = None
     video_duration: float | None = None
     child_posts_data: list[dict[str, Any]] = field(default_factory=list)
 
@@ -355,7 +356,14 @@ class InstagramScraper:
 
         Env vars: INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD,
         SOCIAL_INSTAGRAM_COOKIES_FILE (default: data/instagram_cookies.json).
+
+        Disabled by default to avoid triggering Instagram security checks.
+        Set SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH=true to enable.
         """
+        auto_refresh_enabled = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") or "").strip().lower()
+        if auto_refresh_enabled not in {"1", "true", "yes", "on"}:
+            return {"refreshed": False, "reason": "auto_refresh_disabled"}
+
         from .cookie_refresh import refresh_instagram_cookies
 
         ig_user = (os.getenv("INSTAGRAM_USERNAME") or "").strip()
@@ -414,6 +422,74 @@ class InstagramScraper:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[instagram] cookie auto-refresh failed: %s", exc)
             return {"refreshed": False, "reason": f"refresh_error: {exc}"}
+
+    @staticmethod
+    def _is_local_environment() -> bool:
+        """True when running on local machine, not on Modal workers."""
+        return not (os.getenv("MODAL_TASK_ID") or os.getenv("MODAL_ENVIRONMENT"))
+
+    @staticmethod
+    def _chrome_browser_headless() -> bool:
+        """Resolve headed vs headless mode.
+
+        SOCIAL_INSTAGRAM_BROWSER_MODE=headed   → False (show browser)
+        SOCIAL_INSTAGRAM_BROWSER_MODE=headless → True  (background)
+        Default: headed locally, headless on Modal.
+        """
+        mode = (os.getenv("SOCIAL_INSTAGRAM_BROWSER_MODE") or "").strip().lower()
+        if mode == "headless":
+            return True
+        if mode == "headed":
+            return False
+        # Default: headed locally so you can watch / intervene
+        return not InstagramScraper._is_local_environment()
+
+    def _try_interactive_login(self) -> dict[str, Any]:
+        """Open Chrome with the user's profile for Instagram auth.
+
+        Auto-enabled when running locally (no Modal env detected).
+        Set SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN=false to disable.
+        Set SOCIAL_INSTAGRAM_BROWSER_MODE=headed|headless to control visibility.
+        """
+        # Explicitly disabled?
+        explicit = (os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") or "").strip().lower()
+        if explicit in {"0", "false", "no", "off"}:
+            return {"refreshed": False, "reason": "interactive_login_disabled"}
+
+        # Never run on Modal workers
+        if not self._is_local_environment():
+            return {"refreshed": False, "reason": "running_on_modal"}
+
+        chrome_profile = (
+            (os.getenv("SOCIAL_INSTAGRAM_CHROME_PROFILE") or "").strip()
+            or "entertainmentdatagroup@gmail.com"
+        )
+        cookie_file = (os.getenv("SOCIAL_INSTAGRAM_COOKIES_FILE") or "").strip() or "data/instagram_cookies.json"
+        validation_username = str(self.browser_account_id or "").strip().lstrip("@") or None
+        headless = self._chrome_browser_headless()
+
+        try:
+            from .cookie_refresh import interactive_chrome_login
+
+            fresh_cookies = interactive_chrome_login(
+                chrome_profile_name=chrome_profile,
+                cookie_file=cookie_file,
+                timeout_seconds=300,
+                validation_username=validation_username,
+                headless=headless,
+            )
+            if not fresh_cookies or not fresh_cookies.get("sessionid"):
+                return {"refreshed": False, "reason": "interactive_login_no_sessionid"}
+
+            self.cookies = fresh_cookies
+            for k, v in fresh_cookies.items():
+                self.session.cookies.set(k, v, domain=".instagram.com")
+            self._profile_page_context_cache.clear()
+            logger.info("[instagram] interactive login succeeded — sessionid=%s…", fresh_cookies["sessionid"][:8])
+            return {"refreshed": True, "reason": None, "method": "interactive_chrome"}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[instagram] interactive login failed: %s", exc)
+            return {"refreshed": False, "reason": f"interactive_login_error: {exc}"}
 
     def _profile_posts_doc_ids(self) -> list[str]:
         override = (os.getenv("INSTAGRAM_PROFILE_POSTS_DOC_ID") or "").strip()
@@ -707,13 +783,18 @@ class InstagramScraper:
                     error_code = "instagram_graphql_initial_request_failed"
                     if status_code == 400 and failure_message == "checkpoint_required":
                         error_code = "instagram_graphql_checkpoint_required"
+                auth_fatal = error_code in {
+                    "instagram_graphql_cursor_unauthorized",
+                    "instagram_graphql_cursor_forbidden",
+                    "instagram_graphql_checkpoint_required",
+                }
                 self.last_retrieval_meta.update(
                     {
                         "error_code": error_code,
                         "error_class": "PlaywrightGraphQLFailure",
                         "error_status_code": status_code,
                         "error_message": failure_message,
-                        "retryable": True,
+                        "retryable": not auth_fatal,
                         "graphql_cursor": str(cursor or "").strip() or None,
                         "transport": "playwright",
                         "retrieval_transport": "playwright",
@@ -758,12 +839,17 @@ class InstagramScraper:
                 error_code = "instagram_graphql_checkpoint_required"
             else:
                 error_code = "instagram_graphql_initial_request_failed"
+        auth_fatal = error_code in {
+            "instagram_graphql_cursor_unauthorized",
+            "instagram_graphql_cursor_forbidden",
+            "instagram_graphql_checkpoint_required",
+        }
         return {
             "error_code": error_code,
             "error_class": error.__class__.__name__ if error is not None else "RequestException",
             "error_status_code": status_code,
             "error_message": error_message,
-            "retryable": True,
+            "retryable": not auth_fatal,
             "graphql_cursor": str(cursor or "").strip() or None,
         }
 
@@ -1774,6 +1860,10 @@ class InstagramScraper:
         music = node.get("musicInfo") or node.get("music_info")
         result["music_info"] = music if isinstance(music, dict) else None
 
+        # audio_url (direct MP4 link to audio track, separate from video)
+        audio_url = node.get("audioUrl") or node.get("audio_url")
+        result["audio_url"] = str(audio_url).strip() if audio_url else None
+
         # video_duration
         vd = node.get("videoDuration") or node.get("video_duration")
         if vd is not None:
@@ -1893,6 +1983,7 @@ class InstagramScraper:
             height=extras.get("height"),
             is_comments_disabled=extras.get("is_comments_disabled"),
             music_info=extras.get("music_info"),
+            audio_url=extras.get("audio_url"),
             video_duration=extras.get("video_duration"),
             child_posts_data=self._extract_child_posts_data(node),
         )
@@ -1965,13 +2056,13 @@ class InstagramScraper:
             attempt_limit = self._resolve_graphql_cursor_retry_attempts(cursor)
         last_error: requests.exceptions.RequestException | None = None
         for attempt_index in range(attempt_limit):
-            # In fast_mode, only warm context on the first page and every 5th page
-            # to avoid the overhead of an extra HTTP request per cursor page.
-            should_warm = not fast_mode or not cursor or (self._request_count % 5 == 0) or attempt_index > 0
+            # In fast_mode, only warm context on the very first page (no cursor).
+            # Subsequent pages reuse the cached context to avoid extra HTTP requests.
+            should_warm = not fast_mode or (not cursor and attempt_index == 0)
             page_context = (
                 self._warm_profile_request_context(
                     username,
-                    timeout=timeout,
+                    timeout=timeout,  # use full timeout — first warm sets critical tokens
                     force=(bool(cursor) or attempt_index > 0) if should_warm else False,
                 )
                 if should_warm
@@ -2049,28 +2140,21 @@ class InstagramScraper:
                 except requests.exceptions.RequestException as e:
                     last_error = e
                     saw_request_error = True
+                    status_code = getattr(getattr(e, "response", None), "status_code", None)
+                    if status_code in (401, 403):
+                        logger.warning("GraphQL auth error %s for doc_id %s — skipping remaining doc_ids", status_code, doc_id)
+                        break
                     logger.warning("GraphQL request failed for doc_id %s: %s", doc_id, e)
                     continue
 
-            if cursor and attempt_index + 1 < attempt_limit and saw_request_error:
+            if attempt_index + 1 < attempt_limit and saw_request_error:
                 self._reset_request_session()
                 backoff_seconds = self._resolve_graphql_retry_backoff_seconds(cursor, attempt_index)
                 if backoff_seconds > 0:
                     time.sleep(backoff_seconds)
                 logger.warning(
-                    "Instagram GraphQL cursor page failed for @%s; refreshing profile context and retrying (%d/%d)",
-                    username,
-                    attempt_index + 1,
-                    attempt_limit,
-                )
-                continue
-            if not cursor and attempt_index + 1 < attempt_limit and saw_request_error:
-                self._reset_request_session()
-                backoff_seconds = self._resolve_graphql_retry_backoff_seconds(cursor, attempt_index)
-                if backoff_seconds > 0:
-                    time.sleep(backoff_seconds)
-                logger.warning(
-                    "Instagram GraphQL initial page failed for @%s; refreshing profile context and retrying (%d/%d)",
+                    "Instagram GraphQL %s page failed for @%s; refreshing profile context and retrying (%d/%d)",
+                    "cursor" if cursor else "initial",
                     username,
                     attempt_index + 1,
                     attempt_limit,
@@ -2093,12 +2177,86 @@ class InstagramScraper:
             self.last_retrieval_meta.update(self._graphql_request_error_details(cursor=cursor, error=last_error))
             self.last_retrieval_meta["transport"] = "requests_enriched"
             self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
-        unrecoverable_fallback_errors = {
+        auth_recoverable_errors = {
             "instagram_graphql_checkpoint_required",
-            "instagram_graphql_cursor_rate_limited",
             "instagram_graphql_cursor_unauthorized",
             "instagram_graphql_cursor_forbidden",
         }
+        unrecoverable_fallback_errors = {
+            "instagram_graphql_cursor_rate_limited",
+            # NOTE: auth errors (403/401/checkpoint) are NOT included here because
+            # the Playwright browser fallback CAN recover from them — the browser
+            # has additional context (Origin, Referer, JS headers) that HTTP lacks.
+        }
+        # ── Lightweight session rotation before escalating to interactive login ──
+        _auto_rotation_attempted = getattr(self, "_auto_rotation_attempted_this_scrape", False)
+        if (
+            self.last_retrieval_meta.get("error_code") in auth_recoverable_errors
+            and not _auto_rotation_attempted
+        ):
+            logger.warning(
+                "GraphQL auth error for @%s (%s) — attempting auto cookie refresh before interactive login",
+                username,
+                self.last_retrieval_meta.get("error_code"),
+            )
+            self._auto_rotation_attempted_this_scrape = True
+            refresh_result = self._try_auto_refresh_cookies()
+            if refresh_result.get("refreshed"):
+                self._reset_request_session()
+                self._profile_page_context_cache.pop(username, None)
+                retry_payload = self.fetch_posts_graphql(
+                    username,
+                    cursor=cursor,
+                    delay=delay,
+                    request_timeout=request_timeout,
+                    fast_mode=fast_mode,
+                    allow_browser_fallback=allow_browser_fallback,
+                    page_size=page_size,
+                )
+                if retry_payload is not None:
+                    self._auto_rotation_attempted_this_scrape = False
+                    return retry_payload
+
+        # If auth failed and we're running locally, open Chrome for manual re-auth (once per scrape)
+        _interactive_already_attempted = getattr(self, "_interactive_login_attempted_this_scrape", False)
+        if (
+            self.last_retrieval_meta.get("error_code") in auth_recoverable_errors
+            and self._is_local_environment()
+            and not _interactive_already_attempted
+        ):
+            logger.warning(
+                "Instagram auth failed for @%s (%s) — attempting interactive Chrome login",
+                username,
+                self.last_retrieval_meta.get("error_code"),
+            )
+            self._interactive_login_attempted_this_scrape = True
+            interactive_result = self._try_interactive_login()
+            if interactive_result.get("refreshed"):
+                # Got fresh cookies — retry the failed request once
+                self._reset_request_session()
+                self._profile_page_context_cache.pop(username, None)
+                retry_payload = self.fetch_posts_graphql(
+                    username,
+                    cursor=cursor,
+                    delay=delay,
+                    request_timeout=request_timeout,
+                    fast_mode=fast_mode,
+                    allow_browser_fallback=False,
+                    page_size=page_size,
+                )
+                if retry_payload is not None:
+                    # Reset the guard on success — cookies are working again
+                    self._interactive_login_attempted_this_scrape = False
+                    return retry_payload
+                logger.warning(
+                    "Instagram GraphQL still failing for @%s after interactive login — falling through to browser fallback",
+                    username,
+                )
+        elif _interactive_already_attempted and self.last_retrieval_meta.get("error_code") in auth_recoverable_errors:
+            logger.warning(
+                "Instagram GraphQL 403 for @%s persists after interactive login — falling through to browser fallback",
+                username,
+            )
         if self.last_retrieval_meta.get("error_code") in unrecoverable_fallback_errors:
             logger.warning(
                 "Skipping Instagram GraphQL Playwright fallback for @%s because %s is not browser-recoverable",
@@ -2975,7 +3133,12 @@ class InstagramScraper:
             auto_refresh_result = self._try_auto_refresh_cookies()
             if auto_refresh_result.get("refreshed"):
                 has_auth = True
-            elif config.require_auth:
+            else:
+                interactive_result = self._try_interactive_login()
+                if interactive_result.get("refreshed"):
+                    auto_refresh_result = interactive_result
+                    has_auth = True
+            if not has_auth and config.require_auth:
                 logger.warning(
                     "[instagram] scrape aborted for @%s: no sessionid, auto-refresh failed (%s)",
                     config.username,
@@ -2996,6 +3159,11 @@ class InstagramScraper:
                 auto_refresh_result = self._try_auto_refresh_cookies()
                 if auto_refresh_result.get("refreshed"):
                     auth_check = self._validate_cookies()
+                if not auth_check["valid"]:
+                    interactive_result = self._try_interactive_login()
+                    if interactive_result.get("refreshed"):
+                        auto_refresh_result = interactive_result
+                        auth_check = self._validate_cookies()
                 if not auth_check["valid"]:
                     logger.warning(
                         "[instagram] scrape aborted for @%s: cookies invalid (%s)",
@@ -3085,7 +3253,7 @@ class InstagramScraper:
             "retrieval_mode": mode,
             "error_code": code,
             "error_class": cls,
-            "retryable": True,
+            "retryable": False,
             "cookies_valid": False,
             "cookies_present": bool(self.cookies),
             "sessionid_present": bool(self.cookies.get("sessionid")),
@@ -3179,6 +3347,10 @@ class InstagramScraper:
         no_match_pages = 0
         no_match_page_limit = self._resolve_no_match_page_limit(config)
         seen_cursors: set[str] = set()
+        self._pagination_session_rotated = False
+        self._auto_rotation_attempted_this_scrape = False
+        rotation_attempts = 0
+        rotation_successes = 0
 
         profile_info_data = self.fetch_profile_info(config.username, config.delay_seconds)
         if profile_info_data:
@@ -3209,6 +3381,31 @@ class InstagramScraper:
                 fast_mode=config.fast_mode,
             )
             if not data:
+                # Attempt one session rotation on auth failure before giving up.
+                # Uses interactive Chrome login (pop-up) when running locally —
+                # no SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH env var needed.
+                error_code = self.last_retrieval_meta.get("error_code", "")
+                if (
+                    error_code in {
+                        "instagram_graphql_cursor_unauthorized",
+                        "instagram_graphql_cursor_forbidden",
+                    }
+                    and not self._pagination_session_rotated
+                    and self._is_local_environment()
+                ):
+                    self._pagination_session_rotated = True  # guard before attempt — don't retry even if refresh fails
+                    logger.warning(
+                        "Auth failure mid-pagination on page %d (%s) — opening Chrome for session refresh",
+                        page_num, error_code,
+                    )
+                    rotation_attempts += 1
+                    refresh = self._try_interactive_login()
+                    if refresh.get("refreshed"):
+                        rotation_successes += 1
+                        self._reset_request_session()
+                        self._profile_page_context_cache.pop(config.username, None)
+                        page_num -= 1  # retry same page with fresh cookies
+                        continue
                 if page_num == 1:
                     initial_page_failed = True
                     failure_reason = "graphql_empty_or_error"
@@ -3300,6 +3497,21 @@ class InstagramScraper:
 
             logger.info("Page %d: checked %d posts, %d matches total", page_num, posts_on_page, len(posts))
 
+            # Proactive cookie health check every 20 pages
+            if page_num % 20 == 0:
+                cookie_check = self._validate_cookies()
+                if not cookie_check["valid"]:
+                    logger.warning(
+                        "[instagram] cookies expired mid-pagination at page %d — attempting refresh",
+                        page_num,
+                    )
+                    rotation_attempts += 1
+                    refresh = self._try_auto_refresh_cookies()
+                    if refresh.get("refreshed"):
+                        rotation_successes += 1
+                        self._reset_request_session()
+                        self._profile_page_context_cache.pop(config.username, None)
+
         logger.info("Scrape complete: checked %d posts, found %d matches", posts_checked, len(posts))
         profile_avatar_backfilled_posts = 0
         if posts and any(not getattr(post, "owner_profile_pic_url", None) for post in posts):
@@ -3319,6 +3531,8 @@ class InstagramScraper:
             "no_match_pages": no_match_pages,
             "no_match_page_limit": no_match_page_limit,
             "profile_avatar_backfilled_posts": profile_avatar_backfilled_posts,
+            "rotation_attempts": rotation_attempts,
+            "rotation_successes": rotation_successes,
         }
         if total_posts:
             self.last_retrieval_meta["total_posts"] = total_posts
@@ -3470,7 +3684,12 @@ class InstagramScraper:
 
                     # Auto-scroll loop
                     scroll_interval_ms = 600  # Sort Feed-style fast scrolling
-                    while not reached_date_limit and no_new_data_scrolls < max_no_new_data_scrolls:
+                    _scroll_t0 = time.monotonic()
+                    while (
+                        not reached_date_limit
+                        and no_new_data_scrolls < max_no_new_data_scrolls
+                        and (time.monotonic() - _scroll_t0) < config.max_scrape_seconds
+                    ):
                         if len(posts) >= max_posts:
                             logger.info("browser_intercept: reached max posts (%d)", max_posts)
                             break
@@ -3506,11 +3725,20 @@ class InstagramScraper:
                     self.last_retrieval_meta["total_posts"] = total_posts
                 return posts
 
+        _scroll_elapsed = time.monotonic() - _scroll_t0 if "_scroll_t0" in dir() else 0
+        scroll_timed_out = _scroll_elapsed >= config.max_scrape_seconds
+        if scroll_timed_out:
+            logger.warning(
+                "browser_intercept: scroll loop timed out after %.0fs (limit: %.0fs), %d posts collected",
+                _scroll_elapsed, config.max_scrape_seconds, len(posts),
+            )
         stop_reason = (
             "date_start_reached"
             if reached_date_limit
             else "max_posts_reached"
             if len(posts) >= max_posts
+            else "timeout"
+            if scroll_timed_out
             else "no_new_data"
             if no_new_data_scrolls >= max_no_new_data_scrolls
             else "unknown"

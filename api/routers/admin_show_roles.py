@@ -1201,15 +1201,11 @@ def list_cast_with_roles(
         if assignment_seasons:
             role_season_map[person_id] = assignment_seasons
 
-    has_curated_roles = bool(role_map)
     filtered: list[dict[str, Any]] = []
     for row in rows:
         person_id = str(row.get("person_id") or "")
-        if has_curated_roles:
-            selected_roles = sorted(role_map.get(person_id, set()))
-            if not selected_roles:
-                continue
-        else:
+        selected_roles = sorted(role_map.get(person_id, set()))
+        if not selected_roles:
             selected_roles = sorted(
                 {
                     str(value).strip()

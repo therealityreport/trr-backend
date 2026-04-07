@@ -88,9 +88,11 @@ def verify_jwt_token(token: str) -> dict[str, Any]:
         algorithms=["HS256"],
         options=options,
     )
+    role = str(payload.get("role") or "").strip().lower()
     token_issuer = str(payload.get("iss") or "").strip()
     if expected_issuer and token_issuer and token_issuer != expected_issuer:
-        raise InvalidTokenError("Supabase JWT issuer does not match configured backend project")
+        if not (role == "service_role" and token_issuer == "supabase"):
+            raise InvalidTokenError("Supabase JWT issuer does not match configured backend project")
     token_project_ref = str(payload.get("ref") or "").strip()
     if expected_project_ref and token_project_ref and token_project_ref != expected_project_ref:
         raise InvalidTokenError("Supabase JWT project ref does not match configured backend project")
