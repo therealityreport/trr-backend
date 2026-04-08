@@ -62,10 +62,7 @@ def test_parse_allpages_html_page_scopes_titles_and_next_page_to_allpages_dom() 
     )
 
     assert titles == ["Lisa Barlow/Gallery", "Lisa Barlow"]
-    assert (
-        next_page_url
-        == "https://real-housewives.fandom.com/wiki/Special:AllPages?from=Meredith_Marks"
-    )
+    assert next_page_url == "https://real-housewives.fandom.com/wiki/Special:AllPages?from=Meredith_Marks"
 
 
 def test_discover_candidates_includes_manual_and_search_sources() -> None:

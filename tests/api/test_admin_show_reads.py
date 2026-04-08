@@ -491,6 +491,68 @@ def test_show_cast_forwards_include_photos_flag(monkeypatch: pytest.MonkeyPatch)
     assert recorded["kwargs"]["include_photos"] is False
 
 
+def test_show_credits_returns_grouped_crew_rows_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        router_module.show_reads_repo,
+        "get_show_credits",
+        lambda show_id: (
+            {
+                "cast_roster": [
+                    {
+                        "person_id": "person-1",
+                        "person_name": "Heather Gay",
+                        "roles": ["Housewife"],
+                        "total_episodes": 80,
+                    }
+                ],
+                "crew_sections": [
+                    {
+                        "title": "Producers",
+                        "rows": [
+                            {
+                                "credit_id": "credit-1",
+                                "person_id": "person-2",
+                                "person_name": "Casey Allan",
+                                "role": "supervising producer",
+                                "episodes_label": "12 episodes",
+                            }
+                        ],
+                        "grouped_rows": [
+                            {
+                                "person_id": "person-2",
+                                "person_name": "Casey Allan",
+                                "role_lines": [
+                                    {
+                                        "credit_id": "credit-1",
+                                        "role": "supervising producer",
+                                        "episodes_label": "12 episodes",
+                                    },
+                                    {
+                                        "credit_id": "credit-2",
+                                        "role": "associate producer",
+                                        "episodes_label": "23 episodes",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+                "source_metadata": {"show_imdb_id": "tt11363282"},
+            },
+            1,
+        ),
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/trr-api/shows/show-1/credits")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cast_roster"][0]["person_name"] == "Heather Gay"
+    assert payload["crew_sections"][0]["grouped_rows"][0]["person_name"] == "Casey Allan"
+    assert len(payload["crew_sections"][0]["grouped_rows"][0]["role_lines"]) == 2
+
+
 def test_season_cast_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         router_module.show_reads_repo,

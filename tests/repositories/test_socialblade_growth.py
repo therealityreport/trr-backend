@@ -61,3 +61,44 @@ def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_
         "date": current_day,
         "followers": 475372,
     }
+
+
+def test_merge_chart_data_keeps_older_history_when_fresh_window_starts_later() -> None:
+    existing = {
+        "scraped_at": "2026-03-18T05:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 685081},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {
+            "data": [
+                {"date": "2023-03-18", "followers": 480000},
+                {"date": "2023-03-19", "followers": 480120},
+                {"date": "2026-03-17", "followers": 685063},
+                {"date": "2026-03-18", "followers": 685081},
+            ]
+        },
+    }
+    fresh = {
+        "scraped_at": "2026-04-07T08:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 687613},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {
+            "data": [
+                {"date": "2023-04-01", "followers": 482000},
+                {"date": "2026-03-18", "followers": 685081},
+                {"date": "2026-04-07", "followers": 687613},
+            ]
+        },
+    }
+
+    merged = merge_chart_data(existing, fresh)
+    merged_points = merged["daily_total_followers_chart"]["data"]
+    merged_dates = {point["date"] for point in merged_points}
+
+    assert "2023-03-18" in merged_dates
+    assert "2023-03-19" in merged_dates
+    assert "2023-04-01" in merged_dates
+    assert merged_points[-1] == {"date": "2026-04-07", "followers": 687613}

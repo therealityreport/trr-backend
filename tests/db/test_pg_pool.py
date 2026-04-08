@@ -390,10 +390,10 @@ def test_get_pool_logs_effective_session_pooler_defaults_warning(
         with pg.db_connection():
             pass
 
-    assert "minconn=1 maxconn=4" in caplog.text
+    assert "minconn=1 maxconn=2" in caplog.text
     assert "minconn_source=default maxconn_source=default" in caplog.text
     assert "application_name=trr-backend" in caplog.text
-    assert "session_pooler_tiny_defaults" not in caplog.text
+    assert "session_pooler_tiny_defaults" in caplog.text
 
 
 def test_resolve_pool_sizing_keeps_production_session_defaults_conservative(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -612,7 +612,7 @@ def test_get_connection_with_retry_uses_new_pool_after_closed_pool_reset(
     assert replacement_pool.closeall_calls == 0
 
 
-def test_build_pool_for_session_mode_supavisor_uses_local_dev_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_pool_for_session_mode_supavisor_uses_conservative_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     def _pool_factory(*, minconn, maxconn, **kwargs):
@@ -629,7 +629,7 @@ def test_build_pool_for_session_mode_supavisor_uses_local_dev_defaults(monkeypat
     pg._build_pool_for_url("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
     assert captured["minconn"] == 1
-    assert captured["maxconn"] == 4
+    assert captured["maxconn"] == 2
     options = captured["options"]
     assert "-c idle_in_transaction_session_timeout=60000" in options
     assert "-c statement_timeout=30000" in options

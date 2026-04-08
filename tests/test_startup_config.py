@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from api import main as api_main
@@ -68,3 +71,21 @@ def test_validate_startup_config_does_not_require_screenalytics_service_token_fo
     )
 
     api_main._validate_startup_config()
+
+
+def test_workspace_shared_env_manifest_matches_backend_contract() -> None:
+    manifest_path = Path(__file__).resolve().parents[2] / "docs/workspace/shared-env-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    canonical = set(manifest["canonical"].keys())
+    transitional = set(manifest["transitional"].keys())
+    backend_contract = manifest["repo_validation"]["TRR-Backend"]
+
+    assert {"TRR_DB_URL", "TRR_DB_FALLBACK_URL", "TRR_INTERNAL_ADMIN_SHARED_SECRET"} <= canonical
+    assert {"SCREENALYTICS_API_URL", "SCREENALYTICS_SERVICE_TOKEN"} <= transitional
+    assert set(backend_contract["db_any_of"]) == {"TRR_DB_URL", "TRR_DB_FALLBACK_URL"}
+    assert set(backend_contract["required_in_deployed"]) == {"TRR_INTERNAL_ADMIN_SHARED_SECRET"}
+    assert set(backend_contract["transitional_compat"]) == {
+        "SCREENALYTICS_API_URL",
+        "SCREENALYTICS_SERVICE_TOKEN",
+    }

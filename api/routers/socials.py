@@ -59,6 +59,8 @@ from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
+_LIVE_STATUS_STREAM_INTERVAL_SECONDS = 5.0
+_LIVE_STATUS_SEQUENCE = 0
 
 
 def _reddit_refresh_worker_health_payload(
@@ -78,6 +80,57 @@ def _reddit_refresh_worker_health_payload(
     if isinstance(extra, dict):
         payload.update(extra)
     return payload
+
+
+def _next_live_status_sequence() -> int:
+    global _LIVE_STATUS_SEQUENCE
+    _LIVE_STATUS_SEQUENCE += 1
+    return _LIVE_STATUS_SEQUENCE
+
+
+def _build_social_ingest_health_dot(status_payload: dict[str, Any]) -> dict[str, Any]:
+    workers_payload = status_payload.get("workers") if isinstance(status_payload, dict) else {}
+    queue_payload = status_payload.get("queue") if isinstance(status_payload, dict) else {}
+    by_status = queue_payload.get("by_status") if isinstance(queue_payload, dict) else {}
+    return {
+        "queue_enabled": bool(status_payload.get("queue_enabled") if isinstance(status_payload, dict) else False),
+        "workers": {
+            "healthy": bool(workers_payload.get("healthy")) if isinstance(workers_payload, dict) else False,
+            "healthy_workers": int(workers_payload.get("healthy_workers") or 0)
+            if isinstance(workers_payload, dict)
+            else 0,
+            "shared_account_backfill_readiness": (
+                workers_payload.get("shared_account_backfill_readiness") if isinstance(workers_payload, dict) else None
+            ),
+        },
+        "queue": {
+            "by_status": {
+                "running": int(by_status.get("running") or 0) if isinstance(by_status, dict) else 0,
+                "pending": int(by_status.get("pending") or 0) if isinstance(by_status, dict) else 0,
+                "queued": int(by_status.get("queued") or 0) if isinstance(by_status, dict) else 0,
+                "failed": int(by_status.get("failed") or 0) if isinstance(by_status, dict) else 0,
+            },
+        },
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _build_live_status_payload() -> dict[str, Any]:
+    from trr_backend.repositories import admin_operations as admin_operations_repo
+    from trr_backend.repositories.social_season_analytics import get_queue_status
+
+    queue_status = get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+    )
+    return {
+        "health_dot": _build_social_ingest_health_dot(queue_status),
+        "queue_status": queue_status,
+        "admin_operations": admin_operations_repo.get_admin_operations_health(),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "sequence": _next_live_status_sequence(),
+    }
 
 
 def _raise_if_modal_social_dispatch_unresolvable(platform: str | None = None) -> None:
@@ -819,7 +872,11 @@ def _can_use_local_catalog_inline_fallback(
     allow_inline_dev_fallback: bool,
     remote_plane_enforced: bool,
 ) -> bool:
-    return bool(allow_inline_dev_fallback) and _is_local_or_dev_runtime() and not remote_plane_enforced
+    if not _is_local_or_dev_runtime():
+        return False
+    if _env_truthy("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE"):
+        return True
+    return bool(allow_inline_dev_fallback) and not remote_plane_enforced
 
 
 def _resolve_social_account_catalog_route_execution(
@@ -913,10 +970,17 @@ def _finalize_social_account_catalog_route_response(
     platform: str,
     queue_enabled: bool,
     used_inline_fallback: bool,
+    requires_modal_executor: bool,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     run_id = str(result.get("run_id") or "").strip()
     if not queue_enabled and run_id:
+        logger.warning(
+            "Catalog route using inline fallback: platform=%s queue_enabled=%s requires_modal_executor=%s",
+            platform,
+            queue_enabled,
+            requires_modal_executor,
+        )
         _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
     execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
         queue_enabled=queue_enabled,
@@ -925,6 +989,9 @@ def _finalize_social_account_catalog_route_response(
     return {
         **result,
         "status": "queued" if queue_enabled else "started",
+        "queue_enabled": queue_enabled,
+        "used_inline_fallback": used_inline_fallback,
+        "requires_modal_executor": requires_modal_executor,
         "execution_mode": execution_mode,
         "execution_mode_canonical": execution_mode_canonical,
         "execution_mode_legacy": execution_mode_legacy,
@@ -2680,6 +2747,17 @@ class CatalogResumeTailRequest(BaseModel):
     allow_inline_dev_fallback: bool = Field(default=False)
 
 
+class ApifyBackfillRequest(BaseModel):
+    results_limit: int = Field(default=100, ge=1, le=5000)
+    date_start: datetime | None = None
+    data_detail_level: Literal["basicData", "detailedData"] = Field(default="detailedData")
+    skip_pinned_posts: bool = Field(default=False)
+
+
+class CatalogRepairAuthRequest(BaseModel):
+    allow_inline_dev_fallback: bool = Field(default=False)
+
+
 class CatalogReviewResolveRequest(BaseModel):
     resolution_action: Literal["assign_show", "mark_non_show"]
     show_id: UUID | None = None
@@ -4425,8 +4503,58 @@ async def post_social_account_catalog_backfill_route(
         platform=platform,
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
+        requires_modal_executor=requires_modal_executor,
         background_tasks=background_tasks,
     )
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/apify-backfill")
+async def post_social_account_apify_backfill_route(
+    platform: str,
+    account_handle: str,
+    payload: ApifyBackfillRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    """Run an Instagram backfill via Apify's managed scraper infrastructure."""
+    if platform != "instagram":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "APIFY_INSTAGRAM_ONLY", "message": "Apify backfill is only supported for Instagram."},
+        )
+
+    from trr_backend.socials.instagram.apify_scraper import run_and_normalize
+
+    try:
+        result = run_and_normalize(
+            username=account_handle,
+            results_limit=payload.results_limit,
+            date_start=payload.date_start,
+            data_detail_level=payload.data_detail_level,
+            skip_pinned_posts=payload.skip_pinned_posts,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "APIFY_CONFIG_ERROR", "message": str(exc)},
+        ) from exc
+    except Exception as exc:
+        logger.exception("Apify backfill failed for %s/@%s", platform, account_handle)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "APIFY_RUN_FAILED", "message": f"Apify scraper run failed: {exc}"},
+        ) from exc
+
+    _clear_account_profile_caches()
+
+    return {
+        "status": "completed",
+        "run_id": result["run_id"],
+        "dataset_id": result["dataset_id"],
+        "post_count": result["post_count"],
+        "actor": result["actor"],
+        "posts": result["posts"],
+        "initiated_by": (user or {}).get("email"),
+    }
 
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/sync-recent")
@@ -4492,6 +4620,7 @@ async def post_social_account_catalog_sync_recent_route(
         platform=platform,
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
+        requires_modal_executor=requires_modal_executor,
         background_tasks=background_tasks,
     )
 
@@ -4558,6 +4687,7 @@ async def post_social_account_catalog_sync_newer_route(
         platform=platform,
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
+        requires_modal_executor=requires_modal_executor,
         background_tasks=background_tasks,
     )
 
@@ -4574,7 +4704,7 @@ async def post_social_account_catalog_resume_tail_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
-        resume_tail_social_account_catalog,
+        start_social_account_catalog_backfill,
     )
 
     execution_state = _resolve_social_account_catalog_route_execution(
@@ -4586,13 +4716,15 @@ async def post_social_account_catalog_resume_tail_route(
     requires_modal_executor = bool(execution_state["requires_modal_executor"])
 
     try:
-        result = resume_tail_social_account_catalog(
+        result = start_social_account_catalog_backfill(
             platform=platform,
             account_handle=account_handle,
             source_scope=payload.source_scope,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
+            catalog_action="backfill",
+            catalog_action_scope="full_history",
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -4619,13 +4751,126 @@ async def post_social_account_catalog_resume_tail_route(
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
 
-    return _finalize_social_account_catalog_route_response(
-        result=result,
-        platform=platform,
-        queue_enabled=queue_enabled,
-        used_inline_fallback=used_inline_fallback,
-        background_tasks=background_tasks,
+    return {
+        **_finalize_social_account_catalog_route_response(
+            result=result,
+            platform=platform,
+            queue_enabled=queue_enabled,
+            used_inline_fallback=used_inline_fallback,
+            requires_modal_executor=requires_modal_executor,
+            background_tasks=background_tasks,
+        ),
+        "deprecated_route": True,
+    }
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/repair-auth")
+async def post_social_account_catalog_run_repair_auth_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    payload: CatalogRepairAuthRequest,
+    background_tasks: BackgroundTasks,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    del payload
+    from trr_backend.repositories.social_season_analytics import (
+        SocialIngestValidationError,
+        execute_social_account_catalog_run_auth_repair,
+        request_social_account_catalog_run_auth_repair,
     )
+
+    try:
+        result = request_social_account_catalog_run_auth_repair(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            initiated_by=(user or {}).get("email"),
+        )
+        background_tasks.add_task(
+            execute_social_account_catalog_run_auth_repair,
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            initiated_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
+    except SocialIngestValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+class CookieRefreshRequest(BaseModel):
+    headless: bool = Field(
+        default=False,
+        description="Run browser in headless mode (default: headed for interactive login)",
+    )
+    timeout_seconds: int = Field(default=180, ge=30, le=600)
+
+
+@router.get("/profiles/{platform}/{account_handle}/cookies/health")
+def get_cookie_health_route(
+    platform: str,
+    account_handle: str,
+    force: bool = Query(default=False, description="Bypass validation cache"),
+    user: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import check_platform_cookie_health
+
+    return check_platform_cookie_health(platform, force=force)
+
+
+@router.post("/profiles/{platform}/{account_handle}/cookies/refresh")
+def post_cookie_refresh_route(
+    platform: str,
+    account_handle: str,
+    payload: CookieRefreshRequest,
+    user: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        check_platform_cookie_health,
+        refresh_platform_cookies_interactive,
+    )
+
+    # Pre-check: is refresh available in this runtime?
+    health = check_platform_cookie_health(platform, force=False)
+    if not health.get("refresh_supported"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "COOKIE_REFRESH_NOT_SUPPORTED",
+                "message": f"Cookie refresh is not supported for {platform}.",
+            },
+        )
+    if not health.get("refresh_available"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "COOKIE_REFRESH_REQUIRES_LOCAL",
+                "message": (
+                    "Cookie refresh requires a local dev environment. A headed browser cannot run on remote workers."
+                ),
+            },
+        )
+
+    result = refresh_platform_cookies_interactive(
+        platform,
+        headless=payload.headless,
+        timeout_seconds=payload.timeout_seconds,
+    )
+    if not result.get("success") and result.get("reason") == "refresh_already_in_progress":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "COOKIE_REFRESH_IN_PROGRESS",
+                "message": "A cookie refresh is already in progress for this platform.",
+            },
+        )
+    return result
 
 
 @router.post("/shared/ingest")
@@ -5049,36 +5294,39 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
             include_stuck_jobs=False,
             include_runs_summary=False,
         )
-        workers_payload = status_payload.get("workers") if isinstance(status_payload, dict) else {}
-        queue_payload = status_payload.get("queue") if isinstance(status_payload, dict) else {}
-        by_status = queue_payload.get("by_status") if isinstance(queue_payload, dict) else {}
-        return {
-            "queue_enabled": bool(status_payload.get("queue_enabled") if isinstance(status_payload, dict) else False),
-            "workers": {
-                "healthy": bool(workers_payload.get("healthy")) if isinstance(workers_payload, dict) else False,
-                "healthy_workers": int(workers_payload.get("healthy_workers") or 0)
-                if isinstance(workers_payload, dict)
-                else 0,
-                "shared_account_backfill_readiness": (
-                    workers_payload.get("shared_account_backfill_readiness")
-                    if isinstance(workers_payload, dict)
-                    else None
-                ),
-            },
-            "queue": {
-                "by_status": {
-                    "running": int(by_status.get("running") or 0) if isinstance(by_status, dict) else 0,
-                    "pending": int(by_status.get("pending") or 0) if isinstance(by_status, dict) else 0,
-                    "queued": int(by_status.get("queued") or 0) if isinstance(by_status, dict) else 0,
-                    "failed": int(by_status.get("failed") or 0) if isinstance(by_status, dict) else 0,
-                }
-            },
-            "alerts": list(status_payload.get("alerts") or []) if isinstance(status_payload, dict) else [],
-            "updated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
-        }
+        payload = _build_social_ingest_health_dot(status_payload)
+        payload["alerts"] = list(status_payload.get("alerts") or []) if isinstance(status_payload, dict) else []
+        return payload
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to fetch social ingest health dot payload")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/live-status")
+def get_social_live_status(_: InternalAdminUser = None) -> dict[str, Any]:
+    try:
+        return _build_live_status_payload()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch social live status")
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/live-status/stream")
+async def stream_social_live_status(request: Request, _: InternalAdminUser = None) -> StreamingResponse:
+    async def event_stream() -> Any:
+        while True:
+            if await request.is_disconnected():
+                return
+            payload = _build_live_status_payload()
+            yield "event: live_status\n"
+            yield f"data: {json.dumps(payload, default=str)}\n\n"
+            await asyncio.sleep(_LIVE_STATUS_STREAM_INTERVAL_SECONDS)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @router.post("/reddit/runs")

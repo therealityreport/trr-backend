@@ -8,6 +8,8 @@ Live runtime split:
 - long-running and admin execution on Modal
 - hosted media on S3-compatible object storage
 
+Render should run the repo Docker image as a single `uvicorn` process per container via `start-api.sh`. Do not add extra container workers unless `REDIS_URL` is configured and realtime fanout has been validated for that topology.
+
 ## Canonical Deployment Artifact
 
 - `/Users/thomashulihan/Projects/TRR/TRR-Backend/render.yaml`

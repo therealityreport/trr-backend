@@ -251,3 +251,51 @@ def test_main_emits_json_and_returns_nonzero_when_not_ready(
     assert payload["modal_environment"] == "main"
     assert payload["missing_web_endpoints"] == ["serve_backend_api"]
     assert payload["remote_auth_probe"]["reason"] == "checkpoint_required"
+
+
+def test_main_applies_workspace_runtime_env_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        cli,
+        "apply_workspace_runtime_env",
+        lambda *, repo_root, environ=None: calls.append(repo_root) or {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_parse_args",
+        lambda: type(
+            "Args",
+            (),
+            {
+                "app_name": "trr-backend-jobs",
+                "runtime_secret_name": "trr-backend-runtime",
+                "social_secret_name": "trr-social-auth",
+                "env": "",
+                "json": True,
+                "probe_remote_auth": "",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "verify_modal_readiness",
+        lambda **_kwargs: {
+            "ok": True,
+            "app_found": True,
+            "app_lookup_error": None,
+            "missing_secrets": [],
+            "function_results": [],
+            "missing_functions": [],
+            "api_function_name": "serve_backend_api",
+            "api_web_url": "https://workspace--trr-backend-api.modal.run",
+            "missing_web_endpoints": [],
+            "remote_auth_probe": None,
+        },
+    )
+
+    assert cli.main() == 0
+    assert calls

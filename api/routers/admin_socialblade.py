@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from api.auth import InternalAdminUser
 
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/admin/people", tags=["admin-socialblade"])
 
 
 def _scrape_socialblade_person_page(handle: str) -> dict[str, Any]:
-    from trr_backend.modal_dispatch import dispatch_socialblade_scrape_sync
+    from trr_backend.socials.socialblade.service import SocialBladeRefreshError
     from trr_backend.socials.socialblade.auth import (
         load_socialblade_cookies_from_sources,
         refresh_socialblade_cookies,
@@ -24,16 +25,19 @@ def _scrape_socialblade_person_page(handle: str) -> dict[str, Any]:
     from trr_backend.socials.socialblade.scraper import scrape_socialblade
 
     try:
-        refresh_socialblade_cookies("person_page_refresh")
+        refresh_socialblade_cookies("person_page_refresh", allow_headless_fallback=False)
         cookies = load_socialblade_cookies_from_sources()
-        return scrape_socialblade(handle, cookies)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Local SocialBlade scrape unavailable; falling back to Modal",
-            extra={"handle": handle},
-            exc_info=True,
+        return scrape_socialblade(
+            handle,
+            cookies,
+            allow_login_fallback=False,
+            allow_visible_browser_retry=True,
         )
-        return dispatch_socialblade_scrape_sync(handle=handle)
+    except SocialBladeRefreshError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Local SocialBlade scrape failed", extra={"handle": handle}, exc_info=True)
+        raise SocialBladeRefreshError(str(exc)) from exc
 
 
 class SocialBladeRefreshRequest(BaseModel):
@@ -98,7 +102,8 @@ async def refresh_socialblade_data(
         raise HTTPException(status_code=400, detail="Invalid handle")
 
     try:
-        return refresh_and_persist_socialblade(
+        return await run_in_threadpool(
+            refresh_and_persist_socialblade,
             person_id=person_id,
             handle=safe_handle,
             scraper=_scrape_socialblade_person_page,
@@ -107,6 +112,9 @@ async def refresh_socialblade_data(
         )
     except SocialBladeRefreshError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Unexpected SocialBlade person refresh failure", extra={"person_id": person_id}, exc_info=True)
+        raise HTTPException(status_code=502, detail=str(exc) or "SocialBlade refresh failed") from exc
 
 
 @router.post("/socialblade/refresh-batch")
@@ -200,7 +208,8 @@ async def refresh_socialblade_data_batch(
 
         if source == "cast_comparison":
             try:
-                refreshed = refresh_and_persist_socialblade(
+                refreshed = await run_in_threadpool(
+                    refresh_and_persist_socialblade,
                     person_id=item.person_id,
                     handle=safe_handle,
                     scraper=_scrape_socialblade_person_page,

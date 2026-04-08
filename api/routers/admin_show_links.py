@@ -29,7 +29,6 @@ from trr_backend.ingestion.show_cast_matrix_scraper import (
     is_missing_fandom_page,
     is_missing_wikipedia_page,
 )
-from trr_backend.repositories import admin_show_reads as show_reads_repo, brands_franchises
 from trr_backend.integrations.fandom import (
     build_fandom_wiki_url_from_name,
     is_allowlisted_fandom_domain,
@@ -47,6 +46,8 @@ from trr_backend.integrations.fandom_discovery import (
     parse_allpages_html_page,
 )
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
+from trr_backend.repositories import admin_show_reads as show_reads_repo
+from trr_backend.repositories import brands_franchises
 from trr_backend.scraping.bravo_parser import parse_person_page
 from trr_backend.socials.platforms import infer_platform_from_url
 
@@ -243,11 +244,7 @@ def _accumulate_validated_live_source_counts(stats: dict[str, Any] | None, rows:
     bucket_raw = stats.get("validated_live_counts_by_source")
     bucket: dict[str, int]
     if isinstance(bucket_raw, dict):
-        bucket = {
-            str(key).strip(): int(value or 0)
-            for key, value in bucket_raw.items()
-            if str(key).strip()
-        }
+        bucket = {str(key).strip(): int(value or 0) for key, value in bucket_raw.items() if str(key).strip()}
     else:
         bucket = {}
     for row in rows:
@@ -780,10 +777,21 @@ def _resolve_show_fandom_rule_context(
     show_name: str | None,
     network_values: Sequence[str] | None,
 ) -> dict[str, Any]:
+    if not _is_real_housewives_show_name(show_name):
+        return {
+            "rule_key": None,
+            "fallback_rule_key": None,
+            "effective_rule_key": None,
+            "effective_source": "none",
+            "effective_fandom_url": None,
+            "primary_url": None,
+            "review_allpages_url": None,
+            "community_domains": [],
+            "include_allpages_scan": False,
+            "candidate_urls": [],
+        }
     normalized_networks = tuple(
-        str(value).strip()
-        for value in (network_values or [])
-        if isinstance(value, str) and str(value).strip()
+        str(value).strip() for value in (network_values or []) if isinstance(value, str) and str(value).strip()
     )
     try:
         return brands_franchises.resolve_show_fandom_rule_context(
@@ -4265,9 +4273,8 @@ def _collect_show_fandom_seed_urls(
             candidates.append(real_housewives_wiki_candidate)
 
     existing_rows: list[dict[str, Any]] = []
-    should_load_existing_rows = (
-        not show_fandom_seed_urls
-        and (_is_real_housewives_show_name(show_name) or bool(franchise_rule_urls))
+    should_load_existing_rows = not show_fandom_seed_urls and (
+        _is_real_housewives_show_name(show_name) or bool(franchise_rule_urls)
     )
     if should_load_existing_rows:
         try:
@@ -6458,7 +6465,9 @@ def _run_show_link_discovery(
                 "total_targets": 1,
                 "links_discovered": int(payload_in.get("rows") or len(discovered)),
                 "targets_with_links": (
-                    1 if (current_stage.endswith("_completed") and int(payload_in.get("rows") or len(discovered)) > 0) else 0
+                    1
+                    if (current_stage.endswith("_completed") and int(payload_in.get("rows") or len(discovered)) > 0)
+                    else 0
                 ),
             }
         elif current_stage.startswith("season_discovery"):
@@ -6528,7 +6537,11 @@ def _run_show_link_discovery(
             "last_stage_transition_at": str(discovery_stats.get("__last_stage_transition_at") or "") or None,
             "stalled": stalled,
             "stalled_reason": (
-                stage_budget_reason if stalled and stage_budget_reason else "no_new_progress_events" if stalled else None
+                stage_budget_reason
+                if stalled and stage_budget_reason
+                else "no_new_progress_events"
+                if stalled
+                else None
             ),
         }
 
@@ -6992,12 +7005,10 @@ def discover_show_links_stream(
                 stage_budget_payload = last_progress_payload.get("stage_budget")
                 stage_budget = stage_budget_payload if isinstance(stage_budget_payload, dict) else {}
                 stalled_reason = (
-                    str(
-                        stage_budget.get("budget_reason")
-                        or ""
-                    ).strip()
-                    or "no_new_progress_events"
-                ) if stalled else None
+                    (str(stage_budget.get("budget_reason") or "").strip() or "no_new_progress_events")
+                    if stalled
+                    else None
+                )
                 heartbeat_payload = {
                     **last_progress_payload,
                     "show_id": show_id_str,
@@ -7160,12 +7171,10 @@ def build_show_links_discovery_operation_producer(
                 stage_budget_payload = last_progress_payload.get("stage_budget")
                 stage_budget = stage_budget_payload if isinstance(stage_budget_payload, dict) else {}
                 stalled_reason = (
-                    str(
-                        stage_budget.get("budget_reason")
-                        or ""
-                    ).strip()
-                    or "no_new_progress_events"
-                ) if stalled else None
+                    (str(stage_budget.get("budget_reason") or "").strip() or "no_new_progress_events")
+                    if stalled
+                    else None
+                )
                 heartbeat_payload = {
                     **last_progress_payload,
                     "show_id": show_id_str,

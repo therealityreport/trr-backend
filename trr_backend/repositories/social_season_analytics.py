@@ -12,6 +12,7 @@ import logging
 import mimetypes
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import time as time_module
@@ -184,6 +185,7 @@ TRUSTED_LOCAL_WORKER_LANE = "trusted_local"
 INSTAGRAM_REMOTE_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_remote_executor_blocked"
 INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_local_executor_blocked"
 SHARED_ACCOUNT_FRONTIER_LEASE_UNAVAILABLE_ERROR_CODE = "shared_account_frontier_lease_unavailable"
+SHARED_ACCOUNT_EXECUTION_LOCK_UNAVAILABLE_ERROR_CODE = "shared_account_execution_lock_unavailable"
 STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE = "stale_modal_dispatch_unclaimed"
 INSTAGRAM_MEDIA_MIRROR_JOB_TYPE = "instagram_media_mirror"
 TIKTOK_MEDIA_MIRROR_JOB_TYPE = "tiktok_media_mirror"
@@ -688,16 +690,7 @@ def _shared_account_prefers_frontier_strategy(
         bounded_window=bounded_window,
     ):
         return False
-    if resume_frontier_requested:
-        return True
-
-    expected_total = _normalize_non_negative_int(expected_total_posts)
-    catalog_total = _normalize_non_negative_int(catalog_total_posts)
-    if expected_total <= 0:
-        return True
-    if catalog_total <= 0:
-        return True
-    return (catalog_total / expected_total) < 0.9
+    return bool(resume_frontier_requested)
 
 
 def _shared_account_uses_frontier_strategy(config: Mapping[str, Any] | None, *, platform: str | None = None) -> bool:
@@ -715,6 +708,34 @@ def _shared_account_uses_frontier_strategy(config: Mapping[str, Any] | None, *, 
         strategy = str(metadata.get("partition_strategy") or metadata.get("runner_strategy") or "").strip().lower()
         return strategy == CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
     return False
+
+
+def _shared_account_prefers_partitioned_backfill_recovery(
+    config: Mapping[str, Any] | None,
+    *,
+    platform: str | None = None,
+) -> bool:
+    metadata = _metadata_dict(config)
+    normalized_platform = _normalize_platform_name(platform or metadata.get("platform"))
+    if normalized_platform != "instagram":
+        return False
+    if str(metadata.get("pipeline_ingest_mode") or "").strip().lower() != SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
+        return False
+    if _catalog_backfill_has_bounded_window(
+        date_start=_coerce_dt(metadata.get("date_start")),
+        date_end=_coerce_dt(metadata.get("date_end")),
+    ):
+        return False
+    if str(metadata.get("catalog_action") or "").strip().lower() == "resume_tail":
+        return False
+    if str(metadata.get("resume_frontier_cursor") or "").strip():
+        return False
+    # Single-hop recovery: allow only one discovery recovery requeue before
+    # forcing direct shared-account posts fallback.
+    recovery_depth = _normalize_non_negative_int(metadata.get("recovery_depth"))
+    if recovery_depth >= 1:
+        return False
+    return _catalog_full_history_partition_supported(normalized_platform)
 
 
 def _shared_account_retry_uses_frontier_recovery(
@@ -743,7 +764,287 @@ def _shared_account_retry_uses_frontier_recovery(
         "instagram_graphql_cursor_rate_limited",
         "instagram_graphql_cursor_request_failed",
         "instagram_graphql_browser_unavailable",
+        "instagram_modal_initial_empty_page",
     }
+
+
+def _shared_account_initial_empty_page_retry_limit() -> int:
+    return _resolve_int_env_with_bounds(
+        "SOCIAL_CATALOG_INITIAL_EMPTY_PAGE_RETRY_LIMIT",
+        1,
+        minimum=1,
+        maximum=5,
+    )
+
+
+def _shared_account_recovery_wait_alert_seconds() -> int:
+    return _alert_threshold_seconds(
+        "SOCIAL_CATALOG_RECOVERY_WAIT_ALERT_SECONDS",
+        60,
+        minimum=30,
+        maximum=86_400,
+    )
+
+
+def _shared_account_is_initial_empty_page_error(
+    error_code: str | None,
+    *,
+    runtime_metadata: Mapping[str, Any] | None = None,
+) -> bool:
+    normalized_error = str(error_code or "").strip().lower()
+    if normalized_error in {
+        "instagram_graphql_initial_empty_page",
+        "instagram_modal_initial_empty_page",
+        "discovery_empty_first_page",
+    }:
+        return True
+    retrieval_meta = _metadata_dict(_metadata_dict(runtime_metadata).get("retrieval_meta"))
+    return (
+        _normalize_non_negative_int(retrieval_meta.get("posts_checked")) <= 0
+        and _normalize_non_negative_int(retrieval_meta.get("pages_scanned")) == 1
+        and normalized_error.startswith("instagram_graphql_initial_")
+    )
+
+
+def _shared_account_is_modal_execution(
+    *,
+    config: Mapping[str, Any] | None,
+    dispatch_backend: str | None,
+    worker_id: str | None,
+) -> bool:
+    normalized_dispatch_backend = str(dispatch_backend or "").strip().lower()
+    normalized_worker_id = str(worker_id or "").strip().lower()
+    metadata = _metadata_dict(config)
+    return (
+        normalized_dispatch_backend == "modal"
+        or normalized_worker_id.startswith("modal:")
+        or str(metadata.get("required_execution_backend") or "").strip().lower() == "modal"
+    )
+
+
+def _shared_account_normalize_runtime_error_code(
+    error_code: str | None,
+    *,
+    config: Mapping[str, Any] | None,
+    runtime_metadata: Mapping[str, Any] | None,
+    dispatch_backend: str | None,
+    worker_id: str | None,
+) -> str:
+    normalized_error = str(error_code or "").strip().lower()
+    if not _shared_account_is_initial_empty_page_error(
+        normalized_error,
+        runtime_metadata=runtime_metadata,
+    ):
+        return normalized_error or "shared_stage_failed"
+    if _shared_account_is_modal_execution(
+        config=config,
+        dispatch_backend=dispatch_backend,
+        worker_id=worker_id,
+    ):
+        return "instagram_modal_initial_empty_page"
+    return normalized_error or "instagram_graphql_initial_empty_page"
+
+
+def _shared_account_authenticated_modal_worker_unavailable_reason(
+    worker_health: Mapping[str, Any] | None,
+) -> str | None:
+    readiness = _metadata_dict(_metadata_dict(worker_health).get("shared_account_backfill_readiness"))
+    reason = str(readiness.get("reason") or "").strip().lower() or None
+    if reason in {
+        "no_remote_authenticated_instagram_workers",
+        "no_recent_remote_authenticated_instagram_workers",
+        "no_healthy_remote_authenticated_instagram_workers",
+    }:
+        return reason
+    return None
+
+
+def _shared_account_job_stage(row: Mapping[str, Any]) -> str:
+    config = _metadata_dict(row.get("config"))
+    metadata = _metadata_dict(row.get("metadata"))
+    return str(config.get("stage") or metadata.get("stage") or "").strip().lower()
+
+
+def _shared_account_recovery_status_from_job_status(status: str | None, *, blocked: bool = False) -> str:
+    if blocked:
+        return "blocked"
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status == "running":
+        return "running"
+    if normalized_status in {"queued", "pending", "retrying", "cancelling"}:
+        return "queued"
+    if normalized_status == "completed":
+        return "completed"
+    if normalized_status in {"failed", "cancelled"}:
+        return "failed"
+    return "idle"
+
+
+def _shared_account_recovery_next_stage(stage: str | None, reason: str | None) -> str | None:
+    normalized_stage = str(stage or "").strip().lower()
+    normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason in {"no_partitions_discovered", "initial_empty_page"}:
+        if normalized_stage == SHARED_ACCOUNT_DISCOVERY_STAGE:
+            return SHARED_ACCOUNT_POSTS_STAGE
+    return None
+
+
+def _shared_account_recovery_transport(
+    config: Mapping[str, Any] | None,
+    metadata: Mapping[str, Any] | None,
+) -> str | None:
+    normalized_config = _metadata_dict(config)
+    normalized_metadata = _metadata_dict(metadata)
+    retrieval_meta = _metadata_dict(normalized_metadata.get("retrieval_meta"))
+    return (
+        str(
+            normalized_config.get("transport_preference")
+            or normalized_config.get("frontier_transport")
+            or retrieval_meta.get("transport")
+            or ""
+        )
+        .strip()
+        .lower()
+        or None
+    )
+
+
+def _shared_account_recovery_execution_backend(
+    config: Mapping[str, Any] | None,
+    metadata: Mapping[str, Any] | None,
+) -> str | None:
+    normalized_config = _metadata_dict(config)
+    normalized_metadata = _metadata_dict(metadata)
+    dispatch = _job_dispatch_metadata({"metadata": normalized_metadata})
+    return (
+        str(dispatch.get("dispatch_backend") or normalized_config.get("required_execution_backend") or "")
+        .strip()
+        .lower()
+        or None
+    )
+
+
+def _shared_account_recovery_payload(
+    *,
+    job_rows: Sequence[Mapping[str, Any]],
+    now: datetime,
+) -> dict[str, Any] | None:
+    job_by_id = {str(row.get("id") or "").strip(): row for row in job_rows if str(row.get("id") or "").strip()}
+
+    def _sort_epoch(row: Mapping[str, Any]) -> float:
+        timestamp = _coerce_dt(row.get("created_at") or row.get("started_at") or row.get("completed_at"))
+        return timestamp.timestamp() if timestamp is not None else 0.0
+
+    handoff_candidates: list[tuple[float, dict[str, Any]]] = []
+    for row in job_rows:
+        row_metadata = _metadata_dict(row.get("metadata"))
+        row_config = _metadata_dict(row.get("config"))
+        source_stage = _shared_account_job_stage(row)
+        for job_key, stage_key, default_reason, default_status in (
+            ("recovery_job_id", "recovery_job_stage", "no_partitions_discovered", None),
+            ("fallback_job_id", "fallback_job_stage", "no_partitions_discovered", "fallback_enqueued"),
+        ):
+            target_job_id = str(row_metadata.get(job_key) or "").strip()
+            if not target_job_id:
+                continue
+            target_row = job_by_id.get(target_job_id)
+            target_config = _metadata_dict((target_row or {}).get("config"))
+            target_metadata = _metadata_dict((target_row or {}).get("metadata"))
+            target_stage = (
+                str(
+                    (target_row or {}).get("stage")
+                    or target_config.get("stage")
+                    or row_metadata.get(stage_key)
+                    or source_stage
+                    or ""
+                )
+                .strip()
+                .lower()
+                or None
+            )
+            queued_since = _coerce_dt((target_row or {}).get("created_at"))
+            waited_seconds = int((now - queued_since).total_seconds()) if queued_since is not None else None
+            status = (
+                _shared_account_recovery_status_from_job_status((target_row or {}).get("status"))
+                if target_row is not None
+                else str(default_status or "queued")
+            )
+            reason = (
+                str(
+                    row_metadata.get("recovery_reason")
+                    or row_metadata.get("discovery_fallback_reason")
+                    or default_reason
+                    or ""
+                )
+                .strip()
+                .lower()
+                or None
+            )
+            handoff_candidates.append(
+                (
+                    _sort_epoch(target_row or row),
+                    {
+                        "status": status,
+                        "reason": reason,
+                        "stage": target_stage,
+                        "job_id": target_job_id,
+                        "recovery_depth": _normalize_non_negative_int(
+                            target_config.get("recovery_depth")
+                            if target_row is not None
+                            else row_config.get("recovery_depth")
+                        ),
+                        "queued_since": _iso(queued_since),
+                        "waited_seconds": waited_seconds,
+                        "attempt_count": _normalize_non_negative_int(
+                            target_config.get("initial_empty_page_retry_count") if target_row is not None else 0
+                        ),
+                        "next_stage": _shared_account_recovery_next_stage(target_stage, reason),
+                        "transport": _shared_account_recovery_transport(target_config, target_metadata),
+                        "execution_backend": _shared_account_recovery_execution_backend(target_config, target_metadata),
+                    },
+                )
+            )
+
+    terminal_candidates: list[tuple[float, dict[str, Any]]] = []
+    for row in job_rows:
+        row_config = _metadata_dict(row.get("config"))
+        row_metadata = _metadata_dict(row.get("metadata"))
+        row_error_code = str(row.get("last_error_code") or row_metadata.get("error_code") or "").strip().lower()
+        reason: str | None = None
+        blocked = False
+        if row_error_code == "instagram_modal_initial_empty_page":
+            reason = "initial_empty_page"
+        elif row_error_code == "no_authenticated_modal_workers":
+            reason = "no_authenticated_modal_workers"
+            blocked = True
+        if not reason:
+            continue
+        queued_since = _coerce_dt(row.get("created_at"))
+        waited_seconds = int((now - queued_since).total_seconds()) if queued_since is not None else None
+        stage = _shared_account_job_stage(row)
+        terminal_candidates.append(
+            (
+                _sort_epoch(row),
+                {
+                    "status": _shared_account_recovery_status_from_job_status(row.get("status"), blocked=blocked),
+                    "reason": reason,
+                    "stage": stage or None,
+                    "job_id": str(row.get("id") or "").strip() or None,
+                    "recovery_depth": _normalize_non_negative_int(row_config.get("recovery_depth")),
+                    "queued_since": _iso(queued_since),
+                    "waited_seconds": waited_seconds,
+                    "attempt_count": _normalize_non_negative_int(row_config.get("initial_empty_page_retry_count")),
+                    "next_stage": _shared_account_recovery_next_stage(stage, reason),
+                    "transport": _shared_account_recovery_transport(row_config, row_metadata),
+                    "execution_backend": _shared_account_recovery_execution_backend(row_config, row_metadata),
+                },
+            )
+        )
+
+    all_candidates = handoff_candidates + terminal_candidates
+    if not all_candidates:
+        return None
+    return max(all_candidates, key=lambda item: item[0])[1]
 
 
 def _catalog_full_history_posts_per_shard(platform: str | None) -> int:
@@ -767,8 +1068,22 @@ def _shared_instagram_catalog_graphql_page_size() -> int:
     return 50
 
 
-def _shared_instagram_catalog_delay_seconds(*, base_delay: float, success_streak: int) -> float:
-    """Catalog-specific adaptive delay tiers. Derives from SOCIAL_INSTAGRAM_DELAY_SEC base."""
+def _shared_instagram_catalog_delay_seconds(
+    *,
+    base_delay: float,
+    success_streak: int,
+    discovery: bool = False,
+) -> float:
+    """Catalog-specific adaptive delay tiers. Derives from SOCIAL_INSTAGRAM_DELAY_SEC base.
+
+    Discovery mode uses shorter delays since it only reads cursors, not persisting posts.
+    """
+    if discovery:
+        if success_streak >= 10:
+            return round(base_delay * 0.15, 4)
+        if success_streak >= 3:
+            return round(base_delay * 0.3, 4)
+        return round(base_delay * 0.5, 4)
     if success_streak >= 20:
         return round(base_delay * 0.15, 4)
     if success_streak >= 5:
@@ -1308,6 +1623,8 @@ def _job_required_execution_backend(job_config: Mapping[str, Any] | None, *, pla
     explicit_backend = str(job_config.get("required_execution_backend") or "").strip().lower()
     if explicit_backend:
         return explicit_backend
+    if bool(job_config.get("allow_local_dev_inline_bypass")):
+        return None
     if _shared_account_catalog_requires_modal_executor(
         platform=platform or job_config.get("platform"),
         pipeline_ingest_mode=str(job_config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE),
@@ -1421,6 +1738,49 @@ def _modal_dispatch_platform_cap(stage: str | None, platform: str | None) -> int
     if normalized_stage in {INSTAGRAM_MEDIA_MIRROR_STAGE, COMMENT_MEDIA_MIRROR_STAGE}:
         return _resolve_positive_int_env("SOCIAL_MIRROR_PLATFORM_CAP", 2, minimum=1)
     return None
+
+
+def _resolve_dispatch_account_handle(config: dict[str, Any]) -> str | None:
+    """Extract the canonical account handle from a job config dict.
+
+    Resolution order matches existing shared-account precedence used across
+    the dispatch, progress, and catalog subsystems.
+    """
+    for key in ("account", "account_handle", "source_account", "username"):
+        value = str(config.get(key) or "").strip()
+        if value:
+            return value.lower()
+    # Fallback: shared_account_source_id (opaque id, but still unique per account)
+    fallback = str(config.get("shared_account_source_id") or "").strip()
+    return fallback.lower() if fallback else None
+
+
+def _platform_cap_per_account_scaling_enabled() -> bool:
+    raw = (os.getenv("SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING") or "true").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _modal_dispatch_effective_platform_cap(
+    stage: str | None,
+    platform: str | None,
+    *,
+    active_account_count: int = 1,
+) -> int | None:
+    """Return the effective platform cap, scaled by the number of distinct active accounts.
+
+    When per-account scaling is enabled (default), the base per-platform cap is
+    multiplied by the number of distinct accounts with active jobs for this
+    (stage, platform) pair. The result is capped by the stage global cap so that
+    the total never exceeds the stage-wide ceiling.
+    """
+    base_cap = _modal_dispatch_platform_cap(stage, platform)
+    if base_cap is None:
+        return None
+    if not _platform_cap_per_account_scaling_enabled():
+        return base_cap
+    scaled = base_cap * max(1, active_account_count)
+    ceiling = _modal_dispatch_stage_global_cap(stage)
+    return min(scaled, ceiling)
 
 
 def _modal_dispatch_limit() -> int:
@@ -2984,6 +3344,27 @@ _RECENT_FAILURE_DISMISSED_AT_KEY = "failure_dismissed_at"
 _RECENT_FAILURE_DISMISSED_BY_KEY = "failure_dismissed_by"
 _RUN_FAILURE_DISMISSED_AT_KEY = "failure_dismissed_at"
 _RUN_FAILURE_DISMISSED_BY_KEY = "failure_dismissed_by"
+_RUN_AUTH_REPAIR_STATUS_KEY = "auth_repair_status"
+_RUN_AUTH_REPAIR_STARTED_AT_KEY = "auth_repair_started_at"
+_RUN_AUTH_REPAIR_STARTED_BY_KEY = "auth_repair_started_by"
+_RUN_AUTH_REPAIR_COMPLETED_AT_KEY = "auth_repair_completed_at"
+_RUN_AUTH_REPAIR_COMPLETED_BY_KEY = "auth_repair_completed_by"
+_RUN_AUTH_REPAIR_FAILURE_REASON_KEY = "auth_repair_failure_reason"
+_RUN_AUTH_REPAIR_FAILURE_MESSAGE_KEY = "auth_repair_failure_message"
+_RUN_AUTH_REPAIR_RESULT_KEY = "auth_repair_result"
+_RUN_AUTH_REPAIR_LAST_REQUESTED_AT_KEY = "auth_repair_last_requested_at"
+_RUN_AUTH_REPAIR_LAST_REQUESTED_BY_KEY = "auth_repair_last_requested_by"
+_RUN_AUTH_REPAIR_REPAIRABLE_REASON_KEY = "auth_repair_repairable_reason"
+_RUN_AUTH_REPAIR_RESUME_STAGE_KEY = "auth_repair_resume_stage"
+_RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY = "auth_repair_auto_resume_pending"
+_INSTAGRAM_AUTH_REPAIRABLE_ERROR_CODES = {
+    "instagram_graphql_auth_required",
+    "instagram_graphql_challenge_required",
+    "instagram_graphql_checkpoint_required",
+    "instagram_graphql_forbidden",
+    "instagram_graphql_login_required",
+}
+_TRR_BACKEND_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _count_active_jobs() -> int:
@@ -3007,6 +3388,143 @@ def _recent_failure_not_dismissed_sql(table_alias: str = "j") -> str:
 
 def _run_failure_not_dismissed_sql(table_alias: str = "r") -> str:
     return f"nullif(coalesce({table_alias}.config->>'{_RUN_FAILURE_DISMISSED_AT_KEY}', ''), '') is null"
+
+
+def _catalog_run_auth_repair_command(*, modal_environment: str | None = None) -> str:
+    command = ["python", "scripts/modal/repair_instagram_auth.py", "--json"]
+    normalized_environment = str(modal_environment or "").strip()
+    if normalized_environment:
+        command.extend(["--modal-environment", normalized_environment])
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def _catalog_run_auth_repair_environment(platform: str) -> dict[str, Any]:
+    normalized_platform = _normalize_platform_name(platform) or ""
+    runtime = execution_metadata()
+    execution_mode = str(runtime.get("execution_mode_canonical") or "").strip().lower() or "local"
+    execution_owner = str(runtime.get("execution_owner") or "").strip() or "local_api"
+    modal_environment = modal_environment_name()
+    supported = normalized_platform == "instagram" and execution_mode == "local"
+    unsupported_reason: str | None = None
+    if normalized_platform != "instagram":
+        unsupported_reason = "unsupported_platform"
+    elif execution_mode != "local":
+        unsupported_reason = "interactive_browser_requires_local_api"
+    return {
+        "supported": supported,
+        "execution_mode": execution_mode,
+        "execution_owner": execution_owner,
+        "modal_environment": modal_environment or None,
+        "unsupported_reason": unsupported_reason,
+        "repair_command": _catalog_run_auth_repair_command(modal_environment=modal_environment),
+    }
+
+
+def _instagram_auth_repair_module():
+    from scripts.modal import repair_instagram_auth
+
+    return repair_instagram_auth
+
+
+def _merge_catalog_run_config(*, run_id: str, metadata_updates: Mapping[str, Any]) -> dict[str, Any]:
+    row = pg.fetch_one(
+        """
+        update social.scrape_runs
+        set config = coalesce(config, '{}'::jsonb) || %s::jsonb
+        where id = %s::uuid
+        returning
+          id::text as id,
+          status,
+          config
+        """,
+        [_json_dumps(_metadata_dict(metadata_updates)), run_id],
+    )
+    _invalidate_queue_status_cache()
+    return {
+        "id": str((row or {}).get("id") or "").strip(),
+        "status": str((row or {}).get("status") or "").strip().lower(),
+        "config": _metadata_dict((row or {}).get("config")),
+    }
+
+
+def _reactivate_catalog_run(run_id: str) -> None:
+    pg.fetch_one(
+        """
+        update social.scrape_runs
+        set
+          status = 'running',
+          started_at = coalesce(started_at, now()),
+          completed_at = null,
+          cancelled_at = null
+        where id = %s::uuid
+        returning id::text
+        """,
+        [run_id],
+    )
+    _invalidate_queue_status_cache()
+
+
+def _enqueue_shared_posts_job(
+    *,
+    run_id: str,
+    platform: str,
+    source_scope: str,
+    account_handle: str,
+    shared_account_source_id: Any,
+    pipeline_ingest_mode: str,
+    runner_count: int,
+    expected_total_posts: int | None = None,
+    runner_strategy: str | None = None,
+    partition_strategy: str | None = None,
+    required_worker_lane: str | None = None,
+    required_execution_backend: str | None = None,
+    allow_local_dev_inline_bypass: bool = False,
+    frontier_auth_allowed: bool | None = None,
+    frontier_auth_reason: str | None = None,
+    frontier_transport: str | None = None,
+    transport_preference: str | None = None,
+    allow_public_transport_fallback: bool | None = None,
+    initiated_by: str | None = None,
+    worker_id: str | None = None,
+    priority: int = 101,
+) -> str:
+    return _create_job(
+        None,
+        run_id=run_id,
+        platform=platform,
+        source_scope=source_scope,
+        job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+        stage=SHARED_ACCOUNT_POSTS_STAGE,
+        config={
+            "stage": SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": platform,
+            "source_scope": source_scope,
+            "account": account_handle,
+            "shared_account_source_id": shared_account_source_id,
+            "pipeline_ingest_mode": pipeline_ingest_mode,
+            "partition_strategy": str(partition_strategy or CATALOG_FULL_HISTORY_FRONTIER_STRATEGY).strip().lower(),
+            "runner_strategy": str(runner_strategy or CATALOG_FULL_HISTORY_FRONTIER_STRATEGY).strip().lower(),
+            "runner_count": max(
+                1,
+                _normalize_non_negative_int(runner_count) or CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+            ),
+            "max_posts_per_target": 0,
+            "expected_total_posts": _normalize_non_negative_int(expected_total_posts) or None,
+            "required_worker_lane": str(required_worker_lane or "").strip().lower() or None,
+            "required_execution_backend": str(required_execution_backend or "").strip().lower() or None,
+            "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
+            "frontier_auth_allowed": frontier_auth_allowed,
+            "frontier_auth_reason": str(frontier_auth_reason or "").strip().lower() or None,
+            "frontier_transport": str(frontier_transport or "").strip().lower() or None,
+            "transport_preference": str(transport_preference or "").strip().lower() or None,
+            "allow_public_transport_fallback": allow_public_transport_fallback,
+        },
+        initiated_by=initiated_by,
+        status="queued" if is_queue_enabled() else "pending",
+        priority=priority,
+        worker_id=worker_id,
+        preclaim=bool(worker_id),
+    )
 
 
 def _count_recent_failures() -> int:
@@ -6024,6 +6542,18 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
                         transport=transport or None,
                     ),
                 }
+            elif int(retrieval_meta.get("error_status_code") or 0) in (401, 429) and "wait" in error_message:
+                result = {
+                    "valid": True,
+                    "reason": "rate_limited_soft_pass",
+                    "detail": _instagram_cookie_validation_detail(
+                        phase="graphql",
+                        message="Instagram rate-limited the validation probe; cookies assumed valid.",
+                        error_code=error_code or None,
+                        status_code=retrieval_meta.get("error_status_code"),
+                        transport=transport or None,
+                    ),
+                }
             elif error_code or retrieval_meta.get("error_class"):
                 result = {
                     "valid": False,
@@ -6144,6 +6674,63 @@ def _ensure_instagram_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
 def _load_instagram_cookies() -> dict[str, str]:
     cookies = _load_instagram_cookies_from_sources()
     return _ensure_instagram_cookies_fresh(cookies)
+
+
+def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dict[str, Any]:
+    cookies = _load_instagram_cookies_from_sources()
+    cookie_validation = _inspect_instagram_cookie_health(cookies)
+    reason_codes: list[str] = []
+    if not bool(cookie_validation.get("valid")):
+        reason_codes.append("instagram_cookie_invalid")
+
+    latest_failure: dict[str, Any] | None = None
+    error_reason_codes = {
+        "instagram_graphql_cursor_unauthorized": "recent_instagram_graphql_unauthorized",
+        "instagram_graphql_checkpoint_required": "recent_instagram_graphql_checkpoint_required",
+        INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE: "recent_instagram_local_executor_blocked",
+    }
+    if _relation_exists("social.scrape_jobs"):
+        cutoff = _now_utc() - timedelta(hours=max(1, int(failure_lookback_hours or 24)))
+        try:
+            failure_row = pg.fetch_one(
+                """
+                select
+                  j.id::text as job_id,
+                  j.run_id::text as run_id,
+                  j.worker_id,
+                  j.last_error_code,
+                  coalesce(j.updated_at, j.completed_at, j.started_at, j.created_at) as updated_at
+                from social.scrape_jobs as j
+                where lower(coalesce(j.last_error_code, '')) = any(%s)
+                  and coalesce(j.updated_at, j.completed_at, j.started_at, j.created_at) >= %s
+                order by coalesce(j.updated_at, j.completed_at, j.started_at, j.created_at) desc
+                limit 1
+                """,
+                [list(error_reason_codes.keys()), cutoff],
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed loading recent Instagram auth repair failures", exc_info=True)
+            failure_row = None
+        if failure_row:
+            normalized_error_code = str(failure_row.get("last_error_code") or "").strip().lower()
+            mapped_reason_code = error_reason_codes.get(normalized_error_code)
+            if mapped_reason_code and mapped_reason_code not in reason_codes:
+                reason_codes.append(mapped_reason_code)
+            updated_at = failure_row.get("updated_at")
+            latest_failure = {
+                "job_id": str(failure_row.get("job_id") or "").strip() or None,
+                "run_id": str(failure_row.get("run_id") or "").strip() or None,
+                "worker_id": str(failure_row.get("worker_id") or "").strip() or None,
+                "last_error_code": normalized_error_code or None,
+                "updated_at": _iso(_coerce_dt(updated_at)) or str(updated_at or "").strip() or None,
+            }
+
+    return {
+        "needs_repair": bool(reason_codes),
+        "reason_codes": reason_codes,
+        "cookie_validation": cookie_validation,
+        "latest_failure": latest_failure,
+    }
 
 
 def _default_platform_cookie_file_path(platform: str) -> Path:
@@ -7027,6 +7614,412 @@ def _ensure_threads_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
 def _load_threads_cookies() -> dict[str, str]:
     cookies = _load_threads_cookies_from_sources()
     return _ensure_threads_cookies_fresh(cookies)
+
+
+# ---------------------------------------------------------------------------
+# Platform cookie handler registry (shared by API + CLI)
+# ---------------------------------------------------------------------------
+
+_COOKIE_REQUIRED_PLATFORMS = frozenset({"instagram", "tiktok", "twitter", "facebook", "threads"})
+_COOKIE_REFRESH_SUPPORTED_PLATFORMS = frozenset({"tiktok", "twitter", "facebook", "threads"})
+
+
+def _cookie_platform_load_from_sources(platform: str) -> dict[str, str]:
+    loaders: dict[str, Any] = {
+        "instagram": _load_instagram_cookies_from_sources,
+        "tiktok": _load_tiktok_cookies_from_sources,
+        "twitter": lambda: _load_twitter_auth_from_sources()[0],
+        "facebook": _load_facebook_cookies_from_sources,
+        "threads": _load_threads_cookies_from_sources,
+    }
+    loader = loaders.get(_normalize_platform_name(platform) or "")
+    return loader() if loader else {}
+
+
+def _cookie_platform_validate(platform: str, cookies: dict[str, str]) -> tuple[bool, str | None]:
+    validators: dict[str, Any] = {
+        "instagram": _validate_instagram_cookie_health,
+        "tiktok": _validate_tiktok_cookie_health,
+        "twitter": _validate_twitter_cookie_health,
+        "facebook": _validate_facebook_cookie_health,
+        "threads": _validate_threads_cookie_health,
+    }
+    validator = validators.get(_normalize_platform_name(platform) or "")
+    if not validator:
+        return False, "unsupported_platform"
+    return validator(cookies)
+
+
+def _cookie_platform_validation_cache_ref(platform: str) -> str | None:
+    """Return the global variable name for a platform's validation cache (for clearing)."""
+    mapping = {
+        "instagram": "_instagram_cookie_validation_cache",
+        "tiktok": "_tiktok_cookie_validation_cache",
+        "twitter": "_twitter_cookie_validation_cache",
+        "facebook": "_facebook_cookie_validation_cache",
+        "threads": "_threads_cookie_validation_cache",
+    }
+    return mapping.get(_normalize_platform_name(platform) or "")
+
+
+def _clear_cookie_validation_cache(platform: str) -> None:
+    cache_name = _cookie_platform_validation_cache_ref(platform)
+    if cache_name:
+        globals()[cache_name] = None
+
+
+def _cookie_platform_refresh_lock(platform: str) -> Lock | None:
+    locks: dict[str, Lock] = {
+        "instagram": _instagram_cookie_refresh_lock,
+        "tiktok": _tiktok_cookie_refresh_lock,
+        "twitter": _twitter_cookie_refresh_lock,
+        "facebook": _facebook_cookie_refresh_lock,
+        "threads": _threads_cookie_refresh_lock,
+    }
+    return locks.get(_normalize_platform_name(platform) or "")
+
+
+def _cookie_platform_refresh_env_config(platform: str) -> dict[str, str]:
+    """Return the env var names for a platform's cookie refresh credentials and headless config."""
+    configs: dict[str, dict[str, str]] = {
+        "tiktok": {
+            "username_env": "SOCIAL_AUTH_TIKTOK_USERNAME",
+            "password_env": "SOCIAL_AUTH_TIKTOK_PASSWORD",
+            "headless_env": "SOCIAL_TIKTOK_COOKIE_REFRESH_HEADLESS",
+            "timeout_env": "SOCIAL_TIKTOK_COOKIE_REFRESH_TIMEOUT_SECONDS",
+        },
+        "twitter": {
+            "username_env": "SOCIAL_AUTH_TWITTER_USERNAME",
+            "password_env": "SOCIAL_AUTH_TWITTER_PASSWORD",
+            "headless_env": "SOCIAL_TWITTER_COOKIE_REFRESH_HEADLESS",
+            "timeout_env": "SOCIAL_TWITTER_COOKIE_REFRESH_TIMEOUT_SECONDS",
+        },
+        "facebook": {
+            "username_env": "SOCIAL_AUTH_FACEBOOK_USERNAME",
+            "password_env": "SOCIAL_AUTH_FACEBOOK_PASSWORD",
+            "headless_env": "SOCIAL_FACEBOOK_COOKIE_REFRESH_HEADLESS",
+            "timeout_env": "SOCIAL_FACEBOOK_COOKIE_REFRESH_TIMEOUT_SECONDS",
+        },
+        "threads": {
+            "username_env": "SOCIAL_AUTH_THREADS_USERNAME",
+            "password_env": "SOCIAL_AUTH_THREADS_PASSWORD",
+            "headless_env": "SOCIAL_THREADS_COOKIE_REFRESH_HEADLESS",
+            "timeout_env": "SOCIAL_THREADS_COOKIE_REFRESH_TIMEOUT_SECONDS",
+        },
+    }
+    return configs.get(_normalize_platform_name(platform) or "", {})
+
+
+def _resolve_cookie_source_kind(platform: str) -> tuple[str, str | None]:
+    """Determine how cookies are currently sourced for a platform.
+
+    Returns (source_kind, source_path_or_none).
+    """
+    normalized = _normalize_platform_name(platform) or ""
+    override_refs = {
+        "instagram": "_instagram_cookie_runtime_override",
+        "tiktok": "_tiktok_cookie_runtime_override",
+        "twitter": "_twitter_cookie_runtime_override",
+        "facebook": "_facebook_cookie_runtime_override",
+        "threads": "_threads_cookie_runtime_override",
+    }
+    override_name = override_refs.get(normalized)
+    if override_name and globals().get(override_name):
+        return "runtime_override", None
+
+    json_env_keys = {
+        "instagram": ("SOCIAL_INSTAGRAM_COOKIES_JSON", "INSTAGRAM_COOKIES_JSON"),
+        "tiktok": ("SOCIAL_TIKTOK_COOKIES_JSON", "TIKTOK_COOKIES_JSON"),
+        "twitter": ("SOCIAL_TWITTER_COOKIES_JSON", "TWITTER_COOKIES_JSON"),
+        "facebook": ("SOCIAL_FACEBOOK_COOKIES_JSON", "FACEBOOK_COOKIES_JSON"),
+        "threads": ("SOCIAL_THREADS_COOKIES_JSON", "THREADS_COOKIES_JSON"),
+    }
+    for key in json_env_keys.get(normalized, ()):
+        if (os.getenv(key) or "").strip():
+            return "env_json", None
+
+    file_env_keys_map = {
+        "instagram": ("SOCIAL_INSTAGRAM_COOKIES_FILE", "INSTAGRAM_COOKIES_FILE"),
+        "tiktok": ("SOCIAL_TIKTOK_COOKIES_FILE", "TIKTOK_COOKIES_FILE"),
+        "twitter": ("SOCIAL_TWITTER_COOKIES_FILE", "TWITTER_COOKIES_FILE"),
+        "facebook": ("SOCIAL_FACEBOOK_COOKIES_FILE", "FACEBOOK_COOKIES_FILE"),
+        "threads": ("SOCIAL_THREADS_COOKIES_FILE", "THREADS_COOKIES_FILE"),
+    }
+    for key in file_env_keys_map.get(normalized, ()):
+        raw = (os.getenv(key) or "").strip()
+        if raw:
+            return "env_file", raw
+
+    default = _default_platform_cookie_file_path(normalized)
+    if default.is_file():
+        return "default_file", str(default)
+
+    return "default_file", str(default)
+
+
+def _is_local_cookie_refresh_runtime() -> bool:
+    """Check if the current process can run a headed browser for interactive cookie refresh."""
+    runtime_markers = (
+        os.getenv("APP_ENV"),
+        os.getenv("ENV"),
+        os.getenv("ENVIRONMENT"),
+        os.getenv("TRR_ENV"),
+        os.getenv("TRR_ENVIRONMENT"),
+        os.getenv("WORKSPACE_ENV"),
+    )
+    normalized = {str(value or "").strip().lower() for value in runtime_markers if str(value or "").strip()}
+    local_markers = {"local", "dev", "development", "test", "testing"}
+    if normalized & local_markers:
+        return True
+    for flag in ("TRR_LOCAL_DEV", "TRR_MODAL_ALLOW_DOTENV_FALLBACK"):
+        raw = (os.getenv(flag) or "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    # If no markers indicate remote, assume local (dev server default)
+    if not normalized:
+        return True
+    return False
+
+
+def check_platform_cookie_health(platform: str, *, force: bool = False) -> dict[str, Any]:
+    """Check cookie health for a platform. Returns a structured dict suitable for API responses."""
+    normalized = _normalize_platform_name(platform)
+    if normalized in {"youtube"}:
+        return {
+            "platform": normalized,
+            "required": False,
+            "healthy": True,
+            "reason": None,
+            "refresh_supported": False,
+            "refresh_available": False,
+            "source_kind": "public_api",
+        }
+    if normalized not in _COOKIE_REQUIRED_PLATFORMS:
+        return {
+            "platform": normalized or platform,
+            "required": False,
+            "healthy": True,
+            "reason": None,
+            "refresh_supported": False,
+            "refresh_available": False,
+            "source_kind": "unsupported",
+        }
+
+    if force:
+        _clear_cookie_validation_cache(normalized)
+
+    cookies = _cookie_platform_load_from_sources(normalized)
+    is_valid, reason = _cookie_platform_validate(normalized, cookies)
+    source_kind, source_path = _resolve_cookie_source_kind(normalized)
+    refresh_supported = normalized in _COOKIE_REFRESH_SUPPORTED_PLATFORMS
+    refresh_available = refresh_supported and _is_local_cookie_refresh_runtime()
+
+    result: dict[str, Any] = {
+        "platform": normalized,
+        "required": True,
+        "healthy": is_valid,
+        "reason": reason,
+        "refresh_supported": refresh_supported,
+        "refresh_available": refresh_available,
+        "source_kind": source_kind,
+    }
+    if source_path:
+        result["source_path"] = source_path
+
+    # Warn if cookies sourced from env var but refresh writes to file
+    if source_kind == "env_json" and refresh_supported:
+        default_file = _default_platform_cookie_file_path(normalized)
+        result["refresh_target_path"] = str(default_file)
+        result["warning_code"] = "env_json_source_refresh_writes_file"
+        result["warning_message"] = (
+            f"Cookies loaded from environment variable; refresh writes to {default_file}. "
+            "After refresh, the env var will still take precedence on next load."
+        )
+    elif source_kind in ("env_file", "default_file") and source_path:
+        result["refresh_target_path"] = source_path
+
+    return result
+
+
+def refresh_platform_cookies_interactive(
+    platform: str,
+    *,
+    headless: bool = False,
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    """Trigger an interactive (headed browser) cookie refresh for a platform.
+
+    Acquires the platform's refresh lock, calls the platform-specific refresh
+    module with the explicit headless override, clears validation cache on
+    success, and returns the updated health payload.
+    """
+    normalized = _normalize_platform_name(platform)
+    if not normalized or normalized not in _COOKIE_REFRESH_SUPPORTED_PLATFORMS:
+        return {
+            "success": False,
+            "healthy": False,
+            "reason": f"refresh_not_supported_for_{normalized or platform}",
+        }
+
+    if not _is_local_cookie_refresh_runtime():
+        return {
+            "success": False,
+            "healthy": False,
+            "reason": "refresh_requires_local_runtime",
+        }
+
+    lock = _cookie_platform_refresh_lock(normalized)
+    if lock is None:
+        return {"success": False, "healthy": False, "reason": "no_refresh_lock"}
+
+    # Non-blocking acquire — if already refreshing, return busy
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        return {"success": False, "healthy": False, "reason": "refresh_already_in_progress"}
+
+    try:
+        env_config = _cookie_platform_refresh_env_config(normalized)
+        username_env = env_config.get("username_env", "")
+        password_env = env_config.get("password_env", "")
+        username, password = _platform_auth_credentials(username_env, password_env)
+        if not username or not password:
+            return {
+                "success": False,
+                "healthy": False,
+                "reason": "missing_credentials",
+                "warning_message": f"Set {username_env} and {password_env} environment variables.",
+            }
+
+        # Import and call platform-specific refresh with explicit headless override
+        refresh_map: dict[str, Any] = {
+            "tiktok": lambda: _do_interactive_refresh_tiktok(username, password, headless, timeout_seconds),
+            "twitter": lambda: _do_interactive_refresh_twitter(username, password, headless, timeout_seconds),
+            "facebook": lambda: _do_interactive_refresh_facebook(username, password, headless, timeout_seconds),
+            "threads": lambda: _do_interactive_refresh_threads(username, password, headless, timeout_seconds),
+        }
+        do_refresh = refresh_map.get(normalized)
+        if not do_refresh:
+            return {"success": False, "healthy": False, "reason": "no_refresh_handler"}
+
+        refreshed = do_refresh()
+        success = bool(refreshed)
+        if success:
+            _clear_cookie_validation_cache(normalized)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Interactive cookie refresh for %s failed: %s", normalized, exc)
+        return {"success": False, "healthy": False, "reason": f"refresh_error: {exc}"}
+    finally:
+        lock.release()
+
+    health = check_platform_cookie_health(normalized, force=True)
+    health["success"] = success
+    return health
+
+
+def _do_interactive_refresh_tiktok(
+    username: str,
+    password: str,
+    headless: bool,
+    timeout_seconds: int,
+) -> dict[str, str]:
+    global _tiktok_cookie_runtime_override, _tiktok_cookie_validation_cache
+    from trr_backend.socials.tiktok.cookie_refresh import refresh_tiktok_cookies
+
+    refreshed = refresh_tiktok_cookies(
+        username=username,
+        password=password,
+        cookie_file=_platform_cookie_refresh_target_path(
+            _default_tiktok_cookie_file_path(),
+            "SOCIAL_TIKTOK_COOKIES_FILE",
+            "TIKTOK_COOKIES_FILE",
+        ),
+        headless=headless,
+        timeout_seconds=timeout_seconds,
+    )
+    if refreshed:
+        _tiktok_cookie_runtime_override = dict(refreshed)
+        _tiktok_cookie_validation_cache = None
+    return refreshed
+
+
+def _do_interactive_refresh_twitter(
+    username: str,
+    password: str,
+    headless: bool,
+    timeout_seconds: int,
+) -> dict[str, str]:
+    global _twitter_cookie_runtime_override, _twitter_cookie_validation_cache
+    from trr_backend.socials.twitter.cookie_refresh import refresh_twitter_cookies
+
+    refreshed = refresh_twitter_cookies(
+        username=username,
+        password=password,
+        cookie_file=_platform_cookie_refresh_target_path(
+            _default_twitter_cookie_file_path(),
+            "SOCIAL_TWITTER_COOKIES_FILE",
+            "TWITTER_COOKIES_FILE",
+        ),
+        headless=headless,
+        timeout_seconds=timeout_seconds,
+    )
+    if refreshed:
+        _twitter_cookie_runtime_override = dict(refreshed)
+        _twitter_cookie_validation_cache = None
+    return refreshed
+
+
+def _do_interactive_refresh_facebook(
+    username: str,
+    password: str,
+    headless: bool,
+    timeout_seconds: int,
+) -> dict[str, str]:
+    global _facebook_cookie_runtime_override, _facebook_cookie_validation_cache
+    from trr_backend.socials.facebook.cookie_refresh import refresh_facebook_cookies
+
+    refreshed = refresh_facebook_cookies(
+        username=username,
+        password=password,
+        cookie_file=_platform_cookie_refresh_target_path(
+            _default_facebook_cookie_file_path(),
+            "SOCIAL_FACEBOOK_COOKIES_FILE",
+            "FACEBOOK_COOKIES_FILE",
+        ),
+        headless=headless,
+        timeout_seconds=timeout_seconds,
+    )
+    if refreshed:
+        _facebook_cookie_runtime_override = dict(refreshed)
+        _facebook_cookie_validation_cache = None
+    return refreshed
+
+
+def _do_interactive_refresh_threads(
+    username: str,
+    password: str,
+    headless: bool,
+    timeout_seconds: int,
+) -> dict[str, str]:
+    global _threads_cookie_runtime_override, _threads_cookie_validation_cache
+    from trr_backend.socials.threads.cookie_refresh import refresh_threads_cookies
+
+    refreshed = refresh_threads_cookies(
+        username=username,
+        password=password,
+        cookie_file=_platform_cookie_refresh_target_path(
+            _default_threads_cookie_file_path(),
+            "SOCIAL_THREADS_COOKIES_FILE",
+            "THREADS_COOKIES_FILE",
+        ),
+        headless=headless,
+        timeout_seconds=timeout_seconds,
+    )
+    if refreshed:
+        _threads_cookie_runtime_override = dict(refreshed)
+        _threads_cookie_validation_cache = None
+    return refreshed
 
 
 # ---------------------------------------------------------------------------
@@ -9797,13 +10790,16 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
             active_jobs = int(summary.get("active_jobs") or 0)
             failed_jobs = int(summary.get("failed_jobs") or 0)
         status_breakdown = _run_job_status_breakdown(run_id)
+        fetch_terminal_error = _resolve_pipeline_ingest_mode(
+            current_config.get("pipeline_ingest_mode")
+        ) == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and _shared_catalog_fetch_has_terminal_error(run_id)
         if status_breakdown["running_jobs"] > 0:
             _set_run_status(run_id, "running")
         elif status_breakdown["cancelling_jobs"] > 0:
             _set_run_status(run_id, "cancelling")
         elif active_jobs > 0 or status_breakdown["queued_jobs"] > 0:
             _set_run_status(run_id, "queued")
-        elif failed_jobs > 0:
+        elif failed_jobs > 0 or fetch_terminal_error:
             _set_run_status(run_id, "failed")
         else:
             _set_run_status(run_id, "completed")
@@ -14502,6 +15498,38 @@ def _runtime_version_label(payload: Mapping[str, Any] | None = None) -> str | No
     metadata = _metadata_dict(payload)
     label = str(metadata.get("label") or "").strip()
     return label or None
+
+
+def _runtime_version_satisfies_requirement(
+    required_runtime: Mapping[str, Any] | None,
+    observed_runtime: Mapping[str, Any] | None,
+) -> bool:
+    required = _metadata_dict(required_runtime)
+    observed = _metadata_dict(observed_runtime)
+    if not required or not observed:
+        return False
+
+    required_backend = str(required.get("execution_backend") or "").strip().lower() or None
+    observed_backend = str(observed.get("execution_backend") or "").strip().lower() or None
+    if required_backend and observed_backend and required_backend != observed_backend:
+        return False
+
+    required_modal_image = str(required.get("modal_image") or "").strip() or None
+    observed_modal_image = str(observed.get("modal_image") or "").strip() or None
+    if required_modal_image:
+        return required_modal_image == observed_modal_image
+
+    required_commit = str(required.get("commit_sha") or "").strip() or None
+    observed_commit = str(observed.get("commit_sha") or "").strip() or None
+    if required_commit:
+        return required_commit == observed_commit
+
+    required_label = _runtime_version_label(required)
+    observed_label = _runtime_version_label(observed)
+    if required_label and observed_label and required_label == observed_label:
+        return True
+
+    return bool(required_backend and observed_backend and required_backend == observed_backend)
 
 
 def _job_runtime_metadata(stage: str) -> dict[str, Any]:
@@ -24274,6 +25302,14 @@ def _shared_catalog_payload_base(
     quotes: int | None = None,
     raw_data: dict[str, Any] | None = None,
     run_id: str | None = None,
+    # Instagram enrichment fields (populated by IG-specific upsert only)
+    music_info: dict[str, Any] | None = None,
+    audio_url: str | None = None,
+    paid_partnership: bool = False,
+    child_posts_data: list[dict[str, Any]] | None = None,
+    owner_username: str | None = None,
+    video_play_count: int | None = None,
+    video_duration: float | None = None,
 ) -> dict[str, Any]:
     now_utc = _now_utc()
     return {
@@ -24303,6 +25339,13 @@ def _shared_catalog_payload_base(
         "last_backfill_run_id": run_id,
         "last_seen_at": now_utc,
         "updated_at": now_utc,
+        "music_info": music_info or {},
+        "audio_url": audio_url,
+        "paid_partnership": paid_partnership,
+        "child_posts_data": child_posts_data or [],
+        "owner_username": owner_username,
+        "video_play_count": _normalize_non_negative_int(video_play_count),
+        "video_duration": video_duration,
     }
 
 
@@ -24340,6 +25383,13 @@ def _upsert_shared_catalog_instagram_post(
         views=getattr(post, "video_views", getattr(post, "video_views_observed", 0)),
         raw_data=post.to_dict() if hasattr(post, "to_dict") else {},
         run_id=run_id,
+        music_info=getattr(post, "music_info", None),
+        audio_url=str(getattr(post, "audio_url", "") or "").strip() or None,
+        paid_partnership=bool(getattr(post, "sponsored", False)),
+        child_posts_data=getattr(post, "child_posts_data", None),
+        owner_username=str(getattr(post, "username", "") or "").strip() or None,
+        video_play_count=getattr(post, "video_play_count", None),
+        video_duration=getattr(post, "video_duration", None),
     )
     return _pg_upsert(PLATFORM_CATALOG_POST_TABLES["instagram"], payload, conflict_col="source_id", conn=conn)
 
@@ -24383,6 +25433,13 @@ def _shared_catalog_instagram_post_payload(
         views=getattr(post, "video_views", getattr(post, "video_views_observed", 0)),
         raw_data=post.to_dict() if hasattr(post, "to_dict") else {},
         run_id=run_id,
+        music_info=getattr(post, "music_info", None),
+        audio_url=str(getattr(post, "audio_url", "") or "").strip() or None,
+        paid_partnership=bool(getattr(post, "sponsored", False)),
+        child_posts_data=getattr(post, "child_posts_data", None),
+        owner_username=str(getattr(post, "username", "") or "").strip() or None,
+        video_play_count=getattr(post, "video_play_count", None),
+        video_duration=getattr(post, "video_duration", None),
     )
 
 
@@ -25899,7 +26956,7 @@ def _claim_shared_account_run_frontier(
         update social.shared_account_run_frontiers
         set
           status = case
-            when status in ('completed', 'cancelled') then status
+            when status in ('completed', 'cancelled', 'failed') then status
             else 'running'
           end,
           lease_owner = %s,
@@ -25909,7 +26966,7 @@ def _claim_shared_account_run_frontier(
           and platform = %s
           and account_handle = %s
           and coalesce(exhausted, false) = false
-          and status not in ('completed', 'cancelled')
+          and status not in ('completed', 'cancelled', 'failed')
           and (
             lease_owner is null
             or nullif(lease_owner, '') is null
@@ -26044,6 +27101,7 @@ def _shared_account_frontier_progress(
             "retry_count": 0,
             "exhausted": False,
         }
+    metadata = _metadata_dict(frontier.get("metadata"))
     return {
         "status": str(frontier.get("status") or "queued"),
         "strategy": str(frontier.get("strategy") or ""),
@@ -26056,7 +27114,11 @@ def _shared_account_frontier_progress(
         "lease_owner": str(frontier.get("lease_owner") or "").strip() or None,
         "retry_count": _normalize_non_negative_int(frontier.get("retry_count")),
         "exhausted": bool(frontier.get("exhausted")),
-        "metadata": _metadata_dict(frontier.get("metadata")),
+        "stop_reason": str(metadata.get("frontier_stop_reason") or "").strip().lower() or None,
+        "catalog_oldest_post_at": _iso(_coerce_dt(metadata.get("catalog_oldest_post_at"))),
+        "oldest_posted_at_seen": _iso(_coerce_dt(metadata.get("oldest_posted_at_seen"))),
+        "newest_posted_at_seen": _iso(_coerce_dt(metadata.get("newest_posted_at_seen"))),
+        "metadata": metadata,
         "lease_expires_at": _iso(_coerce_dt(frontier.get("lease_expires_at"))),
         "updated_at": _iso(_coerce_dt(frontier.get("updated_at"))),
     }
@@ -26787,7 +27849,9 @@ def _fetch_shared_instagram_graphql_page(
         preferred_transport=preferred_transport,
         allow_public_fallback=allow_public_fallback,
     ):
-        fetch_kwargs = {"page_size": page_size} if page_size is not None else {}
+        fetch_kwargs: dict[str, Any] = {"fast_mode": True}
+        if page_size is not None:
+            fetch_kwargs["page_size"] = page_size
         data = scraper.fetch_posts_graphql(account_handle, cursor, delay_seconds, **fetch_kwargs)
         if data and _shared_instagram_graphql_page_has_posts(data):
             meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
@@ -26858,6 +27922,38 @@ def _shared_instagram_frontier_auth_error_code(auth_reason: str | None) -> str:
     return "instagram_graphql_auth_blocked"
 
 
+def _shared_instagram_posted_at_bounds(posts: Sequence[Any]) -> tuple[datetime | None, datetime | None]:
+    oldest_posted_at: datetime | None = None
+    newest_posted_at: datetime | None = None
+    for post in posts:
+        posted_at = _parse_instagram_time(getattr(post, "taken_at", None))
+        if posted_at is None:
+            continue
+        if oldest_posted_at is None or posted_at < oldest_posted_at:
+            oldest_posted_at = posted_at
+        if newest_posted_at is None or posted_at > newest_posted_at:
+            newest_posted_at = posted_at
+    return oldest_posted_at, newest_posted_at
+
+
+def _shared_account_frontier_completion_gap_reason(
+    *,
+    expected_total_posts: int,
+    posts_checked: int,
+    catalog_oldest_post_at: datetime | None,
+    oldest_posted_at_seen: datetime | None,
+) -> str | None:
+    if expected_total_posts > 0 and posts_checked < expected_total_posts:
+        return "expected_total_not_reached"
+    if (
+        catalog_oldest_post_at is not None
+        and oldest_posted_at_seen is not None
+        and oldest_posted_at_seen > catalog_oldest_post_at
+    ):
+        return "catalog_oldest_stored_post_not_reached"
+    return None
+
+
 def _shared_account_retry_config_updates(
     config: Mapping[str, Any] | None,
     *,
@@ -26887,12 +27983,25 @@ def _shared_account_retry_config_updates(
     updates["frontier_auth_allowed"] = auth_allowed
     updates["frontier_auth_reason"] = auth_reason
 
+    if normalized_error == "instagram_modal_initial_empty_page":
+        preferred_transport = "authenticated" if auth_allowed else "public"
+        updates["frontier_transport"] = preferred_transport
+        updates["transport_preference"] = preferred_transport
+        updates["allow_public_transport_fallback"] = False
+        updates["initial_empty_page_retry_count"] = (
+            _normalize_non_negative_int(metadata.get("initial_empty_page_retry_count")) + 1
+        )
+        return updates
+
     preferred_transport = str(metadata.get("frontier_transport") or "").strip().lower() or "public"
     if normalized_error.startswith("instagram_graphql_cursor_") and auth_allowed:
         preferred_transport = "authenticated"
     updates["frontier_transport"] = preferred_transport
 
-    if not _shared_account_uses_frontier_strategy(metadata, platform=normalized_platform):
+    if _shared_account_prefers_partitioned_backfill_recovery(metadata, platform=normalized_platform):
+        updates["runner_strategy"] = "full_history_cursor_breakpoints"
+        updates["partition_strategy"] = CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
+    elif not _shared_account_uses_frontier_strategy(metadata, platform=normalized_platform):
         updates["runner_strategy"] = CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
         updates["partition_strategy"] = CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
         if normalized_stage == SHARED_ACCOUNT_POSTS_STAGE:
@@ -26925,9 +28034,47 @@ def _shared_instagram_account_execution(account_handle: str):
 
     with browser_sessions.execution_lock(resolved_account):
         logger.info("[instagram-account-lock] waiting for account=%s lock=%s", resolved_account, lock_key)
-        with pg.db_connection(label=lock_label) as conn:
-            with pg.db_cursor(conn=conn, label=lock_label) as cur:
-                pg.fetch_one_with_cursor(cur, "select pg_advisory_lock(%s) as locked", [lock_key])
+        # Hold the session-level advisory lock on an autocommit connection so
+        # long-running scrapes do not trip idle_in_transaction_session_timeout.
+        # Retry with backoff instead of failing immediately, so concurrent jobs
+        # for the same account wait for the lock rather than all failing.
+        with pg.db_read_connection(label=lock_label) as conn:
+            max_lock_attempts = 40  # ~10 minutes total backoff (handles long scrapes)
+            lock_acquired = False
+            for attempt in range(max_lock_attempts):
+                with pg.db_cursor(conn=conn, label=lock_label) as cur:
+                    lock_row = (
+                        pg.fetch_one_with_cursor(
+                            cur,
+                            "select pg_try_advisory_lock(%s) as locked",
+                            [lock_key],
+                        )
+                        or {}
+                    )
+                if bool(lock_row.get("locked")):
+                    lock_acquired = True
+                    break
+                if attempt < max_lock_attempts - 1:
+                    wait_seconds = 15.0
+                    logger.info(
+                        "[instagram-account-lock] lock busy, retrying in %.0fs (attempt %d/%d) account=%s",
+                        wait_seconds,
+                        attempt + 1,
+                        max_lock_attempts,
+                        resolved_account,
+                    )
+                    time_module.sleep(wait_seconds)
+            if not lock_acquired:
+                raise SharedStageRuntimeError(
+                    f"Instagram account execution lock for @{resolved_account} is already held.",
+                    error_code=SHARED_ACCOUNT_EXECUTION_LOCK_UNAVAILABLE_ERROR_CODE,
+                    retryable=True,
+                    runtime_metadata={
+                        "platform": "instagram",
+                        "account": resolved_account,
+                        "lock_key": lock_key,
+                    },
+                )
             logger.info("[instagram-account-lock] acquired account=%s lock=%s", resolved_account, lock_key)
             try:
                 yield resolved_account
@@ -26994,8 +28141,22 @@ def _persist_shared_catalog_posts_batch(
     account_handle: str,
     posts: Sequence[Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    normalized_platform = _normalize_platform_name(platform)
+    # Instagram: use bulk INSERT (execute_values) instead of one-by-one upserts.
+    # This reduces ~33 DB round-trips per page to a single bulk INSERT.
+    if normalized_platform == "instagram" and posts:
+        rows = _batch_upsert_shared_catalog_instagram_posts(
+            run_id=run_id,
+            account_handle=account_handle,
+            posts=list(posts),
+        )
+        source_ids = [sid for row in rows if (sid := str(_platform_source_id(platform, row)).strip())]
+        deduped_source_ids = sorted(set(source_ids))
+        return rows, deduped_source_ids
+
+    # Other platforms: one-by-one upsert (no batch function available yet)
     rows: list[dict[str, Any]] = []
-    source_ids: list[str] = []
+    source_ids_list: list[str] = []
     for post in posts:
         row = _upsert_shared_catalog_post(
             platform=platform,
@@ -27007,8 +28168,8 @@ def _persist_shared_catalog_posts_batch(
             rows.append(row)
             source_id = _platform_source_id(platform, row)
             if source_id:
-                source_ids.append(source_id)
-    deduped_source_ids = sorted({str(source_id).strip() for source_id in source_ids if str(source_id).strip()})
+                source_ids_list.append(source_id)
+    deduped_source_ids = sorted({str(source_id).strip() for source_id in source_ids_list if str(source_id).strip()})
     return rows, deduped_source_ids
 
 
@@ -27035,6 +28196,7 @@ def _run_shared_account_discovery_frontier_stage(
         platform=platform,
         account_handle=account_handle,
     )
+    catalog_oldest_post_at = _catalog_oldest_stored_post_at(platform, account_handle)
 
     def _flush_progress(*, force: bool = False) -> None:
         _emit_job_progress(
@@ -27111,6 +28273,7 @@ def _run_shared_account_discovery_frontier_stage(
                 "expected_total_posts": resumed_total_posts or None,
                 "required_worker_lane": config.get("required_worker_lane"),
                 "required_execution_backend": config.get("required_execution_backend"),
+                "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed,
                 "frontier_auth_reason": auth_reason,
                 "frontier_transport": resumed_transport,
@@ -27164,6 +28327,8 @@ def _run_shared_account_discovery_frontier_stage(
                 ),
             },
         )
+    activity["phase"] = "history_bootstrap_fetching_first_page"
+    _flush_progress(force=True)
     page_posts, page_info, retrieval_meta, selected_transport = _fetch_shared_instagram_graphql_posts_page(
         account_handle=account_handle,
         cursor=None,
@@ -27180,6 +28345,9 @@ def _run_shared_account_discovery_frontier_stage(
             error_class=str(retrieval_meta.get("error_class") or "SharedStageRuntimeError"),
             runtime_metadata={"retrieval_meta": retrieval_meta},
         )
+    activity["phase"] = "history_bootstrap_saving_first_page"
+    activity["posts_checked"] = len(page_posts)
+    _flush_progress(force=True)
     rows, _source_ids = _persist_shared_catalog_posts_batch(
         platform=platform,
         run_id=run_id,
@@ -27189,12 +28357,14 @@ def _run_shared_account_discovery_frontier_stage(
     pages_scanned = 1
     posts_checked = len(page_posts)
     saved_posts = len(rows)
+    oldest_posted_at_seen, newest_posted_at_seen = _shared_instagram_posted_at_bounds(page_posts)
     total_posts = max(
         expected_total_posts,
         _normalize_non_negative_int(retrieval_meta.get("total_posts")),
     )
     next_cursor = str(page_info.get("end_cursor") or "").strip() or None
     has_next = bool(page_info.get("has_next_page")) and bool(next_cursor)
+    frontier_stop_reason = "source_exhausted" if not has_next else None
     frontier_metadata = {
         "auth_allowed": auth_allowed,
         "auth_reason": auth_reason,
@@ -27202,13 +28372,27 @@ def _run_shared_account_discovery_frontier_stage(
         "last_error_code": retrieval_meta.get("error_code"),
         "last_error_class": retrieval_meta.get("error_class"),
         "last_error_message": retrieval_meta.get("error_message"),
+        "frontier_stop_reason": frontier_stop_reason,
+        "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+        "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+        "newest_posted_at_seen": _iso(newest_posted_at_seen),
     }
+    completion_gap_reason = _shared_account_frontier_completion_gap_reason(
+        expected_total_posts=total_posts,
+        posts_checked=posts_checked,
+        catalog_oldest_post_at=catalog_oldest_post_at,
+        oldest_posted_at_seen=oldest_posted_at_seen,
+    )
+    activity["phase"] = "history_bootstrap_creating_frontier"
+    activity["saved_posts"] = saved_posts
+    activity["total_posts"] = total_posts or None
+    _flush_progress(force=True)
     frontier = _ensure_shared_account_run_frontier(
         run_id=run_id,
         platform=platform,
         account_handle=account_handle,
         strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
-        status="queued" if has_next else "completed",
+        status="queued" if has_next else ("retrying" if completion_gap_reason else "completed"),
         next_cursor=next_cursor if has_next else None,
         total_posts=total_posts,
         posts_checked=posts_checked,
@@ -27216,7 +28400,7 @@ def _run_shared_account_discovery_frontier_stage(
         pages_scanned=pages_scanned,
         last_transport=selected_transport,
         retry_count=0,
-        exhausted=not has_next,
+        exhausted=not has_next and not bool(completion_gap_reason),
         metadata=frontier_metadata,
     )
     activity.update(
@@ -27253,6 +28437,7 @@ def _run_shared_account_discovery_frontier_stage(
                 "expected_total_posts": total_posts or None,
                 "required_worker_lane": config.get("required_worker_lane"),
                 "required_execution_backend": config.get("required_execution_backend"),
+                "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed,
                 "frontier_auth_reason": auth_reason,
                 "frontier_transport": selected_transport,
@@ -27262,6 +28447,28 @@ def _run_shared_account_discovery_frontier_stage(
             priority=101,
             worker_id=worker_id,
             preclaim=bool(worker_id),
+        )
+    elif completion_gap_reason:
+        raise SharedStageRuntimeError(
+            (
+                f"Instagram @{account_handle} history bootstrap ended before full-history coverage was proven: "
+                f"{completion_gap_reason}"
+            ),
+            error_code="catalog_incomplete",
+            retryable=True,
+            runtime_metadata={
+                "retrieval_meta": {
+                    **dict(retrieval_meta or {}),
+                    "expected_total_posts": total_posts,
+                    "observed_posts_checked": posts_checked,
+                    "observed_posts_saved": saved_posts,
+                    "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+                    "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+                    "newest_posted_at_seen": _iso(newest_posted_at_seen),
+                    "frontier_stop_reason": completion_gap_reason,
+                },
+                "frontier": frontier,
+            },
         )
     _flush_progress(force=True)
     return (
@@ -27302,7 +28509,9 @@ def _discover_instagram_cursor_partitions(
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
     partition_callback: Callable[[SharedAccountCursorPartition, int | None], None] | None = None,
 ) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
-    with _shared_instagram_account_execution(account_handle):
+    # Discovery is read-only (scanning cursors, not writing posts), so skip the
+    # account-level advisory lock.  This prevents stale locks from blocking new runs.
+    with nullcontext(account_handle):
         public_scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
         auth_scraper = (
             _build_shared_instagram_scraper(authenticated=True, browser_account_id=account_handle)
@@ -27330,11 +28539,17 @@ def _discover_instagram_cursor_partitions(
         selected_transport: str | None = "authenticated" if auth_allowed else None
         last_retrieval_meta: dict[str, Any] = {}
 
+        consecutive_rate_limit_failures = 0
+        max_rate_limit_retries = 3
+
+        # Brief pause after auth validation probe before page 1.
+        time_module.sleep(1.0)
         while True:
             pages_scanned += 1
             adaptive_delay = _shared_instagram_catalog_delay_seconds(
                 base_delay=base_delay_seconds,
-                success_streak=pages_scanned - 1,
+                success_streak=max(0, pages_scanned - 1),
+                discovery=True,
             )
             data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
                 account_handle=account_handle,
@@ -27343,13 +28558,29 @@ def _discover_instagram_cursor_partitions(
                 public_scraper=public_scraper,
                 auth_scraper=auth_scraper,
                 preferred_transport=selected_transport,
-                allow_public_fallback=not auth_allowed,
+                allow_public_fallback=True,
                 page_size=catalog_page_size,
             )
             if page_meta:
                 last_retrieval_meta = dict(page_meta)
             if not data:
+                error_status = int(last_retrieval_meta.get("error_status_code") or 0)
+                error_msg = str(last_retrieval_meta.get("error_message") or "").strip().lower()
+                is_rate_limit = error_status in (401, 429) and "wait" in error_msg
+                if is_rate_limit and consecutive_rate_limit_failures < max_rate_limit_retries:
+                    consecutive_rate_limit_failures += 1
+                    pages_scanned -= 1  # don't count failed page
+                    backoff = min(60.0, 20.0 * consecutive_rate_limit_failures)
+                    logger.info(
+                        "Discovery rate-limited (attempt %d/%d), backing off %.0fs before retry",
+                        consecutive_rate_limit_failures,
+                        max_rate_limit_retries,
+                        backoff,
+                    )
+                    time_module.sleep(backoff)
+                    continue
                 break
+            consecutive_rate_limit_failures = 0
             page_info: dict[str, Any] = {}
             timestamps: list[int] = []
             page_posts = 0
@@ -27649,7 +28880,10 @@ def _scrape_shared_instagram_posts_partitioned(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from trr_backend.socials.instagram import ScrapeConfig
 
-    with _shared_instagram_account_execution(account_handle):
+    # Partitioned scraping operates on non-overlapping cursor ranges, so
+    # we skip the account-level advisory lock.  This allows multiple partition
+    # workers to scrape the same account concurrently.
+    with nullcontext(account_handle):
         public_scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
         auth_allowed, _auth_reason = _shared_instagram_frontier_auth_validation(config)
         auth_scraper = (
@@ -27671,18 +28905,22 @@ def _scrape_shared_instagram_posts_partitioned(
         selected_transport: str | None = str(config.get("transport_preference") or "").strip().lower() or (
             "authenticated" if auth_allowed else None
         )
-        allow_public_fallback = bool(config.get("allow_public_transport_fallback", auth_scraper is None))
+        allow_public_fallback = bool(config.get("allow_public_transport_fallback", True))
         pages_scanned = 0
         posts_checked = 0
         rows: list[dict[str, Any]] = []
         seen_cursors: set[str] = set()
         last_retrieval_meta: dict[str, Any] = {}
+        consecutive_rate_limit_failures = 0
+        max_rate_limit_retries = 3
 
+        # Brief pause after auth validation probe before page 1.
+        time_module.sleep(1.0)
         while True:
             pages_scanned += 1
             adaptive_delay = _shared_instagram_catalog_delay_seconds(
                 base_delay=base_delay_seconds,
-                success_streak=pages_scanned - 1,
+                success_streak=max(0, pages_scanned - 1),
             )
             data, page_meta, selected_transport = _fetch_shared_instagram_graphql_page(
                 account_handle=account_handle,
@@ -27697,7 +28935,23 @@ def _scrape_shared_instagram_posts_partitioned(
             if page_meta:
                 last_retrieval_meta = dict(page_meta)
             if not data:
+                error_status = int(last_retrieval_meta.get("error_status_code") or 0)
+                error_msg = str(last_retrieval_meta.get("error_message") or "").strip().lower()
+                is_rate_limit = error_status in (401, 429) and "wait" in error_msg
+                if is_rate_limit and consecutive_rate_limit_failures < max_rate_limit_retries:
+                    consecutive_rate_limit_failures += 1
+                    pages_scanned -= 1
+                    backoff = min(60.0, 20.0 * consecutive_rate_limit_failures)
+                    logger.info(
+                        "Partition fetch rate-limited (attempt %d/%d), backing off %.0fs",
+                        consecutive_rate_limit_failures,
+                        max_rate_limit_retries,
+                        backoff,
+                    )
+                    time_module.sleep(backoff)
+                    continue
                 break
+            consecutive_rate_limit_failures = 0
             page_info: dict[str, Any] = {}
             page_posts: list[Any] = []
             for node, pi in public_scraper._iter_posts_from_graphql(data):
@@ -27731,6 +28985,11 @@ def _scrape_shared_instagram_posts_partitioned(
                 break
             cursor = next_cursor
             seen_cursors.add(cursor)
+        # Detect partial scrape: if we stopped early due to errors (not end-of-feed)
+        has_error = bool(last_retrieval_meta.get("error_code") or last_retrieval_meta.get("error_class"))
+        end_cursor_val = max(0, int(config.get("cursor_end") or 0))
+        reached_boundary = end_cursor_val <= 0 or (cursor is not None and int(cursor) <= end_cursor_val)
+        is_partial = has_error and not reached_boundary and posts_checked > 0
         retrieval_meta = {
             "retrieval_mode": "graphql_partition",
             "pages_scanned": pages_scanned,
@@ -27741,6 +29000,7 @@ def _scrape_shared_instagram_posts_partitioned(
             or str(last_retrieval_meta.get("transport") or "").strip()
             or None,
             "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
+            "partial_scrape": is_partial,
         }
         for key in (
             "error_code",
@@ -27875,7 +29135,12 @@ def _scrape_shared_instagram_posts(
     from trr_backend.socials.instagram import ScrapeConfig
 
     with _shared_instagram_account_execution(account_handle):
-        scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
+        auth_allowed, _auth_reason = _shared_instagram_frontier_auth_validation(config)
+        scraper = (
+            _build_shared_instagram_scraper(authenticated=True, browser_account_id=account_handle)
+            if auth_allowed
+            else None
+        ) or _build_shared_instagram_scraper(browser_account_id=account_handle)
         scrape_config = ScrapeConfig(
             username=account_handle,
             hashtags=[],
@@ -27885,6 +29150,11 @@ def _scrape_shared_instagram_posts(
             max_pages=_shared_stage_post_limit(config),
         )
         posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
+        # If auth scraper returned nothing, fall back to public transport.
+        if not posts and auth_allowed:
+            public_scraper = _build_shared_instagram_scraper(browser_account_id=account_handle)
+            posts = public_scraper.scrape(scrape_config, progress_cb=progress_cb)
+            scraper = public_scraper
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     rows: list[dict[str, Any]] = []
     if _shared_catalog_mode(config):
@@ -28545,7 +29815,10 @@ def _maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
           platform,
           lower(coalesce(config->>'account', '')) as account_handle,
           lower(coalesce(config->>'stage', metadata->>'stage', job_type, '')) as stage,
-          lower(coalesce(status, '')) as status
+          lower(coalesce(status, '')) as status,
+          metadata,
+          error_message,
+          last_error_code
         from social.scrape_jobs
         where run_id = %s::uuid
           and lower(coalesce(config->>'stage', metadata->>'stage', job_type, '')) in (%s, %s, %s)
@@ -28568,6 +29841,8 @@ def _maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
     ):
         return 0
     if any(str(row.get("status") or "").strip().lower() == "failed" for row in fetch_rows):
+        return 0
+    if any(_shared_catalog_fetch_row_has_terminal_error(row) for row in fetch_rows):
         return 0
 
     existing_classify = {
@@ -28614,6 +29889,42 @@ def _maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
             )
         )
     return created_jobs
+
+
+def _shared_catalog_fetch_row_has_terminal_error(row: Mapping[str, Any]) -> bool:
+    metadata = _metadata_dict(row.get("metadata"))
+    retrieval_meta = _metadata_dict(metadata.get("retrieval_meta"))
+    error_code = (
+        str(metadata.get("error_code") or retrieval_meta.get("error_code") or row.get("last_error_code") or "")
+        .strip()
+        .lower()
+    )
+    error_marker = str(metadata.get("error") or "").strip().lower()
+    error_message = str(metadata.get("error_message") or row.get("error_message") or "").strip()
+    return bool(error_code or error_marker or error_message)
+
+
+def _shared_catalog_fetch_has_terminal_error(run_id: str) -> bool:
+    job_rows = pg.fetch_all(
+        """
+        select
+          lower(coalesce(config->>'stage', metadata->>'stage', job_type, '')) as stage,
+          lower(coalesce(status, '')) as status,
+          metadata,
+          error_message,
+          last_error_code
+        from social.scrape_jobs
+        where run_id = %s::uuid
+          and lower(coalesce(config->>'stage', metadata->>'stage', job_type, '')) in (%s, %s)
+        """,
+        [run_id, SHARED_ACCOUNT_DISCOVERY_STAGE, SHARED_ACCOUNT_POSTS_STAGE],
+    )
+    fetch_rows = [
+        row
+        for row in job_rows
+        if str(row.get("stage") or "").strip().lower() in {SHARED_ACCOUNT_DISCOVERY_STAGE, SHARED_ACCOUNT_POSTS_STAGE}
+    ]
+    return any(_shared_catalog_fetch_row_has_terminal_error(row) for row in fetch_rows)
 
 
 def _enqueue_shared_materialize_job(
@@ -28695,6 +30006,9 @@ def _enqueue_shared_discovery_job(
     partition_strategy: str | None = None,
     required_worker_lane: str | None = None,
     required_execution_backend: str | None = None,
+    allow_local_dev_inline_bypass: bool = False,
+    transport_preference: str | None = None,
+    allow_public_transport_fallback: bool | None = None,
     resume_frontier_cursor: str | None = None,
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
     catalog_action: str | None = None,
@@ -28702,6 +30016,7 @@ def _enqueue_shared_discovery_job(
     initiated_by: str | None = None,
     worker_id: str | None = None,
     priority: int = 100,
+    recovery_depth: int = 0,
 ) -> str:
     normalized_resume_cursor = str(resume_frontier_cursor or "").strip() or None
     return _create_job(
@@ -28726,10 +30041,14 @@ def _enqueue_shared_discovery_job(
             "expected_total_posts": _normalize_non_negative_int(expected_total_posts),
             "required_worker_lane": str(required_worker_lane or "").strip().lower() or None,
             "required_execution_backend": str(required_execution_backend or "").strip().lower() or None,
+            "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
+            "transport_preference": str(transport_preference or "").strip().lower() or None,
+            "allow_public_transport_fallback": allow_public_transport_fallback,
             "resume_frontier_cursor": normalized_resume_cursor,
             "resume_frontier_snapshot": dict(resume_frontier_snapshot or {}) if normalized_resume_cursor else None,
             "catalog_action": str(catalog_action or "").strip().lower() or None,
             "catalog_action_scope": str(catalog_action_scope or "").strip().lower() or None,
+            "recovery_depth": max(0, int(recovery_depth)),
         },
         initiated_by=initiated_by,
         status="queued" if is_queue_enabled() else "pending",
@@ -28872,6 +30191,7 @@ def _run_shared_account_discovery_stage(
                 "profile_snapshot": None,
                 "required_worker_lane": config.get("required_worker_lane"),
                 "required_execution_backend": config.get("required_execution_backend"),
+                "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
                 "frontier_auth_reason": auth_reason if platform == "instagram" else None,
             },
@@ -28926,6 +30246,87 @@ def _run_shared_account_discovery_stage(
             metadata_updates={"profile_snapshot": profile_snapshot},
         )
     if not partitions:
+        # Only attempt recovery if discovery actually scanned some posts.
+        # If we got 0 posts on the first page, Instagram is blocking us —
+        # retrying with a new discovery job won't help, just fail cleanly.
+        discovery_checked = _normalize_non_negative_int(discovery_meta.get("posts_checked"))
+        recovery_depth = _normalize_non_negative_int(config.get("recovery_depth"))
+        if (
+            discovery_checked > 0
+            and recovery_depth <= 0
+            and _shared_account_prefers_partitioned_backfill_recovery(config, platform=platform)
+        ):
+            recovery_job_id = _enqueue_shared_discovery_job(
+                run_id=run_id,
+                platform=platform,
+                source_scope=source_scope,
+                account_handle=account_handle,
+                shared_account_source_id=config.get("shared_account_source_id"),
+                pipeline_ingest_mode=str(
+                    config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                ),
+                runner_count=max(1, runner_count),
+                expected_total_posts=expected_total_posts,
+                runner_strategy="full_history_cursor_breakpoints",
+                partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                required_worker_lane=str(config.get("required_worker_lane") or "").strip().lower() or None,
+                required_execution_backend=str(config.get("required_execution_backend") or "").strip().lower() or None,
+                allow_local_dev_inline_bypass=bool(config.get("allow_local_dev_inline_bypass")),
+                catalog_action=str(config.get("catalog_action") or "").strip().lower() or None,
+                catalog_action_scope=str(config.get("catalog_action_scope") or "").strip().lower() or None,
+                initiated_by=None,
+                worker_id=None,
+                priority=100,
+                recovery_depth=_normalize_non_negative_int(config.get("recovery_depth")) + 1,
+            )
+            activity["phase"] = "discovery_partition_recovery_enqueued"
+            activity["queued_jobs"] = 1
+            _flush_progress(force=True)
+            return (
+                0,
+                0,
+                {
+                    "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                    "platform": platform,
+                    "account": account_handle,
+                    "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                    "discovered_partition_count": 0,
+                    "recovery_job_enqueued": True,
+                    "recovery_job_id": recovery_job_id,
+                    "recovery_job_stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                    "recovery_reason": "no_partitions_discovered",
+                    "retrieval_meta": discovery_meta,
+                    "expected_total_posts": expected_total_posts,
+                    "activity": dict(activity),
+                    "pipeline_ingest_mode": str(
+                        config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                    ),
+                },
+            )
+        # Only create frontier fallback if discovery actually checked some posts.
+        # If the first page returned nothing, Instagram is blocking — don't spin up
+        # more jobs that will also fail.
+        if discovery_checked == 0:
+            logger.warning(
+                "Discovery got 0 posts for @%s — Instagram likely blocking. Skipping frontier fallback.",
+                account_handle,
+            )
+            return (
+                0,
+                0,
+                {
+                    "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                    "platform": platform,
+                    "account": account_handle,
+                    "discovered_partition_count": 0,
+                    "error": "discovery_empty_first_page",
+                    "error_message": (
+                        f"Instagram returned no posts for @{account_handle} on the first page. "
+                        "The account may be blocked or rate-limited from this IP."
+                    ),
+                    "retrieval_meta": discovery_meta,
+                },
+            )
         fallback_job_id = _create_job(
             None,
             run_id=run_id,
@@ -28950,10 +30351,12 @@ def _run_shared_account_discovery_stage(
                 "profile_snapshot": profile_snapshot,
                 "required_worker_lane": config.get("required_worker_lane"),
                 "required_execution_backend": config.get("required_execution_backend"),
+                "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
                 "frontier_auth_reason": auth_reason if platform == "instagram" else None,
                 "transport_preference": "authenticated" if platform == "instagram" and auth_allowed else None,
                 "allow_public_transport_fallback": False if platform == "instagram" and auth_allowed else None,
+                "recovery_depth": _normalize_non_negative_int(config.get("recovery_depth")) + 1,
             },
             initiated_by=None,
             status="queued" if is_queue_enabled() else "pending",
@@ -28976,6 +30379,7 @@ def _run_shared_account_discovery_stage(
                 "fallback_direct_job_enqueued": True,
                 "fallback_job_id": fallback_job_id,
                 "fallback_job_stage": SHARED_ACCOUNT_POSTS_STAGE,
+                "recovery_reason": "no_partitions_discovered",
                 "retrieval_meta": discovery_meta,
                 "expected_total_posts": expected_total_posts,
                 "activity": dict(activity),
@@ -29068,6 +30472,7 @@ def _run_shared_account_discovery_stage(
                 "profile_snapshot": profile_snapshot,
                 "required_worker_lane": config.get("required_worker_lane"),
                 "required_execution_backend": config.get("required_execution_backend"),
+                "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
                 "frontier_auth_reason": auth_reason if platform == "instagram" else None,
             },
@@ -29183,6 +30588,14 @@ def _run_shared_account_frontier_posts_stage(
     _flush_progress(force=True)
     next_cursor = str(claimed_frontier.get("next_cursor") or "").strip() or None
     frontier_metadata = _metadata_dict(claimed_frontier.get("metadata"))
+    catalog_oldest_post_at = _coerce_dt(
+        frontier_metadata.get("catalog_oldest_post_at")
+    ) or _catalog_oldest_stored_post_at(
+        platform,
+        account_handle,
+    )
+    oldest_posted_at_seen = _coerce_dt(frontier_metadata.get("oldest_posted_at_seen"))
+    newest_posted_at_seen = _coerce_dt(frontier_metadata.get("newest_posted_at_seen"))
     auth_allowed, auth_reason = (
         _shared_instagram_frontier_auth_state(config, frontier_metadata=frontier_metadata)
         if platform == "instagram"
@@ -29219,6 +30632,10 @@ def _run_shared_account_frontier_posts_stage(
                     "last_error_code": error_code,
                     "last_error_class": SharedStageRuntimeError.__name__,
                     "last_error_message": error_message,
+                    "frontier_stop_reason": auth_reason or "auth_blocked",
+                    "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+                    "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+                    "newest_posted_at_seen": _iso(newest_posted_at_seen),
                     "cooldown_until": None,
                     "graphql_cursor": next_cursor,
                 },
@@ -29253,6 +30670,10 @@ def _run_shared_account_frontier_posts_stage(
                     retry_count=_normalize_non_negative_int(claimed_frontier.get("retry_count")) + 1,
                     metadata_updates={
                         "last_error_code": "instagram_graphql_cursor_loop",
+                        "frontier_stop_reason": "repeating_cursor",
+                        "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+                        "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+                        "newest_posted_at_seen": _iso(newest_posted_at_seen),
                         "graphql_cursor": next_cursor,
                     },
                 )
@@ -29288,6 +30709,13 @@ def _run_shared_account_frontier_posts_stage(
                         "last_error_code": retrieval_meta.get("error_code"),
                         "last_error_class": retrieval_meta.get("error_class"),
                         "last_error_message": retrieval_meta.get("error_message"),
+                        "frontier_stop_reason": str(retrieval_meta.get("error_code") or "request_failed")
+                        .strip()
+                        .lower()
+                        or "request_failed",
+                        "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+                        "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+                        "newest_posted_at_seen": _iso(newest_posted_at_seen),
                         "cooldown_until": cooldown_until,
                         "graphql_cursor": retrieval_meta.get("graphql_cursor") or next_cursor,
                     },
@@ -29312,12 +30740,22 @@ def _run_shared_account_frontier_posts_stage(
             total_pages_scanned += 1
             total_posts_checked += len(page_posts)
             total_posts_saved += len(page_rows)
+            page_oldest_posted_at, page_newest_posted_at = _shared_instagram_posted_at_bounds(page_posts)
+            if page_oldest_posted_at is not None and (
+                oldest_posted_at_seen is None or page_oldest_posted_at < oldest_posted_at_seen
+            ):
+                oldest_posted_at_seen = page_oldest_posted_at
+            if page_newest_posted_at is not None and (
+                newest_posted_at_seen is None or page_newest_posted_at > newest_posted_at_seen
+            ):
+                newest_posted_at_seen = page_newest_posted_at
             has_next = bool(page_info.get("has_next_page"))
             discovered_total_posts = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
             if discovered_total_posts > expected_total_posts:
                 expected_total_posts = discovered_total_posts
             next_cursor = str(page_info.get("end_cursor") or "").strip() or None
             exhausted = not has_next or not next_cursor
+            frontier_stop_reason = "source_exhausted" if exhausted else None
             claimed_frontier = _update_shared_account_run_frontier(
                 run_id=run_id,
                 platform=platform,
@@ -29336,6 +30774,10 @@ def _run_shared_account_frontier_posts_stage(
                     "last_error_code": None,
                     "last_error_class": None,
                     "last_error_message": None,
+                    "frontier_stop_reason": frontier_stop_reason,
+                    "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+                    "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+                    "newest_posted_at_seen": _iso(newest_posted_at_seen),
                     "cooldown_until": None,
                 },
             )
@@ -29351,7 +30793,17 @@ def _run_shared_account_frontier_posts_stage(
                 }
             )
             _flush_progress(force=True)
-            if exhausted and expected_total_posts > 0 and total_posts_checked < expected_total_posts:
+            completion_gap_reason = (
+                _shared_account_frontier_completion_gap_reason(
+                    expected_total_posts=expected_total_posts,
+                    posts_checked=total_posts_checked,
+                    catalog_oldest_post_at=catalog_oldest_post_at,
+                    oldest_posted_at_seen=oldest_posted_at_seen,
+                )
+                if exhausted
+                else None
+            )
+            if completion_gap_reason:
                 _update_shared_account_run_frontier(
                     run_id=run_id,
                     platform=platform,
@@ -29366,13 +30818,17 @@ def _run_shared_account_frontier_posts_stage(
                         "expected_total_posts": expected_total_posts,
                         "observed_posts_checked": total_posts_checked,
                         "observed_posts_saved": total_posts_saved,
+                        "frontier_stop_reason": completion_gap_reason,
+                        "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+                        "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+                        "newest_posted_at_seen": _iso(newest_posted_at_seen),
                     },
                 )
                 frontier_release_status = None
                 raise SharedStageRuntimeError(
                     (
-                        f"Shared-account frontier ended early for @{account_handle}: "
-                        f"checked {total_posts_checked} of {expected_total_posts} discovered posts"
+                        f"Shared-account frontier ended before full-history coverage was proven for @{account_handle}: "
+                        f"{completion_gap_reason}"
                     ),
                     error_code="catalog_incomplete",
                     retryable=True,
@@ -29382,6 +30838,10 @@ def _run_shared_account_frontier_posts_stage(
                             "expected_total_posts": expected_total_posts,
                             "observed_posts_checked": total_posts_checked,
                             "observed_posts_saved": total_posts_saved,
+                            "catalog_oldest_post_at": _iso(catalog_oldest_post_at),
+                            "oldest_posted_at_seen": _iso(oldest_posted_at_seen),
+                            "newest_posted_at_seen": _iso(newest_posted_at_seen),
+                            "frontier_stop_reason": completion_gap_reason,
                         }
                     },
                 )
@@ -30114,7 +31574,13 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
         runtime_error_class = str(getattr(exc, "error_class", "") or "").strip()
         runtime_retryable = getattr(exc, "retryable", None)
         runtime_metadata = _metadata_dict(getattr(exc, "runtime_metadata", None))
-        error_code = runtime_error_code or "shared_stage_failed"
+        error_code = _shared_account_normalize_runtime_error_code(
+            runtime_error_code or "shared_stage_failed",
+            config=config,
+            runtime_metadata=runtime_metadata,
+            dispatch_backend=dispatch_backend,
+            worker_id=worker_id,
+        )
         error_class = runtime_error_class or exc.__class__.__name__
         attempt_count = int(job.get("attempt_count") or 1)
         max_attempts = int(job.get("max_attempts") or 1)
@@ -30123,6 +31589,12 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
             if runtime_retryable is not None
             else (attempt_count < max_attempts)
         )
+        if (
+            error_code == "instagram_modal_initial_empty_page"
+            and _normalize_non_negative_int(config.get("initial_empty_page_retry_count"))
+            >= _shared_account_initial_empty_page_retry_limit()
+        ):
+            can_retry = False
         next_available_at = _now_utc() + timedelta(seconds=_retry_backoff_seconds(attempt_count)) if can_retry else None
         retry_config_updates = (
             _shared_account_retry_config_updates(
@@ -30134,6 +31606,71 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
             if can_retry
             else {}
         )
+        retry_requeue: dict[str, Any] | None = None
+        if can_retry and error_code == "instagram_modal_initial_empty_page":
+            try:
+                assert_worker_available_when_queue_enabled(
+                    required_execution_backend="modal",
+                    platform=platform,
+                )
+            except SocialWorkerUnavailableError as worker_exc:
+                runtime_metadata["worker_health"] = _metadata_dict(worker_exc.worker_health)
+                unavailable_reason = _shared_account_authenticated_modal_worker_unavailable_reason(
+                    worker_exc.worker_health
+                )
+                if unavailable_reason:
+                    error_code = "no_authenticated_modal_workers"
+                    error_class = worker_exc.__class__.__name__
+                    can_retry = False
+                    retry_config_updates = {}
+                    next_available_at = None
+        if (
+            can_retry
+            and stage == SHARED_ACCOUNT_POSTS_STAGE
+            and error_code != "instagram_modal_initial_empty_page"
+            and _shared_account_prefers_partitioned_backfill_recovery(
+                config,
+                platform=platform,
+            )
+        ):
+            expected_total_posts = _shared_account_expected_total_posts_from_config(
+                config,
+                platform=platform,
+                account_handle=account_handle,
+            )
+            recovery_job_id = _enqueue_shared_discovery_job(
+                run_id=run_id,
+                platform=platform,
+                source_scope=source_scope,
+                account_handle=account_handle,
+                shared_account_source_id=config.get("shared_account_source_id"),
+                pipeline_ingest_mode=ingest_mode,
+                runner_count=max(
+                    1,
+                    _normalize_non_negative_int(config.get("runner_count"))
+                    or CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+                ),
+                expected_total_posts=expected_total_posts,
+                runner_strategy="full_history_cursor_breakpoints",
+                partition_strategy=CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                required_worker_lane=str(config.get("required_worker_lane") or "").strip().lower() or None,
+                required_execution_backend=str(config.get("required_execution_backend") or "").strip().lower() or None,
+                allow_local_dev_inline_bypass=bool(config.get("allow_local_dev_inline_bypass")),
+                catalog_action=str(config.get("catalog_action") or "").strip().lower() or None,
+                catalog_action_scope=str(config.get("catalog_action_scope") or "").strip().lower() or None,
+                initiated_by=None,
+                worker_id=None,
+                priority=100,
+                recovery_depth=_normalize_non_negative_int(config.get("recovery_depth")) + 1,
+            )
+            retry_requeue = {
+                "job_id": recovery_job_id,
+                "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                "runner_strategy": "full_history_cursor_breakpoints",
+                "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            }
+            retry_config_updates = {}
+            next_available_at = None
         if retry_config_updates:
             updated_config = _update_job_config(job_id, config_updates=retry_config_updates)
             if updated_config:
@@ -30158,23 +31695,31 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
                 "retryable": can_retry,
             }
         )
+        if retry_requeue:
+            metadata["retry_requeue"] = retry_requeue
         if retry_config_updates:
             metadata["retry_config_updates"] = retry_config_updates
         metadata.update(runtime_metadata)
         activity = _metadata_dict(metadata.get("activity"))
-        activity["phase"] = "failed"
+        activity["phase"] = "requeued" if retry_requeue else "failed"
         activity["last_progress_at"] = _iso(_now_utc())
         metadata["activity"] = activity
-        _finish_job(
-            job_id,
-            status="retrying" if can_retry else "failed",
-            items_found=_normalize_non_negative_int(existing_job.get("items_found")),
-            error_message=str(exc),
-            metadata=metadata,
-            last_error_code=error_code,
-            last_error_class=error_class,
-            next_available_at=next_available_at,
-        )
+        try:
+            _finish_job(
+                job_id,
+                status="cancelled" if retry_requeue else ("retrying" if can_retry else "failed"),
+                items_found=_normalize_non_negative_int(existing_job.get("items_found")),
+                error_message=str(exc),
+                metadata=metadata,
+                last_error_code=error_code,
+                last_error_class=error_class,
+                next_available_at=next_available_at,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "CRITICAL: _finish_job() failed for job_id=%s — job stuck in running state",
+                job_id,
+            )
         logger.exception("Shared social ingest job failed: job_id=%s stage=%s platform=%s", job_id, stage, platform)
     finally:
         if run_id:
@@ -30228,6 +31773,7 @@ def _current_modal_dispatch_running_counts() -> tuple[
     dict[tuple[str, str], int],
     dict[str, int],
     dict[tuple[str, str, str], int],
+    dict[tuple[str, str], set[str]],
 ]:
     rows = pg.fetch_all(
         """
@@ -30236,30 +31782,45 @@ def _current_modal_dispatch_running_counts() -> tuple[
           lower(coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown')) as stage,
           lower(coalesce(platform, 'unknown')) as platform,
           coalesce(config->>'pipeline_ingest_mode', '') as pipeline_ingest_mode,
+          lower(coalesce(
+            nullif(trim(config->>'account'), ''),
+            nullif(trim(config->>'account_handle'), ''),
+            nullif(trim(config->>'source_account'), ''),
+            nullif(trim(config->>'username'), ''),
+            nullif(trim(config->>'shared_account_source_id'), ''),
+            ''
+          )) as account_handle,
           count(*)::int as total
         from social.scrape_jobs
         where status = 'running'
-        group by 1, 2, 3, 4
+        group by 1, 2, 3, 4, 5
         """
     )
     by_stage: dict[str, int] = {}
     by_stage_platform: dict[tuple[str, str], int] = {}
     by_run: dict[str, int] = {}
     by_run_stage_platform: dict[tuple[str, str, str], int] = {}
+    active_accounts_by_stage_platform: dict[tuple[str, str], set[str]] = {}
     for row in rows:
         stage = _normalize_social_job_stage_for_stale(row.get("stage")) or "unknown"
         platform = _normalize_platform_name(row.get("platform")) or "unknown"
         run_id = str(row.get("run_id") or "").strip()
         ingest_mode = _resolve_pipeline_ingest_mode(row.get("pipeline_ingest_mode"))
+        account = str(row.get("account_handle") or "").strip()
         total = int(row.get("total") or 0)
         by_stage[stage] = by_stage.get(stage, 0) + total
         by_stage_platform[(stage, platform)] = by_stage_platform.get((stage, platform), 0) + total
+        if account:
+            sp_key = (stage, platform)
+            if sp_key not in active_accounts_by_stage_platform:
+                active_accounts_by_stage_platform[sp_key] = set()
+            active_accounts_by_stage_platform[sp_key].add(account)
         if run_id:
             by_run[run_id] = by_run.get(run_id, 0) + total
             if ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
                 key = (run_id, stage, platform)
                 by_run_stage_platform[key] = by_run_stage_platform.get(key, 0) + total
-    return by_stage, by_stage_platform, by_run, by_run_stage_platform
+    return by_stage, by_stage_platform, by_run, by_run_stage_platform, active_accounts_by_stage_platform
 
 
 def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
@@ -30297,9 +31858,13 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     )
 
     candidates = _list_candidate_jobs_for_modal_dispatch(run_id=run_id, limit=max(safe_limit * 4, 50))
-    running_by_stage, running_by_stage_platform, running_by_run, running_by_run_stage_platform = (
-        _current_modal_dispatch_running_counts()
-    )
+    (
+        running_by_stage,
+        running_by_stage_platform,
+        running_by_run,
+        running_by_run_stage_platform,
+        active_accounts_by_stage_platform,
+    ) = _current_modal_dispatch_running_counts()
     dispatched_job_ids: list[str] = []
     dispatch_attempts = 0
 
@@ -30331,6 +31896,9 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             if _modal_invocation_is_nonterminal(inspection_status):
                 running_by_stage[stage] = running_by_stage.get(stage, 0) + 1
                 running_by_stage_platform[(stage, platform)] = running_by_stage_platform.get((stage, platform), 0) + 1
+                nonterminal_account = _resolve_dispatch_account_handle(job_config)
+                if nonterminal_account:
+                    active_accounts_by_stage_platform.setdefault((stage, platform), set()).add(nonterminal_account)
                 if job_run_id:
                     running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
                     if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
@@ -30343,13 +31911,23 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             continue
         if running_by_stage.get(stage, 0) >= _modal_dispatch_stage_global_cap(stage):
             continue
-        platform_cap = _modal_dispatch_platform_cap(stage, platform)
-        if platform_cap is not None and running_by_stage_platform.get((stage, platform), 0) >= platform_cap:
+        # Compute prospective account count: existing active accounts + this candidate
+        candidate_account = _resolve_dispatch_account_handle(job_config)
+        sp_key = (stage, platform)
+        existing_accounts = active_accounts_by_stage_platform.get(sp_key, set())
+        prospective_accounts = existing_accounts | {candidate_account} if candidate_account else existing_accounts
+        effective_cap = _modal_dispatch_effective_platform_cap(
+            stage,
+            platform,
+            active_account_count=len(prospective_accounts) if prospective_accounts else 1,
+        )
+        if effective_cap is not None and running_by_stage_platform.get(sp_key, 0) >= effective_cap:
             continue
         if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and job_run_id:
             if running_by_run.get(job_run_id, 0) >= _resolve_catalog_run_in_flight_cap():
                 continue
             if stage == SHARED_ACCOUNT_POSTS_STAGE:
+                # Per-run cap stays unscaled to prevent one run from monopolizing extra capacity
                 platform_run_cap = _modal_dispatch_platform_cap(stage, platform)
                 if (
                     platform_run_cap is not None
@@ -30411,6 +31989,8 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             dispatched_job_ids.append(job_id)
             running_by_stage[stage] = running_by_stage.get(stage, 0) + 1
             running_by_stage_platform[(stage, platform)] = running_by_stage_platform.get((stage, platform), 0) + 1
+            if candidate_account:
+                active_accounts_by_stage_platform.setdefault((stage, platform), set()).add(candidate_account)
             if job_run_id:
                 running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
                 if job_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
@@ -30708,13 +32288,13 @@ def _claim_next_jobs(
         [
             worker_id,
             stale_after_seconds,
+            run_id,
+            run_id,
+            stage,
+            stage,
+            platform,
+            platform,
             current_runtime_label,
-            run_id,
-            run_id,
-            stage,
-            stage,
-            platform,
-            platform,
             worker_id,
             worker_id,
             worker_id,
@@ -32448,6 +34028,7 @@ def ingest_shared_accounts(
                     ),
                     required_worker_lane=job_config.get("required_worker_lane"),
                     required_execution_backend=job_config.get("required_execution_backend"),
+                    allow_local_dev_inline_bypass=bool(job_config.get("allow_local_dev_inline_bypass")),
                     resume_frontier_cursor=resume_frontier_cursor,
                     resume_frontier_snapshot=resume_frontier_snapshot,
                     catalog_action=normalized_catalog_action,
@@ -33663,6 +35244,15 @@ _RUN_PROGRESS_STAGE_BUCKETS = (
 )
 
 
+def _run_progress_stage_from_row(row: Mapping[str, Any]) -> str:
+    job_type_stage = _normalize_run_progress_stage(row.get("job_type"))
+    if _run_progress_stage_bucket(job_type_stage) != "other":
+        return job_type_stage
+    config = _metadata_dict(row.get("config"))
+    metadata = _metadata_dict(row.get("metadata"))
+    return _normalize_run_progress_stage(config.get("stage") or metadata.get("stage") or row.get("job_type"))
+
+
 def _normalize_run_progress_stage(stage: Any) -> str:
     normalized = _normalize_social_job_stage_for_stale(stage)
     return normalized or "other"
@@ -33987,7 +35577,7 @@ def _resolve_run_progress_worker_runtime(
     for row in sorted(job_rows, key=_job_runtime_rank):
         config = _metadata_dict(row.get("config"))
         metadata = _metadata_dict(row.get("metadata"))
-        stage = _normalize_run_progress_stage(config.get("stage") or metadata.get("stage") or row.get("job_type"))
+        stage = _run_progress_stage_from_row(row)
         if stage not in {SHARED_ACCOUNT_DISCOVERY_STAGE, SHARED_ACCOUNT_POSTS_STAGE}:
             continue
         candidate_runner_strategy = str(config.get("runner_strategy") or metadata.get("runner_strategy") or "").strip()
@@ -34044,6 +35634,64 @@ def _queued_jobs_by_type(stages_payload: Mapping[str, Any]) -> dict[str, int]:
     return queued
 
 
+def _catalog_run_recovery_is_active(recovery: Mapping[str, Any] | None) -> bool:
+    normalized_recovery = _metadata_dict(recovery)
+    return str(normalized_recovery.get("status") or "").strip().lower() in {
+        "queued",
+        "running",
+        "blocked",
+        "fallback_enqueued",
+    }
+
+
+def _catalog_run_repairable_auth_reason(
+    *,
+    platform: str,
+    job_rows: Sequence[Mapping[str, Any]],
+    frontier_progress: Mapping[str, Any],
+    last_error_code: str | None,
+) -> str | None:
+    normalized_platform = _normalize_platform_name(platform) or ""
+    if normalized_platform != "instagram":
+        return None
+    frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
+    frontier_auth_reason = str(frontier_metadata.get("auth_reason") or "").strip().lower() or None
+    if frontier_metadata.get("auth_allowed") is False and frontier_auth_reason:
+        return frontier_auth_reason
+    for row in job_rows:
+        row_metadata = _metadata_dict(row.get("metadata"))
+        row_config = _metadata_dict(row.get("config"))
+        row_stage = str(row_config.get("stage") or "").strip().lower()
+        row_error = str(row_metadata.get("error") or "").strip().lower() or None
+        row_last_error_code = str(row.get("last_error_code") or "").strip().lower() or None
+        if row_stage == SHARED_ACCOUNT_DISCOVERY_STAGE and row_error == "discovery_empty_first_page":
+            return "discovery_empty_first_page"
+        if row_last_error_code in _INSTAGRAM_AUTH_REPAIRABLE_ERROR_CODES:
+            if row_stage == SHARED_ACCOUNT_DISCOVERY_STAGE:
+                return row_error or "discovery_empty_first_page"
+            return frontier_auth_reason or "frontier_auth_blocked"
+    normalized_last_error_code = str(last_error_code or "").strip().lower() or None
+    if normalized_last_error_code in _INSTAGRAM_AUTH_REPAIRABLE_ERROR_CODES:
+        return frontier_auth_reason or "frontier_auth_blocked"
+    return None
+
+
+def _catalog_run_auth_repair_resume_stage(
+    *,
+    repairable_reason: str | None,
+    run_config: Mapping[str, Any],
+    frontier_progress: Mapping[str, Any],
+) -> str | None:
+    if not repairable_reason:
+        return None
+    configured_resume_stage = str(run_config.get(_RUN_AUTH_REPAIR_RESUME_STAGE_KEY) or "").strip().lower() or None
+    if configured_resume_stage in {"discovery", "posts"}:
+        return configured_resume_stage
+    if bool(frontier_progress.get("next_cursor_present")) or str(frontier_progress.get("next_cursor") or "").strip():
+        return "posts"
+    return "discovery"
+
+
 def _derive_catalog_run_state(
     *,
     run_status: str,
@@ -34051,6 +35699,7 @@ def _derive_catalog_run_state(
     classify_incomplete: bool,
     stages_payload: Mapping[str, Any],
     frontier_progress: Mapping[str, Any],
+    recovery: Mapping[str, Any] | None = None,
 ) -> str:
     normalized_status = str(run_status or "").strip().lower()
     frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
@@ -34066,6 +35715,8 @@ def _derive_catalog_run_state(
         return "completed"
     if normalized_status == "failed":
         return "failed"
+    if _catalog_run_recovery_is_active(recovery):
+        return "recovering"
     discovery_stage = _metadata_dict(stages_payload.get(SHARED_ACCOUNT_DISCOVERY_STAGE))
     posts_stage = _metadata_dict(stages_payload.get(SHARED_ACCOUNT_POSTS_STAGE))
     if _normalize_non_negative_int(discovery_stage.get("jobs_active")) > 0 or (
@@ -34104,9 +35755,11 @@ def _build_catalog_run_progress_alerts(
     platform: str,
     frontier_progress: Mapping[str, Any],
     payload: Mapping[str, Any],
+    recovery: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
     frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
+    recovery_payload = _metadata_dict(recovery)
     worker_runtime = _metadata_dict(payload.get("worker_runtime"))
     if bool(worker_runtime.get("runtime_version_drift")):
         _append_alert(
@@ -34153,6 +35806,20 @@ def _build_catalog_run_progress_alerts(
             frontier_status=str(frontier_progress.get("status") or "").strip().lower() or None,
         )
 
+    frontier_stop_reason = str(frontier_progress.get("stop_reason") or "").strip().lower() or None
+    if frontier_stop_reason == "catalog_oldest_stored_post_not_reached":
+        _append_alert(
+            alerts,
+            code="history_boundary_incomplete",
+            severity="warning",
+            message=(
+                "This run stopped before it reached posts older than the earliest catalog row already stored. "
+                "Treat the backfill as incomplete and let recovery requeue it."
+            ),
+            catalog_oldest_post_at=_iso(_coerce_dt(frontier_progress.get("catalog_oldest_post_at"))),
+            oldest_posted_at_seen=_iso(_coerce_dt(frontier_progress.get("oldest_posted_at_seen"))),
+        )
+
     if _frontier_lease_stale(frontier_progress=frontier_progress, platform=platform):
         _append_alert(
             alerts,
@@ -34164,6 +35831,56 @@ def _build_catalog_run_progress_alerts(
             ),
             lease_owner=str(frontier_progress.get("lease_owner") or "").strip() or None,
             frontier_status=str(frontier_progress.get("status") or "").strip().lower() or None,
+        )
+
+    recovery_status = str(recovery_payload.get("status") or "").strip().lower()
+    recovery_reason = str(recovery_payload.get("reason") or "").strip().lower()
+    recovery_waited_seconds = _normalize_non_negative_int(recovery_payload.get("waited_seconds"))
+    if recovery_status == "queued":
+        _append_alert(
+            alerts,
+            code="recovery_waiting",
+            severity="warning",
+            message="A catalog recovery handoff is queued and waiting for a worker claim.",
+            reason=recovery_reason or None,
+            waited_seconds=recovery_waited_seconds or None,
+            stage=str(recovery_payload.get("stage") or "").strip().lower() or None,
+        )
+        recovery_wait_threshold = _shared_account_recovery_wait_alert_seconds()
+        if recovery_waited_seconds >= recovery_wait_threshold:
+            _append_alert(
+                alerts,
+                code="recovery_wait_exceeded",
+                severity="warning",
+                message="A catalog recovery handoff has been waiting longer than the healthy threshold.",
+                reason=recovery_reason or None,
+                waited_seconds=recovery_waited_seconds,
+                threshold_seconds=recovery_wait_threshold,
+            )
+    if recovery_reason == "initial_empty_page":
+        _append_alert(
+            alerts,
+            code="instagram_modal_empty_page",
+            severity="error",
+            message="Instagram returned no posts on the first page from a Modal worker.",
+            transport=str(recovery_payload.get("transport") or "").strip().lower() or None,
+            execution_backend=str(recovery_payload.get("execution_backend") or "").strip().lower() or None,
+        )
+        if recovery_status == "failed":
+            _append_alert(
+                alerts,
+                code="instagram_modal_empty_page_retry_exhausted",
+                severity="error",
+                message="The authenticated retry for Instagram's empty first page was exhausted.",
+                attempt_count=_normalize_non_negative_int(recovery_payload.get("attempt_count")) or None,
+            )
+    if recovery_reason == "no_authenticated_modal_workers" or recovery_status == "blocked":
+        _append_alert(
+            alerts,
+            code="no_authenticated_modal_workers",
+            severity="error",
+            message="Authenticated Modal Instagram workers were unavailable for the empty-page retry.",
+            execution_backend=str(recovery_payload.get("execution_backend") or "").strip().lower() or None,
         )
 
     dispatch_health = _metadata_dict(payload.get("dispatch_health"))
@@ -34285,7 +36002,7 @@ def _build_run_progress_snapshot_payload(
         activity = _metadata_dict(metadata.get("activity"))
         platform = _normalize_platform_name(row.get("platform")) or "unknown"
         status = str(row.get("status") or "").strip().lower() or "unknown"
-        stage = _normalize_run_progress_stage(config.get("stage") or metadata.get("stage") or row.get("job_type"))
+        stage = _run_progress_stage_from_row(row)
         stage_bucket = _run_progress_stage_bucket(stage)
         account_handle = _run_progress_account_handle(config, metadata)
         scraped_count, saved_count = _run_progress_stage_counters(metadata, row.get("items_found"))
@@ -34498,10 +36215,8 @@ def _build_run_progress_snapshot_payload(
 
     effective_run_status = _derive_run_progress_status(run_row.get("status"), job_rows)
     required_runtime_version = _metadata_dict(run_config.get("required_runtime_version"))
-    required_runtime_label = _runtime_version_label(required_runtime_version)
     # Compare against observed worker runtime (not the local reporting process).
     observed_runtime = runtime_versions["observed"][0] if runtime_versions["observed"] else runtime_versions["current"]
-    observed_runtime_label = _runtime_version_label(observed_runtime)
 
     return {
         "season_id": str(run_row.get("season_id") or season_id or ""),
@@ -34528,9 +36243,8 @@ def _build_run_progress_snapshot_payload(
             "worker_ids_sample": sorted(active_worker_ids)[:12],
             "runtime_version": runtime_versions["current"],
             "required_runtime_version": required_runtime_version or None,
-            "runtime_version_pin_mismatch": bool(
-                required_runtime_label and observed_runtime_label and required_runtime_label != observed_runtime_label
-            ),
+            "runtime_version_pin_mismatch": bool(required_runtime_version)
+            and not _runtime_version_satisfies_requirement(required_runtime_version, observed_runtime),
             "runtime_versions_observed": runtime_versions["observed"],
             "runtime_version_drift": runtime_versions["drift_detected"],
         },
@@ -34990,7 +36704,14 @@ def get_social_account_catalog_run_progress(
     total_posts_for_gap = _normalize_non_negative_int(post_progress.get("total_posts"))
     completion_gap_posts = max(total_posts_for_gap - completed_posts, 0) if total_posts_for_gap > 0 else 0
     completion_gap_reason: str | None = None
-    if completion_gap_posts > 0 and bool(frontier_progress.get("exhausted")):
+    frontier_stop_reason = (
+        str(frontier_progress.get("stop_reason") or "").strip().lower()
+        or str(_metadata_dict(frontier_progress.get("metadata")).get("frontier_stop_reason") or "").strip().lower()
+        or None
+    )
+    if frontier_stop_reason == "catalog_oldest_stored_post_not_reached":
+        completion_gap_reason = "history_boundary_incomplete"
+    elif completion_gap_posts > 0 and bool(frontier_progress.get("exhausted")):
         if source_total_posts_current > 0 and completed_posts >= source_total_posts_current:
             completion_gap_reason = "source_total_drift"
         else:
@@ -35047,12 +36768,14 @@ def get_social_account_catalog_run_progress(
     )
     queued_jobs_by_type = _queued_jobs_by_type(stages_payload)
     dispatch_health = _metadata_dict(payload.get("dispatch_health"))
+    recovery_payload = _shared_account_recovery_payload(job_rows=job_rows, now=_now_utc())
     payload["shared_profile"] = shared_profile
     payload["network_name"] = shared_profile["network_name"]
     payload["profile_kind"] = shared_profile["profile_kind"]
     payload["assignment_mode"] = shared_profile["assignment_mode"]
     payload["assignment_rules"] = shared_profile["assignment_rules"]
     payload["queued_jobs_by_type"] = queued_jobs_by_type
+    payload["recovery"] = recovery_payload
     payload["capacity_waiting"] = (
         _normalize_non_negative_int(dispatch_health.get("modal_pending_jobs"))
         + _normalize_non_negative_int(dispatch_health.get("modal_running_unclaimed_jobs"))
@@ -35068,12 +36791,108 @@ def get_social_account_catalog_run_progress(
         classify_incomplete=bool(payload.get("classify_incomplete")),
         stages_payload=stages_payload,
         frontier_progress=frontier_progress,
+        recovery=recovery_payload,
     )
     payload["alerts"] = _build_catalog_run_progress_alerts(
         platform=normalized_platform,
         frontier_progress=frontier_progress,
         payload=payload,
+        recovery=recovery_payload,
     )
+    frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
+    declared_runner_strategy = str(run_config.get("runner_strategy") or "").strip().lower() or None
+    declared_partition_strategy = str(run_config.get("partition_strategy") or "").strip().lower() or None
+    effective_runner_strategy = (
+        str((_metadata_dict(payload.get("worker_runtime")).get("runner_strategy")) or "").strip().lower() or None
+    )
+    effective_partition_strategy = (
+        str((_metadata_dict(payload.get("worker_runtime")).get("partition_strategy")) or "").strip().lower() or None
+    )
+    worker_runtime_payload = _metadata_dict(payload.get("worker_runtime"))
+    observed_runtime_versions = list(worker_runtime_payload.get("runtime_versions_observed") or [])
+    effective_runtime = (
+        _metadata_dict(observed_runtime_versions[0])
+        if observed_runtime_versions
+        else _metadata_dict(worker_runtime_payload.get("runtime_version"))
+    )
+    effective_execution_backend = str(effective_runtime.get("execution_backend") or "").strip().lower() or None
+    cancel_reason: str | None = None
+    last_error_code = str(frontier_metadata.get("last_error_code") or "").strip().lower() or None
+    last_error_message = str(frontier_metadata.get("last_error_message") or "").strip() or None
+    for row in job_rows:
+        row_metadata = _metadata_dict(row.get("metadata"))
+        if cancel_reason is None:
+            cancel_reason = str(row_metadata.get("cancel_reason") or "").strip().lower() or None
+        if last_error_code is None:
+            last_error_code = str(row.get("last_error_code") or "").strip().lower() or None
+        if last_error_message is None:
+            last_error_message = str(row.get("error_message") or "").strip() or None
+        if cancel_reason and last_error_code and last_error_message:
+            break
+    payload["cancel_reason"] = cancel_reason
+    payload["last_error_code"] = last_error_code
+    payload["last_error_message"] = last_error_message
+    repair_environment = _catalog_run_auth_repair_environment(normalized_platform)
+    repairable_reason = _catalog_run_repairable_auth_reason(
+        platform=normalized_platform,
+        job_rows=job_rows,
+        frontier_progress=frontier_progress,
+        last_error_code=last_error_code,
+    )
+    resume_stage = _catalog_run_auth_repair_resume_stage(
+        repairable_reason=repairable_reason,
+        run_config=run_config,
+        frontier_progress=frontier_progress,
+    )
+    configured_repair_status = str(run_config.get(_RUN_AUTH_REPAIR_STATUS_KEY) or "").strip().lower() or None
+    repair_status = configured_repair_status or ("idle" if repairable_reason else None)
+    auto_resume_pending = bool(run_config.get(_RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY))
+    payload["operational_state"] = (
+        "blocked_auth"
+        if repairable_reason
+        and (
+            str(payload.get("run_state") or "").strip().lower() == "failed"
+            or str(payload.get("run_status") or "").strip().lower() == "failed"
+            or str(run_row.get("status") or "").strip().lower() == "failed"
+        )
+        else payload.get("run_state")
+    )
+    payload["repair_action"] = (
+        "repair_instagram_auth" if repairable_reason and repair_environment.get("supported") else None
+    )
+    payload["repair_status"] = repair_status
+    payload["repairable_reason"] = repairable_reason
+    payload["auto_resume_pending"] = auto_resume_pending
+    payload["resume_stage"] = resume_stage
+    payload["repair_environment"] = repair_environment
+    payload["run_diagnostics"] = {
+        "cancel_reason": cancel_reason,
+        "last_error_code": last_error_code,
+        "last_error_message": last_error_message,
+        "frontier_auth_reason": str(frontier_metadata.get("auth_reason") or "").strip().lower() or None,
+        "frontier_stop_reason": frontier_stop_reason,
+        "declared_runner_strategy": declared_runner_strategy,
+        "effective_runner_strategy": effective_runner_strategy,
+        "declared_partition_strategy": declared_partition_strategy,
+        "effective_partition_strategy": effective_partition_strategy,
+        "effective_execution_backend": effective_execution_backend,
+        "catalog_oldest_post_at": _iso(_coerce_dt(frontier_progress.get("catalog_oldest_post_at"))),
+        "oldest_posted_at_seen": _iso(_coerce_dt(frontier_progress.get("oldest_posted_at_seen"))),
+        "newest_posted_at_seen": _iso(_coerce_dt(frontier_progress.get("newest_posted_at_seen"))),
+        "strategy_mismatch": bool(
+            (
+                declared_runner_strategy
+                and effective_runner_strategy
+                and declared_runner_strategy != effective_runner_strategy
+            )
+            or (
+                declared_partition_strategy
+                and effective_partition_strategy
+                and declared_partition_strategy != effective_partition_strategy
+            )
+        ),
+        "runtime_version_drift": bool(worker_runtime_payload.get("runtime_version_drift")),
+    }
     return payload
 
 
@@ -49107,7 +50926,7 @@ def get_social_account_catalog_gap_analysis(platform: str, account_handle: str) 
             recommended_action = "sync_newer"
         elif missing_all_older or has_resumable_frontier:
             gap_type = "tail_gap"
-            recommended_action = "resume_tail" if has_resumable_frontier else "backfill_posts"
+            recommended_action = "backfill_posts"
         else:
             gap_type = "interior_gaps"
             recommended_action = "bounded_window_backfill"
@@ -49117,7 +50936,7 @@ def get_social_account_catalog_gap_analysis(platform: str, account_handle: str) 
         inferred_missing_count = max(expected_total_posts - catalog_posts, 0)
         if has_resumable_frontier and inferred_missing_count > 0:
             gap_type = "tail_gap"
-            recommended_action = "resume_tail"
+            recommended_action = "backfill_posts"
             missing_from_catalog_count = inferred_missing_count
         elif needs_recent_sync and max(expected_total_posts, live_total_posts_current) > catalog_posts:
             gap_type = "head_gap"
@@ -49129,6 +50948,9 @@ def get_social_account_catalog_gap_analysis(platform: str, account_handle: str) 
             missing_from_catalog_count = max(live_total_posts_current - catalog_posts, 0)
 
     total_duration_ms = int((time_module.perf_counter() - started_at) * 1000)
+    backfill_mode: str | None = None
+    if recommended_action == "backfill_posts":
+        backfill_mode = "resume_frontier" if has_resumable_frontier else "fresh_full_history"
     payload = {
         "platform": normalized_platform,
         "account_handle": normalized_account,
@@ -49142,6 +50964,7 @@ def get_social_account_catalog_gap_analysis(platform: str, account_handle: str) 
         "missing_newest_post_at": _iso(missing_newest_post_at),
         "sample_missing_source_ids": sample_missing_source_ids,
         "has_resumable_frontier": has_resumable_frontier,
+        "backfill_mode": backfill_mode,
         "needs_recent_sync": needs_recent_sync,
         "recommended_action": recommended_action,
         "repair_window_start": repair_window_start,
@@ -49486,7 +51309,7 @@ def resolve_social_account_catalog_action_seed(
     normalized_action = str(catalog_action or "").strip().lower() or None
     normalized_scope = str(catalog_action_scope or "").strip().lower() or None
     if normalized_action is None:
-        normalized_action = "resume_tail" if normalized_resume_cursor else "backfill"
+        normalized_action = "backfill"
     if normalized_scope is None:
         if normalized_action == "sync_recent":
             normalized_scope = "recent_window"
@@ -49534,6 +51357,7 @@ def start_social_account_catalog_backfill(
     normalized_resume_cursor = action_seed["resume_frontier_cursor"]
     normalized_catalog_action = action_seed["catalog_action"]
     normalized_catalog_action_scope = action_seed["catalog_action_scope"]
+    normalized_resume_snapshot = dict(resume_frontier_snapshot or {}) if normalized_resume_cursor else None
     if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
         raise ValueError("Catalog backfill is not supported for this platform.")
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
@@ -49583,7 +51407,37 @@ def start_social_account_catalog_backfill(
                     required_execution_backend="modal",
                     platform=normalized_platform,
                 )
-            return ingest_shared_accounts(
+            auto_resumed = False
+            source_frontier_run_id: str | None = None
+            source_frontier_pages_scanned: int | None = None
+            source_frontier_posts_checked: int | None = None
+            if (
+                normalized_platform == "instagram"
+                and normalized_catalog_action == "backfill"
+                and normalized_catalog_action_scope == "full_history"
+                and normalized_date_start is None
+                and normalized_date_end is None
+                and normalized_resume_cursor is None
+            ):
+                frontier = _latest_account_frontier(normalized_platform, normalized_account)
+                next_cursor = str(frontier.get("next_cursor") or "").strip() or None
+                if next_cursor and not frontier.get("exhausted"):
+                    normalized_resume_cursor = next_cursor
+                    normalized_resume_snapshot = {
+                        "id": frontier.get("id"),
+                        "run_id": frontier.get("run_id"),
+                        "next_cursor": next_cursor,
+                        "total_posts": frontier.get("total_posts"),
+                        "posts_checked": frontier.get("posts_checked") or 0,
+                        "posts_saved": frontier.get("posts_saved") or 0,
+                        "pages_scanned": frontier.get("pages_scanned") or 0,
+                        "last_transport": frontier.get("last_transport"),
+                    }
+                    auto_resumed = True
+                    source_frontier_run_id = str(frontier.get("run_id") or "").strip() or None
+                    source_frontier_pages_scanned = _normalize_non_negative_int(frontier.get("pages_scanned")) or 0
+                    source_frontier_posts_checked = _normalize_non_negative_int(frontier.get("posts_checked")) or 0
+            result = ingest_shared_accounts(
                 platforms=[normalized_platform],
                 source_scope=source_scope,
                 accounts_override=[normalized_account],
@@ -49594,10 +51448,24 @@ def start_social_account_catalog_backfill(
                 inline_worker_id=inline_worker_id,
                 allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
                 resume_frontier_cursor=normalized_resume_cursor,
-                resume_frontier_snapshot=resume_frontier_snapshot,
+                resume_frontier_snapshot=normalized_resume_snapshot,
                 catalog_action=normalized_catalog_action,
                 catalog_action_scope=normalized_catalog_action_scope,
             )
+            if (
+                normalized_platform == "instagram"
+                and normalized_catalog_action == "backfill"
+                and normalized_catalog_action_scope == "full_history"
+            ):
+                return {
+                    **result,
+                    "resumed_from_cursor": auto_resumed,
+                    "backfill_mode": "resume_frontier" if auto_resumed else "fresh_full_history",
+                    "source_frontier_run_id": source_frontier_run_id,
+                    "source_frontier_pages_scanned": source_frontier_pages_scanned,
+                    "source_frontier_posts_checked": source_frontier_posts_checked,
+                }
+            return result
         finally:
             try:
                 with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
@@ -49684,6 +51552,275 @@ def dismiss_social_account_catalog_run(
     }
 
 
+def request_social_account_catalog_run_auth_repair(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    initiated_by: str | None = None,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform != "instagram":
+        raise SocialIngestValidationError(
+            "CATALOG_RUN_AUTH_REPAIR_UNSUPPORTED",
+            "Instagram auth repair is only supported for Instagram catalog runs.",
+        )
+    repair_environment = _catalog_run_auth_repair_environment(normalized_platform)
+    if not bool(repair_environment.get("supported")):
+        raise SocialIngestValidationError(
+            "CATALOG_RUN_AUTH_REPAIR_UNSUPPORTED",
+            "Instagram auth repair can only be launched from a local TRR-Backend admin host.",
+        )
+    _load_social_account_catalog_run_row(
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        run_id=run_id,
+    )
+    progress = get_social_account_catalog_run_progress(normalized_platform, normalized_account, run_id)
+    if str(progress.get("operational_state") or "").strip().lower() != "blocked_auth":
+        raise SocialIngestValidationError(
+            "CATALOG_RUN_AUTH_REPAIR_NOT_AVAILABLE",
+            "This catalog run is not blocked on a repairable Instagram auth failure.",
+        )
+    repairable_reason = str(progress.get("repairable_reason") or "").strip().lower() or None
+    resume_stage = str(progress.get("resume_stage") or "").strip().lower() or "discovery"
+    repair_status = str(progress.get("repair_status") or "").strip().lower() or "idle"
+    if repair_status != "running":
+        _merge_catalog_run_config(
+            run_id=run_id,
+            metadata_updates={
+                _RUN_AUTH_REPAIR_STATUS_KEY: "running",
+                _RUN_AUTH_REPAIR_LAST_REQUESTED_AT_KEY: _iso(_now_utc()),
+                _RUN_AUTH_REPAIR_LAST_REQUESTED_BY_KEY: initiated_by,
+                _RUN_AUTH_REPAIR_STARTED_AT_KEY: _iso(_now_utc()),
+                _RUN_AUTH_REPAIR_STARTED_BY_KEY: initiated_by,
+                _RUN_AUTH_REPAIR_COMPLETED_AT_KEY: None,
+                _RUN_AUTH_REPAIR_COMPLETED_BY_KEY: None,
+                _RUN_AUTH_REPAIR_FAILURE_REASON_KEY: None,
+                _RUN_AUTH_REPAIR_FAILURE_MESSAGE_KEY: None,
+                _RUN_AUTH_REPAIR_RESULT_KEY: None,
+                _RUN_AUTH_REPAIR_REPAIRABLE_REASON_KEY: repairable_reason,
+                _RUN_AUTH_REPAIR_RESUME_STAGE_KEY: resume_stage,
+                _RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY: True,
+            },
+        )
+    return {
+        "run_id": run_id,
+        "status": "accepted",
+        "operational_state": "blocked_auth",
+        "repair_action": "repair_instagram_auth",
+        "repair_status": "running",
+        "repairable_reason": repairable_reason,
+        "auto_resume_pending": True,
+        "resume_stage": resume_stage,
+        "repair_environment": repair_environment,
+    }
+
+
+def execute_social_account_catalog_run_auth_repair(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    initiated_by: str | None = None,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    repair_environment = _catalog_run_auth_repair_environment(normalized_platform)
+    if not bool(repair_environment.get("supported")):
+        raise SocialIngestValidationError(
+            "CATALOG_RUN_AUTH_REPAIR_UNSUPPORTED",
+            "Instagram auth repair can only be launched from a local TRR-Backend admin host.",
+        )
+    run_row = _load_social_account_catalog_run_row(
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        run_id=run_id,
+    )
+    progress = get_social_account_catalog_run_progress(normalized_platform, normalized_account, run_id)
+    if (
+        str(progress.get("operational_state") or "").strip().lower() != "blocked_auth"
+        and str(progress.get("repair_status") or "").strip().lower() != "running"
+    ):
+        raise SocialIngestValidationError(
+            "CATALOG_RUN_AUTH_REPAIR_NOT_AVAILABLE",
+            "This catalog run is not blocked on a repairable Instagram auth failure.",
+        )
+    run_config = _metadata_dict(run_row.get("config"))
+    source_scope = str(run_config.get("source_scope") or "bravo").strip().lower() or "bravo"
+    repairable_reason = (
+        str(progress.get("repairable_reason") or run_config.get(_RUN_AUTH_REPAIR_REPAIRABLE_REASON_KEY) or "")
+        .strip()
+        .lower()
+        or None
+    )
+    modal_environment = str(repair_environment.get("modal_environment") or "").strip()
+    try:
+        with _shared_instagram_account_execution(normalized_account):
+            repair_result = _instagram_auth_repair_module().run_repair(
+                source_env=_TRR_BACKEND_REPO_ROOT / ".env",
+                modal_environment=modal_environment,
+            )
+            if not bool(_metadata_dict(repair_result).get("ok")):
+                failure_reason = str(repair_result.get("failure_reason") or "repair_failed").strip().lower()
+                _merge_catalog_run_config(
+                    run_id=run_id,
+                    metadata_updates={
+                        _RUN_AUTH_REPAIR_STATUS_KEY: "failed",
+                        _RUN_AUTH_REPAIR_COMPLETED_AT_KEY: _iso(_now_utc()),
+                        _RUN_AUTH_REPAIR_COMPLETED_BY_KEY: initiated_by,
+                        _RUN_AUTH_REPAIR_FAILURE_REASON_KEY: failure_reason,
+                        _RUN_AUTH_REPAIR_FAILURE_MESSAGE_KEY: failure_reason.replace("_", " "),
+                        _RUN_AUTH_REPAIR_RESULT_KEY: repair_result,
+                        _RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY: False,
+                        _RUN_AUTH_REPAIR_REPAIRABLE_REASON_KEY: repairable_reason,
+                    },
+                )
+                return {
+                    "ok": False,
+                    "run_id": run_id,
+                    "repair_status": "failed",
+                    "repairable_reason": repairable_reason,
+                    "failure_reason": failure_reason,
+                }
+
+            frontier = _get_shared_account_run_frontier(
+                run_id=run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            _reactivate_catalog_run(run_id)
+            next_cursor = str(frontier.get("next_cursor") or "").strip() or None
+            if next_cursor:
+                resume_stage = "posts"
+                _update_shared_account_run_frontier(
+                    run_id=run_id,
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    status="queued",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    exhausted=False,
+                    metadata_updates={
+                        "auth_allowed": True,
+                        "auth_reason": None,
+                        "repair_repaired_at": _iso(_now_utc()),
+                    },
+                )
+                _enqueue_shared_posts_job(
+                    run_id=run_id,
+                    platform=normalized_platform,
+                    source_scope=source_scope,
+                    account_handle=normalized_account,
+                    shared_account_source_id=run_config.get("shared_account_source_id"),
+                    pipeline_ingest_mode=str(
+                        run_config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                    ),
+                    runner_count=_normalize_non_negative_int(run_config.get("runner_count"))
+                    or CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+                    expected_total_posts=_normalize_non_negative_int(frontier.get("total_posts")) or None,
+                    runner_strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+                    partition_strategy=CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
+                    required_worker_lane=str(run_config.get("required_worker_lane") or "").strip().lower() or None,
+                    required_execution_backend=str(run_config.get("required_execution_backend") or "").strip().lower()
+                    or None,
+                    allow_local_dev_inline_bypass=bool(run_config.get("allow_local_dev_inline_bypass")),
+                    frontier_auth_allowed=True,
+                    frontier_transport="authenticated",
+                    transport_preference="authenticated",
+                    allow_public_transport_fallback=False,
+                    initiated_by=initiated_by,
+                )
+            else:
+                resume_stage = "discovery"
+                _enqueue_shared_discovery_job(
+                    run_id=run_id,
+                    platform=normalized_platform,
+                    source_scope=source_scope,
+                    account_handle=normalized_account,
+                    shared_account_source_id=run_config.get("shared_account_source_id"),
+                    pipeline_ingest_mode=str(
+                        run_config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                    ),
+                    runner_count=_normalize_non_negative_int(run_config.get("runner_count"))
+                    or CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT,
+                    expected_total_posts=_normalize_non_negative_int(run_config.get("expected_total_posts")) or None,
+                    runner_strategy=str(
+                        run_config.get("runner_strategy") or CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
+                    )
+                    .strip()
+                    .lower(),
+                    partition_strategy=str(
+                        run_config.get("partition_strategy") or CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
+                    )
+                    .strip()
+                    .lower(),
+                    required_worker_lane=str(run_config.get("required_worker_lane") or "").strip().lower() or None,
+                    required_execution_backend=str(run_config.get("required_execution_backend") or "").strip().lower()
+                    or None,
+                    allow_local_dev_inline_bypass=bool(run_config.get("allow_local_dev_inline_bypass")),
+                    transport_preference="authenticated",
+                    allow_public_transport_fallback=False,
+                    initiated_by=initiated_by,
+                    priority=100,
+                    recovery_depth=_normalize_non_negative_int(run_config.get("recovery_depth")) + 1,
+                )
+            _merge_catalog_run_config(
+                run_id=run_id,
+                metadata_updates={
+                    _RUN_AUTH_REPAIR_STATUS_KEY: "succeeded",
+                    _RUN_AUTH_REPAIR_COMPLETED_AT_KEY: _iso(_now_utc()),
+                    _RUN_AUTH_REPAIR_COMPLETED_BY_KEY: initiated_by,
+                    _RUN_AUTH_REPAIR_FAILURE_REASON_KEY: None,
+                    _RUN_AUTH_REPAIR_FAILURE_MESSAGE_KEY: None,
+                    _RUN_AUTH_REPAIR_RESULT_KEY: repair_result,
+                    _RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY: False,
+                    _RUN_AUTH_REPAIR_REPAIRABLE_REASON_KEY: repairable_reason,
+                    _RUN_AUTH_REPAIR_RESUME_STAGE_KEY: resume_stage,
+                },
+            )
+            if is_queue_enabled() and is_modal_remote_executor_enabled():
+                dispatch_due_social_jobs(run_id=run_id)
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "repair_status": "succeeded",
+                "repairable_reason": repairable_reason,
+                "resume_stage": resume_stage,
+            }
+    except SocialIngestValidationError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Instagram auth repair failed for run=%s platform=%s account=%s",
+            run_id,
+            normalized_platform,
+            normalized_account,
+        )
+        failure_reason = type(exc).__name__.replace("Error", "").lower() or "repair_failed"
+        _merge_catalog_run_config(
+            run_id=run_id,
+            metadata_updates={
+                _RUN_AUTH_REPAIR_STATUS_KEY: "failed",
+                _RUN_AUTH_REPAIR_COMPLETED_AT_KEY: _iso(_now_utc()),
+                _RUN_AUTH_REPAIR_COMPLETED_BY_KEY: initiated_by,
+                _RUN_AUTH_REPAIR_FAILURE_REASON_KEY: failure_reason,
+                _RUN_AUTH_REPAIR_FAILURE_MESSAGE_KEY: str(exc),
+                _RUN_AUTH_REPAIR_RESULT_KEY: {"ok": False, "failure_reason": failure_reason},
+                _RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY: False,
+                _RUN_AUTH_REPAIR_REPAIRABLE_REASON_KEY: repairable_reason,
+            },
+        )
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "repair_status": "failed",
+            "repairable_reason": repairable_reason,
+            "failure_reason": failure_reason,
+        }
+
+
 def sync_recent_social_account_catalog(
     platform: str,
     account_handle: str,
@@ -49757,26 +51894,8 @@ def resume_tail_social_account_catalog(
     inline_worker_id: str | None = None,
     allow_local_dev_inline_bypass: bool = False,
 ) -> dict[str, Any]:
-    """Fill the tail gap: resume from the last backfill's frontier cursor."""
-    normalized_platform = _normalize_social_account_profile_platform(platform)
-    normalized_account = _normalize_social_account_profile_handle(account_handle)
-    frontier = _latest_account_frontier(normalized_platform, normalized_account)
-    next_cursor = str(frontier.get("next_cursor") or "").strip() or None
-    if not next_cursor:
-        raise SocialIngestValidationError(
-            "NO_RESUMABLE_FRONTIER",
-            "No resumable frontier cursor found. The previous backfill either completed fully "
-            "or has no saved progress.",
-        )
-    # Defensive guard — _latest_account_frontier already filters exhausted=false in SQL,
-    # but we check again to be safe against future query changes.
-    if frontier.get("exhausted"):
-        raise SocialIngestValidationError(
-            "FRONTIER_ALREADY_EXHAUSTED",
-            "The previous backfill's frontier is already exhausted (all posts were reached).",
-        )
-    # Start a new full_history backfill — it will use the frontier strategy
-    result = start_social_account_catalog_backfill(
+    """Compatibility wrapper for the canonical Backfill Posts entrypoint."""
+    return start_social_account_catalog_backfill(
         platform,
         account_handle,
         source_scope=source_scope,
@@ -49785,27 +51904,9 @@ def resume_tail_social_account_catalog(
         initiated_by=initiated_by,
         inline_worker_id=inline_worker_id,
         allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
-        resume_frontier_cursor=next_cursor,
-        resume_frontier_snapshot={
-            "id": frontier.get("id"),
-            "run_id": frontier.get("run_id"),
-            "next_cursor": next_cursor,
-            "total_posts": frontier.get("total_posts"),
-            "posts_checked": frontier.get("posts_checked") or 0,
-            "posts_saved": frontier.get("posts_saved") or 0,
-            "pages_scanned": frontier.get("pages_scanned") or 0,
-            "last_transport": frontier.get("last_transport"),
-        },
-        catalog_action="resume_tail",
-        catalog_action_scope="frontier_resume",
+        catalog_action="backfill",
+        catalog_action_scope="full_history",
     )
-    return {
-        **result,
-        "resumed_from_cursor": True,
-        "source_frontier_run_id": frontier.get("run_id"),
-        "source_frontier_pages_scanned": frontier.get("pages_scanned"),
-        "source_frontier_posts_checked": frontier.get("posts_checked"),
-    }
 
 
 def resolve_social_account_catalog_review_queue_item(

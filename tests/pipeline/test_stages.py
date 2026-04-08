@@ -253,12 +253,13 @@ class TestCollectStage:
 
 
 class TestSyncScreenalyticsStage:
-    """Tests for Stage 6 (sync_screenalytics) stub behavior."""
+    """Tests for Stage 6 (sync_screenalytics) behavior."""
 
-    def test_sync_screenalytics_returns_skipped(self):
-        """Stage 6 is a stub and should return SKIPPED status."""
+    def test_sync_screenalytics_returns_skipped_when_flag_disabled(self, monkeypatch):
+        """Stage 6 should remain skipped until explicitly enabled."""
         from trr_backend.pipeline.stages.sync_screenalytics import run
 
+        monkeypatch.delenv("TRR_STAGE6_SYNC_ENABLED", raising=False)
         config = RunConfig(verbose=False)
         context = RunContext(
             run_id=uuid4(),
@@ -271,3 +272,89 @@ class TestSyncScreenalyticsStage:
         # Stub stage should return SKIPPED, not SUCCESS
         assert result.status == StageStatus.SKIPPED
         assert result.stage_name == "06_sync_screenalytics"
+
+    def test_sync_screenalytics_ingests_pending_result_bundles(self, monkeypatch):
+        """Stage 6 should ingest valid result bundles when the feature flag is enabled."""
+        from trr_backend.pipeline.stages.sync_screenalytics import run
+
+        monkeypatch.setenv("TRR_STAGE6_SYNC_ENABLED", "1")
+
+        captured: list[tuple[str, str | None]] = []
+
+        monkeypatch.setattr(
+            "trr_backend.repositories.screenalytics_runs.list_result_sync_candidates",
+            lambda show_ids: [
+                {
+                    "run": {
+                        "id": "run-1",
+                        "video_asset_id": "asset-1",
+                        "result_contract_version": "trr-screenalytics/v1",
+                    },
+                    "artifacts": [{"artifact_key": "leaderboard.json", "artifact_kind": "leaderboard"}],
+                    "person_metrics": [{"person_id": str(uuid4()), "screen_time_seconds": 42.0}],
+                    "leaderboard": [{"person_id": str(uuid4()), "screen_time_seconds": 42.0}],
+                    "unknown_clusters": [],
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "trr_backend.repositories.screenalytics_runs.mark_result_ingest_status",
+            lambda run_id, *, status, error=None: captured.append((run_id, status)),
+        )
+
+        context = RunContext(
+            run_id=uuid4(),
+            config=RunConfig(verbose=False),
+            db=MagicMock(),
+            show_ids=[str(uuid4())],
+        )
+
+        result = run(context)
+
+        assert result.status == StageStatus.SUCCESS
+        assert result.items_processed == 1
+        assert captured == [("run-1", "ingested")]
+        assert context.artifacts["screenalytics_synced_runs"] == ["run-1"]
+
+    def test_sync_screenalytics_fails_on_incomplete_contract(self, monkeypatch):
+        """Stage 6 should fail when a candidate bundle is missing required result data."""
+        from trr_backend.pipeline.stages.sync_screenalytics import run
+
+        monkeypatch.setenv("TRR_STAGE6_SYNC_ENABLED", "1")
+
+        captured: list[tuple[str, str, str | None]] = []
+
+        monkeypatch.setattr(
+            "trr_backend.repositories.screenalytics_runs.list_result_sync_candidates",
+            lambda show_ids: [
+                {
+                    "run": {
+                        "id": "run-1",
+                        "video_asset_id": "asset-1",
+                        "result_contract_version": "trr-screenalytics/v1",
+                    },
+                    "artifacts": [],
+                    "person_metrics": [],
+                    "leaderboard": [],
+                    "unknown_clusters": [],
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "trr_backend.repositories.screenalytics_runs.mark_result_ingest_status",
+            lambda run_id, *, status, error=None: captured.append((run_id, status, error)),
+        )
+
+        context = RunContext(
+            run_id=uuid4(),
+            config=RunConfig(verbose=False),
+            db=MagicMock(),
+            show_ids=[str(uuid4())],
+        )
+
+        result = run(context)
+
+        assert result.status == StageStatus.FAILED
+        assert result.items_failed == 1
+        assert "incomplete result bundle" in (result.error_message or "")
+        assert captured == [("run-1", "failed", result.error_message)]

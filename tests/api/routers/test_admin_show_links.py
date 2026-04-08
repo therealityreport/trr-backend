@@ -231,9 +231,7 @@ def test_collect_seeded_fandom_candidate_urls_by_domain_can_skip_allpages_scan()
 
     assert requested_urls == ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"]
     assert candidates_by_domain == {
-        "real-housewives.fandom.com": [
-            "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
-        ]
+        "real-housewives.fandom.com": ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"]
     }
 
 
@@ -286,7 +284,7 @@ def test_discover_show_links_keeps_existing_fandom_link_and_adds_real_housewives
             )
         if url == "https://en.wikipedia.org/wiki/The_Real_Housewives_of_Salt_Lake_City":
             return (404, "", url, None)
-        raise AssertionError(url)
+        return (404, "<html><body>Missing</body></html>", url, None)
 
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
         with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[{"url": existing_url}]):
@@ -1360,7 +1358,7 @@ def test_classify_submitted_link_input_rejects_traitors_fandom_url_on_wrong_doma
     assert error == "Fandom link is for a different community."
 
 
-def test_add_show_links_expands_person_fandom_url_into_related_pages() -> None:
+def test_add_show_links_keeps_only_canonical_person_fandom_url() -> None:
     show_id = str(uuid4())
     person_id = str(uuid4())
     person_record = {
@@ -1440,12 +1438,9 @@ def test_add_show_links_expands_person_fandom_url_into_related_pages() -> None:
                                         {"email": "admin@example.com"},
                                     )
 
-    assert result["added"] == 4
+    assert result["added"] == 1
     assert {assignment["url"] for assignment in result["assignments"]} == {
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas",
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Gallery",
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Storylines",
-        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas/Connections",
+        "https://real-housewives.fandom.com/wiki/Angie_Katsanevas"
     }
 
 
@@ -2347,6 +2342,7 @@ def test_discover_people_links_adds_bravo_profile_for_housewife_friend_on_bravo_
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
         fetch_one.return_value = {"networks": ["bravo"]}
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+
             def _fetch_all(query: str, params: list[object]) -> list[dict[str, object]]:
                 assert params == [show_id]
                 if "FROM core.v_show_cast sc" in query:
@@ -2402,6 +2398,7 @@ def test_discover_people_links_adds_bravo_profile_for_any_cast_member_on_bravo_s
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
         fetch_one.return_value = {"name": "Summer House", "networks": ["bravo"], "wikidata_id": None}
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+
             def _fetch_all(query: str, params: list[object]) -> list[dict[str, object]]:
                 assert params == [show_id]
                 if "FROM core.show_cast_role_assignments" in query:
@@ -2452,8 +2449,11 @@ def test_discover_people_links_adds_featured_image_metadata_for_bravo_profile() 
         }
     ]
 
-    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "Summer House", "networks": ["bravo"]}):
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one", return_value={"name": "Summer House", "networks": ["bravo"]}
+    ):
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+
             def _fetch_all(query: str, params: list[object]) -> list[dict[str, object]]:
                 assert params == [show_id]
                 if "FROM core.v_show_cast sc" in query:
@@ -2513,6 +2513,7 @@ def test_discover_people_links_adds_featured_image_metadata_for_fandom_pages() -
 
     with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "RHOSLC", "networks": ["bravo"]}):
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+
             def _fetch_all(query: str, params: list[object]) -> list[dict[str, object]]:
                 assert params == [show_id]
                 if "FROM core.v_show_cast sc" in query:
@@ -2563,6 +2564,7 @@ def test_discover_people_links_skips_missing_wikipedia_and_fandom_pages() -> Non
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
         fetch_one.return_value = {"networks": ["bravo"]}
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+
             def _fetch_all(query: str, params: list[object]) -> list[dict[str, object]]:
                 assert params == [show_id]
                 if "FROM core.v_show_cast sc" in query:
@@ -2744,7 +2746,9 @@ def test_discover_people_links_emits_social_links_from_cast_tmdb_fields() -> Non
                                 "api.routers.admin_show_links._validated_person_social_url",
                                 side_effect=lambda url, kind: url,
                             ):
-                                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                                with patch(
+                                    "api.routers.admin_show_links.search_real_housewives_wiki", return_value=None
+                                ):
                                     with patch(
                                         "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
                                         return_value=[],
@@ -2807,7 +2811,9 @@ def test_discover_people_links_fetches_tmdb_external_ids_when_missing_social_fie
                             "youtube_id": "",
                         },
                     ):
-                        with patch("api.routers.admin_show_links._persist_tmdb_external_ids_for_person") as persist_tmdb:
+                        with patch(
+                            "api.routers.admin_show_links._persist_tmdb_external_ids_for_person"
+                        ) as persist_tmdb:
                             with patch(
                                 "api.routers.admin_show_links._validated_or_carried_person_source_url",
                                 side_effect=(
@@ -2877,7 +2883,10 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
     show_id = str(uuid4())
     person_id = str(uuid4())
 
-    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None}):
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None},
+    ):
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
             fetch_all.side_effect = [
                 [
@@ -2944,7 +2953,10 @@ def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_
     show_id = str(uuid4())
     person_id = str(uuid4())
 
-    with patch("api.routers.admin_show_links.pg.fetch_one", return_value={"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None}):
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None},
+    ):
         with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
             fetch_all.side_effect = [
                 [
@@ -3057,7 +3069,9 @@ def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_doma
                     ):
                         with patch(
                             "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: url
+                            if kind == "fandom"
+                            else None,
                         ):
                             links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -3105,7 +3119,9 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
                     with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
                         with patch(
                             "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, kind, expected_name=None, **kwargs: url if kind == "fandom" else None,
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: url
+                            if kind == "fandom"
+                            else None,
                         ):
                             links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -5025,7 +5041,9 @@ def test_discover_people_links_derives_imdb_and_tmdb_from_wikidata_summary() -> 
                                     url if kind in {"wikidata", "wikipedia"} else None
                                 ),
                             ):
-                                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                                with patch(
+                                    "api.routers.admin_show_links.search_real_housewives_wiki", return_value=None
+                                ):
                                     with patch(
                                         "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
                                         return_value=[],

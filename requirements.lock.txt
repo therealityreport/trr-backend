@@ -26,6 +26,10 @@ anyio==4.13.0
     #   sse-starlette
     #   starlette
     #   watchfiles
+apify-client==2.5.0
+    # via -r requirements.in
+apify-shared==2.2.0
+    # via apify-client
 astunparse==1.6.3
     # via tensorflow
 async-timeout==5.0.1
@@ -78,7 +82,9 @@ click==8.3.1
     #   typer
     #   uvicorn
 colorama==0.4.6
-    # via crawlee
+    # via
+    #   apify-client
+    #   crawlee
 crawlee==1.6.0
     # via -r requirements.in
 cryptography==46.0.6
@@ -230,7 +236,9 @@ idna==3.11
     #   tldextract
     #   yarl
 impit==0.12.0
-    # via crawlee
+    # via
+    #   apify-client
+    #   crawlee
 iniconfig==2.3.0
     # via pytest
 itsdangerous==2.2.0
@@ -279,7 +287,9 @@ mmh3==5.2.1
 modal==1.4.0
     # via -r requirements.in
 more-itertools==10.8.0
-    # via crawlee
+    # via
+    #   apify-client
+    #   crawlee
 mpmath==1.3.0
     # via sympy
 msgpack==1.1.2

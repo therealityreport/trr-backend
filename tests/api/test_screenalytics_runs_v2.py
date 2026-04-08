@@ -51,6 +51,12 @@ def fake_repo(monkeypatch):
             "config_hash": payload.get("config_hash"),
             "candidate_cast_snapshot_json": payload.get("candidate_cast_snapshot_json", []),
             "manifest_key": None,
+            "result_contract_version": None,
+            "status_reason": None,
+            "summary_counts": None,
+            "result_ingest_status": None,
+            "result_ingested_at": None,
+            "result_ingest_error": None,
             "started_at": None,
             "completed_at": None,
             "error_message": None,
@@ -114,6 +120,24 @@ def fake_repo(monkeypatch):
         )
         return cluster
 
+    def get_result_bundle(run_id):
+        run = store["runs"].get(run_id)
+        if not run:
+            return None
+        return {
+            "run": run,
+            "video_asset": store["video_assets"].get(run["video_asset_id"]),
+            "artifacts": list(store["artifacts"].get(run_id, {}).values()),
+            "person_metrics": list(store["metrics"].get(run_id, {}).values()),
+            "unknown_clusters": list(store["unknown_clusters"].get(run_id, {}).values()),
+            "leaderboard": list_leaderboard(run_id),
+            "ingest_status": {
+                "status": run.get("result_ingest_status"),
+                "ingested_at": run.get("result_ingested_at"),
+                "error": run.get("result_ingest_error"),
+            },
+        }
+
     monkeypatch.setattr(repo, "create_video_asset", create_video_asset)
     monkeypatch.setattr(repo, "get_video_asset", get_video_asset)
     monkeypatch.setattr(repo, "create_run", create_run)
@@ -126,6 +150,7 @@ def fake_repo(monkeypatch):
     monkeypatch.setattr(repo, "list_unknown_clusters", list_unknown_clusters)
     monkeypatch.setattr(repo, "upsert_unknown_clusters", upsert_unknown_clusters)
     monkeypatch.setattr(repo, "assign_unknown_cluster", assign_unknown_cluster)
+    monkeypatch.setattr(repo, "get_result_bundle", get_result_bundle)
     yield
 
 
@@ -210,10 +235,18 @@ def test_screenalytics_flow():
     response = client.patch(
         f"/api/v1/screenalytics/v2/runs/{run_id}/status",
         headers=_auth_headers(),
-        json={"status": "running"},
+        json={
+            "status": "running",
+            "result_contract_version": "trr-screenalytics/v1",
+            "status_reason": "worker_started",
+            "summary_counts": {"queued_jobs": 1},
+        },
     )
     assert response.status_code == 200
     assert response.json()["status"] == "running"
+    assert response.json()["result_contract_version"] == "trr-screenalytics/v1"
+    assert response.json()["status_reason"] == "worker_started"
+    assert response.json()["summary_counts"] == {"queued_jobs": 1}
 
     response = client.post(
         f"/api/v1/screenalytics/v2/runs/{run_id}/artifacts:upsert",
@@ -254,6 +287,17 @@ def test_screenalytics_flow():
     )
     assert response.status_code == 200
     assert float(response.json()[0]["screen_time_seconds"]) == 42.0
+
+    bundle = client.get(
+        f"/api/v1/screenalytics/v2/runs/{run_id}/result-bundle",
+        headers=_auth_headers(),
+    )
+    assert bundle.status_code == 200
+    assert bundle.json()["run"]["id"] == run_id
+    assert bundle.json()["run"]["result_contract_version"] == "trr-screenalytics/v1"
+    assert len(bundle.json()["artifacts"]) == 1
+    assert len(bundle.json()["person_metrics"]) == 1
+    assert bundle.json()["leaderboard"][0]["run_id"] == run_id
 
 
 def test_unknown_clusters_flow():

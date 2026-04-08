@@ -22,8 +22,8 @@ from threading import Lock, Thread, current_thread
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import scripts.sync.sync_episode_appearances as sync_episode_appearances
@@ -67,7 +67,15 @@ from trr_backend.media.s3_mirror import (
     mirror_logo_monochrome_variants_row,
     upload_bytes_to_s3,
 )
-from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
+from trr_backend.job_plane import is_remote_job_plane_enabled
+from trr_backend.modal_dispatch import dispatch_admin_operation, supports_admin_operation
+from trr_backend.pipeline.admin_operations import (
+    ensure_operation_execution,
+    operation_stream_response,
+    operation_stream_response_for_parent,
+    start_operation_for_stream,
+)
+from trr_backend.pipeline.show_refresh_orchestrator import ShowRefreshOrchestrator
 from trr_backend.repositories import admin_operations as admin_operations_repo
 from trr_backend.repositories import brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
@@ -81,6 +89,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/shows", tags=["admin-show-sync"])
 STREAM_HEARTBEAT_INTERVAL_SECONDS = 10
+VALID_REFRESH_TARGETS = frozenset({"show_core", "links", "bravo", "cast_profiles", "cast_media"})
 
 
 def _maybe_reload_postgrest_schema_cache(enabled: bool) -> None:
@@ -2740,39 +2749,26 @@ def _run_cast_person_refresh_stage(
     show_name = str((show_row or {}).get("name") or "").strip() or None
     successes = 0
     failures: list[str] = []
-
-    if mode == "profile_only":
-        admin_show_roles.sync_cast_matrix_for_show(
-            show_id=show_id,
-            payload=admin_show_roles.CastMatrixSyncRequest(
-                include_relationship_roles=True,
-                include_bravo_links=False,
-                include_bravo_images=False,
-            ),
-            db=db,
-            admin_user=admin_user or {"id": "admin"},
-        )
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
 
     for member in members:
         person_id = member["person_id"]
         person_name = member["person_name"] or person_id
         try:
             if mode == "profile_only":
-                request = admin_person_images.RefreshImagesRequest(
-                    sources=["tmdb", "fandom"],
-                    limit_per_source=20,
-                    skip_mirror=True,
-                    skip_prune=True,
-                    skip_auto_count=True,
-                    skip_word_detection=True,
-                    skip_centering=True,
-                    skip_resize=True,
-                    show_id=UUID(show_id),
-                    show_name=show_name,
+                result = admin_person_profile._run_person_profile_refresh(
+                    person_id=str(person_id),
+                    payload=admin_person_profile.RefreshProfileRequest(refresh_links=False, refresh_credits=False),
+                    db=db,
+                    actor=actor,
                 )
+                if _infer_profile_refresh_outcome(result) == "failed":
+                    failure_messages = [str(item) for item in result.get("failures") or [] if str(item).strip()]
+                    raise RuntimeError("; ".join(failure_messages) or "profile refresh failed")
+                successes += 1
             else:
                 request = admin_person_images.RefreshImagesRequest(
-                    sources=["imdb", "tmdb", "fandom", "fandom-gallery", "nbcumv"],
+                    sources=["imdb", "tmdb", "nbcumv"],
                     limit_per_source=25,
                     skip_mirror=False,
                     skip_prune=False,
@@ -2783,13 +2779,13 @@ def _run_cast_person_refresh_stage(
                     show_id=UUID(show_id),
                     show_name=show_name,
                 )
-            admin_person_images.refresh_person_images(
-                UUID(person_id),
-                request=request,
-                db=db,
-                _=admin_user,
-            )
-            successes += 1
+                admin_person_images.refresh_person_images(
+                    UUID(person_id),
+                    request=request,
+                    db=db,
+                    _=admin_user,
+                )
+                successes += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("show_refresh_%s failed for person_id=%s: %s", mode, person_id, exc)
             failures.append(f"{person_name}: {exc}")
@@ -3124,7 +3120,7 @@ def _refresh_show_bravo_target(
     if not official_page_url:
         raise RefreshStepSkippedError("Official show page is not configured for Bravo sync.")
 
-    payload = admin_show_bravo.BravoCommitRequest(show_url=official_page_url)
+    payload = admin_show_bravo.BravoCommitRequest(show_url=official_page_url, sync_cast_matrix=False)
     admin_show_bravo.commit_bravo_import(
         show_id=UUID(show_id),
         payload=payload,
@@ -4015,6 +4011,40 @@ def refresh_show_stream(
         "initiated_by": actor,
     }
 
+    # If remote mode + Modal supported, use parallel orchestrator
+    # Guard against re-entrant calls from the local fallback producer path.
+    if (
+        is_remote_job_plane_enabled()
+        and supports_admin_operation("admin_show_refresh")
+        and not _is_internal_raw_stream_request(request)
+    ):
+        client_session_id = str(request.headers.get("x-trr-tab-session-id") or "").strip() or None
+        client_workflow_id = str(request.headers.get("x-trr-flow-key") or "").strip() or None
+        orchestrator = ShowRefreshOrchestrator(
+            show_id=show_id_str,
+            targets=[t.value if hasattr(t, "value") else str(t) for t in ordered],
+            initiated_by=actor,
+            request_payload=request_payload,
+            request_id=request_id,
+            client_session_id=client_session_id,
+            client_workflow_id=client_workflow_id,
+        )
+        parent_id, sub_ops = orchestrator.create_operations()
+
+        # Dispatch all waves — Modal workers handle dependency ordering
+        # via wait_for_sub_operation_dependencies (Task 6)
+        for wave_ops in orchestrator.get_waves():
+            orchestrator.dispatch_wave(
+                wave_ops,
+                producer_factory=lambda sub_op: build_show_refresh_operation_producer(
+                    request_payload=sub_op.get("request_payload", {}),
+                    operation_id=str(sub_op["id"]),
+                    db=db,
+                ),
+            )
+
+        return operation_stream_response_for_parent(parent_id, request=request)
+
     def _yield_event(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
@@ -4365,6 +4395,53 @@ def build_show_refresh_operation_producer(
         return body_iterator
 
     return _producer
+
+
+@router.post("/{show_id}/refresh/target/{target}/retry")
+async def retry_refresh_target(
+    show_id: str,
+    target: str,
+    request: Request,
+    payload: dict = Body(...),
+    db: SupabaseAdminClient = None,
+):
+    """Retry a single failed refresh target by creating a new sub-operation."""
+    if target not in VALID_REFRESH_TARGETS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid target: {target}", "valid_targets": sorted(VALID_REFRESH_TARGETS)},
+        )
+
+    parent_operation_id = str(payload.get("parent_operation_id") or "").strip()
+    if not parent_operation_id:
+        return JSONResponse(status_code=400, content={"error": "parent_operation_id is required"})
+
+    request_id = (request.headers.get("x-trr-request-id") or "").strip() or None
+
+    child = admin_operations_repo.create_sub_operation(
+        parent_operation_id=parent_operation_id,
+        operation_type="admin_show_refresh",
+        refresh_target=target,
+        request_payload={"show_id": show_id, "targets": [target]},
+        initiated_by=request_id,
+        request_id=request_id,
+    )
+
+    # Reset parent to running since we have a new pending child
+    admin_operations_repo.update_operation_status(parent_operation_id, "running")
+
+    # Dispatch to Modal or local
+    if supports_admin_operation("admin_show_refresh") and is_remote_job_plane_enabled():
+        dispatch_admin_operation(operation_id=child["id"], operation_type="admin_show_refresh")
+    else:
+        producer = build_show_refresh_operation_producer(
+            request_payload=child.get("request_payload", {}),
+            operation_id=child["id"],
+            db=db,
+        )
+        ensure_operation_execution(child["id"], producer=producer, request_id=request_id)
+
+    return child
 
 
 @router.post("/{show_id}/refresh-photos/stream")

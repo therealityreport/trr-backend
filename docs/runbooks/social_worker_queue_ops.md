@@ -130,6 +130,26 @@ cd /Users/thomashulihan/Projects/TRR/TRR-Backend
 python3.11 scripts/modal/repair_instagram_auth.py --json
 ```
 
+Run the proactive local-only Instagram repair worker when you want a single command that checks cookie age, recent auth failures, and then invokes the full repair pipeline only when needed:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/socials/cookie_refresh_worker.py --json
+```
+
+Schedule the worker on a trusted local workstation only. Do not schedule it on Modal; Playwright refresh still requires a browser-capable local environment. A simple daily cron is sufficient:
+
+```cron
+0 6 * * * cd /Users/thomashulihan/Projects/TRR/TRR-Backend && ./.venv/bin/python scripts/socials/cookie_refresh_worker.py --json >> .logs/instagram-cookie-refresh.log 2>&1
+```
+
+Worker trigger policy:
+
+- skip when the local Instagram cookie bundle validates and `_cookie_refreshed_at` is still inside the max-age threshold
+- run the full repair flow when the cookie age threshold is exceeded
+- run the full repair flow when recent `instagram_graphql_cursor_unauthorized`, `instagram_graphql_checkpoint_required`, or `instagram_local_executor_blocked` failures are detected
+- fail loudly when refresh, secret apply, deploy, or remote auth probe fails; do not silently loop on checkpoint/2FA failures
+
 Do not treat local cookie files as proof that remote Instagram backfills are
 ready. Full shared-account Instagram backfill is only considered ready when all
 of the following are true:
@@ -143,18 +163,31 @@ of the following are true:
   - `dispatcher_heartbeat_fresh = true`
   - `remote_auth_capabilities.instagram.ready = true`
   - `shared_account_backfill_readiness.ready = true`
-- a bounded canary (`Sync Recent` first, then `Resume Tail` if needed) succeeds
-  before a full-history `Backfill Posts` run is launched
+- a bounded canary (`Sync Recent`) succeeds before a full-history `Backfill Posts`
+  run is launched
 
-`Sync Recent`, `Sync Newer`, `Resume Tail`, and `Backfill Posts` are all variants of the
+`Sync Recent`, `Sync Newer`, and `Backfill Posts` are all variants of the
 same shared-profile catalog backfill pipeline. The operator choice changes the seed scope,
-not the pipeline family.
+not the pipeline family. `Backfill Posts` automatically resumes a saved older
+frontier when one exists, so `Resume Tail` is no longer a separate operator
+action.
+
+The shared-account catalog route responses now expose additive execution diagnostics:
+
+- `queue_enabled`
+- `used_inline_fallback`
+- `requires_modal_executor`
+
+Normal production/shared-account behavior should keep `allow_inline_dev_fallback=false`.
+If a route response comes back with `status="started"` and `used_inline_fallback=true`,
+the request ran inline on the API host instead of entering the queue/Modal path.
 
 Preferred shared Instagram canary order:
 
 1. `Sync Recent`
-2. `Resume Tail` if the run has a resumable frontier
-3. `Backfill Posts` only after the first two checks are green
+2. `Sync Newer` if diagnostics show a head gap
+3. `Backfill Posts` only after the first checks are green; it resumes any saved
+   older frontier automatically before continuing full-history fetches
 
 Use `Sync Newer` as the same-pipeline bounded head-gap repair when diagnostics show the newest stored post lags the live profile. It is not a separate worker path.
 

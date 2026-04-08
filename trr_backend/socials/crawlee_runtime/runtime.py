@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Thread
 from typing import Any
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from .auth_preflight import AuthPreflightResult, build_auth_context
 from .config import CrawleeRuntimeConfig
@@ -180,9 +184,14 @@ def _execute_with_internal_retry(
             if error_code in {"blocked", "rate_limited"}:
                 counters.blocked_events += 1
             if retryable and attempt < attempts:
+                backoff = min(60, 2 ** attempt)  # 1s, 2s, 4s, 8s … capped at 60s
+                logger.warning(
+                    "crawlee retry %d/%d for %s:%s (%s) — backing off %.1fs",
+                    attempt, attempts, platform, stage, error_code, backoff,
+                )
+                time.sleep(backoff)
                 counters.retries_total += 1
                 counters.crawlee_retry_count += 1
-                counters.session_rotations += 1
                 continue
             raise CrawleeRuntimeError(
                 f"crawlee_stage_failed:{platform}:{stage}:{error_code}",
@@ -347,6 +356,12 @@ def execute_platform_stage_with_crawlee(
                         if can_retry:
                             queued_request.retry_count += 1
                             queued_request.session_rotation_count = (queued_request.session_rotation_count or 0) + 1
+                            backoff = min(60, 2 ** queued_request.retry_count)
+                            logger.warning(
+                                "crawlee queue retry %d/%d for %s:%s (%s) — backing off %.1fs",
+                                queued_request.retry_count, max_retries, platform, stage, error_code, backoff,
+                            )
+                            await asyncio.sleep(backoff)
                             counters.retries_total += 1
                             counters.crawlee_retry_count += 1
                             counters.session_rotations += 1

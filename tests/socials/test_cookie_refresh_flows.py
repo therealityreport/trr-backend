@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 
 from trr_backend.socials.facebook import cookie_refresh as facebook_cookie_refresh
 from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh
+from trr_backend.socials.instagram.scraper import load_cookies_from_file
 from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh
 from trr_backend.socials.tiktok import cookie_refresh as tiktok_cookie_refresh
 from trr_backend.socials.twitter import cookie_refresh as twitter_cookie_refresh
@@ -154,6 +156,39 @@ def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatc
 
     assert writes == []
     assert imported_sessions == []
+
+
+def test_instagram_cookie_refresh_writes_refresh_metadata(tmp_path: Path) -> None:
+    cookie_file = tmp_path / "instagram-cookies.json"
+
+    instagram_cookie_refresh._write_cookie_file(
+        cookie_file,
+        {"sessionid": "fresh-session", "csrftoken": "fresh-csrf"},
+    )
+
+    payload = json.loads(cookie_file.read_text(encoding="utf-8"))
+
+    assert payload["sessionid"] == "fresh-session"
+    assert "_cookie_refreshed_at" in payload
+
+
+def test_load_cookies_from_file_strips_refresh_metadata(tmp_path: Path) -> None:
+    cookie_file = tmp_path / "instagram-cookies.json"
+    cookie_file.write_text(
+        json.dumps(
+            {
+                "sessionid": "fresh-session",
+                "csrftoken": "fresh-csrf",
+                "_cookie_refreshed_at": "2026-04-07T12:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_cookies_from_file(str(cookie_file)) == {
+        "sessionid": "fresh-session",
+        "csrftoken": "fresh-csrf",
+    }
 
 
 def test_refresh_twitter_cookies_retries_headed_after_headless_error_shell(

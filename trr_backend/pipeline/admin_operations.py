@@ -304,8 +304,15 @@ def _run_operation_worker(
         else:
             _consume_sync_chunks(operation_id, produced, request_id=request_id)
 
+        # Path B: SSE events (e.g. "complete" / "error") may have already driven
+        # the operation to a terminal status via _update_operation_from_event.
+        # In that case the block below is skipped, so we finalize here instead.
         op = admin_operations.get_operation(operation_id)
-        if op and not admin_operations.operation_is_terminal(str(op.get("status") or "")):
+        _current_status = str(op.get("status") or "") if op else ""
+        if op and admin_operations.operation_is_terminal(_current_status):
+            # Path B: terminal status was already set by an SSE-driven event.
+            finalize_sub_operation(operation_id, _current_status)  # no-op if not a sub-operation
+        elif op:
             if admin_operations.is_cancel_requested(operation_id):
                 payload = {"stage": "cancelled", "message": "Operation cancelled", "operation_id": operation_id}
                 _append_event_and_update(operation_id, event_type="error", payload=payload, request_id=request_id)
@@ -315,8 +322,10 @@ def _run_operation_worker(
                     error_payload=payload,
                     progress_payload=payload,
                 )
+                finalize_sub_operation(operation_id, "cancelled")  # no-op if not a sub-operation
             else:
                 admin_operations.update_operation_status(operation_id, status="completed")
+                finalize_sub_operation(operation_id, "completed")  # no-op if not a sub-operation
     except Exception as exc:  # noqa: BLE001
         logger.exception("Admin operation worker failed: operation_id=%s", operation_id)
         payload = {
@@ -329,6 +338,7 @@ def _run_operation_worker(
             _append_event_and_update(operation_id, event_type="error", payload=payload, request_id=request_id)
         finally:
             admin_operations.mark_operation_failed(operation_id, error_payload=payload)
+            finalize_sub_operation(operation_id, "failed")  # no-op if not a sub-operation
     finally:
         with _FUTURES_LOCK:
             _FUTURES.pop(operation_id, None)
@@ -563,6 +573,7 @@ def _run_remote_claimed_operation(operation: dict[str, Any]) -> None:
             error_payload=payload,
             progress_payload=payload,
         )
+        finalize_sub_operation(operation_id, "failed")  # no-op if not a sub-operation
         admin_operations.release_operation_claim(operation_id, claim_token=claim_token)
         return
 
@@ -804,3 +815,214 @@ def start_operation_for_stream(
     refreshed["execution_mode_canonical"] = current_execution_metadata["execution_mode_canonical"]
     refreshed["execution_backend_canonical"] = current_execution_metadata["execution_backend_canonical"]
     return refreshed
+
+
+async def parent_operation_stream_generator(
+    parent_operation_id: str,
+    *,
+    after_event_id: int = 0,
+    request: Request | None = None,
+) -> AsyncGenerator[str, None]:
+    """Fan-in SSE stream: yields events from all children of a parent operation."""
+    next_event_id = max(0, int(after_event_id))
+
+    while True:
+        events = await run_in_threadpool(
+            admin_operations.stream_sub_operation_events_after_seq,
+            parent_operation_id,
+            after_seq=next_event_id,
+            limit=500,
+        )
+        for event in events:
+            event_id = int(event.get("id") or 0)
+            event_payload = _to_json_payload(event.get("event_payload"))
+            event_payload["refresh_target"] = str(event.get("refresh_target") or "")
+            event_payload["sub_operation_id"] = str(event.get("operation_id") or "")
+            payload = _ensure_operation_payload(
+                parent_operation_id,
+                event_payload,
+                request_id=str(event_payload.get("request_id") or "") or None,
+            )
+            payload["event_id"] = event_id
+            event_type = str(event.get("event_type") or "message")
+            if event_id > 0:
+                yield _sse_chunk(event_type, payload)
+                if event_id > next_event_id:
+                    next_event_id = event_id
+
+        # Check if parent is terminal (all children done)
+        parent_status = await run_in_threadpool(
+            admin_operations.aggregate_parent_status,
+            parent_operation_id,
+        )
+        if parent_status in ("completed", "failed", "cancelled"):
+            # Drain any final events
+            final_events = await run_in_threadpool(
+                admin_operations.stream_sub_operation_events_after_seq,
+                parent_operation_id,
+                after_seq=next_event_id,
+                limit=500,
+            )
+            for event in final_events:
+                event_id = int(event.get("id") or 0)
+                event_payload = _to_json_payload(event.get("event_payload"))
+                event_payload["refresh_target"] = str(event.get("refresh_target") or "")
+                event_payload["sub_operation_id"] = str(event.get("operation_id") or "")
+                payload = _ensure_operation_payload(
+                    parent_operation_id,
+                    event_payload,
+                    request_id=str(event_payload.get("request_id") or "") or None,
+                )
+                payload["event_id"] = event_id
+                event_type = str(event.get("event_type") or "message")
+                if event_id > 0:
+                    yield _sse_chunk(event_type, payload)
+                    if event_id > next_event_id:
+                        next_event_id = event_id
+
+            # Final parent-level terminal event
+            yield _sse_chunk(
+                "complete" if parent_status == "completed" else "error",
+                {"operation_id": parent_operation_id, "status": parent_status},
+            )
+            return
+
+        if request is not None:
+            try:
+                if await request.is_disconnected():
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+
+        await asyncio.sleep(_EVENT_POLL_INTERVAL_SECONDS)
+
+
+def operation_stream_response_for_parent(
+    parent_operation_id: str,
+    *,
+    after_event_id: int = 0,
+    request: Request | None = None,
+) -> StreamingResponse:
+    return StreamingResponse(
+        parent_operation_stream_generator(
+            parent_operation_id,
+            after_event_id=after_event_id,
+            request=request,
+        ),
+        media_type="text/event-stream",
+        headers=_stream_headers(),
+    )
+
+
+def finalize_sub_operation(operation_id: str, status: str) -> str | None:
+    """Called when a sub-operation reaches terminal status.
+
+    Updates the sub-operation status, recomputes the parent's aggregate,
+    and emits a parent-level complete/error event if all children are done.
+
+    Returns the parent's new status, or None if not a sub-operation.
+    """
+    op = admin_operations.get_operation(operation_id)
+    if not op:
+        return None
+
+    parent_id = op.get("parent_operation_id")
+    if not parent_id:
+        return None
+
+    # Update this sub-operation's status
+    admin_operations.update_operation_status(operation_id, status)
+
+    # Recompute parent
+    parent_status = admin_operations.aggregate_parent_status(parent_id)
+    if parent_status in ("completed", "failed", "cancelled"):
+        admin_operations.update_operation_status(parent_id, parent_status)
+
+        # Emit parent-level terminal event
+        children = admin_operations.get_sub_operations(parent_id)
+        summary = {
+            c.get("refresh_target", "unknown"): c.get("status", "unknown")
+            for c in children
+        }
+        admin_operations.append_operation_event(
+            parent_id,
+            event_type="complete" if parent_status == "completed" else "error",
+            event_payload={
+                "operation_id": parent_id,
+                "status": parent_status,
+                "sub_operation_summary": summary,
+            },
+        )
+        logger.info(
+            "Parent operation finalized: parent_id=%s status=%s summary=%s",
+            parent_id, parent_status, summary,
+        )
+
+    return parent_status
+
+
+def wait_for_sub_operation_dependencies(
+    operation_id: str,
+    *,
+    poll_interval_seconds: float = 2.0,
+    timeout_seconds: float = 3600.0,
+) -> bool:
+    """Block until this sub-operation's dependency targets are complete.
+
+    Returns True if dependencies satisfied, False if timed out or a dependency failed.
+    """
+    from trr_backend.pipeline.show_refresh_orchestrator import TARGET_DEPENDENCY_GRAPH
+
+    op = admin_operations.get_operation(operation_id)
+    if not op:
+        return False
+
+    parent_id = op.get("parent_operation_id")
+    target = op.get("refresh_target")
+    if not parent_id or not target:
+        return True  # Not a sub-operation — no dependencies
+
+    deps = TARGET_DEPENDENCY_GRAPH.get(target, [])
+    if not deps:
+        return True  # No dependencies — safe to run
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        siblings = admin_operations.get_sub_operations(parent_id)
+        dep_statuses = {
+            s["refresh_target"]: s["status"]
+            for s in siblings
+            if s.get("refresh_target") in deps
+        }
+
+        # All deps completed → proceed
+        if all(st == "completed" for st in dep_statuses.values()):
+            return True
+
+        # Any dep failed → abort
+        if any(st in ("failed", "cancelled") for st in dep_statuses.values()):
+            logger.warning(
+                "Sub-operation dependency failed: operation_id=%s target=%s failed_deps=%s",
+                operation_id, target,
+                [t for t, s in dep_statuses.items() if s in ("failed", "cancelled")],
+            )
+            return False
+
+        # Deps missing from sibling list → they weren't requested, treat as satisfied
+        if len(dep_statuses) < len(deps):
+            missing = set(deps) - set(dep_statuses.keys())
+            logger.info(
+                "Sub-operation deps not in sibling set (treating as satisfied): %s",
+                missing,
+            )
+            present_statuses = list(dep_statuses.values())
+            if all(st == "completed" for st in present_statuses) or not present_statuses:
+                return True
+
+        time.sleep(poll_interval_seconds)
+
+    logger.error(
+        "Sub-operation dependency wait timed out: operation_id=%s target=%s timeout=%s",
+        operation_id, target, timeout_seconds,
+    )
+    return False

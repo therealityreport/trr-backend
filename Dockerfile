@@ -22,10 +22,11 @@ RUN test -f requirements.lock.txt && pip install --no-cache-dir -r requirements.
 # Copy application code
 COPY . .
 
-# Cloud Run uses PORT env var (defaults to 8080)
-ENV PORT=8080
+# Cloud Run/Render use PORT; keep container launches single-process by default.
+ENV PORT=8080 \
+    TRR_BACKEND_HOST=0.0.0.0 \
+    TRR_BACKEND_RELOAD=0
 
 EXPOSE ${PORT}
 
-# Use sh -c so env vars expand
-CMD ["sh", "-c", "gunicorn api.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8080} --workers ${WEB_CONCURRENCY:-1} --timeout 3600 --graceful-timeout 30 --access-logfile - --error-logfile -"]
+CMD ["./start-api.sh"]

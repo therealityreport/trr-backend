@@ -33,7 +33,6 @@ DEFAULT_POOL_MINCONN = 2
 DEFAULT_POOL_MAXCONN = 24
 DEFAULT_SESSION_POOLER_MINCONN = 1
 DEFAULT_SESSION_POOLER_MAXCONN = 2
-DEFAULT_LOCAL_SESSION_POOLER_MAXCONN = 4
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
 DEFAULT_QUERY_TRANSIENT_ATTEMPTS = 3
@@ -208,10 +207,7 @@ def _is_statement_timeout_error(error: Exception) -> bool:
 def _resolve_pool_sizing(url: str) -> dict[str, Any]:
     session_pooler = _is_supavisor_session_pooler_url(url)
     default_minconn = DEFAULT_SESSION_POOLER_MINCONN if session_pooler else DEFAULT_POOL_MINCONN
-    if session_pooler and _is_local_or_dev_runtime():
-        default_maxconn = DEFAULT_LOCAL_SESSION_POOLER_MAXCONN
-    else:
-        default_maxconn = DEFAULT_SESSION_POOLER_MAXCONN if session_pooler else DEFAULT_POOL_MAXCONN
+    default_maxconn = DEFAULT_SESSION_POOLER_MAXCONN if session_pooler else DEFAULT_POOL_MAXCONN
     minconn_overridden = _env_has_value("TRR_DB_POOL_MINCONN")
     maxconn_overridden = _env_has_value("TRR_DB_POOL_MAXCONN")
     minconn = _env_int("TRR_DB_POOL_MINCONN", default_minconn)
