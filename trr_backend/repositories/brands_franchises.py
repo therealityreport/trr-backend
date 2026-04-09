@@ -576,11 +576,20 @@ def resolve_show_fandom_rule_context(
     else:
         effective_source = "none"
 
+    preferred_community_domain: str | None = None
+    if effective_rule and effective_rule.community_domains:
+        preferred_community_domain = str(effective_rule.community_domains[0] or "").strip() or None
+    if not preferred_community_domain and effective_rule and effective_rule.primary_url:
+        preferred_community_domain = str(urlparse(effective_rule.primary_url).hostname or "").strip() or None
+    if not preferred_community_domain and effective_rule and effective_rule.review_allpages_url:
+        preferred_community_domain = str(urlparse(effective_rule.review_allpages_url).hostname or "").strip() or None
+
     return {
         "rule_key": rule.key if rule else None,
         "fallback_rule_key": fallback_rule.key if fallback_rule else None,
         "effective_rule_key": effective_rule.key if effective_rule else None,
         "effective_source": effective_source,
+        "preferred_community_domain": preferred_community_domain,
         "effective_fandom_url": links.explicit_url
         or links.fallback_url
         or (effective_rule.primary_url if effective_rule else None),

@@ -1,4 +1,4 @@
-"""SocialBlade Instagram scraper using Playwright."""
+"""SocialBlade scraper using Playwright."""
 
 from __future__ import annotations
 
@@ -33,28 +33,20 @@ _JS_EXTRACT_TABLE = """(() => {
     const table = document.querySelector("table");
     if (!table) return null;
     const rows = [...table.querySelectorAll("tr")];
-    const datePattern = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\\d{4}-\\d{2}-\\d{2}$/;
-    const headers = [
-        "Date",
-        "Followers Delta",
-        "Followers Total",
-        "Following Delta",
-        "Following Total",
-        "Media Count Delta",
-        "Media Count Total",
-    ];
+    if (rows.length === 0) return null;
+    const datePattern = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\\d{4}-\\d{2}-\\d{2}$/;
+    const headers = [...rows[0].querySelectorAll("th,td")]
+        .map(cell => cell.textContent.trim())
+        .filter(Boolean);
+    if (headers.length === 0) return null;
     const data = rows.slice(1)
         .map(row => [...row.querySelectorAll("td")].map(td => td.textContent.trim()))
-        .filter(cells => cells.length >= 7 && datePattern.test(cells[0]))
-        .map(cells => ({
-            "Date": cells[0],
-            "Followers Delta": cells[1],
-            "Followers Total": cells[2],
-            "Following Delta": cells[3],
-            "Following Total": cells[4],
-            "Media Count Delta": cells[5],
-            "Media Count Total": cells[6],
-        }));
+        .filter(
+            cells =>
+                cells.length >= headers.length &&
+                datePattern.test((cells[0] || "").replace(/^\\s+|\\s+$/g, ""))
+        )
+        .map(cells => Object.fromEntries(headers.map((header, index) => [header, cells[index] || ""])));
     return { headers, data };
 })()"""
 
@@ -84,6 +76,40 @@ _SOCIALBLADE_RANGE_OPTIONS = (
 )
 _SOCIALBLADE_CHART_INTERVAL_OPTIONS = ("Daily", "Weekly", "Monthly")
 _SOCIALBLADE_CHART_METRIC_OPTIONS = ("Gained", "Total", "Averages")
+_PLATFORM_ROUTE_SEGMENTS = {
+    "instagram": "user",
+    "facebook": "user",
+    "youtube": "handle",
+}
+_PROFILE_STAT_LABELS = {
+    "instagram": {
+        "followers": ("Followers",),
+        "following": ("Following",),
+        "media_count": ("Media Count", "Posts"),
+        "engagement_rate": ("Engagement Rate",),
+        "average_likes": ("Average Likes",),
+        "average_comments": ("Average Comments",),
+        "chart_metric_label": "Followers",
+    },
+    "facebook": {
+        "followers": ("Likes", "Followers"),
+        "following": ("Talking About", "People Talking About This"),
+        "media_count": ("Posts", "Uploads"),
+        "engagement_rate": ("Engagement Rate",),
+        "average_likes": ("Average Reactions", "Average Likes"),
+        "average_comments": ("Average Comments",),
+        "chart_metric_label": "Likes",
+    },
+    "youtube": {
+        "followers": ("Subscribers",),
+        "following": ("Video Views", "Views"),
+        "media_count": ("Uploads", "Videos"),
+        "engagement_rate": ("Engagement Rate",),
+        "average_likes": ("Average Views", "Average Likes"),
+        "average_comments": ("Average Comments",),
+        "chart_metric_label": "Subscribers",
+    },
+}
 
 
 def _parse_int(value: str) -> int:
@@ -92,6 +118,19 @@ def _parse_int(value: str) -> int:
 
 def _parse_float(value: str) -> float:
     return float(re.sub(r"[^0-9.\-]", "", value) or "0")
+
+
+def _parse_metric_number(value: str) -> int:
+    rendered = str(value or "").strip().replace(",", "")
+    if not rendered:
+        return 0
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*([kmb])?$", rendered, re.IGNORECASE)
+    if not match:
+        return _parse_int(rendered)
+    amount = float(match.group(1))
+    suffix = str(match.group(2) or "").lower()
+    multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(suffix, 1)
+    return int(round(amount * multiplier))
 
 
 def _normalize_body_lines(body_text: str) -> list[str]:
@@ -132,15 +171,44 @@ def _page_access_denied(body_text: str) -> bool:
     return any(marker in normalized for marker in _ACCESS_DENIED_PATTERNS)
 
 
-def _extract_profile_stats_from_body_text(body_text: str) -> tuple[dict[str, Any], dict[str, str]]:
+def _socialblade_profile_url(platform: str, handle: str) -> str:
+    normalized_platform = str(platform or "instagram").strip().lower()
+    normalized_handle = str(handle or "").strip().lstrip("@")
+    if normalized_platform == "youtube" and normalized_handle.upper().startswith("UC"):
+        return f"https://socialblade.com/youtube/channel/{normalized_handle}"
+    if normalized_platform == "youtube" and normalized_handle.startswith(("user/", "c/")):
+        return f"https://socialblade.com/youtube/{normalized_handle}"
+    route_segment = _PLATFORM_ROUTE_SEGMENTS.get(normalized_platform, "user")
+    return f"https://socialblade.com/{normalized_platform}/{route_segment}/{normalized_handle}"
+
+
+def _label_value_after(lines: list[str], labels: tuple[str, ...]) -> tuple[str, str]:
+    for label in labels:
+        value = _find_line_after(lines, label)
+        if value:
+            return label, value
+    return labels[0], ""
+
+
+def _extract_profile_stats_from_body_text(
+    body_text: str,
+    platform: str,
+) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
     lines = _normalize_body_lines(body_text)
+    config = _PROFILE_STAT_LABELS.get(platform, _PROFILE_STAT_LABELS["instagram"])
+    followers_label, followers_value = _label_value_after(lines, config["followers"])
+    following_label, following_value = _label_value_after(lines, config["following"])
+    media_count_label, media_count_value = _label_value_after(lines, config["media_count"])
+    engagement_label, engagement_value = _label_value_after(lines, config["engagement_rate"])
+    average_likes_label, average_likes_value = _label_value_after(lines, config["average_likes"])
+    average_comments_label, average_comments_value = _label_value_after(lines, config["average_comments"])
     stats: dict[str, Any] = {
-        "followers": _parse_int(_find_line_after(lines, "Followers")),
-        "following": _parse_int(_find_line_after(lines, "Following")),
-        "media_count": _parse_int(_find_line_after(lines, "Media Count")),
-        "engagement_rate": _find_line_after(lines, "Engagement Rate") or "0%",
-        "average_likes": _parse_float(_find_line_after(lines, "Average Likes")),
-        "average_comments": _parse_float(_find_line_after(lines, "Average Comments")),
+        "followers": _parse_metric_number(followers_value),
+        "following": _parse_metric_number(following_value),
+        "media_count": _parse_metric_number(media_count_value),
+        "engagement_rate": engagement_value or "0%",
+        "average_likes": _parse_float(average_likes_value),
+        "average_comments": _parse_float(average_comments_value),
     }
     rankings: dict[str, str] = {
         "grade": "",
@@ -155,19 +223,20 @@ def _extract_profile_stats_from_body_text(body_text: str) -> tuple[dict[str, Any
     if re.fullmatch(r"[A-F][+-]?", grade_value):
         rankings["grade"] = grade_value
 
-    return stats, rankings
+    labels = {
+        "followers": followers_label,
+        "following": following_label,
+        "media_count": media_count_label,
+        "engagement_rate": engagement_label,
+        "average_likes": average_likes_label,
+        "average_comments": average_comments_label,
+        "chart_metric_label": str(config["chart_metric_label"]),
+    }
+    return stats, rankings, labels
 
 
 def _normalize_table_data(table_data: dict[str, Any] | None, body_text: str) -> dict[str, Any]:
-    headers = [
-        "Date",
-        "Followers Delta",
-        "Followers Total",
-        "Following Delta",
-        "Following Total",
-        "Media Count Delta",
-        "Media Count Total",
-    ]
+    headers = [str(item).strip() for item in list((table_data or {}).get("headers") or []) if str(item).strip()]
     rows = list((table_data or {}).get("data") or [])
     lines = _normalize_body_lines(body_text)
     period = _find_line_after(lines, "Daily Channel Metrics") or "Last 14 Days"
@@ -179,11 +248,19 @@ def _normalize_table_data(table_data: dict[str, Any] | None, body_text: str) -> 
     }
 
 
-def _followers_chart_from_table(metrics: dict[str, Any]) -> dict[str, Any] | None:
+def _followers_chart_from_table(metrics: dict[str, Any], *, metric_label: str) -> dict[str, Any] | None:
+    total_column_candidates = [
+        f"{metric_label} Total",
+        metric_label,
+    ]
+    headers = [str(header).strip() for header in list(metrics.get("headers") or [])]
+    total_column = next((candidate for candidate in total_column_candidates if candidate in headers), None)
+    if not total_column:
+        return None
     chart_points: list[dict[str, Any]] = []
     for row in metrics.get("data") or []:
         raw_date = str(row.get("Date") or "").strip()
-        raw_total = str(row.get("Followers Total") or "").strip()
+        raw_total = str(row.get(total_column) or "").strip()
         if not raw_date or not raw_total:
             continue
         match = _DATE_PREFIX_PATTERN.match(raw_date)
@@ -192,7 +269,7 @@ def _followers_chart_from_table(metrics: dict[str, Any]) -> dict[str, Any] | Non
         chart_points.append(
             {
                 "date": match.group(1),
-                "followers": _parse_int(raw_total),
+                "followers": _parse_metric_number(raw_total),
             }
         )
     if not chart_points:
@@ -376,7 +453,10 @@ def _should_retry_in_visible_shared_browser(error: Exception | None) -> bool:
 
 def _format_scrape_failure_message(error: Exception | None) -> str:
     if _should_retry_in_visible_shared_browser(error):
-        return "SocialBlade scrape failed: SocialBlade challenged the authenticated API before profile history could be fetched"
+        return (
+            "SocialBlade scrape failed: SocialBlade challenged the authenticated API "
+            "before profile history could be fetched"
+        )
 
     rendered = str(error or "").strip()
     if "turnstile" in rendered.lower():
@@ -389,9 +469,9 @@ def _format_scrape_failure_message(error: Exception | None) -> str:
 
 
 def _build_profile_stats_from_user_payload(user: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
-    followers = _parse_int(str(user.get("followers") or "0"))
-    following = _parse_int(str(user.get("following") or "0"))
-    media_count = _parse_int(str(user.get("media_count") or "0"))
+    followers = _parse_metric_number(str(user.get("followers") or "0"))
+    following = _parse_metric_number(str(user.get("following") or "0"))
+    media_count = _parse_metric_number(str(user.get("media_count") or "0"))
     engagement_rate_value = float(user.get("engagement_rate") or 0)
     average_likes = float(user.get("average_likes") or 0)
     average_comments = float(user.get("average_comments") or 0)
@@ -503,6 +583,7 @@ def _scrape_socialblade_in_context(
     context: Any,
     handle: str,
     *,
+    platform: str,
     playwright: Any | None,
     cookies: list[dict[str, Any]] | None,
     allow_login_fallback: bool,
@@ -513,7 +594,7 @@ def _scrape_socialblade_in_context(
         normalize_socialblade_cookies,
     )
 
-    sb_url = f"https://socialblade.com/instagram/user/{handle}"
+    sb_url = _socialblade_profile_url(platform, handle)
     context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
 
     normalized_cookies = normalize_socialblade_cookies(cookies or [])
@@ -538,38 +619,53 @@ def _scrape_socialblade_in_context(
         history_source = "unavailable"
 
         authenticated_api_error: Exception | None = None
-        try:
-            stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
-            history_source = "authenticated_api"
-            _log(
-                f"Authenticated API scrape: {stats['followers']} followers, "
-                f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
-            )
-        except Exception as exc:  # noqa: BLE001
-            authenticated_api_error = exc
-            _log(f"Authenticated API scrape unavailable: {exc}")
-            if allow_visible_browser_retry and _should_retry_in_visible_shared_browser(exc):
-                _log("Retrying SocialBlade scrape through visible shared Chrome session...")
-                return scrape_socialblade_with_shared_browser_session(handle, playwright=playwright)
-
-        if (not chart_data or not metrics) and allow_login_fallback and _has_socialblade_login_credentials():
+        default_profile_labels = _PROFILE_STAT_LABELS.get(platform, _PROFILE_STAT_LABELS["instagram"])
+        profile_labels = {
+            "followers": "Followers",
+            "following": "Following",
+            "media_count": "Media Count",
+            "engagement_rate": "Engagement Rate",
+            "average_likes": "Average Likes",
+            "average_comments": "Average Comments",
+            "chart_metric_label": default_profile_labels["chart_metric_label"],
+        }
+        if platform == "instagram":
             try:
-                _log("Attempting SocialBlade login fallback for authenticated API access...")
-                _do_login(page, context)
-                page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(4_000)
-                body_text = _extract_body_text(page)
-                if _page_access_denied(body_text):
-                    raise RuntimeError("SocialBlade blocked by Cloudflare after login")
                 stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
                 history_source = "authenticated_api"
                 _log(
-                    f"Authenticated API scrape after login: {stats['followers']} followers, "
+                    f"Authenticated API scrape: {stats['followers']} followers, "
                     f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
                 )
             except Exception as exc:  # noqa: BLE001
                 authenticated_api_error = exc
-                _log(f"Authenticated API scrape still unavailable after login: {exc}")
+                _log(f"Authenticated API scrape unavailable: {exc}")
+                if allow_visible_browser_retry and _should_retry_in_visible_shared_browser(exc):
+                    _log("Retrying SocialBlade scrape through visible shared Chrome session...")
+                    return scrape_socialblade_with_shared_browser_session(
+                        handle,
+                        platform=platform,
+                        playwright=playwright,
+                    )
+
+            if (not chart_data or not metrics) and allow_login_fallback and _has_socialblade_login_credentials():
+                try:
+                    _log("Attempting SocialBlade login fallback for authenticated API access...")
+                    _do_login(page, context)
+                    page.goto(sb_url, wait_until="domcontentloaded", timeout=30_000)
+                    page.wait_for_timeout(4_000)
+                    body_text = _extract_body_text(page)
+                    if _page_access_denied(body_text):
+                        raise RuntimeError("SocialBlade blocked by Cloudflare after login")
+                    stats, rankings, metrics, chart_data = _scrape_authenticated_api(page, handle)
+                    history_source = "authenticated_api"
+                    _log(
+                        f"Authenticated API scrape after login: {stats['followers']} followers, "
+                        f"{chart_data['total_data_points'] if chart_data else 0} daily total points"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    authenticated_api_error = exc
+                    _log(f"Authenticated API scrape still unavailable after login: {exc}")
 
         if not chart_data or not metrics:
             try:
@@ -580,7 +676,7 @@ def _scrape_socialblade_in_context(
 
         if not stats or not rankings:
             _log("Extracting profile stats and rankings from page text...")
-            stats, rankings = _extract_profile_stats_from_body_text(body_text)
+            stats, rankings, profile_labels = _extract_profile_stats_from_body_text(body_text, platform)
             _log(f"Stats: {stats['followers']} followers, SB Rank: {rankings['sb_rank']}")
 
         if not metrics:
@@ -589,7 +685,7 @@ def _scrape_socialblade_in_context(
             _log(f"Table: {metrics['row_count']} rows ({metrics['period']})")
 
         if not chart_data:
-            chart_data = _followers_chart_from_table(metrics)
+            chart_data = _followers_chart_from_table(metrics, metric_label=str(profile_labels["chart_metric_label"]))
             if chart_data:
                 history_source = "table_fallback"
                 _log(
@@ -601,17 +697,19 @@ def _scrape_socialblade_in_context(
                     _log(f"WARNING: Falling back after authenticated API failure: {authenticated_api_error}")
                 _log("WARNING: Could not derive follower history from authenticated API or daily metrics table")
 
-        stats_refreshed = bool(stats["followers"] > 0 and stats["following"] >= 0 and metrics["row_count"] > 0)
+        stats_refreshed = bool(stats["followers"] > 0 and metrics["row_count"] > 0)
         if not stats_refreshed:
             raise RuntimeError(_format_scrape_failure_message(authenticated_api_error))
 
         result: dict[str, Any] = {
             "username": handle,
-            "platform": "instagram",
+            "account_handle": handle,
+            "platform": platform,
             "scraped_at": datetime.now(tz=UTC).isoformat(),
             "stats_refreshed": stats_refreshed,
             "history_source": history_source,
             "profile_stats": stats,
+            "profile_stats_labels": profile_labels,
             "rankings": rankings,
             "daily_channel_metrics_60day": metrics
             or {
@@ -621,6 +719,8 @@ def _scrape_socialblade_in_context(
                 "data": [],
             },
             "daily_total_followers_chart": chart_data,
+            "chart_metric_label": profile_labels["chart_metric_label"],
+            "socialblade_url": sb_url,
         }
 
         _log("Scrape complete")
@@ -632,6 +732,7 @@ def _scrape_socialblade_in_context(
 def scrape_socialblade_with_shared_browser_session(
     handle: str,
     *,
+    platform: str = "instagram",
     playwright: Any | None = None,
 ) -> dict[str, Any]:
     """Scrape SocialBlade via the visible shared Chrome session."""
@@ -643,13 +744,15 @@ def scrape_socialblade_with_shared_browser_session(
         with sync_playwright() as sync_playwright_context:
             return scrape_socialblade_with_shared_browser_session(
                 handle,
+                platform=platform,
                 playwright=sync_playwright_context,
             )
 
     cdp_url = _socialblade_visible_chrome_cdp_url()
     if not _chrome_cdp_endpoint_reachable(cdp_url):
         raise RuntimeError(
-            "Visible shared Chrome session is not running on port 9222; start the manual browser session before retrying SocialBlade"
+            "Visible shared Chrome session is not running on port 9222; "
+            "start the manual browser session before retrying SocialBlade"
         )
 
     browser = playwright.chromium.connect_over_cdp(cdp_url)
@@ -659,6 +762,7 @@ def scrape_socialblade_with_shared_browser_session(
         return _scrape_socialblade_in_context(
             browser.contexts[0],
             handle,
+            platform=platform,
             playwright=playwright,
             cookies=None,
             allow_login_fallback=False,
@@ -672,13 +776,14 @@ def scrape_socialblade(
     handle: str,
     cookies: list[dict[str, Any]],
     *,
+    platform: str = "instagram",
     allow_login_fallback: bool = True,
     allow_visible_browser_retry: bool = False,
 ) -> dict[str, Any]:
-    """Scrape SocialBlade Instagram data using Playwright.
+    """Scrape SocialBlade account data using Playwright.
 
     Args:
-        handle: Instagram username (e.g. "lisabarlow14").
+        handle: Social account handle (e.g. "lisabarlow14").
         cookies: List of cookie dicts to inject (Playwright format).
                  Each should have at least ``name``, ``value``, ``domain``.
 
@@ -691,7 +796,7 @@ def scrape_socialblade(
     from trr_backend.socials.socialblade.auth import (
         SOCIALBLADE_STEALTH_USER_AGENT,
     )
-    _log(f"Scraping SocialBlade for @{handle}")
+    _log(f"Scraping SocialBlade for {platform} @{handle}")
 
     with sync_playwright() as pw:
         browser = launch_browser(pw, headless=True)
@@ -705,6 +810,7 @@ def scrape_socialblade(
             return _scrape_socialblade_in_context(
                 context,
                 handle,
+                platform=platform,
                 playwright=pw,
                 cookies=cookies,
                 allow_login_fallback=allow_login_fallback,

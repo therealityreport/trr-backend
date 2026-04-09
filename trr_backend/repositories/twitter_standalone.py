@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from trr_backend.db import pg
-from trr_backend.repositories.social_season_analytics import _adapt_payload_json_values, _pg_upsert_many
+from trr_backend.socials.control_plane import _adapt_payload_json_values, _pg_upsert_many
 from trr_backend.socials.twitter.scraper import Tweet
 
 logger = logging.getLogger(__name__)

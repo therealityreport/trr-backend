@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient, get_supabase_admin_client
 from trr_backend.db import pg
+from trr_backend.integrations.fandom import normalize_fandom_community_domain
 from trr_backend.integrations.free_logo_sources import (
     FREE_LOGO_SOURCE_PROVIDERS,
     build_source_query_profile,
@@ -29,6 +30,7 @@ from trr_backend.integrations.free_logo_sources import (
 )
 from trr_backend.media.s3_mirror import delete_s3_objects, download_image, get_s3_bucket, get_s3_client
 from trr_backend.repositories import brand_families, brands_franchises
+from trr_backend.repositories import fandom_page_directory as fandom_page_directory_repo
 
 router = APIRouter(prefix="/admin/brands", tags=["admin-brands"])
 logger = logging.getLogger(__name__)
@@ -3398,11 +3400,34 @@ def put_franchise_rule(
 ) -> dict[str, Any]:
     actor = str((user or {}).get("id") or "admin")
     try:
-        return brands_franchises.update_franchise_rule(
+        result = brands_franchises.update_franchise_rule(
             franchise_key=franchise_key,
             payload=payload.model_dump(exclude_none=True),
             actor=actor,
         )
+        review_allpages_url = str(
+            (result.get("rule") or {}).get("review_allpages_url") or payload.review_allpages_url or ""
+        ).strip()
+        community_domains = (result.get("rule") or {}).get("community_domains") or payload.community_domains or []
+        primary_url = str((result.get("rule") or {}).get("primary_url") or payload.primary_url or "").strip()
+        candidate_domains: list[str] = []
+        for raw_domain in community_domains:
+            normalized = normalize_fandom_community_domain(str(raw_domain or ""))
+            if normalized and normalized not in candidate_domains:
+                candidate_domains.append(normalized)
+        if not candidate_domains and primary_url:
+            primary_host = normalize_fandom_community_domain(str(urlparse(primary_url).hostname or ""))
+            if primary_host:
+                candidate_domains.append(primary_host)
+        for domain in candidate_domains:
+            fandom_page_directory_repo.enqueue_fandom_page_directory_backfill(
+                community_domain=domain,
+                review_allpages_url=review_allpages_url or None,
+                actor=actor,
+                reason="franchise_rule_update",
+                force=True,
+            )
+        return result
     except Exception as error:  # noqa: BLE001
         raise _to_http_exception(error) from error
 

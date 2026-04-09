@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,6 +12,17 @@ from psycopg2.extras import Json
 from trr_backend.db import pg
 
 logger = logging.getLogger(__name__)
+_PLATFORM_RE = re.compile(r"[^a-z]")
+_HANDLE_RE = re.compile(r"[^a-zA-Z0-9._-]")
+
+
+def normalize_socialblade_platform(platform: str | None) -> str:
+    normalized = _PLATFORM_RE.sub("", str(platform or "").strip().lower())
+    return normalized or "instagram"
+
+
+def normalize_socialblade_account_handle(handle: str | None) -> str:
+    return _HANDLE_RE.sub("", str(handle or "").strip().lstrip("@").lower())
 
 
 def socialblade_growth_table_exists() -> bool:
@@ -19,26 +31,68 @@ def socialblade_growth_table_exists() -> bool:
     return bool(row and row.get("relation_name"))
 
 
-def get_growth_data(person_id: str, handle: str) -> dict[str, Any] | None:
-    """Fetch stored SocialBlade data for a person+handle pair."""
-    row = pg.fetch_one(
-        "SELECT * FROM pipeline.socialblade_growth_data WHERE person_id = %s AND instagram_handle = %s",
-        [person_id, handle],
-    )
+def get_growth_data(person_id: str | None, handle: str, *, platform: str = "instagram") -> dict[str, Any] | None:
+    """Fetch stored SocialBlade data for a handle, preferring the linked person row when present."""
+    normalized_platform = normalize_socialblade_platform(platform)
+    normalized_handle = normalize_socialblade_account_handle(handle)
+    if not normalized_handle:
+        return None
+    if person_id:
+        row = pg.fetch_one(
+            """
+            SELECT *
+            FROM pipeline.socialblade_growth_data
+            WHERE platform = %s
+              AND account_handle = %s
+              AND (person_id = %s OR person_id IS NULL)
+            ORDER BY
+              CASE
+                WHEN person_id = %s THEN 0
+                WHEN person_id IS NULL THEN 1
+                ELSE 2
+              END,
+              updated_at DESC NULLS LAST,
+              created_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            [normalized_platform, normalized_handle, person_id, person_id],
+        )
+    else:
+        row = pg.fetch_one(
+            """
+            SELECT *
+            FROM pipeline.socialblade_growth_data
+            WHERE platform = %s
+              AND account_handle = %s
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            [normalized_platform, normalized_handle],
+        )
     if not row:
         return None
     return _row_to_response(row)
 
 
-def upsert_growth_data(person_id: str, handle: str, data: dict[str, Any]) -> dict[str, Any]:
+def upsert_growth_data(
+    person_id: str | None,
+    handle: str,
+    data: dict[str, Any],
+    *,
+    platform: str = "instagram",
+) -> dict[str, Any]:
     """Upsert merged SocialBlade data. Returns the stored row."""
+    normalized_platform = normalize_socialblade_platform(platform)
+    normalized_handle = normalize_socialblade_account_handle(handle)
     rows = pg.execute_returning(
         "INSERT INTO pipeline.socialblade_growth_data "
-        "(person_id, instagram_handle, scraped_at, stats_refreshed, "
+        "(person_id, platform, account_handle, instagram_handle, scraped_at, stats_refreshed, "
         " profile_stats, rankings, daily_channel_metrics_60day, "
         " daily_total_followers_chart, raw_response, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
-        "ON CONFLICT (person_id, instagram_handle) DO UPDATE SET "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
+        "ON CONFLICT (platform, account_handle) DO UPDATE SET "
+        " person_id = COALESCE(pipeline.socialblade_growth_data.person_id, EXCLUDED.person_id), "
+        " instagram_handle = EXCLUDED.instagram_handle, "
         " scraped_at = EXCLUDED.scraped_at, "
         " stats_refreshed = EXCLUDED.stats_refreshed, "
         " profile_stats = EXCLUDED.profile_stats, "
@@ -50,7 +104,9 @@ def upsert_growth_data(person_id: str, handle: str, data: dict[str, Any]) -> dic
         "RETURNING *",
         [
             person_id,
-            handle,
+            normalized_platform,
+            normalized_handle,
+            normalized_handle,
             data.get("scraped_at", datetime.now(tz=UTC).isoformat()),
             bool(data.get("stats_refreshed", False)),
             Json(data.get("profile_stats", {})),
@@ -140,6 +196,9 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
 
 def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
     """Convert a database row to the JSON response shape the frontend expects."""
+    platform = normalize_socialblade_platform(row.get("platform"))
+    raw_response = (row.get("raw_response") or {}) if isinstance(row.get("raw_response"), dict) else {}
+    account_handle = str(row.get("account_handle") or row.get("instagram_handle") or "").strip()
     scraped_at_raw = row.get("scraped_at")
     scraped_at_value = scraped_at_raw.isoformat() if hasattr(scraped_at_raw, "isoformat") else str(scraped_at_raw or "")
     freshness_status = "missing"
@@ -157,17 +216,19 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
             freshness_status = "unknown"
 
     return {
-        "username": row.get("instagram_handle", ""),
-        "platform": "instagram",
+        "username": account_handle,
+        "account_handle": account_handle,
+        "platform": platform,
         "scraped_at": scraped_at_value,
         "stats_refreshed": bool(row.get("stats_refreshed", False)),
-        "history_source": ((row.get("raw_response") or {}) if isinstance(row.get("raw_response"), dict) else {}).get(
-            "history_source"
-        ),
+        "history_source": raw_response.get("history_source"),
         "profile_stats": row.get("profile_stats", {}),
+        "profile_stats_labels": raw_response.get("profile_stats_labels") or {},
         "rankings": row.get("rankings", {}),
         "daily_channel_metrics_60day": row.get("daily_channel_metrics_60day", {}),
         "daily_total_followers_chart": row.get("daily_total_followers_chart"),
+        "chart_metric_label": raw_response.get("chart_metric_label"),
+        "socialblade_url": raw_response.get("socialblade_url"),
         "freshness_status": freshness_status,
         "is_stale": is_stale,
         "age_hours": age_hours,

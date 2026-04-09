@@ -24,7 +24,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Any, Literal, TypeVar, cast
-from urllib.parse import quote, unquote, urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 from uuid import UUID
 
 from fastapi import APIRouter, Body, HTTPException, Request
@@ -52,6 +52,8 @@ from trr_backend.repositories.tagging_references import (
     build_owner_tagging_reference_profile,
     sync_owner_tagging_reference_usage,
 )
+from trr_backend.services.person_images import detection as person_image_detection
+from trr_backend.services.person_images import source_policy as person_image_source_policy
 
 logger = logging.getLogger(__name__)
 
@@ -929,66 +931,29 @@ def _load_person_credit_show_catalog(
 
 
 def _normalize_scope_ids(values: list[str] | None) -> list[str] | None:
-    if values is None:
-        return None
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for value in values:
-        cleaned = str(value).strip()
-        if not cleaned or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        normalized.append(cleaned)
-    return normalized
+    return person_image_source_policy.normalize_scope_ids(values)
 
 
 def _build_google_reverse_image_search_url(image_url: str | None) -> str | None:
-    cleaned = str(image_url or "").strip()
-    if not cleaned:
-        return None
-    return f"https://www.google.com/searchbyimage?image_url={quote(cleaned, safe='')}"
+    return person_image_source_policy.build_google_reverse_image_search_url(image_url)
 
 
 def _normalize_source_progress_key(value: str | None) -> str | None:
-    normalized = str(value or "").strip().lower().replace("-", "_")
-    if not normalized:
-        return None
-    if normalized in {"nbcumv", "getty"}:
-        return "getty_nbcumv"
-    return normalized
+    return person_image_source_policy.normalize_source_progress_key(value)
 
 
 def _canonicalize_refresh_source(value: str | None) -> SourceType | None:
-    cleaned = str(value or "").strip()
-    if not cleaned:
-        return None
-    if cleaned.lower() == "getty":
-        return "nbcumv"
-    return cast(SourceType, cleaned)
+    return cast(SourceType | None, person_image_source_policy.canonicalize_refresh_source(value))
 
 
 def _canonicalize_refresh_sources(values: list[str] | None) -> list[SourceType]:
-    if values is None:
-        return []
-    seen: set[str] = set()
-    normalized: list[SourceType] = []
-    for value in values:
-        canonical = _canonicalize_refresh_source(value)
-        if canonical is None:
-            continue
-        dedupe_key = canonical.lower()
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        normalized.append(canonical)
-    return normalized
+    return cast(list[SourceType], person_image_source_policy.canonicalize_refresh_sources(values))
 
 
 def _allow_nbcumv_only_supplement_for_requested_sources(values: Sequence[str] | None) -> bool:
-    if not values:
-        return True
-    normalized_sources = {str(value or "").strip().lower() for value in values if str(value or "").strip()}
-    return "nbcumv" in normalized_sources
+    return person_image_source_policy.allow_nbcumv_only_supplement_for_requested_sources(
+        cast(list[str] | tuple[str, ...] | None, values)
+    )
 
 
 def _resolve_requested_source_labels(
@@ -996,38 +961,14 @@ def _resolve_requested_source_labels(
     *,
     operational_sources: list[SourceType],
 ) -> list[str]:
-    if not request.sources:
-        return list(operational_sources)
-
-    enabled_progress_keys = {
-        progress_key
-        for source in operational_sources
-        if (progress_key := _normalize_source_progress_key(source)) is not None
-    }
-    labels: list[str] = []
-    for source in request.sources:
-        label = str(source or "").strip().lower()
-        progress_key = _normalize_source_progress_key(label)
-        if not label or progress_key is None or progress_key not in enabled_progress_keys:
-            continue
-        if label not in labels:
-            labels.append(label)
-    return labels or list(operational_sources)
+    return person_image_source_policy.resolve_requested_source_labels(
+        requested_sources=cast(list[str] | None, request.sources),
+        operational_sources=cast(list[person_image_source_policy.SourceType], operational_sources),
+    )
 
 
 def _empty_source_progress_entry() -> dict[str, Any]:
-    return {
-        "discovered_total": None,
-        "scraped_current": 0,
-        "saved_current": 0,
-        "covered_existing": 0,
-        "upgraded_existing": 0,
-        "failed_current": 0,
-        "skipped_current": 0,
-        "remaining": None,
-        "status": "pending",
-        "message": None,
-    }
+    return person_image_source_policy.empty_source_progress_entry()
 
 
 def _status_with_warning(
@@ -1038,16 +979,16 @@ def _status_with_warning(
     skipped: int = 0,
     cancelled: bool = False,
 ) -> SourceProgressStatus:
-    if cancelled:
-        return "failed"
-    successful = max(0, int(imported)) + max(0, int(covered_existing))
-    failed_count = max(0, int(failed))
-    skipped_count = max(0, int(skipped))
-    if failed_count <= 0:
-        return "completed"
-    if successful > 0 or skipped_count > 0:
-        return "warning"
-    return "failed"
+    return cast(
+        SourceProgressStatus,
+        person_image_source_policy.status_with_warning(
+            imported=imported,
+            covered_existing=covered_existing,
+            failed=failed,
+            skipped=skipped,
+            cancelled=cancelled,
+        ),
+    )
 
 
 def _getty_progress_status_with_warning(
@@ -1056,130 +997,52 @@ def _getty_progress_status_with_warning(
     covered_existing: int = 0,
     failed: int = 0,
 ) -> str:
-    successful = max(0, int(hosted)) + max(0, int(covered_existing))
-    failed_count = max(0, int(failed))
-    if failed_count <= 0:
-        return "completed"
-    if successful > 0:
-        return "warning"
-    return "failed"
+    return person_image_source_policy.getty_progress_status_with_warning(
+        hosted=hosted,
+        covered_existing=covered_existing,
+        failed=failed,
+    )
 
 
 def _ordered_source_progress_snapshot(source_progress: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    def _sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
-        key = item[0]
-        try:
-            return SOURCE_PROGRESS_KEY_ORDER.index(key), key
-        except ValueError:
-            return len(SOURCE_PROGRESS_KEY_ORDER), key
-
-    return dict(sorted(source_progress.items(), key=_sort_key))
+    return person_image_source_policy.ordered_source_progress_snapshot(source_progress, SOURCE_PROGRESS_KEY_ORDER)
 
 
 def _empty_getty_progress_subtask(task_id: str) -> dict[str, Any]:
-    return {
-        "id": task_id,
-        "label": GETTY_PROGRESS_SUBTASK_LABELS.get(task_id, task_id.replace("_", " ")),
-        "status": "pending",
-        "query": None,
-        "query_url": None,
-        "candidates_found": 0,
-        "site_image_total": None,
-        "site_event_total": None,
-        "site_video_total": None,
-        "usable_after_dedupe_total": 0,
-        "overlap_count": 0,
-        "current": 0,
-        "total": 0,
-        "message": None,
-    }
+    return person_image_source_policy.empty_getty_progress_subtask(task_id, GETTY_PROGRESS_SUBTASK_LABELS)
 
 
 def _empty_getty_progress() -> dict[str, Any]:
-    return {
-        "status": "pending",
-        "phase": "searching",
-        "auth_mode": None,
-        "subtasks": {task_id: _empty_getty_progress_subtask(task_id) for task_id in GETTY_PROGRESS_SUBTASK_ORDER},
-        "breakdown": {
-            "raw_getty_candidates": 0,
-            "unique_discovered": 0,
-            "getty_query_image_total": 0,
-            "getty_query_event_total": 0,
-            "getty_query_page_total": 0,
-            "getty_pages_completed": 0,
-            "getty_pages_total": 0,
-            "getty_discovered_total": 0,
-            "getty_usable_total": 0,
-            "getty_existing_shared_total": 0,
-            "getty_existing_getty_total": 0,
-            "getty_to_import_total": 0,
-            "getty_skipped_existing_total": 0,
-            "getty_deferred_resolution_total": 0,
-            "matched_via_nbcumv": 0,
-            "matched_via_bravotv_json": 0,
-            "matched_via_image_search": 0,
-            "unmatched_getty": 0,
-            "getty_only_imported": 0,
-            "nbcumv_only_imported": 0,
-            "bravotv_only_imported": 0,
-            "covered_existing": 0,
-            "upgraded_existing": 0,
-            "skipped": 0,
-            "failed": 0,
-            "mirrored_hosted": 0,
-            "mirrored_failed": 0,
-        },
-    }
+    return person_image_source_policy.empty_getty_progress(
+        GETTY_PROGRESS_SUBTASK_ORDER,
+        GETTY_PROGRESS_SUBTASK_LABELS,
+    )
 
 
 def _ordered_getty_progress_snapshot(getty_progress: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(getty_progress, dict):
-        return None
-    subtasks_raw = getty_progress.get("subtasks")
-    subtasks_by_id = subtasks_raw if isinstance(subtasks_raw, dict) else {}
-    ordered_subtasks = [
-        dict(subtasks_by_id.get(task_id) or _empty_getty_progress_subtask(task_id))
-        for task_id in GETTY_PROGRESS_SUBTASK_ORDER
-    ]
-    return {
-        "status": str(getty_progress.get("status") or "pending").strip().lower() or "pending",
-        "phase": str(getty_progress.get("phase") or "searching").strip().lower() or "searching",
-        "auth_mode": (str(getty_progress.get("auth_mode") or "").strip() or None),
-        "subtasks": ordered_subtasks,
-        "breakdown": dict(getty_progress.get("breakdown") or {}),
-    }
+    return person_image_source_policy.ordered_getty_progress_snapshot(
+        getty_progress,
+        GETTY_PROGRESS_SUBTASK_ORDER,
+        GETTY_PROGRESS_SUBTASK_LABELS,
+    )
 
 
 def _resolve_execution_profile(profile: str | None) -> Literal["speed", "balanced", "safe"]:
-    normalized = str(profile or "").strip().lower()
-    if normalized in {"speed", "balanced", "safe"}:
-        return cast(Literal["speed", "balanced", "safe"], normalized)
-    return "speed"
+    return person_image_source_policy.resolve_execution_profile(profile)
 
 
 def _profile_default_parallelism(
     profile: Literal["speed", "balanced", "safe"],
     stage: Literal["sync", "mirror", "tagging", "crop"],
 ) -> int:
-    defaults: dict[str, dict[str, int]] = {
-        "speed": {"sync": 3, "mirror": 12, "tagging": 8, "crop": 8},
-        "balanced": {"sync": 2, "mirror": 8, "tagging": 4, "crop": 4},
-        "safe": {"sync": 1, "mirror": 4, "tagging": 2, "crop": 2},
-    }
-    return defaults[profile][stage]
+    return person_image_source_policy.profile_default_parallelism(profile, stage)
 
 
 def _profile_default_batch_size(
     profile: Literal["speed", "balanced", "safe"],
     stage: Literal["tagging", "mirror", "crop"],
 ) -> int:
-    defaults: dict[str, dict[str, int]] = {
-        "speed": {"tagging": 32, "mirror": 200, "crop": 64},
-        "balanced": {"tagging": 24, "mirror": 120, "crop": 48},
-        "safe": {"tagging": 16, "mirror": 80, "crop": 24},
-    }
-    return defaults[profile][stage]
+    return person_image_source_policy.profile_default_batch_size(profile, stage)
 
 
 def _resolve_stage_parallelism(
@@ -1188,17 +1051,11 @@ def _resolve_stage_parallelism(
     stage: Literal["sync", "mirror", "tagging", "crop"],
     default: int,
 ) -> int:
-    if isinstance(request_overrides, dict):
-        candidate = request_overrides.get(stage)
-        if isinstance(candidate, int) and candidate > 0:
-            return candidate
-    env_map = {
-        "sync": "SYNC_MAX_PARALLEL",
-        "mirror": "MIRROR_MAX_PARALLEL",
-        "tagging": "TAGGING_MAX_PARALLEL",
-        "crop": "CROP_MAX_PARALLEL",
-    }
-    return _read_positive_int_env(env_map[stage], default)
+    return person_image_source_policy.resolve_stage_parallelism(
+        request_overrides=request_overrides,
+        stage=stage,
+        default=default,
+    )
 
 
 def _resolve_stage_batch_size(
@@ -1207,45 +1064,31 @@ def _resolve_stage_batch_size(
     stage: Literal["tagging", "mirror", "crop"],
     default: int,
 ) -> int:
-    if isinstance(request_overrides, dict):
-        candidate = request_overrides.get(stage)
-        if isinstance(candidate, int) and candidate > 0:
-            return candidate
-    env_map = {
-        "tagging": "TAGGING_BATCH_SIZE",
-        "mirror": "MIRROR_BATCH_SIZE",
-        "crop": "CROP_BATCH_SIZE",
-    }
-    return _read_positive_int_env(env_map[stage], default)
+    return person_image_source_policy.resolve_stage_batch_size(
+        request_overrides=request_overrides,
+        stage=stage,
+        default=default,
+    )
 
 
 def _read_positive_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return max(0.001, float(default))
-    try:
-        parsed = float(str(raw).strip())
-    except (TypeError, ValueError):
-        return max(0.001, float(default))
-    return max(0.001, parsed)
+    return person_image_source_policy.read_positive_float_env(name, default)
 
 
 def _resolve_resize_variant_job_timeout_seconds() -> float:
-    return _read_positive_float_env("TRR_RESIZE_VARIANT_JOB_TIMEOUT_S", 120.0)
+    return person_image_source_policy.resolve_resize_variant_job_timeout_seconds()
 
 
 def _resolve_nbcumv_import_item_timeout_seconds() -> float:
-    return _read_positive_float_env("TRR_NBCUMV_IMPORT_ITEM_TIMEOUT_S", 120.0)
+    return person_image_source_policy.resolve_nbcumv_import_item_timeout_seconds()
 
 
 def _resolve_getty_only_upsert_batch_size() -> int:
-    return _read_positive_int_env("TRR_GETTY_ONLY_UPSERT_BATCH_SIZE", 10)
+    return person_image_source_policy.resolve_getty_only_upsert_batch_size()
 
 
 def _chunked(items: list[TChunk], size: int) -> list[list[TChunk]]:
-    if size <= 0:
-        return [items]
-    return [items[index : index + size] for index in range(0, len(items), size)]
+    return person_image_source_policy.chunked(items, size)
 
 
 def _snapshot_payload_sha(payload: dict[str, Any]) -> str:
@@ -1294,26 +1137,11 @@ def _persist_person_getty_snapshot(
 
 
 def _is_transient_stage_error(exc: Exception) -> bool:
-    lowered = str(exc).lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "timeout",
-            "timed out",
-            "temporarily unavailable",
-            "connection reset",
-            "broken pipe",
-            "network",
-            "socket",
-        )
-    )
+    return person_image_source_policy.is_transient_stage_error(exc)
 
 
 def _is_real_housewives_show(show_name: str | None) -> bool:
-    if not isinstance(show_name, str):
-        return False
-    normalized = show_name.strip().lower()
-    return bool(normalized) and "real housewives" in normalized
+    return person_image_source_policy.is_real_housewives_show(show_name)
 
 
 def _apply_show_source_policy(
@@ -1321,55 +1149,44 @@ def _apply_show_source_policy(
     show_id: UUID | None,
     sources: list[SourceType],
 ) -> tuple[list[SourceType], bool]:
-    show_name = _get_show_name(db, show_id)
-    if show_name is None or _is_real_housewives_show(show_name):
-        return sources, False
-
-    blocked = {"fandom", "fandom-gallery"}
-    filtered_sources: list[SourceType] = [source for source in sources if source not in blocked]
-    fandom_skipped = len(filtered_sources) != len(sources)
-    return filtered_sources, fandom_skipped
+    return cast(
+        tuple[list[SourceType], bool],
+        person_image_source_policy.apply_show_source_policy(show_name=_get_show_name(db, show_id), sources=sources),
+    )
 
 
 def _resolve_refresh_sources(
     db: SupabaseAdminClient,
     request: RefreshImagesRequest,
 ) -> tuple[list[SourceType], bool]:
-    requested_sources = _canonicalize_refresh_sources(list(request.sources or ALL_SOURCES))
-    if not request.enforce_show_source_policy:
-        return requested_sources, False
-    return _apply_show_source_policy(db, request.show_id, requested_sources)
+    return cast(
+        tuple[list[SourceType], bool],
+        person_image_source_policy.resolve_refresh_sources(
+            requested_sources=list(request.sources or ALL_SOURCES),
+            enforce_show_source_policy=request.enforce_show_source_policy,
+            show_name=_get_show_name(db, request.show_id),
+        ),
+    )
 
 
 def _normalize_operational_refresh_sources(
     sources: list[SourceType],
     request: RefreshImagesRequest,
 ) -> list[SourceType]:
-    normalized: list[SourceType] = [source for source in sources if source != "getty"]
-    requested_sources = {
-        str(source or "").strip().lower() for source in (request.sources or []) if str(source or "").strip()
-    }
-    wants_getty_pipeline = (
-        "nbcumv" in requested_sources
-        or "getty" in requested_sources
-        or bool(request.getty_prefetched_assets)
-        or bool(request.getty_prefetched_events)
-        or bool(request.getty_prefetched_queries)
+    return cast(
+        list[SourceType],
+        person_image_source_policy.normalize_operational_refresh_sources(
+            sources=cast(list[person_image_source_policy.SourceType], sources),
+            requested_sources=cast(list[str] | None, request.sources),
+            has_getty_prefetched_assets=bool(request.getty_prefetched_assets),
+            has_getty_prefetched_events=bool(request.getty_prefetched_events),
+            has_getty_prefetched_queries=bool(request.getty_prefetched_queries),
+        ),
     )
-    if wants_getty_pipeline and "nbcumv" not in normalized:
-        normalized.append("nbcumv")
-    return normalized
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return max(1, default)
-    try:
-        parsed = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return max(1, default)
-    return max(1, parsed)
+    return person_image_source_policy.read_positive_int_env(name, default)
 
 
 def _resolve_bravotv_quality_thresholds() -> tuple[int, int, int]:
@@ -1778,6 +1595,45 @@ def _slugify_gallery_bucket_key(value: str | None) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", text)
     text = re.sub(r"-{2,}", "-", text).strip("-")
     return text
+
+
+def _terminal_sse_error_response(
+    *,
+    operation_id: str,
+    run_id: str,
+    stage: str,
+    error: str,
+    detail: str,
+    error_code: str,
+    checkpoint: str,
+) -> StreamingResponse:
+    payload = {
+        "operation_id": operation_id,
+        "event_seq": 0,
+        "run_id": run_id,
+        "stage": stage,
+        "error": error,
+        "detail": detail,
+        "error_code": error_code,
+        "stage_error_code": error_code,
+        "stage_error_detail": detail,
+        "checkpoint": checkpoint,
+        "stream_state": "failed",
+        "is_terminal": True,
+    }
+
+    async def emit_error() -> AsyncGenerator[str, None]:
+        yield f"event: error\ndata: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(
+        emit_error(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _normalize_event_category_text(value: str | None) -> str:
@@ -6840,26 +6696,10 @@ def _apply_auto_crop_payload(
     *,
     fallback_strategy: str = "face_centroid_v1",
 ) -> dict[str, Any] | None:
-    from trr_backend.clients.screenalytics import auto_thumbnail_crop, face_centroid
-
-    generated = auto_thumbnail_crop(result)
-    if generated is not None:
-        return {
-            **generated,
-            "generated_at": datetime.now(UTC).isoformat(),
-        }
-    centroid = face_centroid(result)
-    if centroid is None:
-        return None
-    cx, cy = centroid
-    return {
-        "x": cx,
-        "y": cy,
-        "zoom": 1,
-        "mode": "auto",
-        "strategy": fallback_strategy,
-        "generated_at": datetime.now(UTC).isoformat(),
-    }
+    return person_image_detection.build_auto_thumbnail_crop_payload(
+        result,
+        fallback_strategy=fallback_strategy,
+    )
 
 
 def _sync_cast_gallery_rows_to_media_assets(
@@ -7068,13 +6908,7 @@ def _recenter_person_gallery_images(
         media_rows = []
 
     try:
-        from trr_backend.clients.screenalytics import (
-            ScreenalyticsClientError,
-            count_people,
-            is_screenalytics_configured,
-        )
-
-        if not is_screenalytics_configured():
+        if not person_image_detection.is_runtime_configured():
             return attempted, succeeded, failed, skipped_manual
 
         resolved_owner_name = owner_person_name
@@ -7184,10 +7018,10 @@ def _recenter_person_gallery_images(
 
         def _process_entry(entry: dict[str, Any]) -> tuple[bool, str | None]:
             result = None
-            last_error: ScreenalyticsClientError | None = None
+            last_error: person_image_detection.ScreenalyticsClientError | None = None
             for image_url in entry["urls"]:
                 try:
-                    result = count_people(
+                    result = person_image_detection.count_people_with_fallback(
                         image_url,
                         candidate_person_ids=[person_id],
                         owner_person_id=person_id,
@@ -7195,23 +7029,13 @@ def _recenter_person_gallery_images(
                         prefer_fast_pass=bool(prefer_fast_pass),
                     )
                     break
-                except TypeError:
-                    try:
-                        result = count_people(
-                            image_url,
-                            candidate_person_ids=[person_id],
-                            owner_person_id=person_id,
-                            owner_reference_images=resolved_owner_reference_images or None,
-                        )
-                        break
-                    except TypeError:
-                        result = count_people(image_url, candidate_person_ids=[person_id])
-                        break
-                except ScreenalyticsClientError as exc:
+                except person_image_detection.ScreenalyticsClientError as exc:
                     last_error = exc
             try:
                 if result is None:
-                    raise last_error or ScreenalyticsClientError("Unable to center/crop image")
+                    raise last_error or person_image_detection.ScreenalyticsClientError(
+                        "Unable to center/crop image"
+                    )
                 owner_crop_payload = _owner_face_crop_payload(
                     _extract_detection_boxes(result, kind="face"),
                     owner_person_id=person_id,
@@ -7219,7 +7043,9 @@ def _recenter_person_gallery_images(
                 )
                 crop_payload = owner_crop_payload or _apply_auto_crop_payload(result)
                 if crop_payload is None:
-                    raise ScreenalyticsClientError("No detections available for centering/cropping")
+                    raise person_image_detection.ScreenalyticsClientError(
+                        "No detections available for centering/cropping"
+                    )
                 if entry["origin"] == "cast_photos":
                     metadata = dict(entry["metadata"] or {})
                     metadata["thumbnail_crop"] = crop_payload
@@ -7621,25 +7447,17 @@ def _auto_count_cast_photos(
         return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
 
     try:
-        from trr_backend.clients.screenalytics import (
-            ScreenalyticsClientError,
-            ScreenalyticsUnavailableError,
-            count_people,
-            count_people_batch,
-            get_screenalytics_unavailable_state,
-            is_screenalytics_configured,
-        )
         from trr_backend.repositories.cast_photo_tags import (
             get_tags_by_photo_ids,
             has_manual_tags,
             upsert_cast_photo_tags,
         )
 
-        if not is_screenalytics_configured():
+        if not person_image_detection.is_runtime_configured():
             if diagnostics is not None:
                 _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
             return auto_counts_attempted, auto_counts_succeeded, auto_counts_failed
-        unavailable, _, _ = get_screenalytics_unavailable_state()
+        unavailable, _, _ = person_image_detection.get_unavailable_state()
         if unavailable:
             if diagnostics is not None:
                 _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
@@ -7793,17 +7611,17 @@ def _auto_count_cast_photos(
             batch_results: list[Any] = [None for _ in prepared_chunk]
             if batch_requests:
                 try:
-                    batch_results = count_people_batch(
+                    batch_results = person_image_detection.count_people_batch_with_fallback(
                         batch_requests,
                         prefer_fast_pass=bool(prefer_fast_pass),
                     )
-                except ScreenalyticsUnavailableError as exc:
+                except person_image_detection.ScreenalyticsUnavailableError as exc:
                     logger.warning("Auto-count halted for %s: %s", person_id, exc)
                     auto_counts_failed += len(prepared_chunk)
                     if failed_photo_ids is not None:
                         failed_photo_ids.extend([str(item.get("photo_id") or "") for item in prepared_chunk])
                     break
-                except ScreenalyticsClientError as exc:
+                except person_image_detection.ScreenalyticsClientError as exc:
                     logger.warning("Batch auto-count failed for %s, falling back to single calls: %s", person_id, exc)
                     batch_results = [None for _ in prepared_chunk]
 
@@ -7822,46 +7640,33 @@ def _auto_count_cast_photos(
                 selected_image_url: str | None = (
                     str(image_urls[0]).strip() if result is not None and image_urls else None
                 )
-                last_error: ScreenalyticsClientError | None = None
-                service_unavailable_error: ScreenalyticsUnavailableError | None = None
+                last_error: person_image_detection.ScreenalyticsClientError | None = None
+                service_unavailable_error: person_image_detection.ScreenalyticsUnavailableError | None = None
 
                 if result is None:
                     for image_url in image_urls:
                         try:
-                            if candidate_person_ids:
-                                result = count_people(
-                                    image_url,
-                                    candidate_person_ids=candidate_person_ids,
-                                    owner_person_id=person_id,
-                                    owner_reference_images=owner_reference_images,
-                                    person_reference_images=person_reference_images or None,
-                                    prefer_fast_pass=bool(prefer_fast_pass),
-                                )
-                            else:
-                                result = count_people(
-                                    image_url,
-                                    owner_person_id=person_id,
-                                    owner_reference_images=owner_reference_images,
-                                    person_reference_images=person_reference_images or None,
-                                    prefer_fast_pass=bool(prefer_fast_pass),
-                                )
+                            result = person_image_detection.count_people_with_fallback(
+                                image_url,
+                                candidate_person_ids=cast(list[str] | None, candidate_person_ids),
+                                owner_person_id=person_id,
+                                owner_reference_images=cast(
+                                    list[dict[str, object]] | None,
+                                    owner_reference_images,
+                                ),
+                                person_reference_images=cast(
+                                    list[dict[str, object]] | None,
+                                    person_reference_images or None,
+                                ),
+                                prefer_fast_pass=bool(prefer_fast_pass),
+                            )
                             selected_image_url = image_url
                             break
-                        except TypeError:
-                            if candidate_person_ids:
-                                try:
-                                    result = count_people(image_url, candidate_person_ids=candidate_person_ids)
-                                except TypeError:
-                                    result = count_people(image_url)
-                            else:
-                                result = count_people(image_url)
-                            selected_image_url = image_url
-                            break
-                        except ScreenalyticsUnavailableError as exc:
+                        except person_image_detection.ScreenalyticsUnavailableError as exc:
                             service_unavailable_error = exc
                             last_error = exc
                             break
-                        except ScreenalyticsClientError as exc:
+                        except person_image_detection.ScreenalyticsClientError as exc:
                             last_error = exc
 
                 if service_unavailable_error is not None:
@@ -7876,7 +7681,9 @@ def _auto_count_cast_photos(
                         diagnostics_local["auto_detect_failed_rows"] += 1
                         if failed_photo_ids is not None:
                             failed_photo_ids.append(item["photo_id"])
-                        raise last_error or ScreenalyticsClientError("Unable to auto-count image")
+                        raise last_error or person_image_detection.ScreenalyticsClientError(
+                            "Unable to auto-count image"
+                        )
                     diagnostics_local["auto_detect_success_rows"] += 1
                     if not allow_identity_assignment:
                         diagnostics_local["auto_identity_skipped_non_trr_show"] += 1
@@ -7970,7 +7777,7 @@ def _auto_count_cast_photos(
                             continue
                     diagnostics_local["auto_persist_success_rows"] += 1
                     auto_counts_succeeded += 1
-                except ScreenalyticsClientError as exc:
+                except person_image_detection.ScreenalyticsClientError as exc:
                     auto_counts_failed += 1
                     if result is not None:
                         diagnostics_local["auto_persist_failed_rows"] += 1
@@ -8011,24 +7818,16 @@ def _auto_count_media_links(
     diagnostics_local = _empty_auto_count_diagnostics()
 
     try:
-        from trr_backend.clients.screenalytics import (
-            ScreenalyticsClientError,
-            ScreenalyticsUnavailableError,
-            count_people,
-            count_people_batch,
-            get_screenalytics_unavailable_state,
-            is_screenalytics_configured,
-        )
         from trr_backend.repositories.media_links import (
             has_manual_people_tags,
             has_people_count,
         )
 
-        if not is_screenalytics_configured():
+        if not person_image_detection.is_runtime_configured():
             if diagnostics is not None:
                 _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
             return attempted, succeeded, failed
-        unavailable, _, _ = get_screenalytics_unavailable_state()
+        unavailable, _, _ = person_image_detection.get_unavailable_state()
         if unavailable:
             if diagnostics is not None:
                 _merge_counter_fields(diagnostics, diagnostics_local, AUTO_COUNT_DIAGNOSTIC_FIELDS)
@@ -8173,17 +7972,17 @@ def _auto_count_media_links(
             batch_results: list[Any] = [None for _ in prepared_chunk]
             if batch_requests:
                 try:
-                    batch_results = count_people_batch(
+                    batch_results = person_image_detection.count_people_batch_with_fallback(
                         batch_requests,
                         prefer_fast_pass=bool(prefer_fast_pass),
                     )
-                except ScreenalyticsUnavailableError as exc:
+                except person_image_detection.ScreenalyticsUnavailableError as exc:
                     logger.warning("Auto-count media_links halted for %s: %s", person_id, exc)
                     failed += len(prepared_chunk)
                     if failed_link_ids is not None:
                         failed_link_ids.extend([str(item.get("row", {}).get("id") or "") for item in prepared_chunk])
                     break
-                except ScreenalyticsClientError as exc:
+                except person_image_detection.ScreenalyticsClientError as exc:
                     logger.warning(
                         "Batch auto-count media_links failed for %s, falling back to single calls: %s",
                         person_id,
@@ -8203,46 +8002,33 @@ def _auto_count_media_links(
                 result = batch_results[local_idx - 1] if local_idx - 1 < len(batch_results) else None
                 urls: list[Any] = _u if isinstance((_u := item.get("urls")), list) else []
                 selected_image_url: str | None = str(urls[0]).strip() if result is not None and urls else None
-                last_error: ScreenalyticsClientError | None = None
-                service_unavailable_error: ScreenalyticsUnavailableError | None = None
+                last_error: person_image_detection.ScreenalyticsClientError | None = None
+                service_unavailable_error: person_image_detection.ScreenalyticsUnavailableError | None = None
 
                 if result is None:
                     for image_url in urls:
                         try:
-                            if candidate_person_ids:
-                                result = count_people(
-                                    image_url,
-                                    candidate_person_ids=candidate_person_ids,
-                                    owner_person_id=person_id,
-                                    owner_reference_images=owner_reference_images,
-                                    person_reference_images=person_reference_images or None,
-                                    prefer_fast_pass=bool(prefer_fast_pass),
-                                )
-                            else:
-                                result = count_people(
-                                    image_url,
-                                    owner_person_id=person_id,
-                                    owner_reference_images=owner_reference_images,
-                                    person_reference_images=person_reference_images or None,
-                                    prefer_fast_pass=bool(prefer_fast_pass),
-                                )
+                            result = person_image_detection.count_people_with_fallback(
+                                image_url,
+                                candidate_person_ids=cast(list[str] | None, candidate_person_ids),
+                                owner_person_id=person_id,
+                                owner_reference_images=cast(
+                                    list[dict[str, object]] | None,
+                                    owner_reference_images,
+                                ),
+                                person_reference_images=cast(
+                                    list[dict[str, object]] | None,
+                                    person_reference_images or None,
+                                ),
+                                prefer_fast_pass=bool(prefer_fast_pass),
+                            )
                             selected_image_url = image_url
                             break
-                        except TypeError:
-                            if candidate_person_ids:
-                                try:
-                                    result = count_people(image_url, candidate_person_ids=candidate_person_ids)
-                                except TypeError:
-                                    result = count_people(image_url)
-                            else:
-                                result = count_people(image_url)
-                            selected_image_url = image_url
-                            break
-                        except ScreenalyticsUnavailableError as exc:
+                        except person_image_detection.ScreenalyticsUnavailableError as exc:
                             service_unavailable_error = exc
                             last_error = exc
                             break
-                        except ScreenalyticsClientError as exc:
+                        except person_image_detection.ScreenalyticsClientError as exc:
                             last_error = exc
 
                 if service_unavailable_error is not None:
@@ -8256,7 +8042,9 @@ def _auto_count_media_links(
                         diagnostics_local["auto_detect_failed_rows"] += 1
                         if failed_link_ids is not None:
                             failed_link_ids.append(str(row.get("id") or ""))
-                        raise last_error or ScreenalyticsClientError("Unable to auto-count image")
+                        raise last_error or person_image_detection.ScreenalyticsClientError(
+                            "Unable to auto-count image"
+                        )
                     diagnostics_local["auto_detect_success_rows"] += 1
                     if not allow_identity_assignment:
                         diagnostics_local["auto_identity_skipped_non_trr_show"] += 1
@@ -14211,13 +13999,6 @@ async def refresh_person_images_stream(
             )
         else:
             try:
-                from trr_backend.clients.screenalytics import (
-                    ScreenalyticsClientError,
-                    ScreenalyticsUnavailableError,
-                    count_people,
-                    get_screenalytics_unavailable_state,
-                    is_screenalytics_configured,
-                )
                 from trr_backend.repositories.cast_photo_tags import (
                     get_tags_by_photo_ids,
                     has_manual_tags,
@@ -14228,8 +14009,8 @@ async def refresh_person_images_stream(
                     has_people_count,
                 )
 
-                if is_screenalytics_configured():
-                    unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+                if person_image_detection.is_runtime_configured():
+                    unavailable, retry_after_s, unavailable_reason = person_image_detection.get_unavailable_state()
                     if unavailable:
                         yield progress(
                             {
@@ -14420,7 +14201,7 @@ async def refresh_person_images_stream(
                                     "auto_identity_skipped_non_trr_show": 0,
                                 }
                             )
-                        service_unavailable_error: ScreenalyticsUnavailableError | None = None
+                        service_unavailable_error: person_image_detection.ScreenalyticsUnavailableError | None = None
                         for idx, entry in enumerate(to_process, start=1):
                             if await _client_disconnected("auto_count"):
                                 return
@@ -14478,44 +14259,30 @@ async def refresh_person_images_stream(
                             auto_counts_attempted += 1
                             result = None
                             selected_image_url: str | None = None
-                            last_error: ScreenalyticsClientError | None = None
+                            last_error: person_image_detection.ScreenalyticsClientError | None = None
                             for url in entry["urls"]:
                                 try:
-                                    if candidate_person_ids:
-                                        result = await asyncio.to_thread(
-                                            count_people,
-                                            url,
-                                            candidate_person_ids=candidate_person_ids,
-                                            owner_person_id=person_id_str,
-                                            owner_reference_images=owner_reference_images or None,
-                                            person_reference_images=person_reference_images or None,
-                                        )
-                                    else:
-                                        result = await asyncio.to_thread(
-                                            count_people,
-                                            url,
-                                            owner_person_id=person_id_str,
-                                            owner_reference_images=owner_reference_images or None,
-                                            person_reference_images=person_reference_images or None,
-                                        )
+                                    result = await asyncio.to_thread(
+                                        person_image_detection.count_people_with_fallback,
+                                        url,
+                                        candidate_person_ids=cast(list[str] | None, candidate_person_ids),
+                                        owner_person_id=person_id_str,
+                                        owner_reference_images=cast(
+                                            list[dict[str, object]] | None,
+                                            owner_reference_images or None,
+                                        ),
+                                        person_reference_images=cast(
+                                            list[dict[str, object]] | None,
+                                            person_reference_images or None,
+                                        ),
+                                    )
                                     selected_image_url = url
                                     break
-                                except TypeError:
-                                    if candidate_person_ids:
-                                        result = await asyncio.to_thread(
-                                            count_people,
-                                            url,
-                                            candidate_person_ids=candidate_person_ids,
-                                        )
-                                    else:
-                                        result = await asyncio.to_thread(count_people, url)
-                                    selected_image_url = url
-                                    break
-                                except ScreenalyticsUnavailableError as exc:
+                                except person_image_detection.ScreenalyticsUnavailableError as exc:
                                     service_unavailable_error = exc
                                     last_error = exc
                                     break
-                                except ScreenalyticsClientError as exc:
+                                except person_image_detection.ScreenalyticsClientError as exc:
                                     last_error = exc
                             if service_unavailable_error is not None:
                                 auto_counts_failed += 1
@@ -14542,7 +14309,9 @@ async def refresh_person_images_stream(
                             try:
                                 if result is None:
                                     auto_count_diagnostics["auto_detect_failed_rows"] += 1
-                                    raise last_error or ScreenalyticsClientError("Unable to auto-count image")
+                                    raise last_error or person_image_detection.ScreenalyticsClientError(
+                                        "Unable to auto-count image"
+                                    )
                                 auto_count_diagnostics["auto_detect_success_rows"] += 1
                                 if not owner_reference_synced and isinstance(
                                     getattr(result, "reference_profile", None), dict
@@ -14982,16 +14751,8 @@ async def refresh_person_images_stream(
             )
         else:
             try:
-                from trr_backend.clients.screenalytics import (
-                    ScreenalyticsClientError,
-                    ScreenalyticsUnavailableError,
-                    count_people,
-                    get_screenalytics_unavailable_state,
-                    is_screenalytics_configured,
-                )
-
-                if is_screenalytics_configured():
-                    unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+                if person_image_detection.is_runtime_configured():
+                    unavailable, retry_after_s, unavailable_reason = person_image_detection.get_unavailable_state()
                     if unavailable:
                         yield progress(
                             {
@@ -15079,33 +14840,30 @@ async def refresh_person_images_stream(
                                 "skipped_manual_rows": centering_skipped_manual,
                             }
                         )
-                        service_unavailable_error: ScreenalyticsUnavailableError | None = None
+                        service_unavailable_error: person_image_detection.ScreenalyticsUnavailableError | None = None
                         for idx, entry in enumerate(to_process_crop, start=1):
                             centering_attempted += 1
                             result = None
-                            last_error: ScreenalyticsClientError | None = None
+                            last_error: person_image_detection.ScreenalyticsClientError | None = None
                             resolved_owner_name = (person or {}).get("full_name")
                             for url in entry["urls"]:
                                 try:
                                     result = await asyncio.to_thread(
-                                        count_people,
+                                        person_image_detection.count_people_with_fallback,
                                         url,
                                         candidate_person_ids=[person_id_str],
                                         owner_person_id=person_id_str,
-                                        owner_reference_images=owner_reference_images or None,
+                                        owner_reference_images=cast(
+                                            list[dict[str, object]] | None,
+                                            owner_reference_images or None,
+                                        ),
                                     )
                                     break
-                                except TypeError:
-                                    try:
-                                        result = await asyncio.to_thread(count_people, url)
-                                        break
-                                    except ScreenalyticsClientError as exc:
-                                        last_error = exc
-                                except ScreenalyticsUnavailableError as exc:
+                                except person_image_detection.ScreenalyticsUnavailableError as exc:
                                     service_unavailable_error = exc
                                     last_error = exc
                                     break
-                                except ScreenalyticsClientError as exc:
+                                except person_image_detection.ScreenalyticsClientError as exc:
                                     last_error = exc
                             if service_unavailable_error is not None:
                                 centering_failed += 1
@@ -15132,7 +14890,9 @@ async def refresh_person_images_stream(
                                 break
                             try:
                                 if result is None:
-                                    raise last_error or ScreenalyticsClientError("Unable to center/crop image")
+                                    raise last_error or person_image_detection.ScreenalyticsClientError(
+                                        "Unable to center/crop image"
+                                    )
                                 owner_crop = _owner_face_crop_payload(
                                     _extract_detection_boxes(result, kind="face"),
                                     owner_person_id=person_id_str,
@@ -15140,7 +14900,9 @@ async def refresh_person_images_stream(
                                 )
                                 crop_payload = owner_crop or _apply_auto_crop_payload(result)
                                 if crop_payload is None:
-                                    raise ScreenalyticsClientError("No detections available for centering/cropping")
+                                    raise person_image_detection.ScreenalyticsClientError(
+                                        "No detections available for centering/cropping"
+                                    )
                                 if entry["origin"] == "cast_photos":
                                     metadata = dict(entry["metadata"] or {})
                                     metadata["thumbnail_crop"] = crop_payload
@@ -15508,6 +15270,7 @@ async def refresh_person_images_stream(
                 "stage": "stream",
                 "error": "Refresh stream failed",
                 "detail": str(exc),
+                "error_code": "STREAM_RUNTIME_FAILED",
                 "stage_error_code": "STREAM_RUNTIME_FAILED",
                 "stage_error_detail": str(exc),
                 "checkpoint": "stream_runtime_failed",
@@ -15535,14 +15298,26 @@ async def refresh_person_images_stream(
         "request_id": request_id,
         "initiated_by": actor,
     }
-    operation = start_operation_for_stream(
-        operation_type="admin_person_refresh_images",
-        producer=guarded_event_generator,
-        request_payload=request_payload,
-        initiated_by=actor,
-        request=connection,
-        allow_attach=False,
-    )
+    try:
+        operation = start_operation_for_stream(
+            operation_type="admin_person_refresh_images",
+            producer=guarded_event_generator,
+            request_payload=request_payload,
+            initiated_by=actor,
+            request=connection,
+            allow_attach=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Refresh stream operation kickoff failed for %s: %s", person_id_str, exc)
+        return _terminal_sse_error_response(
+            operation_id=operation_id,
+            run_id=run_id,
+            stage="startup",
+            error="Refresh stream failed",
+            detail=f"Failed to start refresh stream operation: {exc}",
+            error_code="STREAM_OPERATION_START_FAILED",
+            checkpoint="stream_operation_start_failed",
+        )
     return operation_stream_response(str(operation.get("id")), request=connection)
 
 

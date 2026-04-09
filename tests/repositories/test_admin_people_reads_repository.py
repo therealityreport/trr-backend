@@ -43,7 +43,7 @@ def test_gallery_page_keeps_zero_people_count_and_returns_total_count(monkeypatc
         calls.append((query, params))
         if len(calls) == 1:
             return []
-        if len(calls) in {2, 4}:
+        if len(calls) == 2:
             return [
                 {
                     "link_id": "link-1",
@@ -73,37 +73,7 @@ def test_gallery_page_keeps_zero_people_count_and_returns_total_count(monkeypatc
                     "gallery_status": None,
                 }
             ]
-        if len(calls) == 3:
-            return []
-        return [
-            {
-                "link_id": "link-1",
-                "person_id": "person-1",
-                "media_asset_id": "asset-1",
-                "source": "imdb",
-                "source_url": "https://example.com/source.jpg",
-                "hosted_url": "https://cdn.example.com/photo.jpg",
-                "hosted_content_type": "image/jpeg",
-                "caption": "caption",
-                "width": 640,
-                "height": 480,
-                "resolved_source_url": "https://example.com/source.jpg",
-                "thumbnail_crop": {"focus_x": 0.5},
-                "context_people_count": "0",
-                "context_people_count_source": None,
-                "metadata_people_count": None,
-                "metadata_people_count_source": None,
-                "face_boxes": [],
-                "face_crops": [],
-                "bucket_type": None,
-                "bucket_key": None,
-                "bucket_label": None,
-                "resolved_show_id": None,
-                "resolved_show_name": None,
-                "source_page_url": None,
-                "gallery_status": None,
-            }
-        ]
+        return [{"total_count": 1}]
 
     monkeypatch.setattr(repo.pg, "fetch_all", fake_fetch_all)
 
@@ -115,8 +85,8 @@ def test_gallery_page_keeps_zero_people_count_and_returns_total_count(monkeypatc
         sources=None,
     )
 
-    assert query_count == 4
-    assert len(calls) == 4
+    assert query_count == 3
+    assert len(calls) == 3
     assert payload["photos"][0]["people_count"] == 0
     assert payload["pagination"] == {
         "limit": 10,
@@ -139,7 +109,7 @@ def test_gallery_page_total_count_dedupes_duplicates_and_skips_broken(monkeypatc
 
     def fake_fetch_all(query: str, params: list[object]):
         calls.append((query, params))
-        if len(calls) in {1, 3}:
+        if len(calls) == 1:
             return [
                 {
                     "id": "cast-1",
@@ -167,62 +137,64 @@ def test_gallery_page_total_count_dedupes_duplicates_and_skips_broken(monkeypatc
                     "people_count_source": None,
                 }
             ]
-        return [
-            {
-                "link_id": "link-1",
-                "person_id": "person-1",
-                "media_asset_id": "",
-                "source": "imdb",
-                "source_url": "https://example.com/source-1.jpg",
-                "hosted_url": "https://cdn.example.com/photo-1.jpg",
-                "hosted_content_type": "image/jpeg",
-                "caption": "caption",
-                "width": 640,
-                "height": 480,
-                "resolved_source_url": "https://example.com/source-1.jpg",
-                "thumbnail_crop": None,
-                "context_people_count": None,
-                "context_people_count_source": None,
-                "metadata_people_count": None,
-                "metadata_people_count_source": None,
-                "face_boxes": [],
-                "face_crops": [],
-                "bucket_type": None,
-                "bucket_key": None,
-                "bucket_label": None,
-                "resolved_show_id": None,
-                "resolved_show_name": None,
-                "source_page_url": None,
-                "gallery_status": None,
-            },
-            {
-                "link_id": "link-2",
-                "person_id": "person-1",
-                "media_asset_id": "asset-2",
-                "source": "imdb",
-                "source_url": "https://example.com/source-2.jpg",
-                "hosted_url": "https://cdn.example.com/photo-2.jpg",
-                "hosted_content_type": "image/jpeg",
-                "caption": "caption",
-                "width": 640,
-                "height": 480,
-                "resolved_source_url": "https://example.com/source-2.jpg",
-                "thumbnail_crop": None,
-                "context_people_count": None,
-                "context_people_count_source": None,
-                "metadata_people_count": None,
-                "metadata_people_count_source": None,
-                "face_boxes": [],
-                "face_crops": [],
-                "bucket_type": None,
-                "bucket_key": None,
-                "bucket_label": None,
-                "resolved_show_id": None,
-                "resolved_show_name": None,
-                "source_page_url": None,
-                "gallery_status": "broken_unreachable",
-            },
-        ]
+        if len(calls) == 2:
+            return [
+                {
+                    "link_id": "link-1",
+                    "person_id": "person-1",
+                    "media_asset_id": "",
+                    "source": "imdb",
+                    "source_url": "https://example.com/source-1.jpg",
+                    "hosted_url": "https://cdn.example.com/photo-1.jpg",
+                    "hosted_content_type": "image/jpeg",
+                    "caption": "caption",
+                    "width": 640,
+                    "height": 480,
+                    "resolved_source_url": "https://example.com/source-1.jpg",
+                    "thumbnail_crop": None,
+                    "context_people_count": None,
+                    "context_people_count_source": None,
+                    "metadata_people_count": None,
+                    "metadata_people_count_source": None,
+                    "face_boxes": [],
+                    "face_crops": [],
+                    "bucket_type": None,
+                    "bucket_key": None,
+                    "bucket_label": None,
+                    "resolved_show_id": None,
+                    "resolved_show_name": None,
+                    "source_page_url": None,
+                    "gallery_status": None,
+                },
+                {
+                    "link_id": "link-2",
+                    "person_id": "person-1",
+                    "media_asset_id": "asset-2",
+                    "source": "imdb",
+                    "source_url": "https://example.com/source-2.jpg",
+                    "hosted_url": "https://cdn.example.com/photo-2.jpg",
+                    "hosted_content_type": "image/jpeg",
+                    "caption": "caption",
+                    "width": 640,
+                    "height": 480,
+                    "resolved_source_url": "https://example.com/source-2.jpg",
+                    "thumbnail_crop": None,
+                    "context_people_count": None,
+                    "context_people_count_source": None,
+                    "metadata_people_count": None,
+                    "metadata_people_count_source": None,
+                    "face_boxes": [],
+                    "face_crops": [],
+                    "bucket_type": None,
+                    "bucket_key": None,
+                    "bucket_label": None,
+                    "resolved_show_id": None,
+                    "resolved_show_name": None,
+                    "source_page_url": None,
+                    "gallery_status": "broken_unreachable",
+                },
+            ]
+        return [{"total_count": 1}]
 
     monkeypatch.setattr(repo.pg, "fetch_all", fake_fetch_all)
 
@@ -234,7 +206,7 @@ def test_gallery_page_total_count_dedupes_duplicates_and_skips_broken(monkeypatc
         sources=["imdb"],
     )
 
-    assert query_count == 4
+    assert query_count == 3
     assert payload["pagination"]["count"] == 1
     assert payload["pagination"]["total_count"] == 1
     assert payload["photos"][0]["id"] == "link-1"
@@ -308,7 +280,7 @@ def test_gallery_page_uses_lightweight_count_queries_for_exact_total_count(monke
         calls.append((query, params))
         if len(calls) == 1:
             return []
-        if len(calls) in {2, 4}:
+        if len(calls) == 2:
             return [
                 {
                     "link_id": "link-1",
@@ -338,7 +310,7 @@ def test_gallery_page_uses_lightweight_count_queries_for_exact_total_count(monke
                     "gallery_status": None,
                 }
             ]
-        return []
+        return [{"total_count": 1}]
 
     monkeypatch.setattr(repo.pg, "fetch_all", fake_fetch_all)
 
@@ -351,17 +323,102 @@ def test_gallery_page_uses_lightweight_count_queries_for_exact_total_count(monke
         include_total_count=True,
     )
 
-    assert query_count == 4
+    assert query_count == 3
     assert payload["pagination"]["total_count"] == 1
-    assert len(calls) == 4
+    assert len(calls) == 3
     count_cast_query = calls[2][0]
-    count_media_query = calls[3][0]
+    count_media_query = calls[2][0]
     assert "thumbnail_crop" not in count_cast_query
     assert "face_boxes" not in count_cast_query
     assert "caption" not in count_cast_query
     assert "thumbnail_crop" not in count_media_query
     assert "face_boxes" not in count_media_query
     assert "caption" not in count_media_query
+    assert "UNION ALL" in count_cast_query
+    assert "count(*)::int as total_count" in count_cast_query.lower()
+    assert "distinct" in count_cast_query.lower()
+    assert "broken_unreachable" in count_cast_query
+    assert count_media_query == count_cast_query
+
+
+def test_gallery_page_coerces_legacy_show_metadata_into_show_bucket(monkeypatch) -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def fake_fetch_all(query: str, params: list[object]):
+        calls.append((query, params))
+        if len(calls) == 1:
+            return []
+        return [
+            {
+                "link_id": "link-rhoslc-1",
+                "person_id": "person-1",
+                "media_asset_id": "asset-rhoslc-1",
+                "source": "fandom-gallery",
+                "source_url": "https://real-housewives.fandom.com/wiki/Jen_Shah/Gallery",
+                "resolved_source_url": "https://real-housewives.fandom.com/wiki/Jen_Shah/Gallery",
+                "hosted_url": "https://cdn.example.com/rhoslc-1.jpg",
+                "hosted_content_type": "image/jpeg",
+                "caption": "Jen Shah cast image",
+                "width": 1200,
+                "height": 1600,
+                "thumbnail_crop": None,
+                "context_people_count": None,
+                "context_people_count_source": None,
+                "metadata_people_count": None,
+                "metadata_people_count_source": None,
+                "face_boxes": [],
+                "face_crops": [],
+                "bucket_type": None,
+                "bucket_key": None,
+                "bucket_label": None,
+                "resolved_show_id": "show-rhoslc",
+                "resolved_show_name": "The Real Housewives of Salt Lake City",
+                "source_page_url": "https://real-housewives.fandom.com/wiki/Jen_Shah/Gallery",
+                "gallery_status": None,
+            }
+        ]
+
+    monkeypatch.setattr(repo.pg, "fetch_all", fake_fetch_all)
+
+    payload, query_count = repo.get_person_gallery_page(
+        "person-1",
+        limit=10,
+        offset=0,
+        include_broken=False,
+        sources=["fandom-gallery"],
+        include_total_count=False,
+    )
+
+    assert query_count == 2
+    assert payload["photos"] == [
+        {
+            "id": "link-rhoslc-1",
+            "person_id": "person-1",
+            "source": "fandom-gallery",
+            "url": "https://real-housewives.fandom.com/wiki/Jen_Shah/Gallery",
+            "hosted_url": "https://cdn.example.com/rhoslc-1.jpg",
+            "hosted_content_type": "image/jpeg",
+            "caption": "Jen Shah cast image",
+            "width": 1200,
+            "height": 1600,
+            "thumbnail_focus_x": None,
+            "thumbnail_focus_y": None,
+            "thumbnail_zoom": None,
+            "thumbnail_crop_mode": None,
+            "people_count": None,
+            "people_count_source": None,
+            "face_boxes": [],
+            "face_crops": [],
+            "bucket_type": "show",
+            "bucket_key": "show-rhoslc",
+            "bucket_label": "The Real Housewives of Salt Lake City",
+            "resolved_show_id": "show-rhoslc",
+            "resolved_show_name": "The Real Housewives of Salt Lake City",
+            "media_asset_id": "asset-rhoslc-1",
+            "origin": "media_links",
+            "source_page_url": "https://real-housewives.fandom.com/wiki/Jen_Shah/Gallery",
+        }
+    ]
 
 
 def test_resolve_person_slug_uses_single_ranked_query(monkeypatch) -> None:

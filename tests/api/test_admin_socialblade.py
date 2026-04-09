@@ -49,6 +49,7 @@ def test_single_refresh_passes_force(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.json()["refresh_status"] == "refreshed"
     assert captured["person_id"] == "person-1"
     assert captured["handle"] == "lisabarlow14"
+    assert captured["platform"] == "instagram"
     assert captured["source"] == "person_page"
     assert captured["force"] is True
 
@@ -89,6 +90,7 @@ def test_single_refresh_runs_sync_pipeline_in_threadpool(monkeypatch: pytest.Mon
     assert captured["threadpool_kwargs"] == {
         "person_id": "person-1",
         "handle": "heathergay",
+        "platform": "instagram",
         "scraper": router_module._scrape_socialblade_person_page,
         "source": "person_page",
         "force": True,
@@ -148,6 +150,7 @@ def test_person_page_scrape_uses_visible_browser_retry_without_headless_login(
         handle: str,
         cookies,
         *,
+        platform: str,
         allow_login_fallback: bool,
         allow_visible_browser_retry: bool,
     ):
@@ -155,6 +158,7 @@ def test_person_page_scrape_uses_visible_browser_retry_without_headless_login(
             {
                 "handle": handle,
                 "cookies": cookies,
+                "platform": platform,
                 "allow_login_fallback": allow_login_fallback,
                 "allow_visible_browser_retry": allow_visible_browser_retry,
             }
@@ -169,6 +173,7 @@ def test_person_page_scrape_uses_visible_browser_retry_without_headless_login(
     assert captured == {
         "handle": "heathergay",
         "cookies": {"cf_clearance": "token"},
+        "platform": "instagram",
         "allow_login_fallback": False,
         "allow_visible_browser_retry": True,
     }
@@ -180,7 +185,8 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
 
-    def fake_queue_refresh_decision(*, person_id: str, handle: str, force: bool = False):
+    def fake_queue_refresh_decision(*, person_id: str, handle: str, force: bool = False, platform: str = "instagram"):
+        assert platform == "instagram"
         if handle == "freshalready":
             return (
                 "skipped",
@@ -242,6 +248,107 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
         },
     ]
     assert payload["errors"] == []
+
+
+def test_account_socialblade_read_route_uses_platform_handle_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.repositories.socialblade_growth as repository_module
+
+    captured: dict[str, object] = {}
+
+    def fake_get_growth_data(person_id, handle: str, *, platform: str = "instagram"):
+        captured.update({"person_id": person_id, "handle": handle, "platform": platform})
+        return {
+          "username": "bravotv",
+          "account_handle": "bravotv",
+          "platform": "facebook",
+          "scraped_at": "2026-04-08T12:00:00Z",
+        }
+
+    monkeypatch.setattr(repository_module, "get_growth_data", fake_get_growth_data)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/socials/profiles/Facebook/@BravoTV/socialblade")
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == "facebook"
+    assert captured == {
+        "person_id": None,
+        "handle": "bravotv",
+        "platform": "facebook",
+    }
+
+
+def test_account_socialblade_refresh_route_uses_platform_specific_scraper(monkeypatch: pytest.MonkeyPatch) -> None:
+    import api.routers.socials as router_module
+    import trr_backend.socials.socialblade.auth as auth_module
+    import trr_backend.socials.socialblade.scraper as scraper_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(auth_module, "refresh_socialblade_cookies", lambda *args, **kwargs: {"cf_clearance": "token"})
+    monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
+
+    def fake_scrape_socialblade(
+        handle: str,
+        cookies,
+        *,
+        platform: str,
+        allow_login_fallback: bool,
+        allow_visible_browser_retry: bool,
+    ):
+        captured["scraper"] = {
+            "handle": handle,
+            "cookies": cookies,
+            "platform": platform,
+            "allow_login_fallback": allow_login_fallback,
+            "allow_visible_browser_retry": allow_visible_browser_retry,
+        }
+        return {
+            "username": handle,
+            "account_handle": handle,
+            "platform": platform,
+            "scraped_at": "2026-04-08T12:00:00Z",
+        }
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        captured["refresh_kwargs"] = kwargs
+        return kwargs["scraper"](kwargs["handle"])
+
+    async def fake_run_in_threadpool(func, /, *args, **kwargs):
+        captured["threadpool_func"] = func
+        captured["threadpool_args"] = args
+        captured["threadpool_kwargs"] = kwargs
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(scraper_module, "scrape_socialblade", fake_scrape_socialblade)
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(router_module, "run_in_threadpool", fake_run_in_threadpool)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/socials/profiles/youtube/@Bravo/socialblade/refresh",
+        json={"force": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == "youtube"
+    assert captured["threadpool_func"] is fake_refresh_and_persist_socialblade
+    assert captured["threadpool_kwargs"] == {
+        "person_id": None,
+        "platform": "youtube",
+        "handle": "bravo",
+        "scraper": captured["refresh_kwargs"]["scraper"],
+        "source": "account_page",
+        "force": True,
+    }
+    assert captured["scraper"] == {
+        "handle": "bravo",
+        "cookies": {"cf_clearance": "token"},
+        "platform": "youtube",
+        "allow_login_fallback": False,
+        "allow_visible_browser_retry": False,
+    }
 
 
 def test_batch_refresh_respects_season_run_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:

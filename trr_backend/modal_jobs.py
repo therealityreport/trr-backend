@@ -453,7 +453,7 @@ def probe_reddit_refresh_runtime() -> dict[str, object]:
     timeout=5 * 60,
 )
 def probe_social_remote_auth(platform: str) -> dict[str, object]:
-    from trr_backend.repositories.social_season_analytics import probe_remote_auth_health
+    from trr_backend.socials.control_plane import probe_remote_auth_health
 
     return probe_remote_auth_health(platform)
 
@@ -466,7 +466,7 @@ def probe_social_remote_auth(platform: str) -> dict[str, object]:
     max_containers=_SOCIAL_CONCURRENCY_LIMIT,
 )
 def run_social_job(job_id: str) -> dict[str, object]:
-    from trr_backend.repositories.social_season_analytics import claim_and_process_social_job
+    from trr_backend.socials.control_plane import claim_and_process_social_job
 
     worker_id = f"modal:social:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     result = claim_and_process_social_job(job_id=job_id, worker_id=worker_id)
@@ -486,7 +486,7 @@ def run_social_job(job_id: str) -> dict[str, object]:
     schedule=modal.Cron("*/2 * * * *", timezone=_TIMEZONE),
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:
-    from trr_backend.repositories.social_season_analytics import recover_and_dispatch_due_social_jobs
+    from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
 
     return recover_and_dispatch_due_social_jobs()
 
@@ -499,7 +499,7 @@ def sweep_social_dispatch_queue() -> dict[str, object]:
 )
 def heartbeat_remote_executors() -> dict[str, object]:
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
-    from trr_backend.repositories.social_season_analytics import get_worker_auth_capabilities, is_queue_enabled
+    from trr_backend.socials.control_plane import get_worker_auth_capabilities, is_queue_enabled
 
     metadata = {
         "dispatch_enabled": True,

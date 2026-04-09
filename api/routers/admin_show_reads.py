@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ _SEASON_BACKDROPS_CACHE_TTL_SECONDS = max(
     int(os.getenv("TRR_ADMIN_SEASON_BACKDROPS_BACKEND_CACHE_TTL_SECONDS", "30")),
     1,
 )
+_ASSET_CURSOR_PREFIX = "offset:"
 
 
 def _cache_get(key: str) -> dict[str, Any] | None:
@@ -123,6 +125,52 @@ def invalidate_show_read_cache(*, show_id: str | None = None) -> None:
 
 def invalidate_show_reads_cache() -> None:
     invalidate_show_read_cache()
+
+
+def _encode_asset_cursor(offset: int) -> str | None:
+    normalized_offset = max(0, int(offset))
+    if normalized_offset <= 0:
+        return None
+    encoded = base64.urlsafe_b64encode(f"{_ASSET_CURSOR_PREFIX}{normalized_offset}".encode())
+    return encoded.decode("ascii")
+
+
+def _decode_asset_cursor(cursor: str | None) -> int:
+    raw = str(cursor or "").strip()
+    if not raw:
+        return 0
+    try:
+        decoded = base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid asset cursor") from exc
+    if not decoded.startswith(_ASSET_CURSOR_PREFIX):
+        raise HTTPException(status_code=400, detail="Invalid asset cursor")
+    offset_text = decoded.removeprefix(_ASSET_CURSOR_PREFIX).strip()
+    if not offset_text.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid asset cursor")
+    return max(0, int(offset_text))
+
+
+def _build_asset_pagination(
+    *,
+    limit: int,
+    offset: int,
+    count: int,
+    has_more: bool,
+    full: bool,
+    truncated: bool = False,
+) -> dict[str, Any]:
+    next_cursor = _encode_asset_cursor(offset + count) if has_more else None
+    return {
+        "limit": limit,
+        "offset": offset,
+        "count": count,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "cursor": _encode_asset_cursor(offset),
+        "full": full,
+        "truncated": truncated,
+    }
 
 
 def _payload_size_bytes(payload: dict[str, Any]) -> int:
@@ -263,16 +311,19 @@ def get_admin_show(show_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
 @router.get("/shows/{show_id}/assets")
 def get_admin_show_assets(
     show_id: str,
-    limit: int = Query(200, ge=1, le=5001),
+    limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    cursor: str | None = Query(default=None),
     full: bool = Query(False),
     sources: str | None = Query(None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     normalized_sources = ",".join(value.strip().lower() for value in (sources or "").split(",") if value.strip())
-    request_limit = 5001 if full else limit
-    request_offset = 0 if full else offset
+    requested_offset = 0 if full else (_decode_asset_cursor(cursor) if cursor else offset)
+    page_limit = min(limit, 500)
+    request_limit = 5001 if full else page_limit + 1
+    request_offset = requested_offset
     cache_key = f"show-assets:{show_id}:{request_limit}:{request_offset}:{1 if full else 0}:{normalized_sources}"
 
     def _build_show_assets_payload() -> tuple[dict[str, Any], int]:
@@ -283,18 +334,20 @@ def get_admin_show_assets(
             sources=[value for value in normalized_sources.split(",") if value] if normalized_sources else None,
             full=full,
         )
+        visible_assets = assets[:5000] if full else assets[:page_limit]
+        has_more = False if full else len(assets) > page_limit
         truncated = full and len(assets) > 5000
-        visible_assets = assets[:5000] if truncated else assets
         return (
             {
                 "assets": visible_assets,
-                "pagination": {
-                    "limit": 5000 if full else limit,
-                    "offset": request_offset,
-                    "count": len(visible_assets),
-                    "truncated": truncated,
-                    "full": full,
-                },
+                "pagination": _build_asset_pagination(
+                    limit=5000 if full else page_limit,
+                    offset=request_offset,
+                    count=len(visible_assets),
+                    has_more=has_more,
+                    full=full,
+                    truncated=truncated,
+                ),
             },
             query_count,
         )
@@ -357,16 +410,19 @@ def list_admin_show_seasons(
 def get_admin_show_season_assets(
     show_id: str,
     season_number: int,
-    limit: int = Query(200, ge=1, le=5001),
+    limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    cursor: str | None = Query(default=None),
     full: bool = Query(False),
     sources: str | None = Query(None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     normalized_sources = ",".join(value.strip().lower() for value in (sources or "").split(",") if value.strip())
-    request_limit = 5001 if full else limit
-    request_offset = 0 if full else offset
+    requested_offset = 0 if full else (_decode_asset_cursor(cursor) if cursor else offset)
+    page_limit = min(limit, 500)
+    request_limit = 5001 if full else page_limit + 1
+    request_offset = requested_offset
     cache_key = (
         f"season-assets:{show_id}:{season_number}:{request_limit}:{request_offset}:"
         f"{1 if full else 0}:{normalized_sources}"
@@ -381,18 +437,20 @@ def get_admin_show_season_assets(
             sources=[value for value in normalized_sources.split(",") if value] if normalized_sources else None,
             full=full,
         )
+        visible_assets = assets[:5000] if full else assets[:page_limit]
+        has_more = False if full else len(assets) > page_limit
         truncated = full and len(assets) > 5000
-        visible_assets = assets[:5000] if truncated else assets
         return (
             {
                 "assets": visible_assets,
-                "pagination": {
-                    "limit": 5000 if full else limit,
-                    "offset": request_offset,
-                    "count": len(visible_assets),
-                    "truncated": truncated,
-                    "full": full,
-                },
+                "pagination": _build_asset_pagination(
+                    limit=5000 if full else page_limit,
+                    offset=request_offset,
+                    count=len(visible_assets),
+                    has_more=has_more,
+                    full=full,
+                    truncated=truncated,
+                ),
             },
             query_count,
         )

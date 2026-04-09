@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+from trr_backend.socials.browser_cookie_refresh import validate_browser_cookie_session
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,24 @@ def read_instagram_cookie_file_metadata(cookie_file: str | Path) -> dict[str, An
         str(key): value
         for key, value in payload.items()
         if str(key).startswith("_")
+    }
+
+
+def _read_cookie_file(cookie_file: str | Path) -> dict[str, str]:
+    target_file = Path(cookie_file).expanduser()
+    if not target_file.is_file():
+        return {}
+    try:
+        payload = json.loads(target_file.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed reading Instagram cookies from %s", target_file, exc_info=True)
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in payload.items()
+        if not str(key).startswith("_") and str(key or "").strip() and str(value or "").strip()
     }
 
 
@@ -283,6 +302,45 @@ def interactive_chrome_login(
         headless: If False (default), shows the browser so you can log in
                   manually and watch it work. If True, runs in background.
     """
+    target_file = Path(cookie_file).expanduser()
+    if not target_file.is_absolute():
+        target_file = Path(__file__).resolve().parent.parent.parent.parent / cookie_file
+    normalized_validation_username = str(validation_username or "").strip().lstrip("@")
+    session_paths = _INSTAGRAM_BROWSER_SESSIONS.session_paths(
+        normalized_validation_username or chrome_profile_name,
+        fallback_account_id=normalized_validation_username or chrome_profile_name,
+    )
+    saved_cookies = _read_cookie_file(session_paths.cookie_file_path)
+    if saved_cookies.get("sessionid"):
+        validation_url = (
+            f"https://www.instagram.com/{normalized_validation_username}/"
+            if normalized_validation_username
+            else "https://www.instagram.com/"
+        )
+        valid, reason = validate_browser_cookie_session(
+            cookies=saved_cookies,
+            validation_url=validation_url,
+            cookie_domains=(".instagram.com",),
+            required_cookie_names_any=("sessionid",),
+            invalid_url_markers=CHALLENGE_URL_MARKERS,
+            invalid_body_patterns=(INVALID_CREDENTIAL_TEXT_RE.pattern,),
+            timeout_seconds=min(max(20, int(timeout_seconds)), 45),
+        )
+        if valid:
+            _write_cookie_file(target_file, saved_cookies)
+            logger.info(
+                "Reusing saved Instagram browser session for %s from %s",
+                normalized_validation_username or chrome_profile_name,
+                session_paths.cookie_file_path,
+            )
+            print("\n*** Reusing saved Instagram browser session. ***\n")
+            return saved_cookies
+        logger.info(
+            "Saved Instagram browser session invalid for %s (%s); falling back to interactive Chrome login",
+            normalized_validation_username or chrome_profile_name,
+            reason,
+        )
+
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -290,9 +348,6 @@ def interactive_chrome_login(
         raise RuntimeError("Playwright is required for interactive Chrome login") from exc
 
     chrome_profile_dir = _find_chrome_profile_dir(chrome_profile_name)
-    target_file = Path(cookie_file).expanduser()
-    if not target_file.is_absolute():
-        target_file = Path(__file__).resolve().parent.parent.parent.parent / cookie_file
     deadline = time.monotonic() + max(60, int(timeout_seconds))
 
     mode_label = "headless" if headless else "headed"
@@ -406,9 +461,9 @@ def interactive_chrome_login(
                 raise RuntimeError("Timed out waiting for Instagram login — no session cookie detected")
 
             _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
-                validation_username or chrome_profile_name,
+                normalized_validation_username or chrome_profile_name,
                 context.storage_state(),
-                fallback_account_id=validation_username or chrome_profile_name,
+                fallback_account_id=normalized_validation_username or chrome_profile_name,
             )
             _write_cookie_file(target_file, cookies)
             logger.info("Interactive login succeeded — cookies written to %s", target_file)

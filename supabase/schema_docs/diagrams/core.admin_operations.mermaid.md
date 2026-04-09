@@ -26,5 +26,7 @@ erDiagram
         TIMESTAMP_WITH_TIME_ZONE heartbeat_at
         INTEGER attempt_count
         TIMESTAMP_WITH_TIME_ZONE next_retry_at
+        UUID parent_operation_id
+        TEXT refresh_target
     }
 ```

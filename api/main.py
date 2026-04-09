@@ -37,6 +37,11 @@ from trr_backend.observability import (
     render_metrics,
     reset_trace_id,
 )
+from trr_backend.security.jwt import (
+    describe_supabase_jwt_context,
+    expected_supabase_issuer,
+    expected_supabase_project_ref,
+)
 
 configure_runtime_observability(service_name="trr-backend-api")
 
@@ -193,6 +198,17 @@ def _validate_startup_config() -> None:
         )
     elif missing_required:
         raise RuntimeError("Missing required auth env(s) for deployed runtime: " + ", ".join(missing_required))
+
+    supabase_project_ref = expected_supabase_project_ref()
+    supabase_issuer = expected_supabase_issuer()
+    if supabase_project_ref and supabase_issuer:
+        logger.info(
+            "[startup-config] supabase_jwt project_ref=%s issuer=%s",
+            supabase_project_ref,
+            supabase_issuer,
+        )
+    for warning in describe_supabase_jwt_context():
+        logger.warning("[startup-config] supabase_jwt %s", warning)
 
 
 def _prewarm_database_pool() -> None:

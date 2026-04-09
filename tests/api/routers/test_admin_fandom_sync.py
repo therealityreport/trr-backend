@@ -146,3 +146,114 @@ def test_preview_season_returns_profile_payload(monkeypatch) -> None:
     data = response.json()
     assert "candidate_pages" in data
     assert "season_profile" in data
+
+
+def test_enqueue_page_directory_backfill_accepts_allowlisted_domain(monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    mock_db = MagicMock()
+    operation = {
+        "id": str(uuid4()),
+        "status": "pending",
+        "attached": False,
+        "community_domain": "real-housewives.fandom.com",
+        "crawl_url": "https://real-housewives.fandom.com/wiki/Special:AllPages",
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_fandom_sync.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com",),
+        ):
+            with patch(
+                "api.routers.admin_fandom_sync.fandom_page_directory_repo.enqueue_fandom_page_directory_backfill",
+                return_value=operation,
+            ) as enqueue_mock:
+                client = TestClient(app)
+                response = client.post(
+                    "/api/v1/admin/fandom/page-directory/backfill",
+                    json={
+                        "community_domain": "real-housewives.fandom.com",
+                        "review_allpages_url": "https://real-housewives.fandom.com/wiki/Special:AllPages",
+                        "force": True,
+                        "reason": "rollout_backfill",
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "operation_id": operation["id"],
+        "status": "pending",
+        "attached": False,
+        "community_domain": "real-housewives.fandom.com",
+        "crawl_url": "https://real-housewives.fandom.com/wiki/Special:AllPages",
+    }
+    enqueue_mock.assert_called_once_with(
+        community_domain="real-housewives.fandom.com",
+        review_allpages_url="https://real-housewives.fandom.com/wiki/Special:AllPages",
+        actor="service_role:unknown",
+        reason="rollout_backfill",
+        force=True,
+    )
+
+
+def test_enqueue_page_directory_backfill_rejects_non_allowlisted_domain(monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    mock_db = MagicMock()
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_fandom_sync.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com",),
+        ):
+            with patch(
+                "api.routers.admin_fandom_sync.fandom_page_directory_repo.enqueue_fandom_page_directory_backfill"
+            ) as enqueue_mock:
+                client = TestClient(app)
+                response = client.post(
+                    "/api/v1/admin/fandom/page-directory/backfill",
+                    json={"community_domain": "realitytv-girl.fandom.com"},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Domain is not allowlisted: realitytv-girl.fandom.com"
+    enqueue_mock.assert_not_called()
+
+
+def test_enqueue_page_directory_backfill_returns_attached_operation(monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    mock_db = MagicMock()
+    operation = {
+        "id": str(uuid4()),
+        "status": "running",
+        "attached": True,
+        "community_domain": "real-housewives.fandom.com",
+        "crawl_url": "https://real-housewives.fandom.com/wiki/Special:AllPages",
+    }
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_fandom_sync.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com",),
+        ):
+            with patch(
+                "api.routers.admin_fandom_sync.fandom_page_directory_repo.enqueue_fandom_page_directory_backfill",
+                return_value=operation,
+            ):
+                client = TestClient(app)
+                response = client.post(
+                    "/api/v1/admin/fandom/page-directory/backfill",
+                    json={"community_domain": "real-housewives.fandom.com"},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+
+    assert response.status_code == 200
+    assert response.json()["attached"] is True
+    assert response.json()["operation_id"] == operation["id"]

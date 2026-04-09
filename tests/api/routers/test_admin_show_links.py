@@ -130,30 +130,42 @@ def test_discover_show_links_assigns_real_housewives_wiki_without_bravo_network_
     show_id = str(uuid4())
     rhoslc_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
 
+    def _fetch_one(query: str, params=None):
+        if "FROM core.shows" in query:
+            return {
+                "id": show_id,
+                "name": "The Real Housewives of Salt Lake City",
+                "networks": [],
+                "wikidata_id": None,
+                "external_ids": {},
+            }
+        if "FROM core.show_source_latest" in query:
+            return {"payload": {"normalized": {}}}
+        return {"url": ""}
+
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
         with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
-            fetch_one.side_effect = [
-                {
-                    "id": show_id,
-                    "name": "The Real Housewives of Salt Lake City",
-                    "networks": [],
-                    "wikidata_id": None,
-                    "external_ids": {},
+            fetch_one.side_effect = _fetch_one
+            with patch(
+                "api.routers.admin_show_links._resolve_show_fandom_rule_context",
+                return_value={
+                    "preferred_community_domain": "real-housewives.fandom.com",
+                    "community_domains": ["real-housewives.fandom.com"],
+                    "candidate_urls": [rhoslc_url],
+                    "include_allpages_scan": True,
                 },
-                {"url": ""},
-                {"payload": {"normalized": {}}},
-            ]
-            with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=rhoslc_url):
-                with patch(
-                    "api.routers.admin_show_links._fetch_html_with_status",
-                    return_value=(
-                        200,
-                        "<html><body><h1>The Real Housewives of Salt Lake City</h1></body></html>",
-                        rhoslc_url,
-                        None,
-                    ),
-                ):
-                    links = _discover_show_links(show_id)
+            ):
+                with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=rhoslc_url):
+                    with patch(
+                        "api.routers.admin_show_links._fetch_html_with_status",
+                        return_value=(
+                            200,
+                            "<html><body><h1>The Real Housewives of Salt Lake City</h1></body></html>",
+                            rhoslc_url,
+                            None,
+                        ),
+                    ):
+                        links = _discover_show_links(show_id)
 
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     assert len(fandom_links) == 1
@@ -177,6 +189,33 @@ def test_collect_show_fandom_seed_urls_includes_real_housewives_wiki_for_rhoslc(
                     show_id,
                     show_name="The Real Housewives of Salt Lake City",
                     show_fandom_seed_urls=None,
+                )
+
+    assert seeds == ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"]
+
+
+def test_collect_show_fandom_seed_urls_filters_internal_real_housewives_seed_pages() -> None:
+    show_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+        with patch(
+            "api.routers.admin_show_links.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com",),
+        ):
+            with patch(
+                "api.routers.admin_show_links.search_real_housewives_wiki",
+                return_value="https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+            ):
+                seeds = admin_show_links._collect_show_fandom_seed_urls(
+                    show_id,
+                    show_name="The Real Housewives of Salt Lake City",
+                    show_fandom_seed_urls=[
+                        "https://real-housewives.fandom.com/wiki/Real_Housewives_Wiki",
+                        "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                    ],
+                    franchise_rule_urls=[
+                        "https://real-housewives.fandom.com/wiki/Special:AllPages",
+                    ],
                 )
 
     assert seeds == ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"]
@@ -269,7 +308,7 @@ def test_discover_show_links_prefers_core_entity_links_source_for_duplicate_fand
     assert fandom_links[0]["source"] == "core.entity_links"
 
 
-def test_discover_show_links_keeps_existing_fandom_link_and_adds_real_housewives_wiki() -> None:
+def test_discover_show_links_ignores_existing_nonpreferred_real_housewives_fandom_link() -> None:
     show_id = str(uuid4())
     existing_url = "https://another-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
     rh_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
@@ -286,23 +325,27 @@ def test_discover_show_links_keeps_existing_fandom_link_and_adds_real_housewives
             return (404, "", url, None)
         return (404, "<html><body>Missing</body></html>", url, None)
 
+    def _fetch_one(query: str, params=None):
+        if "FROM core.shows" in query:
+            return {
+                "id": show_id,
+                "name": "The Real Housewives of Salt Lake City",
+                "networks": [],
+                "wikidata_id": None,
+                "external_ids": {},
+            }
+        if "FROM core.show_source_latest" in query:
+            return {"payload": {"normalized": {}}}
+        return {"url": ""}
+
     with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
         with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[{"url": existing_url}]):
-            fetch_one.side_effect = [
-                {
-                    "id": show_id,
-                    "name": "The Real Housewives of Salt Lake City",
-                    "networks": [],
-                    "wikidata_id": None,
-                    "external_ids": {},
-                },
-                {"url": ""},
-                {"payload": {"normalized": {}}},
-            ]
+            fetch_one.side_effect = _fetch_one
             with patch(
                 "api.routers.admin_show_links._resolve_show_fandom_rule_context",
                 return_value={
                     "effective_rule_key": "real_housewives",
+                    "preferred_community_domain": "real-housewives.fandom.com",
                     "community_domains": ["real-housewives.fandom.com", "another-housewives.fandom.com"],
                     "candidate_urls": [rh_url],
                     "include_allpages_scan": True,
@@ -316,9 +359,30 @@ def test_discover_show_links_keeps_existing_fandom_link_and_adds_real_housewives
                         links = _discover_show_links(show_id)
 
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
-    assert {str(link.get("url") or "") for link in fandom_links} == {existing_url, rh_url}
-    assert any(link.get("url") == existing_url and link.get("source") == "core.entity_links" for link in fandom_links)
+    assert {str(link.get("url") or "") for link in fandom_links} == {rh_url}
     assert any(link.get("url") == rh_url and link.get("source") == "franchise_rule" for link in fandom_links)
+
+
+def test_collect_show_fandom_seed_urls_filters_to_preferred_real_housewives_community() -> None:
+    show_id = str(uuid4())
+
+    with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+        with patch(
+            "api.routers.admin_show_links.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com", "realitytv-girl.fandom.com"),
+        ):
+            seeds = admin_show_links._collect_show_fandom_seed_urls(
+                show_id,
+                show_name="The Real Housewives of Salt Lake City",
+                show_fandom_seed_urls=[
+                    "https://realitytv-girl.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                    "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                ],
+                fandom_allowlist=("real-housewives.fandom.com", "realitytv-girl.fandom.com"),
+                preferred_community_domain="real-housewives.fandom.com",
+            )
+
+    assert seeds == ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"]
 
 
 def test_discover_show_links_expands_root_fandom_seed_to_show_page_candidates() -> None:
@@ -496,6 +560,7 @@ def test_discover_show_links_falls_back_to_ranked_candidate_discovery_for_show_p
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     fandom_urls = {str(link.get("url") or "") for link in fandom_links}
     assert "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City" in fandom_urls
+    assert "https://real-housewives.fandom.com/" not in fandom_urls
     derived_page = next(
         link
         for link in fandom_links
@@ -503,6 +568,185 @@ def test_discover_show_links_falls_back_to_ranked_candidate_discovery_for_show_p
     )
     assert derived_page["metadata"]["site_title"] == "The Real Housewives Wiki"
     assert str(derived_page.get("source") or "").endswith(":derived_show_page")
+
+
+def test_discover_show_links_uses_real_housewives_rule_allpages_without_persisting_seed_urls() -> None:
+    show_id = str(uuid4())
+    requested_urls: list[str] = []
+
+    def _fetch_one(query: str, params=None):
+        if "FROM core.shows" in query:
+            return {
+                "id": show_id,
+                "name": "The Real Housewives of Salt Lake City",
+                "networks": ["bravo"],
+                "wikidata_id": None,
+                "external_ids": {},
+            }
+        if "FROM core.show_source_latest" in query:
+            return {"payload": {"normalized": {}}}
+        return {"url": ""}
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        requested_urls.append(url)
+        if url == "https://real-housewives.fandom.com/wiki/Real_Housewives_Wiki":
+            return (
+                200,
+                "<html><body><h1>The Real Housewives Wiki</h1></body></html>",
+                url,
+                None,
+            )
+        if url == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City":
+            return (
+                200,
+                """
+                <html>
+                  <head>
+                    <meta property="og:site_name" content="The Real Housewives Wiki" />
+                    <title>The Real Housewives of Salt Lake City | The Real Housewives Wiki | Fandom</title>
+                  </head>
+                  <body><h1>The Real Housewives of Salt Lake City</h1></body>
+                </html>
+                """,
+                url,
+                None,
+            )
+        return (404, "<html><body>Missing</body></html>", url, None)
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch("api.routers.admin_show_links.pg.fetch_all", return_value=[]):
+            fetch_one.side_effect = _fetch_one
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=(None, None, "missing"),
+            ):
+                with patch(
+                    "api.routers.admin_show_links._resolve_show_fandom_rule_context",
+                    return_value={
+                        "effective_rule_key": "real-housewives",
+                        "community_domains": ["real-housewives.fandom.com"],
+                        "include_allpages_scan": True,
+                        "candidate_urls": [
+                            "https://real-housewives.fandom.com/wiki/Real_Housewives_Wiki",
+                            "https://real-housewives.fandom.com/wiki/Special:AllPages",
+                        ],
+                    },
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.load_fandom_community_allowlist",
+                        return_value=("real-housewives.fandom.com",),
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.search_real_housewives_wiki",
+                            return_value=None,
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                                return_value=[],
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                    return_value=[
+                                        "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                    ],
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                                        return_value=[],
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_show_links._fetch_html_with_status",
+                                            side_effect=_fetch_html,
+                                        ):
+                                            links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    assert [str(link.get("url") or "") for link in fandom_links] == [
+        "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+    ]
+    assert "https://real-housewives.fandom.com/wiki/Real_Housewives_Wiki" in requested_urls
+
+
+def test_discover_show_links_uses_cached_directory_when_canonical_page_is_cloudflare_blocked() -> None:
+    show_id = str(uuid4())
+    canonical_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+
+    def _fetch_html(url: str, *, timeout: float = 20.0):
+        return (
+            403,
+            "<html><head><title>Just a moment...</title></head><body>Cloudflare</body></html>",
+            url,
+            None,
+        )
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        with patch(
+            "api.routers.admin_show_links.pg.fetch_all",
+            return_value=[{"url": "https://real-housewives.fandom.com/"}],
+        ):
+            fetch_one.side_effect = [
+                {
+                    "id": show_id,
+                    "name": "The Real Housewives of Salt Lake City",
+                    "networks": ["bravo"],
+                    "wikidata_id": None,
+                    "external_ids": {},
+                },
+                {"url": ""},
+                {"payload": {"normalized": {}}},
+            ]
+            with patch(
+                "api.routers.admin_show_links._resolve_wikipedia_url",
+                return_value=(None, None, "missing"),
+            ):
+                with patch(
+                    "api.routers.admin_show_links.search_real_housewives_wiki",
+                    return_value=None,
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.load_fandom_community_allowlist",
+                        return_value=("real-housewives.fandom.com",),
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.fandom_page_directory_repo.search_active_page_directory_entries",
+                            return_value=[
+                                {
+                                    "community_domain": "real-housewives.fandom.com",
+                                    "page_title": "The Real Housewives of Salt Lake City",
+                                    "page_slug": "The_Real_Housewives_of_Salt_Lake_City",
+                                    "page_url": canonical_url,
+                                }
+                            ],
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links.fandom_page_directory_repo.get_active_page_directory_entry_by_url",
+                                return_value={
+                                    "community_domain": "real-housewives.fandom.com",
+                                    "page_title": "The Real Housewives of Salt Lake City",
+                                    "page_slug": "The_Real_Housewives_of_Salt_Lake_City",
+                                    "page_url": canonical_url,
+                                },
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                                    return_value=[],
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._search_fandom_allpages_html_candidates",
+                                        return_value=[],
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                                            return_value=[],
+                                        ):
+                                            with patch(
+                                                "api.routers.admin_show_links._fetch_html_with_status",
+                                                side_effect=_fetch_html,
+                                            ):
+                                                links = _discover_show_links(show_id)
+
+    fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
+    assert [str(link.get("url") or "") for link in fandom_links] == [canonical_url]
 
 
 def test_discover_show_links_skips_fandom_season_pages_when_only_season_candidate_exists() -> None:
@@ -1465,6 +1709,7 @@ def test_add_show_links_triggers_background_discovery_for_allowlisted_fandom_see
         "people_by_wikidata": {},
     }
     kickoff_calls: list[dict[str, object]] = []
+    backfill_calls: list[dict[str, object]] = []
 
     with patch("api.routers.admin_show_links._show_exists", return_value=True):
         with patch("api.routers.admin_show_links._load_show_link_classifier_context", return_value=context):
@@ -1499,18 +1744,24 @@ def test_add_show_links_triggers_background_discovery_for_allowlisted_fandom_see
                             "api.routers.admin_show_links._kickoff_show_link_discovery_for_manual_fandom_seed",
                             side_effect=lambda **kwargs: kickoff_calls.append(kwargs),
                         ):
-                            result = admin_show_links.add_show_links(
-                                UUID(show_id),
-                                admin_show_links.LinkBulkAddRequest(inputs=["https://real-housewives.fandom.com/"]),
-                                MagicMock(),
-                                {"email": "admin@example.com"},
-                            )
+                            with patch(
+                                "api.routers.admin_show_links.fandom_page_directory_repo.enqueue_fandom_page_directory_backfill",
+                                side_effect=lambda **kwargs: backfill_calls.append(kwargs),
+                            ):
+                                result = admin_show_links.add_show_links(
+                                    UUID(show_id),
+                                    admin_show_links.LinkBulkAddRequest(inputs=["https://real-housewives.fandom.com/"]),
+                                    MagicMock(),
+                                    {"email": "admin@example.com"},
+                                )
 
     assert result["added"] == 1
     assert len(kickoff_calls) == 1
     assert kickoff_calls[0]["show_id"] == show_id
     assert kickoff_calls[0]["actor"] == "admin@example.com"
     assert kickoff_calls[0]["inputs"] == ["https://real-housewives.fandom.com/"]
+    assert len(backfill_calls) == 1
+    assert backfill_calls[0]["community_domain"] == "real-housewives.fandom.com"
 
 
 def test_add_show_links_restores_shared_social_source_links_for_bravo_shows() -> None:
@@ -2305,23 +2556,27 @@ def test_put_fandom_allowlist_normalizes_dedupes_and_refreshes_cache(
     with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
         with patch("api.routers.admin_show_links.pg.db_cursor", return_value=nullcontext(cursor)):
             with patch("api.routers.admin_show_links.refresh_fandom_community_allowlist_cache") as refresh_cache:
-                response = client.put(
-                    "/api/v1/admin/fandom/allowlist",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={
-                        "domains": [
-                            "https://real-housewives.fandom.com/wiki/Andy_Cohen",
-                            "REAL-HOUSEWIVES.FANDOM.COM",
-                            " starwars.fandom.com ",
-                        ]
-                    },
-                )
+                with patch(
+                    "api.routers.admin_show_links.fandom_page_directory_repo.enqueue_fandom_page_directory_backfill"
+                ) as enqueue_backfill:
+                    response = client.put(
+                        "/api/v1/admin/fandom/allowlist",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={
+                            "domains": [
+                                "https://real-housewives.fandom.com/wiki/Andy_Cohen",
+                                "REAL-HOUSEWIVES.FANDOM.COM",
+                                " starwars.fandom.com ",
+                            ]
+                        },
+                    )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["domains"] == ["real-housewives.fandom.com", "starwars.fandom.com"]
     assert payload["count"] == 2
     refresh_cache.assert_called_once()
+    assert enqueue_backfill.call_count == 2
     # One bulk deactivate + one upsert per normalized domain.
     assert cursor.execute.call_count == 3
 
@@ -3607,6 +3862,455 @@ def test_discover_season_links_uses_later_valid_fandom_candidate_when_first_is_m
     assert season_fandom_links[0]["metadata"]["site_title"] == "The Real Housewives Wiki"
 
 
+def test_discover_season_links_rejects_cross_show_real_housewives_fandom_candidate() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_show_links.load_fandom_community_allowlist",
+        return_value=("real-housewives.fandom.com",),
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": season_id,
+                        "season_number": 1,
+                        "external_wikidata_id": "",
+                        "external_ids": {},
+                        "tmdb_season_id": None,
+                    }
+                ],
+                [],
+            ]
+            with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+                fetch_one.side_effect = [
+                    {"name": "The Real Housewives of Salt Lake City", "wikidata_id": None, "tmdb_id": None},
+                    {"url": ""},
+                    {"url": ""},
+                ]
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikipedia_url",
+                    return_value=(None, None, "missing"),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                        return_value=[],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                            return_value=[
+                                SimpleNamespace(
+                                    url=(
+                                        "https://real-housewives.fandom.com/wiki/"
+                                        "Wife_Swap:_The_Real_Housewives_Edition_-_Season_1"
+                                    ),
+                                    title="Wife Swap: The Real Housewives Edition - Season 1",
+                                    snippet="Wrong crossover page",
+                                    source="search",
+                                    score=0.91,
+                                ),
+                                SimpleNamespace(
+                                    url=(
+                                        "https://real-housewives.fandom.com/wiki/"
+                                        "The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+                                    ),
+                                    title="The Real Housewives of Salt Lake City - Season 1",
+                                    snippet="Correct show page",
+                                    source="search",
+                                    score=0.83,
+                                ),
+                            ],
+                        ):
+
+                            def _fetch_html(url: str, timeout: float = 20.0):
+                                if "Wife_Swap" in url:
+                                    return (
+                                        200,
+                                        (
+                                            "<html><body><h1>"
+                                            "Wife Swap: The Real Housewives Edition - Season 1"
+                                            "</h1></body></html>"
+                                        ),
+                                        url,
+                                        None,
+                                    )
+                                if "_-_Season_1" in url:
+                                    return (
+                                        200,
+                                        (
+                                            "<html><body><h1>"
+                                            "The Real Housewives of Salt Lake City - Season 1"
+                                            "</h1></body></html>"
+                                        ),
+                                        (
+                                            "https://real-housewives.fandom.com/wiki/"
+                                            "The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+                                        ),
+                                        None,
+                                    )
+                                return (
+                                    200,
+                                    "There is currently no text in this page.",
+                                    url,
+                                    None,
+                                )
+
+                            with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+                                links = _discover_season_links(
+                                    show_id,
+                                    show_fandom_seed_urls=[
+                                        "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                    ],
+                                )
+
+    season_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(season_fandom_links) == 1
+    assert (
+        season_fandom_links[0]["url"]
+        == "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+    )
+    assert "Wife_Swap" not in season_fandom_links[0]["url"]
+
+
+def test_discover_season_links_uses_cached_page_directory_before_live_fandom_search() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    cached_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+
+    with patch(
+        "api.routers.admin_show_links.load_fandom_community_allowlist",
+        return_value=("real-housewives.fandom.com",),
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": season_id,
+                        "season_number": 1,
+                        "external_wikidata_id": "",
+                        "external_ids": {},
+                        "tmdb_season_id": None,
+                    }
+                ],
+                [],
+            ]
+            with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+                fetch_one.side_effect = [
+                    {"name": "The Real Housewives of Salt Lake City", "wikidata_id": None, "tmdb_id": None},
+                    {"url": ""},
+                    {"url": ""},
+                ]
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikipedia_url",
+                    return_value=(None, None, "missing"),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.fandom_page_directory_repo.search_active_page_directory_entries",
+                        return_value=[
+                            {
+                                "community_domain": "real-housewives.fandom.com",
+                                "page_title": "The Real Housewives of Salt Lake City - Season 1",
+                                "page_slug": "The_Real_Housewives_of_Salt_Lake_City_-_Season_1",
+                                "page_url": cached_url,
+                            }
+                        ],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                            side_effect=AssertionError("live fandom search should not run"),
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                                side_effect=AssertionError("live fandom discovery should not run"),
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._fetch_html_with_status",
+                                    return_value=(
+                                        200,
+                                        (
+                                            "<html><body><h1>"
+                                            "The Real Housewives of Salt Lake City - Season 1"
+                                            "</h1></body></html>"
+                                        ),
+                                        cached_url,
+                                        None,
+                                    ),
+                                ):
+                                    links = _discover_season_links(
+                                        show_id,
+                                        show_fandom_seed_urls=[
+                                            "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                        ],
+                                    )
+
+    season_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(season_fandom_links) == 1
+    assert season_fandom_links[0]["url"] == cached_url
+
+
+def test_discover_season_links_uses_cached_page_directory_when_fandom_page_is_cloudflare_blocked() -> None:
+    show_id = str(uuid4())
+    season_id = str(uuid4())
+    cached_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+
+    with patch(
+        "api.routers.admin_show_links.load_fandom_community_allowlist",
+        return_value=("real-housewives.fandom.com",),
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.side_effect = [
+                [
+                    {
+                        "id": season_id,
+                        "season_number": 1,
+                        "external_wikidata_id": "",
+                        "external_ids": {},
+                        "tmdb_season_id": None,
+                    }
+                ],
+                [],
+            ]
+            with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+                fetch_one.side_effect = [
+                    {"name": "The Real Housewives of Salt Lake City", "wikidata_id": None, "tmdb_id": None},
+                    {"url": ""},
+                    {"url": ""},
+                ]
+                with patch(
+                    "api.routers.admin_show_links._resolve_wikipedia_url",
+                    return_value=(None, None, "missing"),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.fandom_page_directory_repo.search_active_page_directory_entries",
+                        return_value=[
+                            {
+                                "community_domain": "real-housewives.fandom.com",
+                                "page_title": "The Real Housewives of Salt Lake City - Season 1",
+                                "page_slug": "The_Real_Housewives_of_Salt_Lake_City_-_Season_1",
+                                "page_url": cached_url,
+                            }
+                        ],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.fandom_page_directory_repo.get_active_page_directory_entry_by_url",
+                            return_value={
+                                "community_domain": "real-housewives.fandom.com",
+                                "page_title": "The Real Housewives of Salt Lake City - Season 1",
+                                "page_slug": "The_Real_Housewives_of_Salt_Lake_City_-_Season_1",
+                                "page_url": cached_url,
+                            },
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                                side_effect=AssertionError("live fandom search should not run"),
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links.discover_fandom_candidate_pages",
+                                    side_effect=AssertionError("live fandom discovery should not run"),
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._fetch_html_with_status",
+                                        return_value=(
+                                            403,
+                                            "<html><head><title>Just a moment...</title></head></html>",
+                                            cached_url,
+                                            None,
+                                        ),
+                                    ):
+                                        links = _discover_season_links(
+                                            show_id,
+                                            show_fandom_seed_urls=[
+                                                "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                            ],
+                                        )
+
+    season_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(season_fandom_links) == 1
+    assert season_fandom_links[0]["url"] == cached_url
+
+
+def test_discover_people_links_filters_allowlisted_fandom_fallback_to_preferred_community() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    preferred_url = "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        fetch_one.side_effect = [
+            {"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None},
+            None,
+        ]
+        with patch(
+            "api.routers.admin_show_links.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com", "realitytv-girl.fandom.com"),
+        ):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.return_value = [
+                    {
+                        "id": person_id,
+                        "full_name": "Lisa Barlow",
+                        "external_ids": {},
+                        "fandom_url": "",
+                        "cast_tmdb_imdb_id": None,
+                        "cast_tmdb_tmdb_id": None,
+                        "cast_tmdb_wikidata_id": None,
+                        "cast_tmdb_facebook_id": None,
+                        "cast_tmdb_instagram_id": None,
+                        "cast_tmdb_tiktok_id": None,
+                        "cast_tmdb_twitter_id": None,
+                        "cast_tmdb_youtube_id": None,
+                        "cast_tmdb_freebase_id": None,
+                        "cast_tmdb_freebase_mid": None,
+                    }
+                ]
+                with patch(
+                    "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                    return_value=([{"person_id": person_id}], {}),
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._resolve_show_fandom_rule_context",
+                        return_value={
+                            "effective_rule_key": "real_housewives",
+                            "preferred_community_domain": "real-housewives.fandom.com",
+                            "community_domains": ["real-housewives.fandom.com"],
+                            "candidate_urls": [preferred_url],
+                            "include_allpages_scan": True,
+                        },
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                            return_value=[
+                                "https://realitytv-girl.fandom.com/wiki/Lisa_Barlow",
+                                preferred_url,
+                            ],
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._validated_person_knowledge_url",
+                                side_effect=lambda url, **_: url if "real-housewives.fandom.com" in url else None,
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._discover_related_person_fandom_urls",
+                                    return_value=[preferred_url],
+                                ):
+                                    links = _discover_people_links(
+                                        show_id,
+                                        show_fandom_seed_urls=[
+                                            "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                        ],
+                                    )
+
+    person_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(person_fandom_links) == 1
+    assert person_fandom_links[0]["url"] == preferred_url
+
+
+def test_discover_people_links_uses_cached_page_directory_when_fandom_page_is_cloudflare_blocked() -> None:
+    show_id = str(uuid4())
+    person_id = str(uuid4())
+    preferred_url = "https://real-housewives.fandom.com/wiki/Lisa_Barlow"
+    eligible_row = {
+        "person_id": person_id,
+        "eligible_reason": "main_cast",
+        "season_numbers": [1],
+        "season_count": 1,
+        "season_total": 1,
+        "season_latest": 1,
+        "season_first": 1,
+        "episode_count": 10,
+    }
+    person_row = {
+        "id": person_id,
+        "full_name": "Lisa Barlow",
+        "external_ids": {},
+        "fandom_url": None,
+        "cast_tmdb_imdb_id": None,
+        "cast_tmdb_tmdb_id": None,
+        "cast_tmdb_wikidata_id": None,
+        "cast_tmdb_facebook_id": None,
+        "cast_tmdb_instagram_id": None,
+        "cast_tmdb_tiktok_id": None,
+        "cast_tmdb_twitter_id": None,
+        "cast_tmdb_youtube_id": None,
+        "cast_tmdb_freebase_id": None,
+        "cast_tmdb_freebase_mid": None,
+    }
+
+    with patch("api.routers.admin_show_links.pg.fetch_one") as fetch_one:
+        fetch_one.side_effect = [
+            {"name": "The Real Housewives of Salt Lake City", "networks": ["bravo"], "wikidata_id": None},
+            None,
+        ]
+        with patch(
+            "api.routers.admin_show_links.load_fandom_community_allowlist",
+            return_value=("real-housewives.fandom.com",),
+        ):
+            with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+                fetch_all.side_effect = [
+                    [person_row],
+                    [],
+                    [],
+                ]
+                with patch(
+                    "api.routers.admin_show_links._resolve_show_fandom_rule_context",
+                    return_value={
+                        "effective_rule_key": "real_housewives",
+                        "preferred_community_domain": "real-housewives.fandom.com",
+                        "community_domains": ["real-housewives.fandom.com"],
+                        "candidate_urls": [
+                            "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                        ],
+                        "include_allpages_scan": True,
+                    },
+                ):
+                    with patch(
+                        "api.routers.admin_show_links.fandom_page_directory_repo.search_active_page_directory_entries",
+                        return_value=[
+                            {
+                                "community_domain": "real-housewives.fandom.com",
+                                "page_title": "Lisa Barlow",
+                                "page_slug": "Lisa_Barlow",
+                                "page_url": preferred_url,
+                            }
+                        ],
+                    ):
+                        with patch(
+                            "api.routers.admin_show_links.fandom_page_directory_repo.get_active_page_directory_entry_by_url",
+                            return_value={
+                                "community_domain": "real-housewives.fandom.com",
+                                "page_title": "Lisa Barlow",
+                                "page_slug": "Lisa_Barlow",
+                                "page_url": preferred_url,
+                            },
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._fetch_html_with_status",
+                                return_value=(
+                                    403,
+                                    "<html><head><title>Just a moment...</title></head></html>",
+                                    preferred_url,
+                                    None,
+                                ),
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links.search_fandom_community_wiki_candidates",
+                                    side_effect=AssertionError("live fandom search should not run"),
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
+                                        return_value=([eligible_row], {}),
+                                    ):
+                                        links = _discover_people_links(
+                                            show_id,
+                                            show_fandom_seed_urls=[
+                                                "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                            ],
+                                        )
+
+    person_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
+    assert len(person_fandom_links) == 1
+    assert person_fandom_links[0]["url"] == preferred_url
+
+
 def test_discover_people_links_uses_show_wikidata_cast_claims_when_missing_on_person() -> None:
     show_id = str(uuid4())
     person_id = str(uuid4())
@@ -4585,7 +5289,7 @@ def test_cleanup_invalid_show_knowledge_links_deletes_non_manual_invalid_rows() 
     assert result["validation_failures"] == 0
 
 
-def test_cleanup_invalid_show_knowledge_links_keeps_show_level_fandom_seed_domains() -> None:
+def test_cleanup_invalid_show_knowledge_links_deletes_show_level_fandom_seed_domains() -> None:
     show_id = str(uuid4())
     seed_link_id = str(uuid4())
 
@@ -4611,12 +5315,12 @@ def test_cleanup_invalid_show_knowledge_links_keeps_show_level_fandom_seed_domai
             ):
                 with patch("api.routers.admin_show_links._fetch_html_with_status") as fetch_html:
                     with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
-                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1):
                             result = _cleanup_invalid_show_knowledge_links(show_id)
 
     assert result["scanned"] == 1
-    assert result["invalid"] == 0
-    assert result["deleted"] == 0
+    assert result["invalid"] == 1
+    assert result["deleted"] == 1
     assert result["validation_failures"] == 0
     fetch_html.assert_not_called()
 
@@ -4646,7 +5350,7 @@ def test_cleanup_invalid_show_knowledge_links_keeps_bravo_fandom_domains_without
                 }
             ]
             with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=()):
-                with patch("api.routers.admin_show_links._fetch_html_with_status") as fetch_html:
+                with patch("api.routers.admin_show_links._fetch_html_with_status"):
                     with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
                         with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
                             result = _cleanup_invalid_show_knowledge_links(show_id)
@@ -4655,7 +5359,81 @@ def test_cleanup_invalid_show_knowledge_links_keeps_bravo_fandom_domains_without
     assert result["invalid"] == 0
     assert result["deleted"] == 0
     assert result["validation_failures"] == 0
-    fetch_html.assert_not_called()
+
+
+def test_cleanup_invalid_show_knowledge_links_keeps_cached_canonical_fandom_pages_when_cloudflare_blocked() -> None:
+    show_id = str(uuid4())
+    show_link_id = str(uuid4())
+    season_link_id = str(uuid4())
+    show_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+    season_url = "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+
+    with patch(
+        "api.routers.admin_show_links.pg.fetch_one",
+        return_value={
+            "name": "The Real Housewives of Salt Lake City",
+            "wikidata_id": None,
+            "networks": ["Bravo TV"],
+        },
+    ):
+        with patch("api.routers.admin_show_links.pg.fetch_all") as fetch_all:
+            fetch_all.return_value = [
+                {
+                    "id": show_link_id,
+                    "entity_type": "show",
+                    "link_kind": "fandom",
+                    "status": "approved",
+                    "url": show_url,
+                    "source": "backend_discovery",
+                    "discovered_by": "backend_discovery",
+                },
+                {
+                    "id": season_link_id,
+                    "entity_type": "season",
+                    "link_kind": "fandom",
+                    "status": "approved",
+                    "url": season_url,
+                    "source": "backend_discovery",
+                    "discovered_by": "backend_discovery",
+                },
+            ]
+            with patch(
+                "api.routers.admin_show_links.load_fandom_community_allowlist",
+                return_value=("real-housewives.fandom.com",),
+            ):
+                with patch(
+                    "api.routers.admin_show_links.fandom_page_directory_repo.get_active_page_directory_entry_by_url",
+                    side_effect=lambda community_domain, page_url: {
+                        "community_domain": community_domain,
+                        "page_title": (
+                            "The Real Housewives of Salt Lake City"
+                            if page_url == show_url
+                            else "The Real Housewives of Salt Lake City - Season 1"
+                        ),
+                        "page_slug": (
+                            "The_Real_Housewives_of_Salt_Lake_City"
+                            if page_url == show_url
+                            else "The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+                        ),
+                        "page_url": page_url,
+                    },
+                ):
+                    with patch(
+                        "api.routers.admin_show_links._fetch_html_with_status",
+                        return_value=(
+                            403,
+                            "<html><head><title>Just a moment...</title></head></html>",
+                            show_url,
+                            None,
+                        ),
+                    ):
+                        with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                            with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                                result = _cleanup_invalid_show_knowledge_links(show_id)
+
+    assert result["scanned"] == 2
+    assert result["invalid"] == 0
+    assert result["deleted"] == 0
 
 
 def test_cleanup_invalid_show_knowledge_links_deletes_show_level_fandom_season_pages() -> None:
@@ -5389,18 +6167,33 @@ def test_run_show_link_discovery_emits_stage_progress_snapshots() -> None:
         "links_discovered": 0,
         "targets_with_links": 0,
     }
+    assert show_start_payload["target_progress"] == {
+        "shows": {"completed": 0, "total": 1},
+        "seasons": {"completed": 0, "total": 4},
+        "cast_members": {"completed": 0, "total": 9},
+    }
 
     assert show_complete_payload["current_stage"] == "show_discovery_completed"
     assert show_complete_payload["discovered_rows"] == 1
     assert show_complete_payload["rows"] == 1
     assert isinstance(show_complete_payload["stage_elapsed_ms"], int)
     assert show_complete_payload["validated_live_counts_by_source"] == {"fandom": 1}
+    assert show_complete_payload["target_progress"] == {
+        "shows": {"completed": 1, "total": 1},
+        "seasons": {"completed": 0, "total": 4},
+        "cast_members": {"completed": 0, "total": 9},
+    }
     assert people_complete_payload["stage_progress"] == {
         "processed_targets": 4,
         "total_targets": 9,
         "current_target_label": "Heather Gay",
         "links_discovered": 11,
         "targets_with_links": 3,
+    }
+    assert people_complete_payload["target_progress"] == {
+        "shows": {"completed": 1, "total": 1},
+        "seasons": {"completed": 4, "total": 4},
+        "cast_members": {"completed": 4, "total": 9},
     }
     social_repair_payload = next(
         payload for stage, payload in progress_events if stage == "social_url_repair_completed"
@@ -5413,6 +6206,118 @@ def test_run_show_link_discovery_emits_stage_progress_snapshots() -> None:
         "deleted_links": 0,
         "normalized_social_urls": 1,
     }
+
+
+def test_run_show_link_discovery_filters_fandom_seed_urls_to_canonical_show_pages() -> None:
+    progress_events: list[tuple[str, dict[str, object]]] = []
+    season_seed_inputs: list[list[str]] = []
+    people_seed_inputs: list[list[str]] = []
+
+    def _discover_season_links(_show_id: str, *, show_fandom_seed_urls=None, stats=None):
+        season_seed_inputs.append(list(show_fandom_seed_urls or []))
+        return []
+
+    def _discover_people_links(_show_id: str, *, show_fandom_seed_urls=None, stats=None):
+        people_seed_inputs.append(list(show_fandom_seed_urls or []))
+        return []
+
+    with patch(
+        "api.routers.admin_show_links._count_discovery_scan_targets",
+        return_value={"show_scanned": 1, "season_scanned": 4, "people_scanned": 9},
+    ):
+        with patch(
+            "api.routers.admin_show_links._discover_show_links",
+            return_value=[
+                {
+                    "entity_type": "show",
+                    "entity_id": "show-1",
+                    "season_number": 0,
+                    "link_group": "knowledge",
+                    "link_kind": "fandom",
+                    "url": "https://real-housewives.fandom.com/wiki/Real_Housewives_Wiki",
+                    "source": "franchise_rule",
+                    "metadata": {"page_title": "Real Housewives Wiki", "site_title": "The Real Housewives Wiki"},
+                },
+                {
+                    "entity_type": "show",
+                    "entity_id": "show-1",
+                    "season_number": 0,
+                    "link_group": "knowledge",
+                    "link_kind": "fandom",
+                    "url": "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City",
+                    "source": "franchise_rule:derived_show_page",
+                    "metadata": {
+                        "page_title": "The Real Housewives of Salt Lake City",
+                        "site_title": "The Real Housewives Wiki",
+                    },
+                },
+            ],
+        ):
+            with patch("api.routers.admin_show_links._discover_season_links", side_effect=_discover_season_links):
+                with patch("api.routers.admin_show_links._discover_people_links", side_effect=_discover_people_links):
+                    with patch("api.routers.admin_show_links._upsert_link", return_value=None):
+                        with patch(
+                            "api.routers.admin_show_links._normalize_legacy_knowledge_link_kinds",
+                            return_value=0,
+                        ):
+                            with patch(
+                                "api.routers.admin_show_links._cleanup_invalid_person_knowledge_links",
+                                return_value={
+                                    "scanned": 0,
+                                    "deleted": 0,
+                                    "promoted": 0,
+                                    "deleted_by_reason": {},
+                                    "validation_failures": 0,
+                                },
+                            ):
+                                with patch(
+                                    "api.routers.admin_show_links._cleanup_invalid_person_social_links",
+                                    return_value={
+                                        "scanned": 0,
+                                        "deleted": 0,
+                                        "promoted": 0,
+                                        "deleted_by_reason": {},
+                                        "validation_failures": 0,
+                                    },
+                                ):
+                                    with patch(
+                                        "api.routers.admin_show_links._cleanup_invalid_show_knowledge_links",
+                                        return_value={
+                                            "scanned": 0,
+                                            "deleted": 0,
+                                            "manual_skipped": 0,
+                                            "deleted_by_reason": {},
+                                            "validation_failures": 0,
+                                        },
+                                    ):
+                                        with patch(
+                                            "api.routers.admin_show_links._promote_pending_links_to_approved",
+                                            return_value=0,
+                                        ):
+                                            with patch(
+                                                "api.routers.admin_show_links._normalize_existing_social_handle_urls",
+                                                return_value={"scanned": 0, "normalized": 0, "deleted_duplicates": 0},
+                                            ):
+                                                admin_show_links._run_show_link_discovery(
+                                                    show_id_str="show-1",
+                                                    payload=admin_show_links.LinkDiscoverRequest(
+                                                        include_seasons=True,
+                                                        include_people=True,
+                                                    ),
+                                                    db=MagicMock(),
+                                                    actor="admin@example.com",
+                                                    stage_callback=lambda stage, payload: progress_events.append(
+                                                        (stage, payload)
+                                                    ),
+                                                )
+
+    expected_seed = ["https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"]
+    assert season_seed_inputs == [expected_seed]
+    assert people_seed_inputs == [expected_seed]
+    season_started_payload = next(payload for stage, payload in progress_events if stage == "season_discovery_started")
+    people_started_payload = next(payload for stage, payload in progress_events if stage == "people_discovery_started")
+    assert season_started_payload["seed_urls"] == 1
+    assert people_started_payload["seed_urls"] == 1
 
 
 def test_discover_show_links_stream_emits_progress_events_before_complete() -> None:

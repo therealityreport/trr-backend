@@ -177,12 +177,34 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "parent_operation_id",
+      "data_type": "uuid",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
+    },
+    {
+      "name": "refresh_target",
+      "data_type": "text",
+      "is_nullable": "YES",
+      "default": null,
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
   "primary_key": [
     "id"
   ],
-  "foreign_keys": [],
+  "foreign_keys": [
+    {
+      "constraint": "admin_operations_parent_operation_id_fkey",
+      "column": "parent_operation_id",
+      "references": "core.admin_operations.id"
+    }
+  ],
   "unique_constraints": [],
   "indexes": [
     {
@@ -241,6 +263,24 @@
       "definition": "CREATE INDEX idx_admin_operations_operation_type_created_at ON core.admin_operations USING btree (operation_type, created_at DESC)"
     },
     {
+      "name": "idx_admin_operations_parent_id",
+      "columns": [
+        "parent_operation_id",
+        "created_at) WHERE (parent_operation_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_parent_id ON core.admin_operations USING btree (parent_operation_id, created_at) WHERE (parent_operation_id IS NOT NULL)"
+    },
+    {
+      "name": "idx_admin_operations_parent_status",
+      "columns": [
+        "parent_operation_id",
+        "status) WHERE (parent_operation_id IS NOT NULL"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_admin_operations_parent_status ON core.admin_operations USING btree (parent_operation_id, status) WHERE (parent_operation_id IS NOT NULL)"
+    },
+    {
       "name": "idx_admin_operations_status_created_at",
       "columns": [
         "status",
@@ -282,6 +322,8 @@
     "lease_expires_at": "1970-01-01T00:00:00Z",
     "heartbeat_at": "1970-01-01T00:00:00Z",
     "attempt_count": 0,
-    "next_retry_at": "1970-01-01T00:00:00Z"
+    "next_retry_at": "1970-01-01T00:00:00Z",
+    "parent_operation_id": "00000000-0000-0000-0000-000000000000",
+    "refresh_target": "example"
   }
 }

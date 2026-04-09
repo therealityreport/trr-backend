@@ -288,7 +288,45 @@ class TikTokScraper:
             time.sleep(effective_delay)
         self._request_count += 1
 
-    def _safe_response_json(self, response: requests.Response) -> dict | None:
+    def _record_endpoint_response(
+        self,
+        *,
+        endpoint: str,
+        failure_reason: str | None = None,
+        response: requests.Response | None = None,
+    ) -> None:
+        endpoint_name = str(endpoint or "").strip()
+        if not endpoint_name:
+            return
+        endpoint_responses = dict(self.last_retrieval_meta.get("endpoint_responses") or {})
+        payload: dict[str, Any] = {"endpoint": endpoint_name}
+        normalized_failure_reason = str(failure_reason or "").strip().lower() or None
+        if normalized_failure_reason:
+            payload["failure_reason"] = normalized_failure_reason
+        if response is not None:
+            content_type = str(response.headers.get("content-type") or "").strip() or None
+            content_length_raw = str(response.headers.get("content-length") or "").strip()
+            try:
+                content_length = int(content_length_raw) if content_length_raw else len(response.content or b"")
+            except (TypeError, ValueError):
+                content_length = len(response.content or b"")
+            request_id = (
+                str(response.headers.get("x-tt-logid") or "").strip()
+                or str(response.headers.get("x-request-id") or "").strip()
+                or None
+            )
+            payload.update(
+                {
+                    "http_status": int(getattr(response, "status_code", 0) or 0),
+                    "content_type": content_type,
+                    "content_length": max(0, int(content_length)),
+                    "request_id": request_id,
+                }
+            )
+        endpoint_responses[endpoint_name] = {key: value for key, value in payload.items() if value is not None}
+        self.last_retrieval_meta["endpoint_responses"] = endpoint_responses
+
+    def _safe_response_json(self, response: requests.Response, *, endpoint: str) -> dict | None:
         """Parse response JSON and classify challenge/non-json failures."""
         try:
             return response.json()
@@ -299,6 +337,11 @@ class TikTokScraper:
                 self._last_api_fail_reason = "challenge_or_blocked"
             else:
                 self._last_api_fail_reason = "non_json_response"
+            self._record_endpoint_response(
+                endpoint=endpoint,
+                failure_reason=self._last_api_fail_reason,
+                response=response,
+            )
             logger.warning(
                 "TikTok returned non-JSON response (status=%s, content-type=%s, reason=%s)",
                 response.status_code,
@@ -1214,13 +1257,19 @@ class TikTokScraper:
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            parsed = self._safe_response_json(response)
+            parsed = self._safe_response_json(response, endpoint="fetch_user_detail")
             if parsed is None:
                 return None
             return parsed
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch user detail for @{username}: {e}")
             self._last_api_fail_reason = "request_error"
+            response = getattr(e, "response", None)
+            self._record_endpoint_response(
+                endpoint="fetch_user_detail",
+                failure_reason=self._last_api_fail_reason,
+                response=response,
+            )
             return None
 
     def fetch_posts(
@@ -1251,13 +1300,19 @@ class TikTokScraper:
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
-            parsed = self._safe_response_json(response)
+            parsed = self._safe_response_json(response, endpoint="fetch_posts")
             if parsed is None:
                 return None
             return parsed
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch posts: {e}")
             self._last_api_fail_reason = "request_error"
+            response = getattr(e, "response", None)
+            self._record_endpoint_response(
+                endpoint="fetch_posts",
+                failure_reason=self._last_api_fail_reason,
+                response=response,
+            )
             return None
 
     def _browser_cookie_payload(self) -> list[dict[str, Any]]:
@@ -1813,6 +1868,7 @@ class TikTokScraper:
             if filled:
                 logger.info(f"Oembed backfill: {filled}/{len(missing_thumb)} thumbnails resolved")
 
+        endpoint_responses = dict((self.last_retrieval_meta or {}).get("endpoint_responses") or {})
         self.last_retrieval_meta = {
             "retrieval_mode": (
                 "ytdlp_fallback" if ytdlp_used else ("api" if api_posts_found else ("html" if html_posts else "none"))
@@ -1826,6 +1882,8 @@ class TikTokScraper:
             "total_posts": max(self._safe_int_metric(profile_snapshot.get("total_posts")), len(posts)),
             "profile_snapshot": profile_snapshot,
         }
+        if endpoint_responses:
+            self.last_retrieval_meta["endpoint_responses"] = endpoint_responses
         return posts
 
     def fetch_comments(
@@ -1882,9 +1940,14 @@ class TikTokScraper:
                     timeout=self.REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
-                data = self._safe_response_json(response)
+                data = self._safe_response_json(response, endpoint="fetch_comments")
             except requests.exceptions.RequestException as e:
                 self._set_comment_failure_reason("request_error")
+                self._record_endpoint_response(
+                    endpoint="fetch_comments",
+                    failure_reason=self._last_api_fail_reason,
+                    response=getattr(e, "response", None),
+                )
                 logger.error(f"Failed to fetch comments: {e}")
                 break
             if not data:
@@ -1975,9 +2038,14 @@ class TikTokScraper:
                     timeout=self.REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
-                data = self._safe_response_json(response)
+                data = self._safe_response_json(response, endpoint="fetch_comment_replies")
             except requests.exceptions.RequestException as e:
                 self._set_comment_failure_reason("request_error")
+                self._record_endpoint_response(
+                    endpoint="fetch_comment_replies",
+                    failure_reason=self._last_api_fail_reason,
+                    response=getattr(e, "response", None),
+                )
                 logger.error(f"Failed to fetch replies for comment {comment_id}: {e}")
                 break
             if not data:

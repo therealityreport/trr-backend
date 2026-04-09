@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from trr_backend.repositories.social_season_analytics import (
+from trr_backend.socials.control_plane import (
     cancel_claimed_job_before_processing,
     claim_next_queued_jobs,
     ensure_media_mirror_s3_ready,

@@ -6,7 +6,6 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 
 ## Current Active Work
 - `TASK27 Instagram Backfill Worker Reliability` | last updated `2026-04-07` | current phase `running targeted verification for the backend reliability changes` | next action `finish validation, update the runbook/status evidence, and close out the backend implementation summary` | details `../cross-collab/TASK27/STATUS.md`
-- `TASK26 Instagram Shared-Profile Rollout Guardrails` | last updated `2026-04-04` | current phase `frontier/auth fix proven live; instagram session repair pending` | next action `repair the Instagram authenticated session, then rerun bounded canary and affected replay against the deployed backend` | details `../cross-collab/TASK26/STATUS.md`
 
 ## Blocked / Waiting
 - None.
@@ -19,6 +18,7 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - `Cloud-First Schema Validation Contract Phase 6` | last updated `2026-04-03` | current phase `phase 6 backend validation contract updated` | next action `Use the frozen remote-first validation contract when Phase 7 aligns backend defaults and workspace scripts.` | details `local-status/cloud-first-schema-validation-contract-phase6.md`
 
 ## Older Plans
+- `TASK26 Instagram Shared-Profile Rollout Guardrails` | last updated `2026-04-04` | current phase `frontier/auth fix proven live; instagram session repair pending` | next action `repair the Instagram authenticated session, then rerun bounded canary and affected replay against the deployed backend` | details `../cross-collab/TASK26/STATUS.md`
 - `Screenalytics Decommission Ledger` | last updated `2026-04-03` | current phase `phase 5 screentime runtime retirement captured` | next action `Use this ledger as the canonical record that screentime is backend-only; remaining Screenalytics references are legacy or out of scope.` | details `local-status/screenalytics-decommission-ledger.md`
 - `Cast Screentime Phase 5 Runtime Retirement` | last updated `2026-04-03` | current phase `phase 5 runtime retirement implemented` | next action `Run one real screentime asset through the backend-only lane for final operational confidence.` | details `local-status/cast-screentime-phase5-runtime-retirement.md`
 - `Cast Screentime Phase 4 Review Publication Cutover` | last updated `2026-04-03` | current phase `phase 4 review and publication cutover implemented` | next action `Plan Phase 5 runtime retirement and remove the remaining rollback-only Screenalytics boundary.` | details `local-status/cast-screentime-phase4-review-publication-cutover.md`
@@ -28,7 +28,6 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - `TASK14 Supabase runtime contract cleanup` | last updated `2026-03-30` | current phase `deploy environment cleanup complete` | next action `monitor future deploys for regressions; no further backend cleanup required in this task` | details `../cross-collab/TASK14/STATUS.md`
 - `Reddit Stable Reads Backend Read Cutover` | last updated `2026-03-26` | current phase `backend-owned stable reddit reads shipped for Batch 2.5 with live local smoke` | next action `keep live/discover/backfill/mutation flows out of scope; treat sampled resolve 404 as a legacy stable-read behavior note unless later parity work promotes it` | details `local-status/reddit-stable-reads-backend-read-cutover.md`
 - `Networks Streaming Summary Backend Read Cutover` | last updated `2026-03-26` | current phase `backend-owned networks-streaming summary reads shipped for Batch 2.4` | next action `keep the summary route on the measured query/payload envelope while app consumers finish Batch 2 summary cutover` | details `local-status/networks-streaming-summary-backend-read-cutover.md`
-- `TASK4 Supabase Schema Cleanup` | last updated `2026-03-16` | current phase `6j/6k deferred cleanup` | next action `Reopen when Reddit scraping or legacy image-table removal is reprioritized` | details `../cross-collab/TASK4/STATUS.md`
 
 ## Archives / Canonical Links
 - History archive: `archive/HANDOFF-legacy-2026-03-16.md`

@@ -15,7 +15,7 @@ app = modal.App("trr-instagram-test")
 def test_instagram_graphql():
     import os, json
     from trr_backend.socials.instagram import InstagramScraper
-    from trr_backend.repositories.social_season_analytics import _load_instagram_cookies
+    from trr_backend.socials.control_plane import _load_instagram_cookies
 
     cookies = _load_instagram_cookies()
     result = {

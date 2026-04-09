@@ -62,7 +62,7 @@ def main() -> int:
 
     from trr_backend.socials.instagram.scraper import InstagramScraper, ScrapeConfig
     if not args.dry_run:
-        from trr_backend.repositories.social_season_analytics import (
+        from trr_backend.socials.control_plane import (
             _batch_upsert_shared_catalog_instagram_posts,
         )
 

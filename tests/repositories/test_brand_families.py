@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import trr_backend.repositories.brand_families as mod
@@ -101,3 +102,93 @@ def test_show_has_non_family_link_kind_escapes_like_placeholder() -> None:
 
     with patch.object(mod.pg, "fetch_one", side_effect=_fake_fetch_one):
         assert mod._show_has_non_family_link_kind("show-1", link_kind="wikipedia") is False
+
+
+def test_import_family_wikipedia_show_links_keeps_imports_as_diagnostics_only() -> None:
+    html = "<html><body><h2>Programming</h2><a href='/wiki/Test_Show'>Test Show</a></body></html>"
+
+    with (
+        patch.object(mod, "_fetch_family_row", return_value={"id": "fam-1"}),
+        patch.object(
+            mod,
+            "_fetch_family_members",
+            return_value=[{"entity_type": "network", "entity_key": "bravo"}],
+        ),
+        patch.object(
+            mod,
+            "_resolve_entity_wikipedia_url",
+            return_value="https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+        ),
+        patch.object(
+            mod.requests,
+            "get",
+            return_value=SimpleNamespace(
+                text=html,
+                raise_for_status=lambda: None,
+            ),
+        ),
+        patch.object(
+            mod,
+            "_extract_wikipedia_show_urls_from_html",
+            return_value=[
+                {
+                    "show_url": "https://en.wikipedia.org/wiki/Test_Show",
+                    "show_title": "Test Show",
+                    "show_url_key": "https://en.wikipedia.org/wiki/test_show",
+                }
+            ],
+        ),
+        patch.object(mod, "_wiki_api_wikidata_id", return_value="Q123"),
+        patch.object(mod, "_match_show_for_wikipedia_url", return_value=("show-1", "show_wikidata_id")),
+        patch.object(
+            mod,
+            "_upsert_wikipedia_show_link",
+            return_value={
+                "id": "wiki-row-1",
+                "family_id": "fam-1",
+                "entity_type": "network",
+                "entity_key": "bravo",
+                "brand_wikipedia_url": "https://en.wikipedia.org/wiki/Bravo_(American_TV_network)",
+                "show_url": "https://en.wikipedia.org/wiki/Test_Show",
+                "show_url_key": "https://en.wikipedia.org/wiki/test_show",
+                "show_title": "Test Show",
+                "wikidata_id": "Q123",
+                "matched_show_id": "show-1",
+                "match_method": "show_wikidata_id",
+                "import_source": "sync_networks_streaming",
+                "is_applied": False,
+                "metadata": {"imported_by": "sync_networks_streaming"},
+            },
+        ),
+        patch.object(mod, "create_family_link_rule") as create_family_link_rule,
+        patch.object(mod, "apply_family_links") as apply_family_links,
+    ):
+        result = mod.import_family_wikipedia_show_links(
+            family_id="fam-1",
+            actor="sync_networks_streaming",
+            apply_matched=True,
+            import_source="sync_networks_streaming",
+        )
+
+    assert result["imported_count"] == 1
+    assert result["matched_count"] == 1
+    assert result["rules_upserted"] == 0
+    assert result["apply_result"] is None
+    create_family_link_rule.assert_not_called()
+    apply_family_links.assert_not_called()
+
+
+def test_cleanup_imported_family_link_rules_scopes_to_wikipedia_import_rows() -> None:
+    def _fake_execute_returning(query: str, params: list[object]) -> list[dict[str, object]]:
+        assert "delete from admin.brand_family_link_rules" in query
+        assert "source = 'wikipedia_import'" in query
+        assert params == ["fam-1"]
+        return [{"id": "rule-1"}, {"id": "rule-2"}]
+
+    with (
+        patch.object(mod, "_fetch_family_row", return_value={"id": "fam-1"}),
+        patch.object(mod.pg, "execute_returning", side_effect=_fake_execute_returning),
+    ):
+        result = mod.cleanup_imported_family_link_rules(family_id="fam-1")
+
+    assert result == {"family_id": "fam-1", "deleted_count": 2}

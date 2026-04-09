@@ -63,6 +63,10 @@ _LIVE_STATUS_STREAM_INTERVAL_SECONDS = 5.0
 _LIVE_STATUS_SEQUENCE = 0
 
 
+class SocialBladeProfileRefreshRequest(BaseModel):
+    force: bool = False
+
+
 def _reddit_refresh_worker_health_payload(
     *,
     healthy: bool,
@@ -904,39 +908,35 @@ def _resolve_social_account_catalog_route_execution(
         remote_plane_enforced=remote_plane_enforced,
     )
     if queue_enabled:
-        if requires_modal_executor and can_use_local_inline_fallback:
-            queue_enabled = False
-            used_inline_fallback = True
-        else:
-            try:
-                assert_worker_available_when_queue_enabled(
-                    required_execution_backend="modal" if requires_modal_executor else None,
-                    platform=platform if requires_modal_executor else None,
-                )
-                if requires_modal_executor:
-                    _raise_if_modal_social_dispatch_unresolvable(platform)
-            except SocialWorkerUnavailableError as exc:
-                if can_use_local_inline_fallback:
-                    queue_enabled = False
-                    used_inline_fallback = True
-                else:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "code": (
-                                "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
-                                if remote_plane_enforced
-                                else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                                if requires_modal_executor
-                                else "SOCIAL_WORKER_UNAVAILABLE"
-                            ),
-                            "message": (_remote_worker_unavailable_message(exc) if remote_plane_enforced else str(exc)),
-                            "execution_mode": canonical_execution_mode(),
-                            "execution_owner": execution_owner_label(),
-                            "worker_health": _worker_health_detail(exc.worker_health),
-                            "required_execution_backend": "modal" if requires_modal_executor else None,
-                        },
-                    ) from exc
+        try:
+            assert_worker_available_when_queue_enabled(
+                required_execution_backend="modal" if requires_modal_executor else None,
+                platform=platform if requires_modal_executor else None,
+            )
+            if requires_modal_executor:
+                _raise_if_modal_social_dispatch_unresolvable(platform)
+        except SocialWorkerUnavailableError as exc:
+            if can_use_local_inline_fallback:
+                queue_enabled = False
+                used_inline_fallback = True
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": (
+                            "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                            if remote_plane_enforced
+                            else "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                            if requires_modal_executor
+                            else "SOCIAL_WORKER_UNAVAILABLE"
+                        ),
+                        "message": (_remote_worker_unavailable_message(exc) if remote_plane_enforced else str(exc)),
+                        "execution_mode": canonical_execution_mode(),
+                        "execution_owner": execution_owner_label(),
+                        "worker_health": _worker_health_detail(exc.worker_health),
+                        "required_execution_backend": "modal" if requires_modal_executor else None,
+                    },
+                ) from exc
     elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
         raise HTTPException(
             status_code=503,
@@ -3887,6 +3887,92 @@ def get_social_account_profile_summary_route(
         raise _to_social_read_http_exception(exc) from exc
 
 
+@router.get("/profiles/{platform}/{account_handle}/socialblade")
+def get_social_account_profile_socialblade_route(
+    platform: str,
+    account_handle: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.socialblade_growth import get_growth_data
+    from trr_backend.socials.socialblade.service import (
+        SocialBladeRefreshError,
+        sanitize_socialblade_handle,
+        sanitize_socialblade_platform,
+    )
+
+    try:
+        normalized_platform = sanitize_socialblade_platform(platform)
+        safe_handle = sanitize_socialblade_handle(account_handle)
+    except SocialBladeRefreshError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not safe_handle:
+        raise HTTPException(status_code=400, detail="Invalid handle")
+
+    data = get_growth_data(None, safe_handle, platform=normalized_platform)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No SocialBlade data found for {normalized_platform}/@{safe_handle}",
+        )
+    return data
+
+
+@router.post("/profiles/{platform}/{account_handle}/socialblade/refresh")
+async def refresh_social_account_profile_socialblade_route(
+    platform: str,
+    account_handle: str,
+    body: SocialBladeProfileRefreshRequest,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.socials.socialblade.auth import (
+        load_socialblade_cookies_from_sources,
+        refresh_socialblade_cookies,
+    )
+    from trr_backend.socials.socialblade.scraper import scrape_socialblade
+    from trr_backend.socials.socialblade.service import (
+        SocialBladeRefreshError,
+        refresh_and_persist_socialblade,
+        sanitize_socialblade_handle,
+        sanitize_socialblade_platform,
+    )
+
+    try:
+        normalized_platform = sanitize_socialblade_platform(platform)
+        safe_handle = sanitize_socialblade_handle(account_handle)
+    except SocialBladeRefreshError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not safe_handle:
+        raise HTTPException(status_code=400, detail="Invalid handle")
+
+    try:
+        refresh_socialblade_cookies("account_page_refresh", allow_headless_fallback=False)
+        cookies = load_socialblade_cookies_from_sources()
+        return await run_in_threadpool(
+            refresh_and_persist_socialblade,
+            person_id=None,
+            platform=normalized_platform,
+            handle=safe_handle,
+            scraper=lambda normalized_handle: scrape_socialblade(
+                normalized_handle,
+                cookies,
+                platform=normalized_platform,
+                allow_login_fallback=normalized_platform == "instagram",
+                allow_visible_browser_retry=normalized_platform == "instagram",
+            ),
+            source="account_page",
+            force=body.force,
+        )
+    except SocialBladeRefreshError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to refresh social account SocialBlade data: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
 @router.get("/profiles/{platform}/{account_handle}/posts")
 def get_social_account_profile_posts_route(
     platform: str,
@@ -5293,6 +5379,7 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
             include_recent_failures=False,
             include_stuck_jobs=False,
             include_runs_summary=False,
+            summary_only=True,
         )
         payload = _build_social_ingest_health_dot(status_payload)
         payload["alerts"] = list(status_payload.get("alerts") or []) if isinstance(status_payload, dict) else []

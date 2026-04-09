@@ -73,6 +73,7 @@ id
 - core_cast_photos_person_id_idx (non-unique): person_id
 - core_cast_photos_person_source_asset_id_idx (non-unique): person_id, source, source_asset_id) WHERE (source_asset_id IS NOT NULL
 - core_cast_photos_source_source_image_id_idx (non-unique): source, source_image_id
+- idx_cast_photos_person_source_id_hosted (non-unique): person_id, source, id, hosted_url
 - idx_cast_photos_source_tmdb (non-unique): person_id, source) WHERE (source = 'tmdb'::text
 
 ## RLS Enabled
