@@ -29596,6 +29596,7 @@ def _scrape_shared_youtube_posts(
     api_identity = youtube_api.resolve_channel(account_handle) if youtube_api.enabled() else None
     posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
     import shutil as _shutil_yt
+
     _ytdlp_available = bool(_shutil_yt.which("yt-dlp"))
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     retrieval_meta["ytdlp_available"] = _ytdlp_available
@@ -29687,10 +29688,7 @@ def _scrape_shared_youtube_posts(
         len(rows),
     )
     # --- YouTube empty-channel-page detection (analogous to TikTok fix) ---
-    if (
-        not rows
-        and not retrieval_meta.get("error_code")
-    ):
+    if not rows and not retrieval_meta.get("error_code"):
         fp = retrieval_meta.get("first_page_counts") or {}
         if not fp.get("videos") and not fp.get("shorts"):
             retrieval_meta["error_code"] = "youtube_empty_channel_page"
