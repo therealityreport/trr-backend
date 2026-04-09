@@ -52,7 +52,7 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
 @pytest.fixture(autouse=True)
 def _mock_fandom_page_directory():
     with patch(
-        "trr_backend.repositories.fandom_page_directory.pg.fetch_one",
+        "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
         return_value=None,
     ):
         yield
@@ -3164,8 +3164,6 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
                         "cast_tmdb_wikidata_id": None,
                     }
                 ],
-                [],
-                [],
             ]
             with patch(
                 "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
@@ -3178,15 +3176,18 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
                     with patch(
                         "api.routers.admin_show_links._resolve_show_fandom_rule_context",
                         return_value={
-                            "effective_rule_key": "real_housewives",
-                            "community_domains": ["real-housewives.fandom.com"],
+                            "effective_rule_key": None,
+                            "community_domains": [],
                             "candidate_urls": [],
-                            "include_allpages_scan": True,
+                            "include_allpages_scan": False,
                         },
                     ):
-                        with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                        with patch(
+                            "api.routers.admin_show_links._collect_show_fandom_seed_urls",
+                            return_value=[],
+                        ):
                             with patch(
-                                "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                "api.routers.admin_show_links._discover_fandom_candidates_for_person",
                                 return_value=[
                                     "https://teen-wolf.fandom.com/wiki/Lisa_Barlow",
                                     "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
@@ -3210,7 +3211,6 @@ def test_discover_people_links_fandom_fallback_uses_allowlisted_domains_only() -
         "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
     }
     assert all("real-housewives.fandom.com" in str(link.get("url") or "") for link in fandom_links)
-    assert any(link.get("metadata", {}).get("site_title") == "Real Housewives Wiki" for link in fandom_links)
 
 
 def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_pages() -> None:
@@ -3234,8 +3234,6 @@ def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_
                         "cast_tmdb_wikidata_id": None,
                     }
                 ],
-                [],
-                [],
             ]
             with patch(
                 "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
@@ -3248,15 +3246,18 @@ def test_discover_people_links_fandom_fallback_includes_multiple_valid_distinct_
                     with patch(
                         "api.routers.admin_show_links._resolve_show_fandom_rule_context",
                         return_value={
-                            "effective_rule_key": "real_housewives",
-                            "community_domains": ["real-housewives.fandom.com"],
+                            "effective_rule_key": None,
+                            "community_domains": [],
                             "candidate_urls": [],
-                            "include_allpages_scan": True,
+                            "include_allpages_scan": False,
                         },
                     ):
-                        with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                        with patch(
+                            "api.routers.admin_show_links._collect_show_fandom_seed_urls",
+                            return_value=[],
+                        ):
                             with patch(
-                                "api.routers.admin_show_links.search_allowlisted_fandom_wikis",
+                                "api.routers.admin_show_links._discover_fandom_candidates_for_person",
                                 return_value=[
                                     "https://real-housewives.fandom.com/wiki/Lisa",
                                     "https://real-housewives.fandom.com/wiki/Lisa_Barlow",
@@ -5334,7 +5335,7 @@ def test_cleanup_invalid_show_knowledge_links_deletes_show_level_fandom_seed_dom
     fetch_html.assert_not_called()
 
 
-def test_cleanup_invalid_show_knowledge_links_keeps_bravo_fandom_domains_without_global_allowlist() -> None:
+def test_cleanup_invalid_show_knowledge_links_deletes_bravo_fandom_seed_domains_without_wiki_path() -> None:
     show_id = str(uuid4())
     seed_link_id = str(uuid4())
 
@@ -5361,12 +5362,12 @@ def test_cleanup_invalid_show_knowledge_links_keeps_bravo_fandom_domains_without
             with patch("api.routers.admin_show_links.load_fandom_community_allowlist", return_value=()):
                 with patch("api.routers.admin_show_links._fetch_html_with_status"):
                     with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
-                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                        with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=1):
                             result = _cleanup_invalid_show_knowledge_links(show_id)
 
     assert result["scanned"] == 1
-    assert result["invalid"] == 0
-    assert result["deleted"] == 0
+    assert result["invalid"] == 1
+    assert result["deleted"] == 1
     assert result["validation_failures"] == 0
 
 

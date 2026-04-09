@@ -1016,7 +1016,7 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
             "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
-            side_effect=SocialWorkerUnavailableError("worker unavailable"),
+            side_effect=SocialWorkerUnavailableError("worker unavailable", worker_health={}),
         ) as worker_guard,
         patch(
             "api.routers.socials.resolve_modal_function",
