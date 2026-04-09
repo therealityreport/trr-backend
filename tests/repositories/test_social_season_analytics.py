@@ -24360,6 +24360,31 @@ def test_discover_instagram_cursor_partitions_invokes_partition_callback(
     assert callback_calls[2][0].shard_index == 2
 
 
+def test_discover_shared_account_cursor_partitions_forwards_partition_callback_to_tiktok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_discover_tiktok_cursor_partitions(**kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
+        captured.update(kwargs)
+        return [], {"pages_scanned": 1, "posts_checked": 0, "total_posts": 3277}
+
+    def partition_callback(partition: Any, expected_count: int | None) -> None:
+        del partition, expected_count
+
+    monkeypatch.setattr(social_repo, "_discover_tiktok_cursor_partitions", fake_discover_tiktok_cursor_partitions)
+
+    social_repo._discover_shared_account_cursor_partitions(
+        platform="tiktok",
+        account_handle="bravowwhl",
+        runner_count=4,
+        progress_cb=None,
+        partition_callback=partition_callback,
+    )
+
+    assert captured["partition_callback"] is partition_callback
+
+
 def test_run_shared_account_discovery_stage_bootstraps_frontier_and_enqueues_fetch_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -24511,7 +24536,11 @@ def test_run_shared_account_frontier_posts_stage_continues_when_discovered_posts
     )
     monkeypatch.setattr(social_repo, "_release_shared_account_run_frontier", lambda **_kwargs: {})
     monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
-    monkeypatch.setattr(social_repo, "_enqueue_shared_classify_jobs_batched", lambda **kwargs: finish_calls.append(kwargs))
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_shared_classify_jobs_batched",
+        lambda **kwargs: finish_calls.append(kwargs),
+    )
     monkeypatch.setattr(social_repo, "_catalog_oldest_stored_post_at", lambda *_args, **_kwargs: None)
 
     posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
@@ -24613,7 +24642,11 @@ def test_run_shared_account_frontier_posts_stage_raises_when_oldest_stored_post_
         },
     )
     monkeypatch.setattr(social_repo, "_release_shared_account_run_frontier", lambda **_kwargs: {})
-    monkeypatch.setattr(social_repo, "_catalog_oldest_stored_post_at", lambda *_args, **_kwargs: datetime(2025, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(
+        social_repo,
+        "_catalog_oldest_stored_post_at",
+        lambda *_args, **_kwargs: datetime(2025, 1, 1, tzinfo=UTC),
+    )
 
     with pytest.raises(social_repo.SharedStageRuntimeError) as exc_info:
         social_repo._run_shared_account_posts_stage(
@@ -24635,7 +24668,10 @@ def test_run_shared_account_frontier_posts_stage_raises_when_oldest_stored_post_
         )
 
     assert exc_info.value.error_code == "catalog_incomplete"
-    assert exc_info.value.runtime_metadata["retrieval_meta"]["frontier_stop_reason"] == "catalog_oldest_stored_post_not_reached"
+    assert (
+        exc_info.value.runtime_metadata["retrieval_meta"]["frontier_stop_reason"]
+        == "catalog_oldest_stored_post_not_reached"
+    )
     assert frontier_updates[-1]["metadata_updates"]["frontier_stop_reason"] == "catalog_oldest_stored_post_not_reached"
 
 

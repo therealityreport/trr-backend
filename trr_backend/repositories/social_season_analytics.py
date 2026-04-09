@@ -4009,7 +4009,9 @@ def get_queue_status(
 
     if not safe_summary_only:
         try:
-            dispatch_blocked_jobs, dispatch_blocked_jobs_total = _list_dispatch_blocked_jobs(limit=safe_stuck_jobs_limit)
+            dispatch_blocked_jobs, dispatch_blocked_jobs_total = _list_dispatch_blocked_jobs(
+                limit=safe_stuck_jobs_limit
+            )
             queue_payload["dispatch_blocked_jobs"] = dispatch_blocked_jobs
             queue_payload["dispatch_blocked_jobs_total"] = dispatch_blocked_jobs_total
             blocked_by_reason: dict[str, int] = {}
@@ -28961,6 +28963,7 @@ def _discover_tiktok_cursor_partitions(
     account_handle: str,
     runner_count: int,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    partition_callback: Callable[[SharedAccountCursorPartition, int | None], None] | None = None,
 ) -> tuple[list[SharedAccountCursorPartition], dict[str, Any]]:
     context = _bootstrap_shared_tiktok_account_context(account_handle=account_handle, delay_seconds=0.35)
     scraper = context["scraper"]
@@ -28980,6 +28983,9 @@ def _discover_tiktok_cursor_partitions(
     pages_scanned = 0
     posts_checked = 0
     seen_cursors: set[int] = set()
+    expected_partition_count = (
+        -(-total_posts // target_posts_per_shard) if total_posts > 0 and target_posts_per_shard > 0 else None
+    )
 
     while True:
         pages_scanned += 1
@@ -29030,23 +29036,24 @@ def _discover_tiktok_cursor_partitions(
                 cursor_start=str(partition_start_cursor),
                 cursor_end=str(next_cursor) if next_cursor > 0 else None,
             )
-            partitions.append(
-                SharedAccountCursorPartition(
-                    partition_key=partition_key,
-                    shard_index=shard_index,
-                    shard_total=0,
-                    runner_lane=lanes[shard_index % len(lanes)],
-                    cursor_start=str(partition_start_cursor),
-                    cursor_end=str(next_cursor) if next_cursor > 0 else None,
-                    boundary_start_at=partition_start_at,
-                    boundary_end_at=page_oldest_at,
-                    metadata={
-                        "pages_scanned": partition_pages,
-                        "posts_discovered": partition_posts,
-                        "sec_uid": sec_uid,
-                    },
-                )
+            partition = SharedAccountCursorPartition(
+                partition_key=partition_key,
+                shard_index=shard_index,
+                shard_total=0,
+                runner_lane=lanes[shard_index % len(lanes)],
+                cursor_start=str(partition_start_cursor),
+                cursor_end=str(next_cursor) if next_cursor > 0 else None,
+                boundary_start_at=partition_start_at,
+                boundary_end_at=page_oldest_at,
+                metadata={
+                    "pages_scanned": partition_pages,
+                    "posts_discovered": partition_posts,
+                    "sec_uid": sec_uid,
+                },
             )
+            partitions.append(partition)
+            if partition_callback:
+                partition_callback(partition, expected_partition_count)
             shard_index += 1
             partition_start_cursor = next_cursor
             partition_start_at = None
@@ -29070,6 +29077,29 @@ def _discover_tiktok_cursor_partitions(
     endpoint_responses = _metadata_dict(_metadata_dict(scraper.last_retrieval_meta).get("endpoint_responses"))
     if endpoint_responses:
         retrieval_meta["endpoint_responses"] = endpoint_responses
+    if pages_scanned == 1 and posts_checked <= 0 and total_posts > 0:
+        retrieval_meta["error_code"] = "tiktok_discovery_empty_first_page"
+        retrieval_meta["error_class"] = "TikTokDiscoveryEmptyFirstPage"
+        retrieval_meta["retryable"] = False
+        fetch_posts_response = _metadata_dict(endpoint_responses.get("fetch_posts"))
+        logger.warning(
+            "TikTok discovery got an empty first page for @%s despite "
+            "total_posts=%s (request_id=%s, http_status=%s, content_length=%s)",
+            account_handle,
+            total_posts,
+            str(fetch_posts_response.get("request_id") or "").strip() or "unknown",
+            _normalize_non_negative_int(fetch_posts_response.get("http_status")) or "unknown",
+            _normalize_non_negative_int(fetch_posts_response.get("content_length")),
+        )
+    logger.info(
+        "TikTok discovery complete for @%s: pages=%s posts=%s partitions=%s total_posts=%s sec_uid_prefix=%s",
+        account_handle,
+        pages_scanned,
+        posts_checked,
+        len(partitions),
+        total_posts or 0,
+        sec_uid[:8] if sec_uid else "missing",
+    )
     return partitions, retrieval_meta
 
 
@@ -29096,6 +29126,7 @@ def _discover_shared_account_cursor_partitions(
             account_handle=account_handle,
             runner_count=runner_count,
             progress_cb=progress_cb,
+            partition_callback=partition_callback,
         )
     raise ValueError(f"Full-history discovery is not supported for {platform}")
 
@@ -29564,7 +29595,16 @@ def _scrape_shared_youtube_posts(
     )
     api_identity = youtube_api.resolve_channel(account_handle) if youtube_api.enabled() else None
     posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
+    import shutil as _shutil_yt
+    _ytdlp_available = bool(_shutil_yt.which("yt-dlp"))
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    retrieval_meta["ytdlp_available"] = _ytdlp_available
+    if not _ytdlp_available:
+        logger.warning(
+            "yt-dlp not available in runtime — YouTube video metrics "
+            "(likes, comments, tags, duration) will be incomplete for @%s",
+            account_handle,
+        )
     canonical_handle = (
         _normalize_account_handle(
             retrieval_meta.get("canonical_handle")
@@ -29646,6 +29686,23 @@ def _scrape_shared_youtube_posts(
         _normalize_non_negative_int(profile_snapshot.get("total_posts")),
         len(rows),
     )
+    # --- YouTube empty-channel-page detection (analogous to TikTok fix) ---
+    if (
+        not rows
+        and not retrieval_meta.get("error_code")
+    ):
+        fp = retrieval_meta.get("first_page_counts") or {}
+        if not fp.get("videos") and not fp.get("shorts"):
+            retrieval_meta["error_code"] = "youtube_empty_channel_page"
+            retrieval_meta["retryable"] = True
+            retrieval_meta["error_class"] = "YouTubeEmptyChannelPage"
+            logger.warning(
+                "YouTube scrape for @%s returned 0 posts with no continuation error — "
+                "marking as youtube_empty_channel_page (first_page_counts=%s)",
+                account_handle,
+                fp,
+            )
+    # --- end YouTube empty-channel-page detection ---
     return rows, retrieval_meta
 
 
@@ -30669,6 +30726,17 @@ def _run_shared_account_discovery_stage(
     # is known, and dispatch any partitions that the callback did not handle.
     final_shard_total = max(1, len(partitions))
     created_partition_count = len(dispatched_partitions)
+    logger.info(
+        "Discovery reconciliation for run %s account=%s platform=%s: "
+        "partitions_from_discovery=%s eagerly_dispatched=%s "
+        "remaining_to_dispatch=%s",
+        run_id,
+        account_handle,
+        platform,
+        len(partitions),
+        len(dispatched_partitions),
+        max(0, len(partitions) - len(dispatched_partitions)),
+    )
     for partition in partitions:
         p_key = _shared_account_partition_key(
             run_id=run_id,
@@ -37125,8 +37193,10 @@ def get_social_account_catalog_run_progress(
         and posts_active <= 0
         and posts_waiting <= 0
     )
-    payload["classify_incomplete"] = (not dismissed_terminal_classify_cancel) and classify_total > 0 and (
-        classify_completed + classify_failed < classify_total or classify_active > 0 or classify_waiting > 0
+    payload["classify_incomplete"] = (
+        (not dismissed_terminal_classify_cancel)
+        and classify_total > 0
+        and (classify_completed + classify_failed < classify_total or classify_active > 0 or classify_waiting > 0)
     )
     if (
         str(payload.get("run_status") or "").strip().lower() == "completed"

@@ -183,6 +183,35 @@ def test_tiktok_fetch_posts_records_empty_body_response_metadata(monkeypatch: py
     }
 
 
+def test_tiktok_fetch_posts_records_success_response_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+
+    def _fake_get(url: str, params: dict | None = None, **kwargs: object) -> _FakeResponse:
+        return _FakeResponse(
+            status_code=200,
+            payload={"itemList": [], "hasMore": False, "cursor": 0},
+            headers={
+                "content-type": "application/json",
+                "content-length": "0",
+                "x-tt-logid": "posts-logid",
+            },
+        )
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+
+    payload = scraper.fetch_posts("bravotv", "sec-1", cursor=0, delay=0)
+
+    assert payload == {"itemList": [], "hasMore": False, "cursor": 0}
+    assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_posts"] == {
+        "endpoint": "fetch_posts",
+        "http_status": 200,
+        "content_type": "application/json",
+        "content_length": 0,
+        "request_id": "posts-logid",
+    }
+
+
 def test_tiktok_parse_ytdlp_metadata_extracts_author_avatar() -> None:
     scraper = TikTokScraper()
     config = TikTokScrapeConfig(username="bravotv")
@@ -3366,6 +3395,7 @@ def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_yt
     assert [post.video_id for post in posts] == ["vid-1"]
     assert calls["fetch_posts"] == 0
     assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp_fallback"
+    assert scraper.last_retrieval_meta["posts_checked"] == 1_200
     assert scraper.last_retrieval_meta["videos_scanned"] == 1_200
     assert scraper.last_retrieval_meta["api_pagination_blocked_reason"] == "non_json_response"
     assert progress_events[-1]["phase"] == "scrape_ytdlp_fallback"
