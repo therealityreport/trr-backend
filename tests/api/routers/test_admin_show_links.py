@@ -752,7 +752,18 @@ def test_discover_show_links_uses_cached_directory_when_canonical_page_is_cloudf
                                                 "api.routers.admin_show_links._fetch_html_with_status",
                                                 side_effect=_fetch_html,
                                             ):
-                                                links = _discover_show_links(show_id)
+                                                with patch(
+                                                    "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
+                                                    side_effect=lambda candidate_url, **kwargs: {
+                                                        "community_domain": "real-housewives.fandom.com",
+                                                        "page_title": "The Real Housewives of Salt Lake City",
+                                                        "page_slug": "The_Real_Housewives_of_Salt_Lake_City",
+                                                        "page_url": canonical_url,
+                                                    }
+                                                    if candidate_url and "real-housewives.fandom.com" in candidate_url
+                                                    else None,
+                                                ):
+                                                    links = _discover_show_links(show_id)
 
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     assert [str(link.get("url") or "") for link in fandom_links] == [canonical_url]
@@ -1682,14 +1693,17 @@ def test_add_show_links_keeps_only_canonical_person_fandom_url() -> None:
                                 with patch(
                                     "api.routers.admin_show_links._kickoff_show_link_discovery_for_manual_fandom_seed"
                                 ):
-                                    result = admin_show_links.add_show_links(
-                                        UUID(show_id),
-                                        admin_show_links.LinkBulkAddRequest(
-                                            inputs=["https://real-housewives.fandom.com/wiki/Angie_Katsanevas"]
-                                        ),
-                                        MagicMock(),
-                                        {"email": "admin@example.com"},
-                                    )
+                                    with patch(
+                                        "api.routers.admin_show_links.fandom_page_directory_repo.enqueue_fandom_page_directory_backfill"
+                                    ):
+                                        result = admin_show_links.add_show_links(
+                                            UUID(show_id),
+                                            admin_show_links.LinkBulkAddRequest(
+                                                inputs=["https://real-housewives.fandom.com/wiki/Angie_Katsanevas"]
+                                            ),
+                                            MagicMock(),
+                                            {"email": "admin@example.com"},
+                                        )
 
     assert result["added"] == 1
     assert {assignment["url"] for assignment in result["assignments"]} == {
@@ -4128,12 +4142,23 @@ def test_discover_season_links_uses_cached_page_directory_when_fandom_page_is_cl
                                             None,
                                         ),
                                     ):
-                                        links = _discover_season_links(
-                                            show_id,
-                                            show_fandom_seed_urls=[
-                                                "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
-                                            ],
-                                        )
+                                        with patch(
+                                            "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
+                                            side_effect=lambda candidate_url, **kwargs: {
+                                                "community_domain": "real-housewives.fandom.com",
+                                                "page_title": "The Real Housewives of Salt Lake City - Season 1",
+                                                "page_slug": "The_Real_Housewives_of_Salt_Lake_City_-_Season_1",
+                                                "page_url": cached_url,
+                                            }
+                                            if candidate_url and "real-housewives.fandom.com" in candidate_url
+                                            else None,
+                                        ):
+                                            links = _discover_season_links(
+                                                show_id,
+                                                show_fandom_seed_urls=[
+                                                    "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                                ],
+                                            )
 
     season_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
     assert len(season_fandom_links) == 1
@@ -4309,12 +4334,23 @@ def test_discover_people_links_uses_cached_page_directory_when_fandom_page_is_cl
                                         "api.routers.admin_show_links.show_reads_repo.get_show_links_eligible_people",
                                         return_value=([eligible_row], {}),
                                     ):
-                                        links = _discover_people_links(
-                                            show_id,
-                                            show_fandom_seed_urls=[
-                                                "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
-                                            ],
-                                        )
+                                        with patch(
+                                            "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
+                                            side_effect=lambda candidate_url, **kwargs: {
+                                                "community_domain": "real-housewives.fandom.com",
+                                                "page_title": "Lisa Barlow",
+                                                "page_slug": "Lisa_Barlow",
+                                                "page_url": preferred_url,
+                                            }
+                                            if candidate_url and "real-housewives.fandom.com" in candidate_url
+                                            else None,
+                                        ):
+                                            links = _discover_people_links(
+                                                show_id,
+                                                show_fandom_seed_urls=[
+                                                    "https://real-housewives.fandom.com/wiki/The_Real_Housewives_of_Salt_Lake_City"
+                                                ],
+                                            )
 
     person_fandom_links = [link for link in links if link.get("link_kind") == "fandom"]
     assert len(person_fandom_links) == 1
@@ -5437,9 +5473,28 @@ def test_cleanup_invalid_show_knowledge_links_keeps_cached_canonical_fandom_page
                             None,
                         ),
                     ):
-                        with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
-                            with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
-                                result = _cleanup_invalid_show_knowledge_links(show_id)
+                        with patch(
+                            "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
+                            side_effect=lambda candidate_url, **kwargs: {
+                                "community_domain": "real-housewives.fandom.com",
+                                "page_title": (
+                                    "The Real Housewives of Salt Lake City"
+                                    if candidate_url == show_url
+                                    else "The Real Housewives of Salt Lake City - Season 1"
+                                ),
+                                "page_slug": (
+                                    "The_Real_Housewives_of_Salt_Lake_City"
+                                    if candidate_url == show_url
+                                    else "The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+                                ),
+                                "page_url": candidate_url,
+                            }
+                            if candidate_url and "real-housewives.fandom.com" in candidate_url
+                            else None,
+                        ):
+                            with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                                with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
+                                    result = _cleanup_invalid_show_knowledge_links(show_id)
 
     assert result["scanned"] == 2
     assert result["invalid"] == 0
