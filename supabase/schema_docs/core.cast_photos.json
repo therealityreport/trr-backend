@@ -461,6 +461,17 @@
       "definition": "CREATE INDEX core_cast_photos_source_source_image_id_idx ON core.cast_photos USING btree (source, source_image_id)"
     },
     {
+      "name": "idx_cast_photos_person_source_id_hosted",
+      "columns": [
+        "person_id",
+        "source",
+        "id",
+        "hosted_url"
+      ],
+      "unique": false,
+      "definition": "CREATE INDEX idx_cast_photos_person_source_id_hosted ON core.cast_photos USING btree (person_id, source, id, hosted_url)"
+    },
+    {
       "name": "idx_cast_photos_source_tmdb",
       "columns": [
         "person_id",

@@ -18,6 +18,7 @@ from trr_backend.ingestion.fandom_season_scraper import parse_fandom_season_html
 from trr_backend.integrations.fandom import is_allowlisted_fandom_domain, load_fandom_community_allowlist
 from trr_backend.integrations.fandom_discovery import FandomCandidatePage, discover_fandom_candidate_pages
 from trr_backend.integrations.openai_fandom_cleanup import cleanup_fandom_payload_with_openai
+from trr_backend.repositories import fandom_page_directory as fandom_page_directory_repo
 from trr_backend.repositories.cast_fandom import upsert_cast_fandom
 from trr_backend.repositories.season_fandom import list_season_fandom, upsert_season_fandom
 
@@ -37,6 +38,13 @@ class FandomSyncRequest(BaseModel):
 
 class FandomSyncCommitRequest(FandomSyncRequest):
     selected_page_urls: list[str] = Field(default_factory=list)
+
+
+class FandomPageDirectoryBackfillRequest(BaseModel):
+    community_domain: str = Field(min_length=1)
+    review_allpages_url: str | None = None
+    force: bool = False
+    reason: str | None = None
 
 
 def _to_iso_now() -> str:
@@ -70,6 +78,44 @@ def _validate_manual_urls(manual_urls: list[str], *, allowlist: tuple[str, ...])
             raise HTTPException(status_code=400, detail=f"Manual URL is not allowlisted: {value}")
         out.append(value)
     return out
+
+
+@router.post("/admin/fandom/page-directory/backfill")
+def enqueue_page_directory_backfill(
+    payload: FandomPageDirectoryBackfillRequest,
+    _: SupabaseAdminClient,
+    admin: InternalAdminUser,
+) -> dict[str, Any]:
+    configured_allowlist = tuple(load_fandom_community_allowlist())
+    domain = str(payload.community_domain or "").strip().lower()
+    if not domain or not is_allowlisted_fandom_domain(domain, allowlist=configured_allowlist):
+        raise HTTPException(status_code=400, detail=f"Domain is not allowlisted: {domain or payload.community_domain}")
+
+    actor = str(admin.get("email") or admin.get("id") or "admin")
+    operation = fandom_page_directory_repo.enqueue_fandom_page_directory_backfill(
+        community_domain=domain,
+        review_allpages_url=payload.review_allpages_url,
+        actor=actor,
+        reason=payload.reason,
+        force=payload.force,
+    )
+    if not operation:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Active page directory entries already exist for {domain}. Re-run with force=true.",
+        )
+
+    operation_id = str(operation.get("id") or "").strip()
+    if not operation_id:
+        raise HTTPException(status_code=500, detail="Backfill operation did not return an operation id.")
+
+    return {
+        "operation_id": operation_id,
+        "status": str(operation.get("status") or "pending"),
+        "attached": bool(operation.get("attached")),
+        "community_domain": str(operation.get("community_domain") or domain),
+        "crawl_url": str(operation.get("crawl_url") or "").strip(),
+    }
 
 
 def _row_has_value(value: Any) -> bool:

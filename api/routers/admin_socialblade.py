@@ -17,12 +17,12 @@ router = APIRouter(prefix="/admin/people", tags=["admin-socialblade"])
 
 
 def _scrape_socialblade_person_page(handle: str) -> dict[str, Any]:
-    from trr_backend.socials.socialblade.service import SocialBladeRefreshError
     from trr_backend.socials.socialblade.auth import (
         load_socialblade_cookies_from_sources,
         refresh_socialblade_cookies,
     )
     from trr_backend.socials.socialblade.scraper import scrape_socialblade
+    from trr_backend.socials.socialblade.service import SocialBladeRefreshError
 
     try:
         refresh_socialblade_cookies("person_page_refresh", allow_headless_fallback=False)
@@ -30,6 +30,7 @@ def _scrape_socialblade_person_page(handle: str) -> dict[str, Any]:
         return scrape_socialblade(
             handle,
             cookies,
+            platform="instagram",
             allow_login_fallback=False,
             allow_visible_browser_retry=True,
         )
@@ -75,7 +76,7 @@ async def get_socialblade_data(
 
     from trr_backend.repositories.socialblade_growth import get_growth_data
 
-    data = get_growth_data(person_id, safe_handle)
+    data = get_growth_data(person_id, safe_handle, platform="instagram")
     if not data:
         raise HTTPException(
             status_code=404,
@@ -109,6 +110,7 @@ async def refresh_socialblade_data(
             scraper=_scrape_socialblade_person_page,
             source="person_page",
             force=body.force,
+            platform="instagram",
         )
     except SocialBladeRefreshError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -184,6 +186,7 @@ async def refresh_socialblade_data_batch(
             person_id=item.person_id,
             handle=safe_handle,
             force=body.force,
+            platform="instagram",
         )
         if status == "error":
             errors.append(
@@ -215,6 +218,7 @@ async def refresh_socialblade_data_batch(
                     scraper=_scrape_socialblade_person_page,
                     source=source,
                     force=body.force,
+                    platform="instagram",
                 )
             except SocialBladeRefreshError as exc:
                 errors.append(

@@ -113,6 +113,7 @@ begin
       coalesce(nullif(trim(sva.video_class), ''), 'episode') as video_class,
       nullif(trim(sva.promo_subtype), '') as promo_subtype,
       coalesce(nullif(trim(sva.source_import_type), ''), 'upload') as source_import_type,
+      sva.updated_at,
       case
         when coalesce(nullif(trim(sva.video_class), ''), 'episode') = 'episode' then 'episode'
         when nullif(trim(sva.promo_subtype), '') = 'trailer' then 'trailer'

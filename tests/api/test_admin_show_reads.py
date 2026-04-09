@@ -250,13 +250,53 @@ def test_show_assets_route_returns_default_gallery_contract(monkeypatch: pytest.
             "limit": 25,
             "offset": 5,
             "count": 1,
+            "has_more": False,
+            "next_cursor": None,
+            "cursor": "b2Zmc2V0OjU=",
             "truncated": False,
             "full": False,
         },
     }
     assert captured == {
         "show_id": "show-1",
-        "kwargs": {"limit": 25, "offset": 5, "sources": ["tmdb", "bravo.com"], "full": False},
+        "kwargs": {"limit": 26, "offset": 5, "sources": ["tmdb", "bravo.com"], "full": False},
+    }
+
+
+def test_show_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get_show_assets(show_id: str, **kwargs):
+        captured["show_id"] = show_id
+        captured["kwargs"] = kwargs
+        return (
+            [
+                {"id": "asset-6", "hosted_url": "https://cdn.example.com/6.jpg"},
+                {"id": "asset-7", "hosted_url": "https://cdn.example.com/7.jpg"},
+                {"id": "asset-8", "hosted_url": "https://cdn.example.com/8.jpg"},
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(router_module.show_reads_repo, "get_show_assets", fake_get_show_assets)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/trr-api/shows/show-1/assets?limit=2&cursor=b2Zmc2V0OjU=")
+
+    assert response.status_code == 200
+    assert response.json()["pagination"] == {
+        "limit": 2,
+        "offset": 5,
+        "count": 2,
+        "has_more": True,
+        "next_cursor": "b2Zmc2V0Ojc=",
+        "cursor": "b2Zmc2V0OjU=",
+        "truncated": False,
+        "full": False,
+    }
+    assert captured == {
+        "show_id": "show-1",
+        "kwargs": {"limit": 3, "offset": 5, "sources": None, "full": False},
     }
 
 
@@ -295,6 +335,9 @@ def test_show_assets_route_returns_full_gallery_contract_with_truthful_truncatio
         "limit": 5000,
         "offset": 0,
         "count": 5000,
+        "has_more": False,
+        "next_cursor": None,
+        "cursor": None,
         "truncated": True,
         "full": True,
     }
@@ -322,8 +365,50 @@ def test_season_assets_route_returns_gallery_contract(monkeypatch: pytest.Monkey
         "limit": 5000,
         "offset": 0,
         "count": 1,
+        "has_more": False,
+        "next_cursor": None,
+        "cursor": None,
         "truncated": False,
         "full": True,
+    }
+
+
+def test_season_assets_route_decodes_cursor_and_exposes_next_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get_show_season_assets(show_id: str, season_number: int, **kwargs):
+        captured["show_id"] = show_id
+        captured["season_number"] = season_number
+        captured["kwargs"] = kwargs
+        return (
+            [
+                {"id": "asset-9", "hosted_url": "https://cdn.example.com/9.jpg"},
+                {"id": "asset-10", "hosted_url": "https://cdn.example.com/10.jpg"},
+                {"id": "asset-11", "hosted_url": "https://cdn.example.com/11.jpg"},
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(router_module.show_reads_repo, "get_show_season_assets", fake_get_show_season_assets)
+
+    client = TestClient(app)
+    response = client.get("/api/v1/admin/trr-api/shows/show-1/seasons/6/assets?limit=2&cursor=b2Zmc2V0Ojg=")
+
+    assert response.status_code == 200
+    assert response.json()["pagination"] == {
+        "limit": 2,
+        "offset": 8,
+        "count": 2,
+        "has_more": True,
+        "next_cursor": "b2Zmc2V0OjEw",
+        "cursor": "b2Zmc2V0Ojg=",
+        "truncated": False,
+        "full": False,
+    }
+    assert captured == {
+        "show_id": "show-1",
+        "season_number": 6,
+        "kwargs": {"limit": 3, "offset": 8, "sources": None, "full": False},
     }
 
 

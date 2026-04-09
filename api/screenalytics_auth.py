@@ -40,7 +40,7 @@ async def require_screenalytics_service_token(request: Request) -> None:
         )
 
     expected = get_screenalytics_service_token()
-    allow_service_token_fallback = _env_flag("TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK", True)
+    allow_service_token_fallback = _env_flag("TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK", False)
 
     if expected and allow_service_token_fallback and hmac.compare_digest(token, expected):
         logger.info("screenalytics auth fallback accepted via service token")
@@ -74,6 +74,6 @@ async def require_screenalytics_service_token(request: Request) -> None:
 
     raise HTTPException(
         status_code=401,
-        detail="Valid internal admin token required",
+        detail="Valid internal admin token required; service-token fallback is transitional and disabled by default",
         headers={"WWW-Authenticate": "Bearer"},
     )

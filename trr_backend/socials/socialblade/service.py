@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,6 +11,8 @@ from typing import Any
 from trr_backend.repositories.socialblade_growth import (
     get_growth_data,
     merge_chart_data,
+    normalize_socialblade_account_handle,
+    normalize_socialblade_platform,
     upsert_growth_data,
 )
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 SocialBladeScraper = Callable[[str], dict[str, Any]]
 _DEFAULT_FRESHNESS_HOURS = 24
 _DEFAULT_MIN_REUSABLE_CHART_POINTS = 30
+SUPPORTED_SOCIALBLADE_PLATFORMS = frozenset({"instagram", "facebook", "youtube"})
 
 
 class SocialBladeRefreshError(RuntimeError):
@@ -27,8 +29,15 @@ class SocialBladeRefreshError(RuntimeError):
 
 
 def sanitize_socialblade_handle(handle: str) -> str:
-    """Normalize a user-supplied Instagram handle for SocialBlade lookups."""
-    return re.sub(r"[^a-zA-Z0-9_.]", "", str(handle or "").strip())
+    """Normalize a user-supplied social account handle for SocialBlade lookups."""
+    return normalize_socialblade_account_handle(handle)
+
+
+def sanitize_socialblade_platform(platform: str | None) -> str:
+    normalized = normalize_socialblade_platform(platform)
+    if normalized not in SUPPORTED_SOCIALBLADE_PLATFORMS:
+        raise SocialBladeRefreshError(f"Unsupported SocialBlade platform: {platform}")
+    return normalized
 
 
 def socialblade_freshness_hours() -> int:
@@ -113,20 +122,23 @@ def build_refresh_metadata(
 
 def persist_scraped_payload(
     *,
-    person_id: str,
+    person_id: str | None,
     handle: str,
     payload: dict[str, Any],
     source: str,
     force: bool,
+    platform: str = "instagram",
 ) -> dict[str, Any]:
     """Merge and persist a scraped SocialBlade payload."""
-    existing = get_growth_data(person_id, handle)
+    normalized_platform = sanitize_socialblade_platform(platform)
+    existing = get_growth_data(person_id, handle, platform=normalized_platform)
     merged = merge_chart_data(existing, payload)
-    stored = upsert_growth_data(person_id, handle, merged)
+    stored = upsert_growth_data(person_id, handle, merged, platform=normalized_platform)
     logger.info(
         "SocialBlade refresh persisted",
         extra={
             "person_id": person_id,
+            "platform": normalized_platform,
             "handle": handle,
             "source": source,
             "force": force,
@@ -143,18 +155,20 @@ def persist_scraped_payload(
 
 def refresh_and_persist_socialblade(
     *,
-    person_id: str,
+    person_id: str | None,
     handle: str,
     scraper: SocialBladeScraper,
     source: str,
     force: bool = False,
+    platform: str = "instagram",
 ) -> dict[str, Any]:
     """Run the SocialBlade scrape, preserve historical chart data, and persist the result."""
+    normalized_platform = sanitize_socialblade_platform(platform)
     safe_handle = sanitize_socialblade_handle(handle)
     if not safe_handle:
         raise SocialBladeRefreshError("Invalid handle")
 
-    existing = get_growth_data(person_id, safe_handle)
+    existing = get_growth_data(person_id, safe_handle, platform=normalized_platform)
     freshness_hours = socialblade_freshness_hours()
     if existing and not force and is_growth_data_fresh(existing, freshness_hours=freshness_hours):
         return build_refresh_metadata(
@@ -174,21 +188,24 @@ def refresh_and_persist_socialblade(
         payload=fresh_data,
         source=source,
         force=force,
+        platform=normalized_platform,
     )
 
 
 def queue_refresh_decision(
     *,
-    person_id: str,
+    person_id: str | None,
     handle: str,
     force: bool = False,
+    platform: str = "instagram",
 ) -> tuple[str, dict[str, Any] | None, str | None]:
     """Classify a batch refresh item as accepted or skipped before dispatch."""
+    normalized_platform = sanitize_socialblade_platform(platform)
     safe_handle = sanitize_socialblade_handle(handle)
     if not safe_handle:
         return "error", None, "Invalid handle"
 
-    existing = get_growth_data(person_id, safe_handle)
+    existing = get_growth_data(person_id, safe_handle, platform=normalized_platform)
     freshness_hours = socialblade_freshness_hours()
     if existing and not force and is_growth_data_fresh(existing, freshness_hours=freshness_hours):
         return "skipped", existing, f"fresh_within_{freshness_hours}h"

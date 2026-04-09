@@ -48,6 +48,7 @@ from trr_backend.integrations.fandom_discovery import (
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 from trr_backend.repositories import admin_show_reads as show_reads_repo
 from trr_backend.repositories import brands_franchises
+from trr_backend.repositories import fandom_page_directory as fandom_page_directory_repo
 from trr_backend.scraping.bravo_parser import parse_person_page
 from trr_backend.socials.platforms import infer_platform_from_url
 
@@ -434,6 +435,7 @@ def _stage_budget_exhausted(stats: dict[str, Any] | None) -> bool:
     if stage_name:
         key = f"{stage_name}_skipped_fetch_budget"
         stats[key] = int(stats.get(key) or 0) + 1
+    _notify_show_link_discovery_progress(stats)
     return True
 
 
@@ -442,7 +444,20 @@ def _can_attempt_fandom_candidate(stats: dict[str, Any] | None) -> bool:
         return False
     if stats is not None:
         stats["fandom_candidates_tested"] = int(stats.get("fandom_candidates_tested") or 0) + 1
+        _notify_show_link_discovery_progress(stats)
     return True
+
+
+def _notify_show_link_discovery_progress(stats: dict[str, Any] | None) -> None:
+    if not isinstance(stats, dict):
+        return
+    callback = stats.get("__live_progress_callback")
+    if not callable(callback):
+        return
+    try:
+        callback()
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _extract_constraint_name_from_error(error: Exception) -> str:
@@ -783,6 +798,7 @@ def _resolve_show_fandom_rule_context(
             "fallback_rule_key": None,
             "effective_rule_key": None,
             "effective_source": "none",
+            "preferred_community_domain": None,
             "effective_fandom_url": None,
             "primary_url": None,
             "review_allpages_url": None,
@@ -805,6 +821,7 @@ def _resolve_show_fandom_rule_context(
             "fallback_rule_key": None,
             "effective_rule_key": None,
             "effective_source": "none",
+            "preferred_community_domain": None,
             "effective_fandom_url": None,
             "primary_url": None,
             "review_allpages_url": None,
@@ -812,6 +829,181 @@ def _resolve_show_fandom_rule_context(
             "include_allpages_scan": False,
             "candidate_urls": [],
         }
+
+
+def _resolve_preferred_fandom_community_domain(
+    *,
+    show_name: str | None,
+    fandom_rule_context: dict[str, Any] | None,
+) -> str | None:
+    context = fandom_rule_context if isinstance(fandom_rule_context, dict) else {}
+    preferred = normalize_fandom_community_domain(str(context.get("preferred_community_domain") or ""))
+    if preferred:
+        return preferred
+    if _is_real_housewives_show_name(show_name):
+        return "real-housewives.fandom.com"
+    for raw_domain in context.get("community_domains") or []:
+        normalized = normalize_fandom_community_domain(str(raw_domain or ""))
+        if normalized:
+            return normalized
+    for raw_url in (
+        context.get("effective_fandom_url"),
+        context.get("primary_url"),
+        context.get("review_allpages_url"),
+    ):
+        normalized = normalize_fandom_community_domain(str(urlparse(str(raw_url or "")).hostname or ""))
+        if normalized:
+            return normalized
+    return None
+
+
+def _matches_preferred_fandom_community(url: str | None, *, preferred_community_domain: str | None) -> bool:
+    preferred = normalize_fandom_community_domain(preferred_community_domain)
+    if not preferred:
+        return True
+    host = normalize_fandom_community_domain(str(urlparse(str(url or "")).hostname or ""))
+    return bool(host and host == preferred)
+
+
+def _search_cached_fandom_directory_candidate_urls(
+    *,
+    community_domain: str | None,
+    query_values: Sequence[str],
+    limit: int = 40,
+) -> list[str]:
+    normalized_domain = normalize_fandom_community_domain(community_domain)
+    if not normalized_domain:
+        return []
+    try:
+        rows = fandom_page_directory_repo.search_active_page_directory_entries(
+            community_domain=normalized_domain,
+            query_values=query_values,
+            limit=limit,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        candidate = _canonicalize_url(str(row.get("page_url") or "").strip())
+        if not candidate:
+            continue
+        key = _url_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(candidate)
+    return urls
+
+
+def _get_cached_fandom_page_directory_entry(
+    candidate_url: str | None,
+    *,
+    preferred_community_domain: str | None = None,
+) -> dict[str, Any] | None:
+    canonical_candidate = _canonicalize_url(candidate_url)
+    if not canonical_candidate:
+        return None
+    normalized_domain = normalize_fandom_community_domain(str(urlparse(canonical_candidate).hostname or ""))
+    if not normalized_domain:
+        return None
+    if preferred_community_domain and (
+        normalized_domain != normalize_fandom_community_domain(preferred_community_domain)
+    ):
+        return None
+    try:
+        row = fandom_page_directory_repo.get_active_page_directory_entry_by_url(
+            community_domain=normalized_domain,
+            page_url=canonical_candidate,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return dict(row) if isinstance(row, dict) else None
+
+
+def _cached_fandom_page_title_candidates(cached_entry: dict[str, Any] | None, *, fallback_url: str | None) -> set[str]:
+    candidates: set[str] = set()
+    if not isinstance(cached_entry, dict):
+        return candidates
+    for raw_value in (
+        cached_entry.get("page_title"),
+        str(cached_entry.get("page_slug") or "").replace("_", " "),
+        _extract_fandom_page_title_from_url(str(cached_entry.get("page_url") or fallback_url or "")),
+        _extract_fandom_page_title_from_url(fallback_url),
+    ):
+        cleaned = str(raw_value or "").strip()
+        if cleaned:
+            candidates.add(cleaned)
+    return candidates
+
+
+def _is_valid_cached_fandom_show_page(
+    cached_entry: dict[str, Any] | None,
+    *,
+    candidate_url: str | None,
+    show_name: str | None,
+) -> bool:
+    if not isinstance(cached_entry, dict):
+        return False
+    page_url = _canonicalize_url(str(cached_entry.get("page_url") or candidate_url or "").strip())
+    if not page_url or _is_fandom_noncanonical_subpage_url(page_url):
+        return False
+    if not _is_valid_fandom_show_page_url(page_url, show_name=show_name):
+        return False
+    return any(
+        _is_valid_fandom_show_page_title(candidate_title, show_name=show_name)
+        for candidate_title in _cached_fandom_page_title_candidates(cached_entry, fallback_url=page_url)
+    )
+
+
+def _is_valid_cached_fandom_season_page(
+    cached_entry: dict[str, Any] | None,
+    *,
+    candidate_url: str | None,
+    season_number: int,
+    show_name: str | None,
+    show_seed_urls: Sequence[str] | None,
+) -> bool:
+    if not isinstance(cached_entry, dict):
+        return False
+    page_url = _canonicalize_url(str(cached_entry.get("page_url") or candidate_url or "").strip())
+    if not page_url or _is_fandom_noncanonical_subpage_url(page_url):
+        return False
+    candidates = _cached_fandom_page_title_candidates(cached_entry, fallback_url=page_url)
+    if not candidates:
+        return False
+    if not any(_extract_season_number_from_text(value) == season_number for value in candidates):
+        return False
+    anchor_titles = _collect_fandom_season_show_anchor_titles(show_name=show_name, show_seed_urls=show_seed_urls)
+    if anchor_titles:
+        return _matches_fandom_season_show_anchor(candidates, anchor_titles=anchor_titles)
+    if not show_name:
+        return True
+    expected_tokens = {
+        token
+        for token in _normalize_lookup_value(show_name).split()
+        if token and token not in {"the", "season", "series", "tv", "show"}
+    }
+    if not expected_tokens:
+        return True
+    return any(expected_tokens.issubset(set(_normalize_lookup_value(value).split())) for value in candidates)
+
+
+def _is_valid_cached_fandom_person_page(
+    cached_entry: dict[str, Any] | None,
+    *,
+    candidate_url: str | None,
+    expected_name: str | None,
+) -> bool:
+    if not isinstance(cached_entry, dict):
+        return False
+    page_url = _canonicalize_url(str(cached_entry.get("page_url") or candidate_url or "").strip())
+    if not page_url or _is_fandom_noncanonical_subpage_url(page_url):
+        return False
+    if not expected_name:
+        return True
+    candidates = list(_cached_fandom_page_title_candidates(cached_entry, fallback_url=page_url))
+    return _person_name_candidates_match(expected_name, candidates)
 
 
 def _extract_season_number_from_text(value: str | None) -> int | None:
@@ -859,6 +1051,27 @@ def _is_fandom_seed_url(url: str | None) -> bool:
     if not path or path == "/":
         return True
     return "/wiki/" not in path
+
+
+def _is_internal_fandom_seed_url(url: str | None) -> bool:
+    if _is_fandom_seed_url(url):
+        return True
+    parsed = urlparse(str(url or "").strip())
+    host = str(parsed.hostname or "").strip().lower()
+    if not host or not (host.endswith("fandom.com") or host.endswith("wikia.com")):
+        return False
+    slug = _extract_wiki_slug_title(unquote(parsed.path or ""))
+    normalized_slug = _normalize_fandom_title_token(str(slug or "").replace("_", " "))
+    if normalized_slug == "special allpages":
+        return True
+    title = _extract_fandom_page_title_from_url(url)
+    if not title:
+        return False
+    normalized_title = _normalize_fandom_title_token(title)
+    if not normalized_title:
+        return False
+    site_title = _derive_fandom_site_title_from_host(host)
+    return bool(site_title) and normalized_title == _normalize_fandom_title_token(site_title)
 
 
 _FANDOM_SKIPPED_PAGE_PREFIXES = (
@@ -1298,7 +1511,16 @@ def _collect_seeded_fandom_candidate_urls_by_domain(
     return by_domain
 
 
-def _score_fandom_season_candidate_url(url: str, *, show_name: str | None, season_number: int) -> int:
+def _score_fandom_season_candidate_url(
+    url: str,
+    *,
+    show_name: str | None,
+    season_number: int,
+    show_seed_urls: list[str] | tuple[str, ...] | None = None,
+    preferred_community_domain: str | None = None,
+) -> int:
+    if not _matches_preferred_fandom_community(url, preferred_community_domain=preferred_community_domain):
+        return 0
     title = _extract_fandom_page_title_from_url(url)
     if not title:
         return 0
@@ -1306,7 +1528,16 @@ def _score_fandom_season_candidate_url(url: str, *, show_name: str | None, seaso
     if detected_season != season_number:
         return 0
     score = 300
-    if show_name:
+    anchor_titles = _collect_fandom_season_show_anchor_titles(show_name=show_name, show_seed_urls=show_seed_urls)
+    if anchor_titles:
+        if not _matches_fandom_season_show_anchor({title}, anchor_titles=anchor_titles):
+            return 0
+        normalized_title = _normalize_fandom_season_show_identity(title)
+        if normalized_title in anchor_titles:
+            score += 150
+        else:
+            score += 100
+    elif show_name:
         show_tokens = {
             token
             for token in _normalize_lookup_value(show_name).split()
@@ -1316,6 +1547,50 @@ def _score_fandom_season_candidate_url(url: str, *, show_name: str | None, seaso
         if show_tokens and show_tokens.intersection(title_tokens):
             score += 100
     return score
+
+
+def _normalize_fandom_season_show_identity(value: str | None) -> str:
+    normalized = _normalize_lookup_value(value or "")
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\b(?:season|series)\s+\d+\b", " ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _collect_fandom_season_show_anchor_titles(
+    *,
+    show_name: str | None,
+    show_seed_urls: list[str] | tuple[str, ...] | None,
+) -> set[str]:
+    anchors: set[str] = set()
+    normalized_show_name = _normalize_fandom_season_show_identity(show_name)
+    if normalized_show_name:
+        anchors.add(normalized_show_name)
+    for seed_url in show_seed_urls or []:
+        seed_title = _extract_fandom_page_title_from_url(seed_url)
+        normalized_seed_title = _normalize_fandom_season_show_identity(seed_title)
+        if normalized_seed_title:
+            anchors.add(normalized_seed_title)
+    return anchors
+
+
+def _matches_fandom_season_show_anchor(candidate_values: set[str], *, anchor_titles: set[str]) -> bool:
+    if not anchor_titles:
+        return False
+    normalized_candidates = {
+        normalized
+        for normalized in (
+            _normalize_fandom_season_show_identity(value)
+            for value in candidate_values
+        )
+        if normalized
+    }
+    for candidate in normalized_candidates:
+        for anchor in anchor_titles:
+            if candidate == anchor or candidate.startswith(f"{anchor} "):
+                return True
+    return False
 
 
 def _try_expand_social_handle_input(value: str) -> str | None:
@@ -2415,6 +2690,13 @@ _TMDB_CHALLENGE_PATTERNS = (
     "captcha",
     "please enable javascript",
 )
+_FANDOM_CHALLENGE_PATTERNS = (
+    "verify you are human",
+    "just a moment",
+    "cloudflare",
+    "captcha",
+    "please enable javascript",
+)
 _INSTAGRAM_MISSING_PATTERNS = (
     "sorry, this page isn't available",
     "the link you followed may be broken",
@@ -3346,6 +3628,7 @@ def _validate_person_knowledge_url(
     kind: str,
     expected_name: str | None = None,
     fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+    preferred_community_domain: str | None = None,
 ) -> tuple[str | None, Literal["valid", "invalid", "fetch_error"]]:
     candidate = str(url or "").strip()
     if not candidate:
@@ -3490,6 +3773,11 @@ def _validate_person_knowledge_url(
         allowlist=resolved_allowlist,
     ):
         return None, "invalid"
+    if normalized_kind == "fandom" and not _matches_preferred_fandom_community(
+        candidate,
+        preferred_community_domain=preferred_community_domain,
+    ):
+        return None, "invalid"
     if normalized_kind == "fandom" and _is_fandom_noncanonical_subpage_url(candidate):
         return None, "invalid"
 
@@ -3500,12 +3788,38 @@ def _validate_person_knowledge_url(
         candidate,
         timeout=_source_timeout_seconds(timeout_source),
     )
+    cached_fandom_entry = (
+        _get_cached_fandom_page_directory_entry(
+            candidate,
+            preferred_community_domain=preferred_community_domain,
+        )
+        if normalized_kind == "fandom"
+        else None
+    )
     if status_code is None:
+        if normalized_kind == "fandom" and _is_valid_cached_fandom_person_page(
+            cached_fandom_entry,
+            candidate_url=candidate,
+            expected_name=expected_name,
+        ):
+            return _canonicalize_url(str(cached_fandom_entry.get("page_url") or candidate)), "valid"
         return (None, "fetch_error") if error else (None, "invalid")
     if status_code in {404, 410}:
         return None, "invalid"
     if status_code >= 500:
         return None, "fetch_error"
+    if normalized_kind == "fandom":
+        is_challenge = _is_access_challenge_page(
+            html or "",
+            status_code=status_code,
+            markers=_FANDOM_CHALLENGE_PATTERNS,
+        )
+        if (status_code >= 400 or not html or is_challenge) and _is_valid_cached_fandom_person_page(
+            cached_fandom_entry,
+            candidate_url=candidate,
+            expected_name=expected_name,
+        ):
+            return _canonicalize_url(str(cached_fandom_entry.get("page_url") or candidate)), "valid"
     if status_code >= 400:
         return None, "invalid"
     if not html:
@@ -3518,6 +3832,11 @@ def _validate_person_knowledge_url(
     if normalized_kind == "fandom" and not is_allowlisted_fandom_domain(
         resolved,
         allowlist=resolved_allowlist,
+    ):
+        return None, "invalid"
+    if normalized_kind == "fandom" and not _matches_preferred_fandom_community(
+        resolved,
+        preferred_community_domain=preferred_community_domain,
     ):
         return None, "invalid"
     if normalized_kind == "fandom" and _is_fandom_noncanonical_subpage_url(resolved):
@@ -3534,12 +3853,14 @@ def _validated_person_knowledge_url(
     kind: str,
     expected_name: str | None = None,
     fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+    preferred_community_domain: str | None = None,
 ) -> str | None:
     resolved, outcome = _validate_person_knowledge_url(
         url,
         kind=kind,
         expected_name=expected_name,
         fandom_allowlist=fandom_allowlist,
+        preferred_community_domain=preferred_community_domain,
     )
     if outcome != "valid":
         return None
@@ -3742,6 +4063,10 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
         show_name=show_name,
         network_values=network_values,
     )
+    preferred_community_domain = _resolve_preferred_fandom_community_domain(
+        show_name=show_name,
+        fandom_rule_context=fandom_rule_context,
+    )
     include_allpages_scan = (
         bool(fandom_rule_context.get("include_allpages_scan"))
         if is_real_housewives_show and fandom_rule_context.get("effective_rule_key")
@@ -3809,11 +4134,17 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
         fandom_candidates: list[tuple[str, str]] = []
         for row in existing_show_fandom_links:
             raw_url = str(row.get("url") or "").strip()
-            if raw_url:
+            if raw_url and _matches_preferred_fandom_community(
+                raw_url,
+                preferred_community_domain=preferred_community_domain,
+            ):
                 fandom_candidates.append((raw_url, "core.entity_links"))
         for raw_url in fandom_rule_context.get("candidate_urls") or []:
             candidate_url = str(raw_url or "").strip()
-            if candidate_url:
+            if candidate_url and _matches_preferred_fandom_community(
+                candidate_url,
+                preferred_community_domain=preferred_community_domain,
+            ):
                 fandom_candidates.append((candidate_url, "franchise_rule"))
         fandom_candidates.extend((url, "curated_fandom_base") for url in _curated_show_fandom_base_urls(show_name))
         if is_real_housewives_show and show_name:
@@ -3832,6 +4163,11 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
         ) -> str | None:
             normalized = _canonicalize_url(resolved_url or candidate_url)
             if not normalized:
+                return None
+            if not _matches_preferred_fandom_community(
+                normalized,
+                preferred_community_domain=preferred_community_domain,
+            ):
                 return None
             if _is_fandom_noncanonical_subpage_url(normalized):
                 return None
@@ -3880,16 +4216,25 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
             if not parsed.scheme.startswith("http"):
                 continue
             candidate_host = str(parsed.hostname or "").strip().lower()
+            if preferred_community_domain and candidate_host and candidate_host != preferred_community_domain:
+                continue
             if curated_fandom_domains and candidate_host and candidate_host not in curated_fandom_domains:
                 continue
             if not is_allowlisted_fandom_domain(canonical_raw_url, allowlist=fandom_allowlist):
                 continue
             candidate_urls: list[str] = [canonical_raw_url]
-            if _is_fandom_seed_url(canonical_raw_url) and show_name:
+            if _is_internal_fandom_seed_url(canonical_raw_url) and show_name:
                 derived_candidates: list[str] = []
                 direct_candidate = build_fandom_wiki_url_from_name(show_name, candidate_host)
                 if direct_candidate:
                     derived_candidates.append(direct_candidate)
+                derived_candidates.extend(
+                    _search_cached_fandom_directory_candidate_urls(
+                        community_domain=candidate_host,
+                        query_values=[show_name],
+                        limit=40,
+                    )
+                )
                 if not _stage_budget_exhausted(stats):
                     derived_candidates.extend(
                         search_fandom_community_wiki_candidates(
@@ -3919,7 +4264,7 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
             ranked_page_candidates = [
                 candidate_url
                 for candidate_url in candidate_urls
-                if candidate_url and not _is_fandom_seed_url(candidate_url)
+                if candidate_url and not _is_internal_fandom_seed_url(candidate_url)
             ]
             for idx, candidate_url in enumerate(candidate_urls):
                 if idx > 0 and found_derived_show_page:
@@ -3932,9 +4277,32 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                     candidate_url,
                     timeout=_source_timeout_seconds("fandom"),
                 )
-                if fetch_error or not html:
-                    continue
-                if status_code is not None and status_code >= 400:
+                cached_entry = _get_cached_fandom_page_directory_entry(
+                    candidate_url,
+                    preferred_community_domain=preferred_community_domain,
+                )
+                is_challenge = _is_access_challenge_page(
+                    html or "",
+                    status_code=status_code,
+                    markers=_FANDOM_CHALLENGE_PATTERNS,
+                )
+                if fetch_error or not html or (status_code is not None and status_code >= 400) or is_challenge:
+                    if _is_valid_cached_fandom_show_page(
+                        cached_entry,
+                        candidate_url=candidate_url,
+                        show_name=show_name,
+                    ):
+                        resolved = _canonicalize_url(str(cached_entry.get("page_url") or candidate_url))
+                        source_value = fandom_source if idx == 0 else f"{fandom_source}:derived_show_page"
+                        normalized = record_fandom_row(
+                            candidate_url=candidate_url,
+                            html="",
+                            resolved_url=resolved,
+                            source_value=source_value,
+                            title_hint=str(cached_entry.get("page_title") or "").strip() or None,
+                        )
+                        if idx > 0 and normalized and not _is_internal_fandom_seed_url(normalized):
+                            found_derived_show_page = True
                     continue
                 resolved = str(resolved_url or candidate_url)
                 if is_missing_fandom_page(html, resolved):
@@ -3946,11 +4314,11 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                     resolved_url=resolved,
                     source_value=source_value,
                 )
-                if idx > 0 and normalized and not _is_fandom_seed_url(normalized):
+                if idx > 0 and normalized and not _is_internal_fandom_seed_url(normalized):
                     found_derived_show_page = True
             if (
                 not found_derived_show_page
-                and _is_fandom_seed_url(canonical_raw_url)
+                and _is_internal_fandom_seed_url(canonical_raw_url)
                 and show_name
                 and not _stage_budget_exhausted(stats)
             ):
@@ -3967,6 +4335,11 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                     candidate_url = _canonicalize_url(candidate.url)
                     if not candidate_url or _is_fandom_seed_url(candidate_url):
                         continue
+                    if not _matches_preferred_fandom_community(
+                        candidate_url,
+                        preferred_community_domain=preferred_community_domain,
+                    ):
+                        continue
                     if _score_fandom_show_candidate_url(candidate_url, show_name=show_name) <= 0:
                         continue
                     if not _can_attempt_fandom_candidate(stats):
@@ -3975,9 +4348,29 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                         candidate_url,
                         timeout=_source_timeout_seconds("fandom"),
                     )
-                    if fetch_error or not html:
-                        continue
-                    if status_code is not None and status_code >= 400:
+                    cached_entry = _get_cached_fandom_page_directory_entry(
+                        candidate_url,
+                        preferred_community_domain=preferred_community_domain,
+                    )
+                    is_challenge = _is_access_challenge_page(
+                        html or "",
+                        status_code=status_code,
+                        markers=_FANDOM_CHALLENGE_PATTERNS,
+                    )
+                    if fetch_error or not html or (status_code is not None and status_code >= 400) or is_challenge:
+                        if _is_valid_cached_fandom_show_page(
+                            cached_entry,
+                            candidate_url=candidate_url,
+                            show_name=show_name,
+                        ):
+                            record_fandom_row(
+                                candidate_url=candidate_url,
+                                html="",
+                                resolved_url=str(cached_entry.get("page_url") or candidate_url),
+                                source_value=f"{fandom_source}:derived_show_page",
+                                title_hint=str(cached_entry.get("page_title") or "").strip() or None,
+                            )
+                            found_derived_show_page = True
                         continue
                     resolved = str(resolved_url or candidate_url)
                     if is_missing_fandom_page(html, resolved):
@@ -3989,7 +4382,7 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
                         source_value=f"{fandom_source}:{candidate.source}:derived_show_page",
                         title_hint=candidate.title,
                     )
-                    if normalized and not _is_fandom_seed_url(normalized):
+                    if normalized and not _is_internal_fandom_seed_url(normalized):
                         found_derived_show_page = True
                         break
         for fandom_row in fandom_rows_by_url.values():
@@ -4258,9 +4651,11 @@ def _collect_show_fandom_seed_urls(
     show_fandom_seed_urls: list[str] | None,
     franchise_rule_urls: list[str] | None = None,
     fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+    preferred_community_domain: str | None = None,
 ) -> list[str]:
     resolved_allowlist = fandom_allowlist if fandom_allowlist is not None else load_fandom_community_allowlist()
     curated_domains = _curated_show_fandom_domains(show_name)
+    preferred_domain = normalize_fandom_community_domain(preferred_community_domain)
     candidates: list[str] = []
     if show_fandom_seed_urls:
         candidates.extend(show_fandom_seed_urls)
@@ -4269,7 +4664,10 @@ def _collect_show_fandom_seed_urls(
     candidates.extend(_curated_show_fandom_base_urls(show_name))
     if _is_real_housewives_show_name(show_name):
         real_housewives_wiki_candidate = search_real_housewives_wiki(show_name or "")
-        if real_housewives_wiki_candidate:
+        if real_housewives_wiki_candidate and _is_valid_fandom_show_page_url(
+            real_housewives_wiki_candidate,
+            show_name=show_name,
+        ):
             candidates.append(real_housewives_wiki_candidate)
 
     existing_rows: list[dict[str, Any]] = []
@@ -4310,9 +4708,13 @@ def _collect_show_fandom_seed_urls(
         if not parsed.scheme.startswith("http"):
             continue
         host = str(parsed.hostname or "").strip().lower()
+        if preferred_domain and host and host != preferred_domain:
+            continue
         if curated_domains and host and host not in curated_domains:
             continue
         if not is_allowlisted_fandom_domain(canonical, allowlist=resolved_allowlist):
+            continue
+        if _is_internal_fandom_seed_url(canonical):
             continue
         dedupe_key = _url_key(canonical)
         if dedupe_key in seen:
@@ -4326,13 +4728,17 @@ def _extract_fandom_domains_from_urls(
     urls: list[str],
     *,
     fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+    preferred_community_domain: str | None = None,
 ) -> list[str]:
     resolved_allowlist = fandom_allowlist if fandom_allowlist is not None else load_fandom_community_allowlist()
+    preferred_domain = normalize_fandom_community_domain(preferred_community_domain)
     domains: list[str] = []
     for url in urls:
         parsed = urlparse(str(url or "").strip())
         host = str(parsed.hostname or "").strip().lower()
         if not host:
+            continue
+        if preferred_domain and host != preferred_domain:
             continue
         if not is_allowlisted_fandom_domain(host, allowlist=resolved_allowlist):
             continue
@@ -4439,10 +4845,17 @@ def _validated_fandom_season_url(
     season_number: int,
     show_name: str | None = None,
     fandom_allowlist: list[str] | tuple[str, ...] | None = None,
+    show_seed_urls: list[str] | tuple[str, ...] | None = None,
+    preferred_community_domain: str | None = None,
 ) -> str | None:
     resolved_allowlist = fandom_allowlist if fandom_allowlist is not None else load_fandom_community_allowlist()
     canonical_candidate = _canonicalize_url(candidate_url)
     if not canonical_candidate:
+        return None
+    if not _matches_preferred_fandom_community(
+        canonical_candidate,
+        preferred_community_domain=preferred_community_domain,
+    ):
         return None
     if _is_fandom_noncanonical_subpage_url(canonical_candidate):
         return None
@@ -4453,11 +4866,30 @@ def _validated_fandom_season_url(
         canonical_candidate,
         timeout=_source_timeout_seconds("fandom"),
     )
-    if status_code is None or status_code >= 400 or not html:
+    cached_entry = _get_cached_fandom_page_directory_entry(
+        canonical_candidate,
+        preferred_community_domain=preferred_community_domain,
+    )
+    is_challenge = _is_access_challenge_page(
+        html or "",
+        status_code=status_code,
+        markers=_FANDOM_CHALLENGE_PATTERNS,
+    )
+    if status_code is None or status_code >= 400 or not html or is_challenge:
+        if _is_valid_cached_fandom_season_page(
+            cached_entry,
+            candidate_url=canonical_candidate,
+            season_number=season_number,
+            show_name=show_name,
+            show_seed_urls=show_seed_urls,
+        ):
+            return _canonicalize_url(str(cached_entry.get("page_url") or canonical_candidate))
         return None
 
     resolved = _canonicalize_url(final_url or canonical_candidate)
     if not resolved:
+        return None
+    if not _matches_preferred_fandom_community(resolved, preferred_community_domain=preferred_community_domain):
         return None
     if _is_fandom_noncanonical_subpage_url(resolved):
         return None
@@ -4470,7 +4902,11 @@ def _validated_fandom_season_url(
     season_matches = any(_extract_season_number_from_text(value) == season_number for value in candidates)
     if not season_matches:
         return None
-    if show_name:
+    anchor_titles = _collect_fandom_season_show_anchor_titles(show_name=show_name, show_seed_urls=show_seed_urls)
+    if anchor_titles:
+        if not _matches_fandom_season_show_anchor(candidates, anchor_titles=anchor_titles):
+            return None
+    elif show_name:
         expected_tokens = {
             token
             for token in _normalize_lookup_value(show_name).split()
@@ -4512,6 +4948,10 @@ def _discover_season_links(
         show_name=show_name,
         network_values=network_values,
     )
+    preferred_community_domain = _resolve_preferred_fandom_community_domain(
+        show_name=show_name,
+        fandom_rule_context=fandom_rule_context,
+    )
     include_allpages_scan = (
         bool(fandom_rule_context.get("include_allpages_scan"))
         if _is_real_housewives_show_name(show_name) and fandom_rule_context.get("effective_rule_key")
@@ -4529,8 +4969,13 @@ def _discover_season_links(
         show_fandom_seed_urls=show_fandom_seed_urls,
         franchise_rule_urls=fandom_rule_context.get("candidate_urls"),
         fandom_allowlist=fandom_allowlist,
+        preferred_community_domain=preferred_community_domain,
     )
-    fandom_domains = _extract_fandom_domains_from_urls(season_fandom_seed_urls, fandom_allowlist=fandom_allowlist)
+    fandom_domains = _extract_fandom_domains_from_urls(
+        season_fandom_seed_urls,
+        fandom_allowlist=fandom_allowlist,
+        preferred_community_domain=preferred_community_domain,
+    )
     season_fandom_seed_urls_by_domain: dict[str, list[str]] = {}
     for seed_url in season_fandom_seed_urls:
         host = str(urlparse(seed_url).hostname or "").strip().lower()
@@ -4598,8 +5043,26 @@ def _discover_season_links(
         stats["season_links_discovered"] = 0
         stats["season_with_links"] = 0
         stats["current_season_label"] = ""
+        _notify_show_link_discovery_progress(stats)
 
     found: list[dict[str, Any]] = []
+    seen_season_links: set[tuple[str, str, str]] = set()
+
+    def append_unique_season_link(row: dict[str, Any]) -> bool:
+        season_key = str(row.get("entity_id") or "").strip()
+        link_kind = _normalize_link_kind(str(row.get("link_kind") or "").strip())
+        canonical_url = _canonicalize_url(str(row.get("url") or "").strip())
+        if not season_key or not link_kind or not canonical_url:
+            return False
+        dedupe_key = (season_key, link_kind, _url_key(canonical_url))
+        if dedupe_key in seen_season_links:
+            return False
+        seen_season_links.add(dedupe_key)
+        row["link_kind"] = link_kind
+        row["url"] = canonical_url
+        found.append(row)
+        return True
+
     for index, row in enumerate(season_rows, start=1):
         if _stage_budget_exhausted(stats):
             break
@@ -4607,6 +5070,7 @@ def _discover_season_links(
         season_number = int(row.get("season_number") or 0)
         if stats is not None:
             stats["current_season_label"] = f"Season {season_number}"
+            _notify_show_link_discovery_progress(stats)
         season_link_count_before = len(found)
         season_external_ids_raw = row.get("external_ids")
         season_external_ids: dict[str, Any] = (
@@ -4762,6 +5226,7 @@ def _discover_season_links(
                 stats["season_processed"] = index
                 if len(found) > season_link_count_before:
                     stats["season_with_links"] = int(stats.get("season_with_links") or 0) + 1
+                _notify_show_link_discovery_progress(stats)
             continue
 
         season_fandom_queries = _build_fandom_season_search_queries(
@@ -4779,6 +5244,8 @@ def _discover_season_links(
                     candidate_url,
                     show_name=show_name if show_name else None,
                     season_number=season_number,
+                    show_seed_urls=season_fandom_seed_urls,
+                    preferred_community_domain=preferred_community_domain,
                 ),
                 reverse=True,
             )
@@ -4789,6 +5256,8 @@ def _discover_season_links(
                     candidate,
                     show_name=show_name if show_name else None,
                     season_number=season_number,
+                    show_seed_urls=season_fandom_seed_urls,
+                    preferred_community_domain=preferred_community_domain,
                 )
                 if candidate_score <= 0:
                     continue
@@ -4797,10 +5266,32 @@ def _discover_season_links(
                     season_number=season_number,
                     show_name=show_name if show_name else None,
                     fandom_allowlist=fandom_allowlist,
+                    show_seed_urls=season_fandom_seed_urls,
+                    preferred_community_domain=preferred_community_domain,
                 )
                 if validated:
                     resolved_fandom_url = validated
                     break
+            if not resolved_fandom_url:
+                cached_candidates = _search_cached_fandom_directory_candidate_urls(
+                    community_domain=fandom_domain,
+                    query_values=season_fandom_queries,
+                    limit=max(1, per_domain_candidate_cap),
+                )
+                for candidate in cached_candidates[: max(1, per_domain_candidate_cap)]:
+                    if not _can_attempt_fandom_candidate(stats):
+                        break
+                    validated = _validated_fandom_season_url(
+                        candidate,
+                        season_number=season_number,
+                        show_name=show_name if show_name else None,
+                        fandom_allowlist=fandom_allowlist,
+                        show_seed_urls=season_fandom_seed_urls,
+                        preferred_community_domain=preferred_community_domain,
+                    )
+                    if validated:
+                        resolved_fandom_url = validated
+                        break
             direct_candidates: list[str] = []
             if show_name:
                 direct_from_name = build_fandom_wiki_url_from_name(f"{show_name} season {season_number}", fandom_domain)
@@ -4827,6 +5318,8 @@ def _discover_season_links(
                     season_number=season_number,
                     show_name=show_name if show_name else None,
                     fandom_allowlist=fandom_allowlist,
+                    show_seed_urls=season_fandom_seed_urls,
+                    preferred_community_domain=preferred_community_domain,
                 )
                 if validated:
                     resolved_fandom_url = validated
@@ -4834,7 +5327,7 @@ def _discover_season_links(
 
             if resolved_fandom_url:
                 fandom_title = _extract_fandom_page_title_from_url(resolved_fandom_url)
-                found.append(
+                appended = append_unique_season_link(
                     {
                         "entity_type": "season",
                         "entity_id": season_id,
@@ -4847,10 +5340,11 @@ def _discover_season_links(
                         "metadata": _build_fandom_link_metadata(resolved_fandom_url, title=fandom_title),
                     }
                 )
-                if stats is not None:
+                if stats is not None and appended:
                     stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
                     stats["season_processed"] = index
                     stats["season_with_links"] = int(stats.get("season_with_links") or 0) + 1
+                    _notify_show_link_discovery_progress(stats)
                 continue
 
             for query in season_fandom_queries:
@@ -4868,6 +5362,8 @@ def _discover_season_links(
                         season_number=season_number,
                         show_name=show_name if show_name else None,
                         fandom_allowlist=fandom_allowlist,
+                        show_seed_urls=season_fandom_seed_urls,
+                        preferred_community_domain=preferred_community_domain,
                     )
                     if validated:
                         resolved_fandom_url = validated
@@ -4898,6 +5394,8 @@ def _discover_season_links(
                         season_number=season_number,
                         show_name=show_name if show_name else None,
                         fandom_allowlist=fandom_allowlist,
+                        show_seed_urls=season_fandom_seed_urls,
+                        preferred_community_domain=preferred_community_domain,
                     )
                     if validated:
                         resolved_fandom_url = validated
@@ -4905,7 +5403,7 @@ def _discover_season_links(
             if not resolved_fandom_url:
                 continue
             fandom_title = _extract_fandom_page_title_from_url(resolved_fandom_url)
-            found.append(
+            appended = append_unique_season_link(
                 {
                     "entity_type": "season",
                     "entity_id": season_id,
@@ -4918,14 +5416,16 @@ def _discover_season_links(
                     "metadata": _build_fandom_link_metadata(resolved_fandom_url, title=fandom_title),
                 }
             )
-            if stats is not None:
+            if stats is not None and appended:
                 stats["season_links_discovered"] = int(stats.get("season_links_discovered") or 0) + 1
         if stats is not None:
             stats["season_processed"] = index
             if len(found) > season_link_count_before:
                 stats["season_with_links"] = int(stats.get("season_with_links") or 0) + 1
+            _notify_show_link_discovery_progress(stats)
     if stats is not None:
         stats["current_season_label"] = ""
+        _notify_show_link_discovery_progress(stats)
     return found
 
 
@@ -4988,6 +5488,7 @@ def _discover_fandom_candidates_for_person(
     fandom_allowlist: list[str] | tuple[str, ...],
     include_allpages_scan: bool = True,
     stats: dict[str, Any] | None = None,
+    preferred_community_domain: str | None = None,
 ) -> list[str]:
     max_candidates_per_person = _link_discovery_people_fandom_candidates_per_person_cap()
     candidates: list[str] = []
@@ -4995,12 +5496,30 @@ def _discover_fandom_candidates_for_person(
         candidates.append(seeded_fandom_url)
     if name:
         for fandom_domain in show_fandom_domains or []:
+            if not _matches_preferred_fandom_community(
+                f"https://{fandom_domain}/wiki/{quote(name.replace(' ', '_'))}",
+                preferred_community_domain=preferred_community_domain,
+            ):
+                continue
+            cached_candidate_found = False
+            for cached_candidate in _search_cached_fandom_directory_candidate_urls(
+                community_domain=fandom_domain,
+                query_values=[name],
+                limit=max_candidates_per_person,
+            ):
+                if _score_fandom_candidate_url(cached_candidate, expected_name=name) > 0:
+                    candidates.append(cached_candidate)
+                    cached_candidate_found = True
             for seeded_candidate in (seeded_domain_candidates or {}).get(fandom_domain, []):
                 if _score_fandom_candidate_url(seeded_candidate, expected_name=name) > 0:
                     candidates.append(seeded_candidate)
             direct_candidate = build_fandom_wiki_url_from_name(name, fandom_domain)
             if direct_candidate:
                 candidates.append(direct_candidate)
+            if cached_candidate_found and normalize_fandom_community_domain(preferred_community_domain):
+                if len(candidates) >= max_candidates_per_person:
+                    break
+                continue
             if not _stage_budget_exhausted(stats):
                 search_candidates = search_fandom_community_wiki_candidates(
                     name,
@@ -5037,19 +5556,22 @@ def _discover_fandom_candidates_for_person(
     primary = search_real_housewives_wiki(name)
     if primary:
         candidates.append(primary)
-    candidates.extend(
-        search_allowlisted_fandom_wikis(
-            name,
-            allowlist=fandom_allowlist,
-            max_results=5,
+    if not normalize_fandom_community_domain(preferred_community_domain):
+        candidates.extend(
+            search_allowlisted_fandom_wikis(
+                name,
+                allowlist=fandom_allowlist,
+                max_results=5,
+            )
         )
-    )
 
     deduped: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
         cleaned = str(candidate or "").strip()
         if not cleaned or cleaned in seen:
+            continue
+        if not _matches_preferred_fandom_community(cleaned, preferred_community_domain=preferred_community_domain):
             continue
         seen.add(cleaned)
         deduped.append(cleaned)
@@ -5160,6 +5682,10 @@ def _discover_people_links(
         show_id=show_id,
         show_name=show_name,
         network_values=network_values,
+    )
+    preferred_community_domain = _resolve_preferred_fandom_community_domain(
+        show_name=show_name,
+        fandom_rule_context=fandom_rule_context,
     )
     include_allpages_scan = (
         bool(fandom_rule_context.get("include_allpages_scan"))
@@ -5281,8 +5807,13 @@ def _discover_people_links(
         show_fandom_seed_urls=show_fandom_seed_urls,
         franchise_rule_urls=fandom_rule_context.get("candidate_urls"),
         fandom_allowlist=fandom_allowlist,
+        preferred_community_domain=preferred_community_domain,
     )
-    show_fandom_domains = _extract_fandom_domains_from_urls(people_fandom_seed_urls, fandom_allowlist=fandom_allowlist)
+    show_fandom_domains = _extract_fandom_domains_from_urls(
+        people_fandom_seed_urls,
+        fandom_allowlist=fandom_allowlist,
+        preferred_community_domain=preferred_community_domain,
+    )
     seeded_fandom_candidates_by_domain = _collect_seeded_fandom_candidate_urls_by_domain(
         people_fandom_seed_urls,
         fandom_allowlist=fandom_allowlist,
@@ -5296,6 +5827,7 @@ def _discover_people_links(
         stats["people_with_links"] = 0
         stats["current_person_name"] = ""
         stats["current_person_id"] = ""
+        _notify_show_link_discovery_progress(stats)
     found: list[dict[str, Any]] = []
     seen_person_links: set[tuple[str, str, str]] = set()
     matched_show_cast_wikidata_candidates: set[str] = set()
@@ -5326,6 +5858,7 @@ def _discover_people_links(
         if stats is not None:
             stats["current_person_id"] = person_id
             stats["current_person_name"] = name
+            _notify_show_link_discovery_progress(stats)
         fandom_url = str(row.get("fandom_url") or "").strip()
         external_ids_raw = row.get("external_ids")
         external_ids: dict[str, Any] = external_ids_raw if isinstance(external_ids_raw, dict) else {}
@@ -5608,6 +6141,7 @@ def _discover_people_links(
             fandom_allowlist=fandom_allowlist,
             include_allpages_scan=include_allpages_scan,
             stats=stats,
+            preferred_community_domain=preferred_community_domain,
         )
         max_candidates_per_person = _link_discovery_people_fandom_candidates_per_person_cap()
         ranked_fandom_candidates = sorted(
@@ -5626,6 +6160,7 @@ def _discover_people_links(
                 kind="fandom",
                 expected_name=name if name else None,
                 fandom_allowlist=fandom_allowlist,
+                preferred_community_domain=preferred_community_domain,
             )
             if validated_fandom_url:
                 canonical_fandom_url = _canonicalize_url(validated_fandom_url)
@@ -5659,6 +6194,7 @@ def _discover_people_links(
                             kind="fandom",
                             expected_name=name if name else None,
                             fandom_allowlist=fandom_allowlist,
+                            preferred_community_domain=preferred_community_domain,
                         )
                         if not validated_related_url:
                             continue
@@ -5711,9 +6247,11 @@ def _discover_people_links(
             stats["people_processed"] = index
             if len(found) > person_link_count_before:
                 stats["people_with_links"] = int(stats.get("people_with_links") or 0) + 1
+            _notify_show_link_discovery_progress(stats)
     if stats is not None:
         stats["current_person_name"] = ""
         stats["current_person_id"] = ""
+        _notify_show_link_discovery_progress(stats)
     return found
 
 
@@ -6028,10 +6566,20 @@ def _scan_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
     network_tokens = _normalize_show_network_tokens(network_values)
     show_wikidata_id = _resolve_show_wikidata_id(show_id, (show_row or {}).get("wikidata_id"))
     curated_fandom_domains = _curated_show_fandom_domains(show_name)
+    fandom_rule_context = _resolve_show_fandom_rule_context(
+        show_id=show_id,
+        show_name=show_name,
+        network_values=tuple(network_values),
+    )
+    preferred_community_domain = _resolve_preferred_fandom_community_domain(
+        show_name=show_name,
+        fandom_rule_context=fandom_rule_context,
+    )
     fandom_allowlist = _effective_fandom_allowlist(
         show_name=show_name,
         network_tokens=network_tokens,
         base_allowlist=load_fandom_community_allowlist(),
+        additional_domains=fandom_rule_context.get("community_domains"),
     )
 
     links = pg.fetch_all(
@@ -6065,15 +6613,25 @@ def _scan_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
         if link_kind == "fandom":
             parsed = urlparse(url)
             host = str(parsed.hostname or "").strip().lower()
+            if preferred_community_domain and host and host != preferred_community_domain:
+                invalid_rows.append({**row, "reason": "fandom_domain_mismatch"})
+                continue
             if entity_type == "show" and curated_fandom_domains and host and host not in curated_fandom_domains:
                 invalid_rows.append({**row, "reason": "fandom_domain_mismatch"})
                 continue
             if not is_allowlisted_fandom_domain(url, allowlist=fandom_allowlist):
                 invalid_rows.append({**row, "reason": "fandom_not_allowlisted"})
                 continue
-            # Show-level fandom seed domains are valid discovery seeds even without a /wiki page path.
-            # Keep them persisted so refresh can continue deriving season/cast candidates from them.
             if entity_type == "show" and _is_fandom_seed_url(url):
+                invalid_rows.append({**row, "reason": "fandom_seed_not_renderable"})
+                continue
+
+            cached_entry = _get_cached_fandom_page_directory_entry(
+                url,
+                preferred_community_domain=preferred_community_domain,
+            )
+            if entity_type == "show" and _is_internal_fandom_seed_url(url):
+                invalid_rows.append({**row, "reason": "fandom_seed_not_renderable"})
                 continue
 
             status_code, html, resolved_url, fetch_error = _fetch_html_with_status(
@@ -6081,12 +6639,54 @@ def _scan_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
                 timeout=_source_timeout_seconds("fandom"),
             )
             if fetch_error or status_code is None:
+                if entity_type == "show" and _is_valid_cached_fandom_show_page(
+                    cached_entry,
+                    candidate_url=url,
+                    show_name=show_name,
+                ):
+                    continue
+                season_number = _extract_season_number_from_text(url)
+                if season_number and entity_type == "season":
+                    if _is_valid_cached_fandom_season_page(
+                        cached_entry,
+                        candidate_url=url,
+                        season_number=season_number,
+                        show_name=show_name,
+                        show_seed_urls=None,
+                    ):
+                        continue
                 validation_failures += 1
                 continue
-            if status_code >= 400 or not html:
+            is_challenge = _is_access_challenge_page(
+                html or "",
+                status_code=status_code,
+                markers=_FANDOM_CHALLENGE_PATTERNS,
+            )
+            if status_code >= 400 or not html or is_challenge:
+                if entity_type == "show" and _is_valid_cached_fandom_show_page(
+                    cached_entry,
+                    candidate_url=url,
+                    show_name=show_name,
+                ):
+                    continue
+                season_number = _extract_season_number_from_text(url)
+                if entity_type == "season" and season_number and _is_valid_cached_fandom_season_page(
+                    cached_entry,
+                    candidate_url=url,
+                    season_number=season_number,
+                    show_name=show_name,
+                    show_seed_urls=None,
+                ):
+                    continue
                 invalid_rows.append({**row, "reason": "fandom_missing_or_invalid"})
                 continue
             resolved = str(resolved_url or url)
+            if preferred_community_domain and not _matches_preferred_fandom_community(
+                resolved,
+                preferred_community_domain=preferred_community_domain,
+            ):
+                invalid_rows.append({**row, "reason": "fandom_domain_mismatch"})
+                continue
             if is_missing_fandom_page(html, resolved):
                 invalid_rows.append({**row, "reason": "fandom_missing_or_invalid"})
                 continue
@@ -6305,6 +6905,13 @@ def put_fandom_allowlist(payload: FandomAllowlistUpdateRequest, admin: InternalA
         raise HTTPException(status_code=502, detail=f"Failed to update fandom allowlist: {exc}") from exc
 
     refresh_fandom_community_allowlist_cache()
+    for domain in normalized_domains:
+        fandom_page_directory_repo.enqueue_fandom_page_directory_backfill(
+            community_domain=domain,
+            actor=actor,
+            reason="allowlist_update",
+            force=True,
+        )
     return {
         "domains": normalized_domains,
         "count": len(normalized_domains),
@@ -6421,6 +7028,7 @@ def _run_show_link_discovery(
     db: SupabaseAdminClient,
     actor: str,
     stage_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    live_progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     stage_callback = stage_callback or (lambda _stage, _payload: None)
     run_id = str(uuid4())
@@ -6507,9 +7115,33 @@ def _run_show_link_discovery(
                 "links_discovered": len(discovered),
                 "targets_with_links": int(payload_in.get("approved_added") or 0),
             }
+        show_completed = 0 if current_stage == "show_discovery_started" else 1
+        season_total_targets = int(scan_targets.get("season_scanned") or 0) if payload.include_seasons else 0
+        season_completed = min(
+            season_total_targets,
+            int(discovery_stats.get("season_processed") or 0) if season_total_targets > 0 else 0,
+        )
+        if (
+            season_total_targets > 0
+            and current_stage
+            and not current_stage.startswith(("show_discovery", "season_discovery"))
+        ):
+            season_completed = season_total_targets
+        people_total_targets = int(scan_targets.get("people_scanned") or 0) if payload.include_people else 0
+        people_completed = min(
+            people_total_targets,
+            int(discovery_stats.get("people_processed") or 0) if people_total_targets > 0 else 0,
+        )
+        if people_total_targets > 0 and current_stage and not current_stage.startswith("people_discovery"):
+            if current_stage.startswith(("upsert", "social_url_repair", "cleanup", "completed")):
+                people_completed = people_total_targets
         validated_live_counts_by_source = _normalized_count_map(discovery_stats.get("validated_live_counts_by_source"))
         stage_budget_reason = str(discovery_stats.get("__stage_budget_exhausted_reason") or "").strip() or None
-        stalled = bool(is_stage_active and stalled_threshold_ms > 0 and stage_elapsed_ms >= stalled_threshold_ms)
+        last_progress_perf = float(discovery_stats.get("__last_progress_perf") or 0.0)
+        no_progress_elapsed_ms = (
+            max(0, int((perf_counter() - last_progress_perf) * 1000)) if last_progress_perf > 0 else 0
+        )
+        stalled = bool(is_stage_active and stalled_threshold_ms > 0 and no_progress_elapsed_ms >= stalled_threshold_ms)
         return {
             "current_stage": current_stage,
             "stage_started_elapsed_ms": stage_started_elapsed_ms,
@@ -6522,6 +7154,11 @@ def _run_show_link_discovery(
                 "show_scanned": int(scan_targets.get("show_scanned") or 0),
                 "season_scanned": int(scan_targets.get("season_scanned") or 0) if payload.include_seasons else 0,
                 "people_scanned": int(scan_targets.get("people_scanned") or 0) if payload.include_people else 0,
+            },
+            "target_progress": {
+                "shows": {"completed": show_completed, "total": 1},
+                "seasons": {"completed": season_completed, "total": season_total_targets},
+                "cast_members": {"completed": people_completed, "total": people_total_targets},
             },
             "stage_budget": {
                 "stage": budget_stage,
@@ -6545,9 +7182,22 @@ def _run_show_link_discovery(
             ),
         }
 
+    def publish_live_progress() -> None:
+        if live_progress_callback is None:
+            return
+        stage_name = str(discovery_stats.get("__current_progress_stage") or "").strip().lower()
+        if not stage_name:
+            return
+        snapshot = build_progress_snapshot(stage_name)
+        snapshot["timestamp"] = _iso_utc_now()
+        live_progress_callback(snapshot)
+
+    discovery_stats["__live_progress_callback"] = publish_live_progress
+
     def emit(stage: str, payload_in: dict[str, Any]) -> None:
         now_iso = _iso_utc_now()
         now_perf = perf_counter()
+        discovery_stats["__current_progress_stage"] = stage
         last_stage_name = str(discovery_stats.get("__last_stage_transition_stage") or "").strip().lower()
         if stage != last_stage_name:
             discovery_stats["__last_stage_transition_stage"] = stage
@@ -6606,6 +7256,7 @@ def _run_show_link_discovery(
         for row in discovered
         if str(row.get("entity_type") or "").strip().lower() == "show"
         and _normalize_link_kind(str(row.get("link_kind") or "").strip().lower()) == "fandom"
+        and not _is_internal_fandom_seed_url(str(row.get("url") or "").strip())
     ]
     show_fandom_seed_urls: list[str] = []
     seen_show_fandom_seed_keys: set[str] = set()
@@ -6858,6 +7509,17 @@ def _run_show_link_discovery(
             "deleted_links": deleted_invalid,
             "normalized_social_urls": int(social_url_normalization.get("normalized") or 0),
         },
+        "target_progress": {
+            "shows": {"completed": 1, "total": 1},
+            "seasons": {
+                "completed": int(scan_targets.get("season_scanned") or 0) if payload.include_seasons else 0,
+                "total": int(scan_targets.get("season_scanned") or 0) if payload.include_seasons else 0,
+            },
+            "cast_members": {
+                "completed": int(scan_targets.get("people_scanned") or 0) if payload.include_people else 0,
+                "total": int(scan_targets.get("people_scanned") or 0) if payload.include_people else 0,
+            },
+        },
         "status_counts": {
             "approved_added": approved_added,
             "deleted_invalid": deleted_invalid,
@@ -6948,16 +7610,31 @@ def discover_show_links_stream(
         result_box: dict[str, Any] = {}
         error_box: dict[str, Any] = {}
         last_progress_payload: dict[str, Any] = {}
+        progress_lock = threading.Lock()
         heartbeat_interval_seconds = 5.0
         stalled_threshold_ms = int(_link_discovery_stalled_threshold_seconds() * 1000)
         stream_started_perf = perf_counter()
+        last_live_progress_perf = stream_started_perf
+
+        def update_last_progress(payload_with_stage: dict[str, Any]) -> None:
+            nonlocal last_live_progress_perf
+            with progress_lock:
+                last_progress_payload.clear()
+                last_progress_payload.update(payload_with_stage)
+                last_live_progress_perf = perf_counter()
 
         def on_stage(stage: str, stage_payload: dict[str, Any]) -> None:
             current_stage = str(stage_payload.get("current_stage") or "").strip() or stage
             payload_with_stage = {"stage": stage, "current_stage": current_stage, **stage_payload}
-            last_progress_payload.clear()
-            last_progress_payload.update(payload_with_stage)
+            update_last_progress(payload_with_stage)
             event_queue.put(("progress", payload_with_stage))
+
+        def on_live_progress(progress_payload: dict[str, Any]) -> None:
+            current_stage = str(progress_payload.get("current_stage") or progress_payload.get("stage") or "").strip()
+            if not current_stage:
+                return
+            payload_with_stage = {"stage": current_stage, "current_stage": current_stage, **progress_payload}
+            update_last_progress(payload_with_stage)
 
         def worker() -> None:
             try:
@@ -6967,6 +7644,7 @@ def discover_show_links_stream(
                     db=db,
                     actor=actor,
                     stage_callback=on_stage,
+                    live_progress_callback=on_live_progress,
                 )
             except Exception as exc:  # noqa: BLE001
                 error_box["error"] = str(exc)
@@ -6992,17 +7670,20 @@ def discover_show_links_stream(
                 event_name, event_payload = event_queue.get(timeout=heartbeat_interval_seconds)
             except Empty:
                 elapsed_ms = int((perf_counter() - stream_started_perf) * 1000)
-                stage_started_elapsed_ms = int(last_progress_payload.get("stage_started_elapsed_ms") or 0)
+                with progress_lock:
+                    heartbeat_source_payload = dict(last_progress_payload)
+                    no_progress_elapsed_ms = int((perf_counter() - last_live_progress_perf) * 1000)
+                stage_started_elapsed_ms = int(heartbeat_source_payload.get("stage_started_elapsed_ms") or 0)
                 stage_elapsed_ms = max(0, elapsed_ms - stage_started_elapsed_ms) if stage_started_elapsed_ms > 0 else 0
                 current_stage = str(
-                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
+                    heartbeat_source_payload.get("current_stage") or heartbeat_source_payload.get("stage") or ""
                 ).strip()
                 stalled = bool(
                     current_stage.endswith("_started")
                     and stalled_threshold_ms > 0
-                    and stage_elapsed_ms >= stalled_threshold_ms
+                    and no_progress_elapsed_ms >= stalled_threshold_ms
                 )
-                stage_budget_payload = last_progress_payload.get("stage_budget")
+                stage_budget_payload = heartbeat_source_payload.get("stage_budget")
                 stage_budget = stage_budget_payload if isinstance(stage_budget_payload, dict) else {}
                 stalled_reason = (
                     (str(stage_budget.get("budget_reason") or "").strip() or "no_new_progress_events")
@@ -7010,7 +7691,7 @@ def discover_show_links_stream(
                     else None
                 )
                 heartbeat_payload = {
-                    **last_progress_payload,
+                    **heartbeat_source_payload,
                     "show_id": show_id_str,
                     "stage": "heartbeat",
                     "heartbeat": True,
@@ -7061,6 +7742,7 @@ def discover_show_links_stream(
                     "message": result.get("message"),
                     "current_stage": result.get("current_stage"),
                     "stage_progress": result.get("stage_progress"),
+                    "target_progress": result.get("target_progress"),
                     "stage_counts": result.get("stage_counts"),
                     "stage_timings_ms": result.get("stage_timings_ms"),
                     "status_counts": result.get("status_counts"),
@@ -7114,16 +7796,31 @@ def build_show_links_discovery_operation_producer(
         result_box: dict[str, Any] = {}
         error_box: dict[str, Any] = {}
         last_progress_payload: dict[str, Any] = {}
+        progress_lock = threading.Lock()
         heartbeat_interval_seconds = 5.0
         stalled_threshold_ms = int(_link_discovery_stalled_threshold_seconds() * 1000)
         stream_started_perf = perf_counter()
+        last_live_progress_perf = stream_started_perf
+
+        def update_last_progress(payload_with_stage: dict[str, Any]) -> None:
+            nonlocal last_live_progress_perf
+            with progress_lock:
+                last_progress_payload.clear()
+                last_progress_payload.update(payload_with_stage)
+                last_live_progress_perf = perf_counter()
 
         def on_stage(stage: str, stage_payload: dict[str, Any]) -> None:
             current_stage = str(stage_payload.get("current_stage") or "").strip() or stage
             payload_with_stage = {"stage": stage, "current_stage": current_stage, **stage_payload}
-            last_progress_payload.clear()
-            last_progress_payload.update(payload_with_stage)
+            update_last_progress(payload_with_stage)
             event_queue.put(("progress", payload_with_stage))
+
+        def on_live_progress(progress_payload: dict[str, Any]) -> None:
+            current_stage = str(progress_payload.get("current_stage") or progress_payload.get("stage") or "").strip()
+            if not current_stage:
+                return
+            payload_with_stage = {"stage": current_stage, "current_stage": current_stage, **progress_payload}
+            update_last_progress(payload_with_stage)
 
         def worker() -> None:
             try:
@@ -7133,6 +7830,7 @@ def build_show_links_discovery_operation_producer(
                     db=local_db,
                     actor=actor,
                     stage_callback=on_stage,
+                    live_progress_callback=on_live_progress,
                 )
             except Exception as exc:  # noqa: BLE001
                 error_box["error"] = str(exc)
@@ -7158,17 +7856,20 @@ def build_show_links_discovery_operation_producer(
                 event_name, event_payload = event_queue.get(timeout=heartbeat_interval_seconds)
             except Empty:
                 elapsed_ms = int((perf_counter() - stream_started_perf) * 1000)
-                stage_started_elapsed_ms = int(last_progress_payload.get("stage_started_elapsed_ms") or 0)
+                with progress_lock:
+                    heartbeat_source_payload = dict(last_progress_payload)
+                    no_progress_elapsed_ms = int((perf_counter() - last_live_progress_perf) * 1000)
+                stage_started_elapsed_ms = int(heartbeat_source_payload.get("stage_started_elapsed_ms") or 0)
                 stage_elapsed_ms = max(0, elapsed_ms - stage_started_elapsed_ms) if stage_started_elapsed_ms > 0 else 0
                 current_stage = str(
-                    last_progress_payload.get("current_stage") or last_progress_payload.get("stage") or ""
+                    heartbeat_source_payload.get("current_stage") or heartbeat_source_payload.get("stage") or ""
                 ).strip()
                 stalled = bool(
                     current_stage.endswith("_started")
                     and stalled_threshold_ms > 0
-                    and stage_elapsed_ms >= stalled_threshold_ms
+                    and no_progress_elapsed_ms >= stalled_threshold_ms
                 )
-                stage_budget_payload = last_progress_payload.get("stage_budget")
+                stage_budget_payload = heartbeat_source_payload.get("stage_budget")
                 stage_budget = stage_budget_payload if isinstance(stage_budget_payload, dict) else {}
                 stalled_reason = (
                     (str(stage_budget.get("budget_reason") or "").strip() or "no_new_progress_events")
@@ -7176,7 +7877,7 @@ def build_show_links_discovery_operation_producer(
                     else None
                 )
                 heartbeat_payload = {
-                    **last_progress_payload,
+                    **heartbeat_source_payload,
                     "show_id": show_id_str,
                     "stage": "heartbeat",
                     "heartbeat": True,
@@ -7227,6 +7928,7 @@ def build_show_links_discovery_operation_producer(
                     "message": result.get("message"),
                     "current_stage": result.get("current_stage"),
                     "stage_progress": result.get("stage_progress"),
+                    "target_progress": result.get("target_progress"),
                     "stage_counts": result.get("stage_counts"),
                     "stage_timings_ms": result.get("stage_timings_ms"),
                     "status_counts": result.get("status_counts"),
@@ -7343,6 +8045,13 @@ def add_show_links(
             )
             if link_kind == "fandom" and _is_allowlisted_fandom_seed_input(canonical_url):
                 discovery_seed_inputs.append(raw_input)
+                fandom_domain = normalize_fandom_community_domain(str(urlparse(canonical_url).hostname or ""))
+                if fandom_domain:
+                    fandom_page_directory_repo.enqueue_fandom_page_directory_backfill(
+                        community_domain=fandom_domain,
+                        actor=actor,
+                        reason="manual_fandom_seed",
+                    )
 
     if discovery_seed_inputs:
         _kickoff_show_link_discovery_for_manual_fandom_seed(

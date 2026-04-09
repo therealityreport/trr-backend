@@ -127,17 +127,21 @@ def test_put_franchise_rule_success(client: TestClient, monkeypatch: pytest.Monk
     expected = {"rule": {"key": "real-housewives", **payload}}
 
     with patch("trr_backend.repositories.brands_franchises.update_franchise_rule", return_value=expected) as mocked:
-        response = client.put(
-            "/api/v1/admin/brands/franchise-rules/real-housewives",
-            headers={"Authorization": f"Bearer {token}"},
-            json=payload,
-        )
+        with patch(
+            "api.routers.admin_brands.fandom_page_directory_repo.enqueue_fandom_page_directory_backfill"
+        ) as enqueue_backfill:
+            response = client.put(
+                "/api/v1/admin/brands/franchise-rules/real-housewives",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
 
     assert response.status_code == 200
     assert response.json() == expected
     assert mocked.call_args.kwargs["franchise_key"] == "real-housewives"
     assert mocked.call_args.kwargs["payload"] == payload
     assert mocked.call_args.kwargs["actor"] == "service_role:unknown"
+    enqueue_backfill.assert_called_once()
 
 
 def test_post_apply_franchise_rule_uses_safe_defaults(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

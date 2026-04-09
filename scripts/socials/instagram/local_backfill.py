@@ -41,7 +41,7 @@ def main() -> int:
     parser.add_argument("--backfill-scope", default="full_history", choices=["full_history", "bounded_window"])
     args = parser.parse_args()
 
-    from trr_backend.repositories.social_season_analytics import (
+    from trr_backend.socials.control_plane import (
         execute_run_with_inline_worker_registration,
         start_social_account_catalog_backfill,
     )

@@ -2602,7 +2602,7 @@ def _list_show_season_ids(show_id: str) -> list[str]:
 
 
 def _seed_show_social_targets(show_id: str, *, show_row: dict[str, Any] | None) -> int:
-    from trr_backend.repositories.social_season_analytics import (
+    from trr_backend.socials.control_plane import (
         _default_targets,
         get_season_context,
         get_targets,

@@ -276,7 +276,7 @@ Examples:
     tiktok_cookies: dict[str, str] = {}
     if not args.no_auth:
         try:
-            from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
+            from trr_backend.socials.control_plane import _load_tiktok_cookies
 
             if args.cookies and args.cookies != "tiktok_cookies.json":
                 os.environ["SOCIAL_TIKTOK_COOKIES_FILE"] = str(Path(args.cookies).expanduser())

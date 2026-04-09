@@ -171,6 +171,8 @@ def test_get_gallery_returns_narrow_fields(monkeypatch: pytest.MonkeyPatch) -> N
                     "limit": 120,
                     "offset": 0,
                     "count": 1,
+                    "total_count": 347,
+                    "total_count_status": "exact",
                     "next_offset": 1,
                     "has_more": False,
                 },
@@ -188,6 +190,8 @@ def test_get_gallery_returns_narrow_fields(monkeypatch: pytest.MonkeyPatch) -> N
         "limit": 120,
         "offset": 0,
         "count": 1,
+        "total_count": 347,
+        "total_count_status": "exact",
         "next_offset": 1,
         "has_more": False,
     }

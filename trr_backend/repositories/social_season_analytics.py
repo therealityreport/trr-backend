@@ -1,7 +1,8 @@
-"""Season-scoped social analytics + ingest helpers."""
+"""Legacy social control-plane monolith and temporary compatibility surface."""
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import csv
 import glob
@@ -60,6 +61,7 @@ from trr_backend.socials.crawlee_runtime import (
     should_use_crawlee,
 )
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+from trr_backend.socials.twitter import TwitterScraper
 
 logger = logging.getLogger(__name__)
 
@@ -929,6 +931,13 @@ def _shared_account_recovery_payload(
     job_rows: Sequence[Mapping[str, Any]],
     now: datetime,
 ) -> dict[str, Any] | None:
+    if any(
+        _shared_account_job_stage(row) == SHARED_ACCOUNT_POSTS_STAGE
+        and str(row.get("status") or "").strip().lower() in _RUN_PROGRESS_ACTIVE_JOB_STATUSES
+        for row in job_rows
+    ):
+        return None
+
     job_by_id = {str(row.get("id") or "").strip(): row for row in job_rows if str(row.get("id") or "").strip()}
 
     def _sort_epoch(row: Mapping[str, Any]) -> float:
@@ -2037,7 +2046,7 @@ def _build_modal_executor_health_payload(
 _schema_ready_cache: tuple[float, bool] | None = None
 _worker_health_cache: tuple[float, int | None, dict[str, Any]] | None = None
 _worker_health_cache_lock = Lock()
-_queue_status_cache: tuple[float, int, int, bool, bool, int, bool, dict[str, Any]] | None = None
+_queue_status_cache: tuple[float, int, int, bool, bool, int, bool, bool, dict[str, Any]] | None = None
 _queue_status_cache_lock = Lock()
 _queue_status_last_good_cache: tuple[float, dict[str, Any]] | None = None
 _instagram_cookie_refresh_lock = Lock()
@@ -3690,6 +3699,7 @@ def get_queue_status(
     include_stuck_jobs: bool = True,
     stuck_jobs_limit: int = SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT,
     include_runs_summary: bool = True,
+    summary_only: bool = False,
     fresh: bool = False,
 ) -> dict[str, Any]:
     global _queue_status_cache, _queue_status_last_good_cache
@@ -3699,6 +3709,7 @@ def get_queue_status(
     safe_include_stuck_jobs = bool(include_stuck_jobs)
     safe_stuck_jobs_limit = max(1, min(int(stuck_jobs_limit), 500))
     safe_include_runs_summary = bool(include_runs_summary)
+    safe_summary_only = bool(summary_only)
     cache_ttl_seconds = _resolve_positive_int_env(
         "SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS",
         SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT,
@@ -3717,6 +3728,7 @@ def get_queue_status(
                     cached_include_stuck_jobs,
                     cached_stuck_jobs_limit,
                     cached_include_runs_summary,
+                    cached_summary_only,
                     cached_payload,
                 ) = _queue_status_cache
                 if (
@@ -3726,6 +3738,7 @@ def get_queue_status(
                     and cached_include_stuck_jobs == safe_include_stuck_jobs
                     and cached_stuck_jobs_limit == safe_stuck_jobs_limit
                     and cached_include_runs_summary == safe_include_runs_summary
+                    and cached_summary_only == safe_summary_only
                     and (now - cached_at) < cache_ttl_seconds
                 ):
                     return copy.deepcopy(cached_payload)
@@ -3741,6 +3754,7 @@ def get_queue_status(
                     safe_include_stuck_jobs,
                     safe_stuck_jobs_limit,
                     safe_include_runs_summary,
+                    safe_summary_only,
                     payload,
                 )
                 if not payload.get("queue", {}).get("error"):
@@ -3786,17 +3800,18 @@ def get_queue_status(
     except Exception as exc:  # noqa: BLE001
         errors.append(f"scrape_jobs_relation_check_failed: {exc}")
 
-    try:
-        _reconcile_active_queue_runs(limit=200)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Queue status active-run reconciliation failed: %s", exc)
-        errors.append(f"queue_run_reconciliation_failed: {exc}")
+    if not safe_summary_only:
+        try:
+            _reconcile_active_queue_runs(limit=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Queue status active-run reconciliation failed: %s", exc)
+            errors.append(f"queue_run_reconciliation_failed: {exc}")
 
-    try:
-        recover_dispatch_blocked_no_progress_jobs(limit=safe_stuck_jobs_limit)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Queue status blocked-job recovery failed: %s", exc)
-        errors.append(f"queue_dispatch_blocked_recovery_failed: {exc}")
+        try:
+            recover_dispatch_blocked_no_progress_jobs(limit=safe_stuck_jobs_limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Queue status blocked-job recovery failed: %s", exc)
+            errors.append(f"queue_dispatch_blocked_recovery_failed: {exc}")
 
     try:
         with pg.db_connection() as conn:
@@ -3863,54 +3878,56 @@ def get_queue_status(
         logger.warning("Queue status aggregate query failed: %s", exc)
         errors.append(f"queue_aggregate_query_failed: {exc}")
 
-    try:
-        running_jobs = pg.fetch_all(
-            """
-            select
-              j.id::text as id,
-              j.run_id::text as run_id,
-              j.platform,
-              j.job_type,
-              lower(
-                coalesce(
-                  nullif(j.config->>'stage', ''),
-                  nullif(j.metadata->>'stage', ''),
-                  nullif(j.job_type, ''),
-                  'unknown'
-                )
-              ) as stage,
-              nullif(coalesce(j.config->>'account', j.metadata->>'account', ''), '') as account_handle,
-              j.worker_id,
-              j.started_at,
-              j.heartbeat_at,
-              nullif(coalesce(j.metadata->'dispatch'->>'dispatch_backend', ''), '') as dispatch_backend,
-              nullif(coalesce(j.config->>'required_execution_backend', ''), '') as required_execution_backend
-            from social.scrape_jobs j
-            where j.status = 'running'
-            order by coalesce(j.heartbeat_at, j.started_at, j.created_at) desc, j.created_at desc
-            """
-        )
-        queue_payload["running_jobs"] = [
-            {
-                "id": str(row.get("id") or ""),
-                "run_id": str(row.get("run_id") or "").strip() or None,
-                "platform": str(row.get("platform") or "").strip().lower() or "unknown",
-                "job_type": str(row.get("job_type") or "").strip().lower() or "unknown",
-                "stage": _normalize_social_job_stage_for_stale(row.get("stage")) or "unknown",
-                "account_handle": str(row.get("account_handle") or "").strip() or None,
-                "worker_id": str(row.get("worker_id") or "").strip() or None,
-                "started_at": _iso(_coerce_dt(row.get("started_at"))),
-                "heartbeat_at": _iso(_coerce_dt(row.get("heartbeat_at"))),
-                "dispatch_backend": str(row.get("dispatch_backend") or "").strip().lower() or None,
-                "required_execution_backend": str(row.get("required_execution_backend") or "").strip().lower() or None,
-            }
-            for row in running_jobs
-        ]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Queue status running-jobs query failed: %s", exc)
-        errors.append(f"queue_running_jobs_query_failed: {exc}")
+    if not safe_summary_only:
+        try:
+            running_jobs = pg.fetch_all(
+                """
+                select
+                  j.id::text as id,
+                  j.run_id::text as run_id,
+                  j.platform,
+                  j.job_type,
+                  lower(
+                    coalesce(
+                      nullif(j.config->>'stage', ''),
+                      nullif(j.metadata->>'stage', ''),
+                      nullif(j.job_type, ''),
+                      'unknown'
+                    )
+                  ) as stage,
+                  nullif(coalesce(j.config->>'account', j.metadata->>'account', ''), '') as account_handle,
+                  j.worker_id,
+                  j.started_at,
+                  j.heartbeat_at,
+                  nullif(coalesce(j.metadata->'dispatch'->>'dispatch_backend', ''), '') as dispatch_backend,
+                  nullif(coalesce(j.config->>'required_execution_backend', ''), '') as required_execution_backend
+                from social.scrape_jobs j
+                where j.status = 'running'
+                order by coalesce(j.heartbeat_at, j.started_at, j.created_at) desc, j.created_at desc
+                """
+            )
+            queue_payload["running_jobs"] = [
+                {
+                    "id": str(row.get("id") or ""),
+                    "run_id": str(row.get("run_id") or "").strip() or None,
+                    "platform": str(row.get("platform") or "").strip().lower() or "unknown",
+                    "job_type": str(row.get("job_type") or "").strip().lower() or "unknown",
+                    "stage": _normalize_social_job_stage_for_stale(row.get("stage")) or "unknown",
+                    "account_handle": str(row.get("account_handle") or "").strip() or None,
+                    "worker_id": str(row.get("worker_id") or "").strip() or None,
+                    "started_at": _iso(_coerce_dt(row.get("started_at"))),
+                    "heartbeat_at": _iso(_coerce_dt(row.get("heartbeat_at"))),
+                    "dispatch_backend": str(row.get("dispatch_backend") or "").strip().lower() or None,
+                    "required_execution_backend": str(row.get("required_execution_backend") or "").strip().lower()
+                    or None,
+                }
+                for row in running_jobs
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Queue status running-jobs query failed: %s", exc)
+            errors.append(f"queue_running_jobs_query_failed: {exc}")
 
-    if safe_include_recent_failures:
+    if safe_include_recent_failures and not safe_summary_only:
         try:
             features = _scrape_jobs_features()
             select_run_id = "run_id::text as run_id" if features.get("has_run_id") else "null::text as run_id"
@@ -3965,7 +3982,7 @@ def get_queue_status(
             logger.warning("Queue status recent-failures query failed: %s", exc)
             errors.append(f"queue_recent_failures_query_failed: {exc}")
 
-    if safe_include_stuck_jobs:
+    if safe_include_stuck_jobs and not safe_summary_only:
         try:
             stuck_jobs, stuck_jobs_total = _list_stuck_jobs(limit=safe_stuck_jobs_limit)
             queue_payload["stuck_jobs"] = stuck_jobs
@@ -3990,46 +4007,47 @@ def get_queue_status(
             logger.warning("Queue status stuck-jobs query failed: %s", exc)
             errors.append(f"queue_stuck_jobs_query_failed: {exc}")
 
-    try:
-        dispatch_blocked_jobs, dispatch_blocked_jobs_total = _list_dispatch_blocked_jobs(limit=safe_stuck_jobs_limit)
-        queue_payload["dispatch_blocked_jobs"] = dispatch_blocked_jobs
-        queue_payload["dispatch_blocked_jobs_total"] = dispatch_blocked_jobs_total
-        blocked_by_reason: dict[str, int] = {}
-        for row in dispatch_blocked_jobs:
-            reason = str(row.get("stuck_reason") or "dispatch_blocked").strip().lower() or "dispatch_blocked"
-            blocked_by_reason[reason] = int(blocked_by_reason.get(reason) or 0) + 1
-        queue_payload["dispatch_blocked_by_reason"] = blocked_by_reason
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Queue status dispatch-blocked query failed: %s", exc)
-        errors.append(f"queue_dispatch_blocked_query_failed: {exc}")
+    if not safe_summary_only:
+        try:
+            dispatch_blocked_jobs, dispatch_blocked_jobs_total = _list_dispatch_blocked_jobs(limit=safe_stuck_jobs_limit)
+            queue_payload["dispatch_blocked_jobs"] = dispatch_blocked_jobs
+            queue_payload["dispatch_blocked_jobs_total"] = dispatch_blocked_jobs_total
+            blocked_by_reason: dict[str, int] = {}
+            for row in dispatch_blocked_jobs:
+                reason = str(row.get("stuck_reason") or "dispatch_blocked").strip().lower() or "dispatch_blocked"
+                blocked_by_reason[reason] = int(blocked_by_reason.get(reason) or 0) + 1
+            queue_payload["dispatch_blocked_by_reason"] = blocked_by_reason
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Queue status dispatch-blocked query failed: %s", exc)
+            errors.append(f"queue_dispatch_blocked_query_failed: {exc}")
 
-    try:
-        dispatch_rows = pg.fetch_all(
-            """
-            select
-              id::text as id,
-              status,
-              worker_id,
-              metadata,
-              available_at,
-              created_at
-            from social.scrape_jobs
-            where status in ('queued', 'pending', 'retrying')
-              and lower(coalesce(metadata->'dispatch'->>'dispatch_backend', '')) = 'modal'
-            """
-        )
-        dispatch_health = _build_run_dispatch_health(dispatch_rows)
-        queue_payload["waiting_for_claim_jobs_total"] = _normalize_non_negative_int(
-            dispatch_health.get("queued_unclaimed_jobs")
-        )
-        queue_payload["retrying_dispatch_jobs_total"] = _normalize_non_negative_int(
-            dispatch_health.get("retrying_dispatch_jobs")
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Queue status dispatch-health query failed: %s", exc)
-        errors.append(f"queue_dispatch_health_query_failed: {exc}")
+        try:
+            dispatch_rows = pg.fetch_all(
+                """
+                select
+                  id::text as id,
+                  status,
+                  worker_id,
+                  metadata,
+                  available_at,
+                  created_at
+                from social.scrape_jobs
+                where status in ('queued', 'pending', 'retrying')
+                  and lower(coalesce(metadata->'dispatch'->>'dispatch_backend', '')) = 'modal'
+                """
+            )
+            dispatch_health = _build_run_dispatch_health(dispatch_rows)
+            queue_payload["waiting_for_claim_jobs_total"] = _normalize_non_negative_int(
+                dispatch_health.get("queued_unclaimed_jobs")
+            )
+            queue_payload["retrying_dispatch_jobs_total"] = _normalize_non_negative_int(
+                dispatch_health.get("retrying_dispatch_jobs")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Queue status dispatch-health query failed: %s", exc)
+            errors.append(f"queue_dispatch_health_query_failed: {exc}")
 
-    if safe_include_runs_summary:
+    if safe_include_runs_summary and not safe_summary_only:
         try:
             if _relation_exists("social.scrape_runs"):
                 run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
@@ -11122,7 +11140,13 @@ def recover_stale_running_jobs(
     recovered_rows = pg.fetch_all(
         f"""
         with stale_jobs as (
-          select j.id
+          select
+            j.id,
+            j.run_id::text as run_id,
+            j.platform,
+            coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type, '') as stage,
+            lower(coalesce(j.config->>'account', j.metadata->>'account', '')) as account_handle,
+            j.worker_id as prior_worker_id
           from social.scrape_jobs j
           where j.status = 'running'
             and coalesce(j.heartbeat_at, j.started_at, j.claimed_at, j.created_at) <
@@ -11175,8 +11199,11 @@ def recover_stale_running_jobs(
         where j.id = stale_jobs.id
         returning
           j.id::text as id,
-          j.run_id::text as run_id,
-          j.platform,
+          stale_jobs.run_id as run_id,
+          stale_jobs.platform as platform,
+          stale_jobs.stage as stage,
+          stale_jobs.account_handle as account_handle,
+          stale_jobs.prior_worker_id as prior_worker_id,
           j.status,
           j.attempt_count,
           j.max_attempts
@@ -11204,6 +11231,29 @@ def recover_stale_running_jobs(
                 status="idle",
                 metadata={"source": "stale_recovery", "job_status": row.get("status")},
             )
+        normalized_stage = str(row.get("stage") or "").strip().lower()
+        normalized_platform = _normalize_platform_name(row.get("platform"))
+        normalized_account = _normalize_account_handle(row.get("account_handle"))
+        prior_worker_id = str(row.get("prior_worker_id") or "").strip() or None
+        if (
+            normalized_stage == SHARED_ACCOUNT_POSTS_STAGE
+            and normalized_platform
+            and normalized_account
+            and prior_worker_id
+        ):
+            frontier = _get_shared_account_run_frontier(
+                run_id=str(row.get("run_id") or "").strip(),
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            )
+            if str(frontier.get("lease_owner") or "").strip() == prior_worker_id:
+                _release_shared_account_run_frontier(
+                    run_id=str(row.get("run_id") or "").strip(),
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    lease_owner=prior_worker_id,
+                    status="retrying" if str(row.get("status") or "").strip().lower() == "retrying" else "failed",
+                )
 
     affected_run_ids = sorted({str(row.get("run_id") or "") for row in recovered_rows if row.get("run_id")})
     for stale_run_id in affected_run_ids:
@@ -24824,6 +24874,14 @@ def _social_profile_cache_ttl_seconds() -> int:
     )
 
 
+def _run_async_sync(awaitable: Any) -> Any:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(awaitable)
+    finally:
+        loop.close()
+
+
 def _merge_tiktok_profile_snapshots(*snapshots: Mapping[str, Any] | None) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     for snapshot in snapshots:
@@ -25068,7 +25126,7 @@ def _youtube_profile_snapshot_from_analysis_rows(
 def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[str, Any]:
     normalized_platform = _normalize_platform_name(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    if normalized_platform not in {"tiktok", "youtube"} or not normalized_account:
+    if normalized_platform not in {"tiktok", "twitter", "youtube"} or not normalized_account:
         return {}
 
     ttl_seconds = _social_profile_cache_ttl_seconds()
@@ -25095,6 +25153,66 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
                         _normalize_non_negative_int(snapshot.get("total_posts")),
                         len(html_items),
                     )
+        elif normalized_platform == "twitter":
+            from twikit import Client as TwikitClient
+            from twikit.guest import GuestClient as TwikitGuestClient
+
+            twitter_cookies, _twitter_bearer = _load_twitter_auth_from_sources()
+            credentials = _load_twikit_credentials(twitter_cookies)
+            scraper = TwitterScraper(
+                cookies=twitter_cookies,
+                bearer_token=_twitter_bearer,
+                twikit_credentials=credentials,
+            )
+            snapshot = scraper.fetch_user_profile_summary(normalized_account, delay=0.0) or {}
+
+            if not snapshot:
+
+                async def _load_snapshot() -> dict[str, Any]:
+                    client: Any | None = None
+                    try:
+                        auth_token = str((credentials or {}).get("auth_token") or "").strip()
+                        ct0 = str((credentials or {}).get("ct0") or "").strip()
+                        username = str((credentials or {}).get("username") or "").strip()
+                        email = str((credentials or {}).get("email") or "").strip()
+                        password = str((credentials or {}).get("password") or "").strip()
+                        if auth_token and ct0:
+                            client = TwikitClient("en-US")
+                            client.set_cookies({"auth_token": auth_token, "ct0": ct0})
+                        elif username and password:
+                            client = TwikitClient("en-US")
+                            await client.login(
+                                auth_info_1=username,
+                                auth_info_2=email or username,
+                                password=password,
+                            )
+                        else:
+                            client = TwikitGuestClient("en-US")
+                            await client.activate()
+                        user = await client.get_user_by_screen_name(normalized_account)
+                        return {
+                            "username": _normalize_account_handle(
+                                getattr(user, "screen_name", None) or normalized_account
+                            ),
+                            "display_name": str(getattr(user, "name", "") or "").strip() or None,
+                            "bio": str(getattr(user, "description", "") or "").strip() or None,
+                            "avatar_url": _best_profile_avatar_url([getattr(user, "profile_image_url", None)]),
+                            "profile_url": _platform_profile_url_for_handle("twitter", normalized_account),
+                            "follower_count": _normalize_non_negative_int(getattr(user, "followers_count", None))
+                            or None,
+                            "following_count": _normalize_non_negative_int(getattr(user, "following_count", None))
+                            or None,
+                            "total_posts": _normalize_non_negative_int(getattr(user, "statuses_count", None)) or None,
+                            "is_verified": bool(
+                                getattr(user, "verified", False) or getattr(user, "is_blue_verified", False)
+                            ),
+                        }
+                    finally:
+                        http_client = getattr(client, "http", None)
+                        if http_client is not None and hasattr(http_client, "aclose"):
+                            await http_client.aclose()
+
+                snapshot = _run_async_sync(_load_snapshot())
         elif normalized_platform == "youtube":
             from trr_backend.socials.youtube import YouTubeDataApiClient, YouTubeScraper
 
@@ -26410,6 +26528,14 @@ def _social_account_profile_window_to_lookback_days(window: str | None) -> int |
     raise ValueError("Unsupported hashtag window. Use one of: all, 7d, 30d, 365d.")
 
 
+def _catalog_run_intent_metadata(run_config: Mapping[str, Any] | None) -> dict[str, str | None]:
+    config = _metadata_dict(run_config)
+    return {
+        "catalog_action": str(config.get("catalog_action") or "").strip().lower() or None,
+        "catalog_action_scope": str(config.get("catalog_action_scope") or "").strip().lower() or None,
+    }
+
+
 def _catalog_recent_runs(platform: str, account_handle: str, *, limit: int = 10) -> list[dict[str, Any]]:
     normalized_platform = _normalize_platform_name(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -26558,9 +26684,40 @@ def _catalog_recent_runs(platform: str, account_handle: str, *, limit: int = 10)
                 safe_limit,
             ],
         )
+        for row in rows:
+            row.update(_catalog_run_intent_metadata(row.get("run_config")))
         return rows
     except psycopg_errors.UndefinedTable:
         return []
+
+
+def _historical_catalog_expected_total_posts(platform: str, account_handle: str, *, limit: int = 10) -> int:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform not in {"twitter", "facebook", "threads"}:
+        return 0
+
+    best_total = 0
+    for row in _catalog_recent_runs(normalized_platform, normalized_account, limit=limit):
+        run_config = _metadata_dict(row.get("run_config") if row.get("run_config") is not None else row.get("config"))
+        metadata = _metadata_dict(row.get("metadata"))
+        activity = _metadata_dict(metadata.get("activity"))
+        retrieval_meta = _metadata_dict(metadata.get("retrieval_meta"))
+        profile_snapshot = _metadata_dict(retrieval_meta.get("profile_snapshot"))
+        best_total = max(
+            best_total,
+            _shared_account_expected_total_posts_from_config(
+                run_config,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+            ),
+            _normalize_non_negative_int(metadata.get("expected_total_posts")),
+            _normalize_non_negative_int(activity.get("total_posts")),
+            _normalize_non_negative_int(retrieval_meta.get("expected_total_posts")),
+            _normalize_non_negative_int(retrieval_meta.get("total_posts")),
+            _normalize_non_negative_int(profile_snapshot.get("total_posts")),
+        )
+    return best_total
 
 
 def _load_social_account_catalog_run_row(
@@ -26576,8 +26733,15 @@ def _load_social_account_catalog_run_row(
         """
         select
           id::text as id,
+          id::text as run_id,
+          season_id::text as season_id,
           status,
-          config
+          source_scope,
+          config,
+          summary,
+          created_at,
+          started_at,
+          completed_at
         from social.scrape_runs
         where id = %s::uuid
           and coalesce(config->>'pipeline_ingest_mode', '') = %s
@@ -26604,11 +26768,68 @@ def _load_social_account_catalog_run_row(
         raise LookupError("Catalog run not found.")
     return {
         "id": str(run_row.get("id") or "").strip(),
+        "run_id": str(run_row.get("run_id") or run_row.get("id") or "").strip(),
+        "season_id": str(run_row.get("season_id") or "").strip() or None,
         "status": str(run_row.get("status") or "").strip().lower(),
+        "source_scope": str(run_row.get("source_scope") or "").strip() or None,
         "config": run_config,
+        "summary": _metadata_dict(run_row.get("summary")),
+        "created_at": run_row.get("created_at"),
+        "started_at": run_row.get("started_at"),
+        "completed_at": run_row.get("completed_at"),
         "platform": normalized_platform,
         "account_handle": normalized_account,
     }
+
+
+def _load_social_account_catalog_jobs(
+    *,
+    run_id: str,
+    platform: str,
+    account_handle: str,
+    features: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    resolved_features = dict(features or _scrape_jobs_features())
+    select_worker_id = "j.worker_id" if bool(resolved_features.get("has_queue_fields")) else "null::text as worker_id"
+    select_last_error_code = (
+        "j.last_error_code" if bool(resolved_features.get("has_queue_fields")) else "null::text as last_error_code"
+    )
+    return pg.fetch_all(
+        f"""
+        select
+          j.id::text as id,
+          j.platform,
+          j.job_type,
+          j.status,
+          j.items_found,
+          j.error_message,
+          j.created_at,
+          j.started_at,
+          j.completed_at,
+          j.config,
+          j.metadata,
+          {select_worker_id},
+          {select_last_error_code}
+        from social.scrape_jobs j
+        where j.run_id = %s::uuid
+          and j.platform = %s
+          and lower(coalesce(j.config->>'account', '')) = %s
+        order by coalesce(j.completed_at, j.started_at, j.created_at) desc, j.created_at desc
+        """,
+        [run_id, normalized_platform, normalized_account],
+    )
+
+
+def _load_social_account_catalog_progress_rows(
+    *,
+    run_id: str,
+    platform: str,
+    account_handle: str,
+) -> list[dict[str, Any]]:
+    del run_id, platform, account_handle
+    return []
 
 
 def _shared_account_run_partitions_table_ready() -> bool:
@@ -27880,7 +28101,11 @@ def _shared_instagram_frontier_auth_validation(config: Mapping[str, Any] | None 
         return True, None
     if metadata.get("frontier_auth_allowed") is False:
         return False, str(metadata.get("frontier_auth_reason") or "").strip().lower() or None
-    cookies = _load_instagram_cookies()
+
+    # Frontier bootstrap/resume jobs run on remote workers. They need a quick
+    # auth capability check, not the heavier auto-refresh path that can block
+    # long enough to trip stale-heartbeat recovery before the resume handoff.
+    cookies = _load_instagram_cookies_from_sources()
     if not cookies.get("sessionid"):
         return False, "sessionid_missing"
     is_valid, validation_reason = _validate_instagram_cookie_health(cookies)
@@ -28834,7 +29059,7 @@ def _discover_tiktok_cursor_partitions(
     shard_total = max(1, len(partitions))
     for partition in partitions:
         partition.shard_total = shard_total
-    return partitions, {
+    retrieval_meta = {
         "pages_scanned": pages_scanned,
         "posts_checked": posts_checked,
         "total_posts": total_posts or None,
@@ -28842,6 +29067,10 @@ def _discover_tiktok_cursor_partitions(
         "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
         "profile_snapshot": _metadata_dict(context.get("profile_snapshot")),
     }
+    endpoint_responses = _metadata_dict(_metadata_dict(scraper.last_retrieval_meta).get("endpoint_responses"))
+    if endpoint_responses:
+        retrieval_meta["endpoint_responses"] = endpoint_responses
+    return partitions, retrieval_meta
 
 
 def _discover_shared_account_cursor_partitions(
@@ -29109,6 +29338,9 @@ def _scrape_shared_tiktok_posts_partitioned(
         "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
         "profile_snapshot": profile_snapshot,
     }
+    endpoint_responses = _metadata_dict(_metadata_dict(scraper.last_retrieval_meta).get("endpoint_responses"))
+    if endpoint_responses:
+        retrieval_meta["endpoint_responses"] = endpoint_responses
     if error_code and not partition_completed:
         retrieval_meta["error_code"] = error_code
         retrieval_meta["error_class"] = "PartitionBoundaryNotReached"
@@ -29433,8 +29665,25 @@ def _scrape_shared_twitter_posts(
         bearer_token=twitter_bearer,
         twikit_credentials=_load_twikit_credentials(twitter_cookies),
     )
-    date_start = _coerce_dt(config.get("date_start")) or (_now_utc() - timedelta(days=30))
-    date_end = _coerce_dt(config.get("date_end")) or _now_utc()
+    requested_date_start = _coerce_dt(config.get("date_start"))
+    requested_date_end = _coerce_dt(config.get("date_end"))
+    catalog_action_scope = str(config.get("catalog_action_scope") or "").strip().lower()
+    full_history_requested = (
+        _shared_catalog_mode(config)
+        and requested_date_start is None
+        and requested_date_end is None
+        and catalog_action_scope in {"", "full_history"}
+    )
+    date_start = requested_date_start or (
+        datetime(2006, 1, 1, tzinfo=UTC) if full_history_requested else (_now_utc() - timedelta(days=30))
+    )
+    date_end = requested_date_end or _now_utc()
+    if full_history_requested and config.get("max_posts_per_target") is None:
+        max_pages = None
+    elif full_history_requested:
+        max_pages = _shared_stage_post_limit(config, default=0)
+    else:
+        max_pages = min(_shared_stage_post_limit(config, default=10) or 10, 20)
     scrape_config = TwitterScrapeConfig(
         query=f"from:{account_handle}",
         date_start=date_start,
@@ -29442,7 +29691,7 @@ def _scrape_shared_twitter_posts(
         include_replies=False,
         include_links=True,
         delay_seconds=0.35,
-        max_pages=min(_shared_stage_post_limit(config, default=10) or 10, 20),
+        max_pages=max_pages,
     )
     posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
@@ -30307,6 +30556,34 @@ def _run_shared_account_discovery_stage(
         # If the first page returned nothing, Instagram is blocking — don't spin up
         # more jobs that will also fail.
         if discovery_checked == 0:
+            if platform == "tiktok":
+                activity["phase"] = "shared_account_discovery_failed"
+                message = (
+                    f"TikTok returned no posts for @{account_handle} on the first page. "
+                    "The post-list response body was empty or unusable."
+                )
+                logger.error(
+                    "TikTok discovery got 0 posts for @%s on the first page; failing discovery without fallback",
+                    account_handle,
+                )
+                raise SharedStageRuntimeError(
+                    message,
+                    error_code="tiktok_discovery_empty_first_page",
+                    retryable=False,
+                    error_class="TikTokDiscoveryEmptyFirstPage",
+                    runtime_metadata={
+                        "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                        "platform": platform,
+                        "account": account_handle,
+                        "discovered_partition_count": 0,
+                        "retrieval_meta": discovery_meta,
+                        "expected_total_posts": expected_total_posts,
+                        "activity": dict(activity),
+                        "pipeline_ingest_mode": str(
+                            config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                        ),
+                    },
+                )
             logger.warning(
                 "Discovery got 0 posts for @%s — Instagram likely blocking. Skipping frontier fallback.",
                 account_handle,
@@ -30611,7 +30888,7 @@ def _run_shared_account_frontier_posts_stage(
     frontier_release_status: str | None = None
 
     try:
-        if platform == "instagram" and next_cursor and not auth_allowed:
+        if platform == "instagram" and next_cursor and not auth_allowed and selected_transport == "authenticated":
             error_code = _shared_instagram_frontier_auth_error_code(auth_reason)
             error_message = (
                 f"Shared-account frontier auth blocked for @{account_handle}: {auth_reason or 'auth_blocked'}"
@@ -35598,15 +35875,30 @@ def _resolve_run_progress_worker_runtime(
 
 
 def _resolve_run_progress_runtime_versions(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    def _runtime_version_from_worker_identity(row: Mapping[str, Any]) -> dict[str, Any] | None:
+        worker_id = str(row.get("worker_id") or "").strip().lower()
+        if not worker_id:
+            return None
+        if worker_id.startswith(("api-background:", "local-script:", "debug-inline:")):
+            return {
+                "label": f"local:{worker_id}",
+                "execution_backend": "local",
+                "worker_id": worker_id,
+            }
+        return None
+
     versions: list[dict[str, Any]] = []
     seen_labels: set[str] = set()
     for row in job_rows:
         metadata = _metadata_dict(row.get("metadata"))
         runtime_candidates = [
+            _runtime_version_from_worker_identity(row),
             _metadata_dict(metadata.get("runtime_version")),
             _metadata_dict(_metadata_dict(metadata.get("retrieval_meta")).get("runtime_version")),
         ]
         for runtime_version in runtime_candidates:
+            if not isinstance(runtime_version, Mapping):
+                continue
             label = str(runtime_version.get("label") or "").strip()
             if not label or label in seen_labels:
                 continue
@@ -35655,8 +35947,13 @@ def _catalog_run_repairable_auth_reason(
     if normalized_platform != "instagram":
         return None
     frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
+    frontier_transport = str(frontier_progress.get("transport") or "").strip().lower() or None
     frontier_auth_reason = str(frontier_metadata.get("auth_reason") or "").strip().lower() or None
-    if frontier_metadata.get("auth_allowed") is False and frontier_auth_reason:
+    if (
+        frontier_metadata.get("auth_allowed") is False
+        and frontier_auth_reason
+        and frontier_transport == "authenticated"
+    ):
         return frontier_auth_reason
     for row in job_rows:
         row_metadata = _metadata_dict(row.get("metadata"))
@@ -35671,9 +35968,38 @@ def _catalog_run_repairable_auth_reason(
                 return row_error or "discovery_empty_first_page"
             return frontier_auth_reason or "frontier_auth_blocked"
     normalized_last_error_code = str(last_error_code or "").strip().lower() or None
-    if normalized_last_error_code in _INSTAGRAM_AUTH_REPAIRABLE_ERROR_CODES:
+    if normalized_last_error_code in _INSTAGRAM_AUTH_REPAIRABLE_ERROR_CODES and frontier_transport == "authenticated":
         return frontier_auth_reason or "frontier_auth_blocked"
     return None
+
+
+def _catalog_run_transport_response_from_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    retrieval_meta = _metadata_dict(_metadata_dict(metadata).get("retrieval_meta"))
+    endpoint_responses = _metadata_dict(retrieval_meta.get("endpoint_responses"))
+    for endpoint in ("fetch_posts", "fetch_user_detail", "fetch_comments", "fetch_comment_replies"):
+        payload = _metadata_dict(endpoint_responses.get(endpoint))
+        if payload:
+            if not str(payload.get("endpoint") or "").strip():
+                payload["endpoint"] = endpoint
+            return payload
+    return {}
+
+
+def _catalog_run_last_transport_response(
+    *,
+    frontier_progress: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    frontier_candidate = _catalog_run_transport_response_from_metadata(
+        _metadata_dict(frontier_progress.get("metadata"))
+    )
+    if frontier_candidate:
+        return frontier_candidate
+    for row in job_rows:
+        candidate = _catalog_run_transport_response_from_metadata(_metadata_dict(row.get("metadata")))
+        if candidate:
+            return candidate
+    return {}
 
 
 def _catalog_run_auth_repair_resume_stage(
@@ -35703,7 +36029,12 @@ def _derive_catalog_run_state(
 ) -> str:
     normalized_status = str(run_status or "").strip().lower()
     frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
-    if frontier_metadata.get("auth_allowed") is False and str(frontier_metadata.get("auth_reason") or "").strip():
+    frontier_transport = str(frontier_progress.get("transport") or "").strip().lower() or None
+    if (
+        frontier_metadata.get("auth_allowed") is False
+        and frontier_transport == "authenticated"
+        and str(frontier_metadata.get("auth_reason") or "").strip()
+    ):
         return "failed"
     if normalized_status == "cancelled":
         return "cancelled"
@@ -35758,9 +36089,12 @@ def _build_catalog_run_progress_alerts(
     recovery: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
+    normalized_platform = _normalize_platform_name(platform) or ""
     frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
     recovery_payload = _metadata_dict(recovery)
     worker_runtime = _metadata_dict(payload.get("worker_runtime"))
+    last_error_code = str(payload.get("last_error_code") or "").strip().lower() or None
+    last_transport_response = _metadata_dict(payload.get("last_transport_response"))
     if bool(worker_runtime.get("runtime_version_drift")):
         _append_alert(
             alerts,
@@ -35787,12 +36121,13 @@ def _build_catalog_run_progress_alerts(
 
     frontier_auth_allowed = frontier_metadata.get("auth_allowed")
     frontier_auth_reason = str(frontier_metadata.get("auth_reason") or "").strip().lower() or None
+    frontier_transport = str(frontier_progress.get("transport") or "").strip().lower() or None
     frontier_auth_error_code = str(frontier_metadata.get("last_error_code") or "").strip().lower() or (
         _shared_instagram_frontier_auth_error_code(frontier_auth_reason)
         if frontier_auth_allowed is False and frontier_auth_reason
         else None
     )
-    if frontier_auth_allowed is False and frontier_auth_reason:
+    if frontier_auth_allowed is False and frontier_auth_reason and frontier_transport == "authenticated":
         _append_alert(
             alerts,
             code="frontier_auth_blocked",
@@ -35804,6 +36139,25 @@ def _build_catalog_run_progress_alerts(
             auth_reason=frontier_auth_reason,
             error_code=frontier_auth_error_code,
             frontier_status=str(frontier_progress.get("status") or "").strip().lower() or None,
+        )
+    if normalized_platform == "tiktok" and last_error_code == "tiktok_discovery_empty_first_page":
+        _append_alert(
+            alerts,
+            code="tiktok_empty_first_page",
+            severity="error",
+            message=(
+                "TikTok returned no posts on the first discovery page. "
+                "The worker reached TikTok, but the post-list response body was empty or unusable."
+            ),
+            endpoint=str(last_transport_response.get("endpoint") or "").strip() or None,
+            failure_reason=str(last_transport_response.get("failure_reason") or "").strip().lower() or None,
+            http_status=_normalize_non_negative_int(last_transport_response.get("http_status")) or None,
+            content_type=str(last_transport_response.get("content_type") or "").strip().lower() or None,
+            content_length=_normalize_non_negative_int(last_transport_response.get("content_length")) or 0,
+            request_id=str(last_transport_response.get("request_id") or "").strip() or None,
+            execution_backend=str(payload.get("effective_execution_backend") or "").strip().lower() or None,
+            required_execution_backend=str(payload.get("required_execution_backend") or "").strip().lower() or None,
+            allow_local_dev_inline_bypass=bool(payload.get("allow_local_dev_inline_bypass")),
         )
 
     frontier_stop_reason = str(frontier_progress.get("stop_reason") or "").strip().lower() or None
@@ -36369,7 +36723,7 @@ def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int 
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     if not normalized_account:
         return None
-    if normalized_platform in {"tiktok", "youtube"}:
+    if normalized_platform in {"tiktok", "twitter", "youtube"}:
         return _normalize_non_negative_int(
             _cached_live_profile_snapshot(normalized_platform, normalized_account).get("total_posts")
         )
@@ -36431,6 +36785,23 @@ def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int 
     return total_posts
 
 
+def _cached_live_profile_total_posts_cached_only(platform: str, account_handle: str) -> int | None:
+    normalized_platform = _normalize_platform_name(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if not normalized_account:
+        return None
+    if normalized_platform != "instagram":
+        return _cached_live_profile_total_posts(normalized_platform, normalized_account)
+
+    cache_key = (normalized_platform, normalized_account)
+    now_monotonic = time_module.monotonic()
+    with _SOCIAL_PROFILE_TOTAL_POSTS_CACHE_LOCK:
+        cached = _SOCIAL_PROFILE_TOTAL_POSTS_CACHE.get(cache_key)
+        if cached and cached[0] > now_monotonic:
+            return cached[1]
+    return None
+
+
 def _social_account_profile_optional_identity_fields(
     platform: str,
     account_handle: str,
@@ -36455,6 +36826,7 @@ def _social_account_profile_optional_identity_fields(
         snapshot = _merge_social_profile_snapshots(
             *source_snapshots,
             _twitter_profile_snapshot_from_analysis_rows(analysis_rows, normalized_account),
+            _cached_live_profile_snapshot(normalized_platform, normalized_account),
         )
     elif normalized_platform == "threads":
         snapshot = _merge_social_profile_snapshots(
@@ -36494,11 +36866,17 @@ def _best_known_social_account_total_posts(
     *,
     materialized_total_posts: int | None = None,
     catalog_total_posts: int | None = None,
+    allow_live_refresh: bool = True,
 ) -> int:
     candidates = [
         _normalize_non_negative_int(materialized_total_posts),
         _normalize_non_negative_int(catalog_total_posts),
-        _normalize_non_negative_int(_cached_live_profile_total_posts(platform, account_handle)),
+        _normalize_non_negative_int(
+            _cached_live_profile_total_posts(platform, account_handle)
+            if allow_live_refresh
+            else _cached_live_profile_total_posts_cached_only(platform, account_handle)
+        ),
+        _historical_catalog_expected_total_posts(platform, account_handle),
     ]
     return max(candidates or [0])
 
@@ -36522,27 +36900,14 @@ def get_social_account_catalog_run_progress(
     if not bool(features.get("has_run_id")):
         raise ValueError("run_progress_requires_scrape_jobs_run_id")
 
-    run_row = pg.fetch_one(
-        """
-        select
-          id::text as run_id,
-          season_id::text as season_id,
-          status,
-          source_scope,
-          config,
-          summary,
-          created_at,
-          started_at,
-          completed_at
-        from social.scrape_runs
-        where id = %s::uuid
-          and coalesce(config->>'pipeline_ingest_mode', '') = %s
-        limit 1
-        """,
-        [run_id, SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE],
-    )
-    if not run_row:
-        raise ValueError("run_not_found")
+    try:
+        run_row = _load_social_account_catalog_run_row(
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            run_id=run_id,
+        )
+    except LookupError as exc:
+        raise ValueError("run_not_found") from exc
 
     run_config = _metadata_dict(run_row.get("config"))
     configured_platforms = {
@@ -36568,33 +36933,11 @@ def get_social_account_catalog_run_progress(
     )
     recover_dispatch_blocked_no_progress_jobs(limit=25)
 
-    select_worker_id = "j.worker_id" if bool(features.get("has_queue_fields")) else "null::text as worker_id"
-    select_last_error_code = (
-        "j.last_error_code" if bool(features.get("has_queue_fields")) else "null::text as last_error_code"
-    )
-    job_rows = pg.fetch_all(
-        f"""
-        select
-          j.id::text as id,
-          j.platform,
-          j.job_type,
-          j.status,
-          j.items_found,
-          j.error_message,
-          j.created_at,
-          j.started_at,
-          j.completed_at,
-          j.config,
-          j.metadata,
-          {select_worker_id},
-          {select_last_error_code}
-        from social.scrape_jobs j
-        where j.run_id = %s::uuid
-          and j.platform = %s
-          and lower(coalesce(j.config->>'account', '')) = %s
-        order by coalesce(j.completed_at, j.started_at, j.created_at) desc, j.created_at desc
-        """,
-        [run_id, normalized_platform, normalized_account],
+    job_rows = _load_social_account_catalog_jobs(
+        run_id=run_id,
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        features=features,
     )
     if not job_rows:
         raise ValueError("run_not_found")
@@ -36646,6 +36989,9 @@ def get_social_account_catalog_run_progress(
         recent_log_limit=safe_recent_log_limit,
         summary_override=summary_override,
     )
+    payload.update(_catalog_run_intent_metadata(run_config))
+    resume_state_payload = run_config.get("resume_state") if isinstance(run_config.get("resume_state"), dict) else None
+    payload["resume_state"] = resume_state_payload
     partition_progress = _shared_account_partition_progress(
         run_id=run_id,
         platform=normalized_platform,
@@ -36665,6 +37011,10 @@ def get_social_account_catalog_run_progress(
     payload["discovery"] = partition_progress
     payload["frontier"] = frontier_progress
     post_progress = _metadata_dict(payload.get("post_progress"))
+    allow_live_profile_refresh = not (
+        normalized_platform == "instagram"
+        and str(run_row.get("status") or "").strip().lower() in _RUN_PROGRESS_ACTIVE_JOB_STATUSES
+    )
     expected_total_posts = max(
         _shared_account_expected_total_posts_from_config(
             run_config,
@@ -36676,16 +37026,41 @@ def get_social_account_catalog_run_progress(
     )
     source_total_posts_current = _normalize_non_negative_int(
         _cached_live_profile_total_posts(normalized_platform, normalized_account)
+        if allow_live_profile_refresh
+        else _cached_live_profile_total_posts_cached_only(normalized_platform, normalized_account)
     )
     best_known_total_posts = _best_known_social_account_total_posts(
         normalized_platform,
         normalized_account,
         materialized_total_posts=_social_account_profile_total_posts(normalized_platform, normalized_account),
         catalog_total_posts=_shared_catalog_total_posts(normalized_platform, normalized_account),
+        allow_live_refresh=allow_live_profile_refresh,
     )
     progress_total_posts = (
-        expected_total_posts or _normalize_non_negative_int(post_progress.get("total_posts")) or best_known_total_posts
+        max(
+            expected_total_posts,
+            _normalize_non_negative_int(post_progress.get("total_posts")),
+            source_total_posts_current,
+            best_known_total_posts,
+        )
+        if (
+            _shared_catalog_mode(run_config)
+            and _coerce_dt(run_config.get("date_start")) is None
+            and _coerce_dt(run_config.get("date_end")) is None
+            and str(run_config.get("catalog_action_scope") or "").strip().lower() in {"", "full_history"}
+        )
+        else expected_total_posts
+        or _normalize_non_negative_int(post_progress.get("total_posts"))
+        or best_known_total_posts
     )
+    frontier_expected_total = _normalize_non_negative_int(frontier_progress.get("expected_total_posts"))
+    frontier_completed_posts = _normalize_non_negative_int(frontier_progress.get("posts_checked"))
+    if (
+        frontier_expected_total > 0
+        and bool(frontier_progress.get("exhausted"))
+        and frontier_completed_posts < frontier_expected_total
+    ):
+        progress_total_posts = frontier_expected_total
     if progress_total_posts > 0:
         post_progress["total_posts"] = progress_total_posts
         payload["post_progress"] = post_progress
@@ -36731,6 +37106,18 @@ def get_social_account_catalog_run_progress(
     classify_failed = _normalize_non_negative_int(classify_stage.get("jobs_failed"))
     classify_active = _normalize_non_negative_int(classify_stage.get("jobs_active"))
     classify_waiting = _normalize_non_negative_int(classify_stage.get("jobs_waiting"))
+    dismissed_terminal_classify_cancel = (
+        str(run_row.get("status") or "").strip().lower() == "completed"
+        and bool(str(run_config.get(_RUN_FAILURE_DISMISSED_AT_KEY) or "").strip())
+        and classify_total > 0
+        and classify_active <= 0
+        and classify_waiting <= 0
+        and any(
+            _run_progress_stage_from_row(row) == POST_CLASSIFY_STAGE
+            and str(row.get("status") or "").strip().lower() == "cancelled"
+            for row in job_rows
+        )
+    )
     payload["scrape_complete"] = (
         posts_total > 0
         and posts_completed >= posts_total
@@ -36738,7 +37125,7 @@ def get_social_account_catalog_run_progress(
         and posts_active <= 0
         and posts_waiting <= 0
     )
-    payload["classify_incomplete"] = classify_total > 0 and (
+    payload["classify_incomplete"] = (not dismissed_terminal_classify_cancel) and classify_total > 0 and (
         classify_completed + classify_failed < classify_total or classify_active > 0 or classify_waiting > 0
     )
     if (
@@ -36785,20 +37172,10 @@ def get_social_account_catalog_run_progress(
         or str((_metadata_dict(payload.get("worker_runtime")).get("active_transport")) or "").strip().lower()
         or None
     )
-    payload["run_state"] = _derive_catalog_run_state(
-        run_status=str(payload.get("run_status") or ""),
-        scrape_complete=bool(payload.get("scrape_complete")),
-        classify_incomplete=bool(payload.get("classify_incomplete")),
-        stages_payload=stages_payload,
-        frontier_progress=frontier_progress,
-        recovery=recovery_payload,
+    payload["required_execution_backend"] = (
+        str(run_config.get("required_execution_backend") or "").strip().lower() or None
     )
-    payload["alerts"] = _build_catalog_run_progress_alerts(
-        platform=normalized_platform,
-        frontier_progress=frontier_progress,
-        payload=payload,
-        recovery=recovery_payload,
-    )
+    payload["allow_local_dev_inline_bypass"] = bool(run_config.get("allow_local_dev_inline_bypass"))
     frontier_metadata = _metadata_dict(frontier_progress.get("metadata"))
     declared_runner_strategy = str(run_config.get("runner_strategy") or "").strip().lower() or None
     declared_partition_strategy = str(run_config.get("partition_strategy") or "").strip().lower() or None
@@ -36829,9 +37206,34 @@ def get_social_account_catalog_run_progress(
             last_error_message = str(row.get("error_message") or "").strip() or None
         if cancel_reason and last_error_code and last_error_message:
             break
+    if dismissed_terminal_classify_cancel:
+        cancel_reason = None
+        last_error_code = None
+        last_error_message = None
+    last_transport_response = _catalog_run_last_transport_response(
+        frontier_progress=frontier_progress,
+        job_rows=job_rows,
+    )
     payload["cancel_reason"] = cancel_reason
     payload["last_error_code"] = last_error_code
     payload["last_error_message"] = last_error_message
+    payload["effective_execution_backend"] = effective_execution_backend
+    if last_transport_response:
+        payload["last_transport_response"] = last_transport_response
+    payload["run_state"] = _derive_catalog_run_state(
+        run_status=str(payload.get("run_status") or ""),
+        scrape_complete=bool(payload.get("scrape_complete")),
+        classify_incomplete=bool(payload.get("classify_incomplete")),
+        stages_payload=stages_payload,
+        frontier_progress=frontier_progress,
+        recovery=recovery_payload,
+    )
+    payload["alerts"] = _build_catalog_run_progress_alerts(
+        platform=normalized_platform,
+        frontier_progress=frontier_progress,
+        payload=payload,
+        recovery=recovery_payload,
+    )
     repair_environment = _catalog_run_auth_repair_environment(normalized_platform)
     repairable_reason = _catalog_run_repairable_auth_reason(
         platform=normalized_platform,
@@ -36876,9 +37278,12 @@ def get_social_account_catalog_run_progress(
         "declared_partition_strategy": declared_partition_strategy,
         "effective_partition_strategy": effective_partition_strategy,
         "effective_execution_backend": effective_execution_backend,
+        "required_execution_backend": payload.get("required_execution_backend"),
+        "allow_local_dev_inline_bypass": bool(payload.get("allow_local_dev_inline_bypass")),
         "catalog_oldest_post_at": _iso(_coerce_dt(frontier_progress.get("catalog_oldest_post_at"))),
         "oldest_posted_at_seen": _iso(_coerce_dt(frontier_progress.get("oldest_posted_at_seen"))),
         "newest_posted_at_seen": _iso(_coerce_dt(frontier_progress.get("newest_posted_at_seen"))),
+        "last_transport_response": payload.get("last_transport_response"),
         "strategy_mismatch": bool(
             (
                 declared_runner_strategy
@@ -51508,7 +51913,13 @@ def dismiss_social_account_catalog_run(
         run_id=run_id,
     )
     run_id = str(run_row.get("id") or "").strip()
-    status = str(run_row.get("status") or "").strip().lower()
+    stored_status = str(run_row.get("status") or "").strip().lower()
+    job_rows = _load_social_account_catalog_jobs(
+        run_id=run_id,
+        platform=platform,
+        account_handle=account_handle,
+    )
+    status = _derive_run_progress_status(stored_status, job_rows)
     if status not in {"failed", "cancelled"}:
         raise ValueError("Only failed or cancelled catalog runs can be dismissed.")
     run_config = _metadata_dict(run_row.get("config"))
@@ -51531,21 +51942,20 @@ def dismiss_social_account_catalog_run(
         update social.scrape_runs as r
         set config = coalesce(r.config, '{{}}'::jsonb) || %s::jsonb
         where r.id = %s::uuid
-          and r.status = any(%s::text[])
           and {run_failure_not_dismissed_sql}
         returning
           r.id::text as id,
           r.status,
           coalesce(r.config->>'{_RUN_FAILURE_DISMISSED_AT_KEY}', '') as dismissed_at
         """,
-        [json.dumps(metadata_payload), run_id, ["failed", "cancelled"]],
+        [json.dumps(metadata_payload), run_id],
     )
     if not updated_row:
         raise ValueError("Only failed or cancelled catalog runs can be dismissed.")
     _invalidate_queue_status_cache()
     return {
         "run_id": str(updated_row.get("id") or "").strip(),
-        "status": str(updated_row.get("status") or "").strip().lower(),
+        "status": status,
         "dismissed": True,
         "dismissed_at": str(updated_row.get("dismissed_at") or "").strip()
         or metadata_payload[_RUN_FAILURE_DISMISSED_AT_KEY],

@@ -2,6 +2,7 @@
 
 - [core.admin_operation_events](core.admin_operation_events.md) ([diagram](diagrams/core.admin_operation_events.mermaid.md))
 - [core.admin_operations](core.admin_operations.md) ([diagram](diagrams/core.admin_operations.mermaid.md))
+- [core.bravotv_image_runs](core.bravotv_image_runs.md) ([diagram](diagrams/core.bravotv_image_runs.mermaid.md))
 - [core.cast_fandom](core.cast_fandom.md) ([diagram](diagrams/core.cast_fandom.mermaid.md))
 - [core.cast_photos](core.cast_photos.md) ([diagram](diagrams/core.cast_photos.mermaid.md))
 - [core.cast_tmdb](core.cast_tmdb.md) ([diagram](diagrams/core.cast_tmdb.mermaid.md))
@@ -15,6 +16,7 @@
 - [core.episodes](core.episodes.md) ([diagram](diagrams/core.episodes.mermaid.md))
 - [core.external_id_conflicts](core.external_id_conflicts.md) ([diagram](diagrams/core.external_id_conflicts.mermaid.md))
 - [core.fandom_community_allowlist](core.fandom_community_allowlist.md) ([diagram](diagrams/core.fandom_community_allowlist.mermaid.md))
+- [core.fandom_page_directory](core.fandom_page_directory.md) ([diagram](diagrams/core.fandom_page_directory.mermaid.md))
 - [core.google_news_sync_jobs](core.google_news_sync_jobs.md) ([diagram](diagrams/core.google_news_sync_jobs.mermaid.md))
 - [core.media_asset_variants](core.media_asset_variants.md) ([diagram](diagrams/core.media_asset_variants.mermaid.md))
 - [core.media_assets](core.media_assets.md) ([diagram](diagrams/core.media_assets.mermaid.md))

@@ -13,6 +13,7 @@ from api.routers import screenalytics as screenalytics_router
 @pytest.fixture(autouse=True)
 def set_service_token(monkeypatch):
     monkeypatch.setenv("SCREENALYTICS_SERVICE_TOKEN", "test-token")
+    monkeypatch.setenv("TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK", "1")
     yield
 
 

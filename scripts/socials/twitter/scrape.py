@@ -278,7 +278,7 @@ Examples:
     twikit_loader = None
 
     try:
-        from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
+        from trr_backend.socials.control_plane import _load_twikit_credentials, _load_twitter_auth
 
         twikit_loader = _load_twikit_credentials
         cookies, env_bearer = _load_twitter_auth()

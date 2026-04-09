@@ -37,6 +37,21 @@ class _FakeResponse:
         return self.payload
 
 
+@dataclass
+class _FakeInvalidJsonResponse:
+    status_code: int
+    headers: dict[str, str] | None = None
+    text: str = ""
+    content: bytes = b""
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} error", response=self)
+
+    def json(self) -> dict:
+        raise ValueError("empty body")
+
+
 def test_tiktok_fetch_comments_adds_required_aid_param(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = TikTokScraper()
     captured_params: dict[str, int] = {}
@@ -106,6 +121,66 @@ def test_tiktok_fetch_user_detail_applies_request_timeout(monkeypatch: pytest.Mo
     payload = scraper.fetch_user_detail("bravotv", delay=0)
     assert payload is not None
     assert captured_timeout == scraper.REQUEST_TIMEOUT_SECONDS
+
+
+def test_tiktok_fetch_user_detail_records_empty_body_response_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+
+    def _fake_get(url: str, params: dict | None = None, **kwargs: object) -> _FakeInvalidJsonResponse:
+        return _FakeInvalidJsonResponse(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "content-length": "0",
+                "x-tt-logid": "detail-logid",
+            },
+        )
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+
+    payload = scraper.fetch_user_detail("bravotv", delay=0)
+
+    assert payload is None
+    assert scraper._last_api_fail_reason == "non_json_response"
+    assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_user_detail"] == {
+        "endpoint": "fetch_user_detail",
+        "failure_reason": "non_json_response",
+        "http_status": 200,
+        "content_type": "application/json",
+        "content_length": 0,
+        "request_id": "detail-logid",
+    }
+
+
+def test_tiktok_fetch_posts_records_empty_body_response_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+
+    def _fake_get(url: str, params: dict | None = None, **kwargs: object) -> _FakeInvalidJsonResponse:
+        return _FakeInvalidJsonResponse(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "content-length": "0",
+                "x-tt-logid": "posts-logid",
+            },
+        )
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+
+    payload = scraper.fetch_posts("bravotv", "sec-1", 0, delay=0)
+
+    assert payload is None
+    assert scraper._last_api_fail_reason == "non_json_response"
+    assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_posts"] == {
+        "endpoint": "fetch_posts",
+        "failure_reason": "non_json_response",
+        "http_status": 200,
+        "content_type": "application/json",
+        "content_length": 0,
+        "request_id": "posts-logid",
+    }
 
 
 def test_tiktok_parse_ytdlp_metadata_extracts_author_avatar() -> None:

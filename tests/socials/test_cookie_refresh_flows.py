@@ -191,6 +191,46 @@ def test_load_cookies_from_file_strips_refresh_metadata(tmp_path: Path) -> None:
     }
 
 
+def test_interactive_instagram_login_reuses_saved_browser_session(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path))
+    paths = instagram_cookie_refresh._INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(  # noqa: SLF001
+        "bravotv",
+        {"sessionid": "saved-session", "csrftoken": "saved-csrf"},
+    )
+
+    validate_calls: list[dict[str, object]] = []
+    writes: list[tuple[Path, dict[str, str]]] = []
+
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "validate_browser_cookie_session",
+        lambda **kwargs: validate_calls.append(kwargs) or (True, None),
+    )
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_write_cookie_file",
+        lambda path, cookies: writes.append((Path(path), dict(cookies))),
+    )
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_find_chrome_profile_dir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("persistent Chrome should not launch")),
+    )
+
+    cookies = instagram_cookie_refresh.interactive_chrome_login(
+        chrome_profile_name="unused-profile",
+        cookie_file=tmp_path / "instagram-cookies.json",
+        validation_username="bravotv",
+        timeout_seconds=120,
+        headless=False,
+    )
+
+    assert cookies == {"sessionid": "saved-session", "csrftoken": "saved-csrf"}
+    assert validate_calls[0]["validation_url"] == "https://www.instagram.com/bravotv/"
+    assert writes == [(tmp_path / "instagram-cookies.json", {"sessionid": "saved-session", "csrftoken": "saved-csrf"})]
+    assert paths.cookie_file_path.exists()
+
+
 def test_refresh_twitter_cookies_retries_headed_after_headless_error_shell(
     monkeypatch,
     tmp_path: Path,

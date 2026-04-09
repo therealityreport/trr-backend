@@ -358,7 +358,7 @@ def _record_dispatcher_heartbeat(
     supported_platforms: list[str] | None = None,
 ) -> None:
     try:
-        from trr_backend.repositories.social_season_analytics import update_worker_heartbeat
+        from trr_backend.socials.control_plane import update_worker_heartbeat
 
         metadata = {
             "dispatcher_name": dispatcher_name,

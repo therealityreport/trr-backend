@@ -230,6 +230,7 @@ class TwitterScraper:
     # Fallback hashes (updated periodically, auto-discovered at runtime)
     _FALLBACK_SEARCH_HASH = "cGK-Qeg1XJc2sZ6kgQw_Iw"
     _FALLBACK_DETAIL_HASH = "VWFGPVAGkZMGRKGe3GFFnA"
+    _FALLBACK_USER_BY_SCREEN_NAME_HASH = "NimuplG1OB7Fd2btCLdBOw"
 
     # Public bearer token used by Twitter's web app (not a secret).
     PUBLIC_BEARER_TOKEN = (
@@ -323,6 +324,19 @@ class TwitterScraper:
         "responsive_web_grok_community_note_auto_translation_is_enabled": False,
         "responsive_web_enhance_cards_enabled": False,
     }
+    USER_BY_SCREEN_NAME_FEATURES = {
+        "hidden_profile_likes_enabled": True,
+        "hidden_profile_subscriptions_enabled": True,
+        "responsive_web_graphql_exclude_directive_enabled": True,
+        "verified_phone_label_enabled": False,
+        "subscriptions_verification_info_is_identity_verified_enabled": True,
+        "subscriptions_verification_info_verified_since_enabled": True,
+        "highlights_tweets_tab_ui_enabled": True,
+        "responsive_web_twitter_article_notes_tab_enabled": False,
+        "creator_subscriptions_tweet_preview_api_enabled": True,
+        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+        "responsive_web_graphql_timeline_navigation_enabled": True,
+    }
 
     def __init__(
         self,
@@ -338,6 +352,7 @@ class TwitterScraper:
         self._consecutive_success: int = 0
         self._guest_token: str | None = None
         self._search_hash: str | None = None
+        self._user_by_screen_name_hash: str | None = None
         # twikit credentials: {"username": ..., "email": ..., "password": ...}
         self._twikit_credentials = twikit_credentials
         self._detail_hash: str | None = None
@@ -460,7 +475,7 @@ class TwitterScraper:
 
     def _discover_graphql_hashes(self):
         """Discover current GraphQL operation hashes from Twitter's JS bundle."""
-        if self._search_hash and self._detail_hash:
+        if self._search_hash and self._detail_hash and self._user_by_screen_name_hash:
             return
 
         try:
@@ -520,7 +535,19 @@ class TwitterScraper:
                         self._detail_hash = match.group(1)
                         logger.info("Discovered TweetDetail hash from %s", js_url)
 
-                if self._search_hash and self._detail_hash:
+                if not self._user_by_screen_name_hash:
+                    match = re.search(
+                        r'queryId:"([a-zA-Z0-9_-]+)",operationName:"UserByScreenName"',
+                        js_text,
+                    ) or re.search(
+                        r'operationName:"UserByScreenName",queryId:"([a-zA-Z0-9_-]+)"',
+                        js_text,
+                    )
+                    if match:
+                        self._user_by_screen_name_hash = match.group(1)
+                        logger.info("Discovered UserByScreenName hash from %s", js_url)
+
+                if self._search_hash and self._detail_hash and self._user_by_screen_name_hash:
                     break
 
         except Exception as e:
@@ -531,6 +558,8 @@ class TwitterScraper:
             self._search_hash = self._FALLBACK_SEARCH_HASH
         if not self._detail_hash:
             self._detail_hash = self._FALLBACK_DETAIL_HASH
+        if not self._user_by_screen_name_hash:
+            self._user_by_screen_name_hash = self._FALLBACK_USER_BY_SCREEN_NAME_HASH
 
     @property
     def _search_timeline_url(self) -> str:
@@ -541,6 +570,11 @@ class TwitterScraper:
     def _tweet_detail_url(self) -> str:
         self._discover_graphql_hashes()
         return f"{self.GRAPHQL_BASE_URL}/{self._detail_hash}/TweetDetail"
+
+    @property
+    def _user_by_screen_name_url(self) -> str:
+        self._discover_graphql_hashes()
+        return f"{self.GRAPHQL_BASE_URL}/{self._user_by_screen_name_hash}/UserByScreenName"
 
     def _rate_limit(self, delay: float, *, fast_mode: bool = False):
         """Apply adaptive rate limiting between requests.
@@ -902,6 +936,92 @@ class TwitterScraper:
             "views": _as_int(payload.get("view_count") or payload.get("views")),
             "bookmarks": _as_int(payload.get("bookmark_count")),
             "media_urls": media_urls,
+        }
+
+    def fetch_user_profile_summary(self, screen_name: str, delay: float = 0.0) -> dict[str, Any] | None:
+        """Fetch profile metadata for a user from the authenticated GraphQL endpoint."""
+        import json
+        import urllib.parse
+
+        normalized_screen_name = str(screen_name or "").strip().lstrip("@")
+        if not normalized_screen_name:
+            return None
+
+        self._ensure_auth()
+        if delay > 0:
+            self._rate_limit(delay)
+
+        variables = {
+            "screen_name": normalized_screen_name,
+            "withSafetyModeUserFields": False,
+        }
+        params = {
+            "variables": json.dumps(variables),
+            "features": json.dumps(self.USER_BY_SCREEN_NAME_FEATURES),
+            "fieldToggles": json.dumps({"withAuxiliaryUserLabels": False}),
+        }
+        headers = self._get_headers()
+
+        def _request() -> requests.Response:
+            url = f"{self._user_by_screen_name_url}?{urllib.parse.urlencode(params)}"
+            return self.session.get(
+                url,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
+            )
+
+        try:
+            response = _request()
+            if response.status_code == 404:
+                self._user_by_screen_name_hash = None
+                self._discover_graphql_hashes()
+                response = _request()
+            self._track_response_status(response.status_code)
+            response.raise_for_status()
+            data = response.json()
+        except requests.exceptions.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is not None:
+                self._track_response_status(status)
+            logger.debug("Twitter user profile request failed for @%s: %s", normalized_screen_name, exc)
+            return None
+        except Exception:
+            logger.debug("Twitter user profile parse failed for @%s", normalized_screen_name, exc_info=True)
+            return None
+
+        user_result = data.get("data", {}).get("user", {}).get("result", {}) if isinstance(data, dict) else {}
+        if not isinstance(user_result, dict):
+            return None
+        if user_result.get("__typename") == "UserUnavailable":
+            return None
+
+        legacy = user_result.get("legacy", {}) if isinstance(user_result.get("legacy"), dict) else {}
+        core = user_result.get("core", {}) if isinstance(user_result.get("core"), dict) else {}
+        username = str(legacy.get("screen_name") or core.get("screen_name") or normalized_screen_name).strip()
+        if not username:
+            return None
+
+        def _as_int(value: Any) -> int | None:
+            try:
+                return int(value)
+            except Exception:
+                return None
+
+        return {
+            "username": username,
+            "display_name": str(legacy.get("name") or core.get("name") or "").strip() or None,
+            "bio": str(legacy.get("description") or "").strip() or None,
+            "avatar_url": (
+                str(legacy.get("profile_image_url_https") or legacy.get("profile_image_url") or "").strip() or None
+            ),
+            "profile_url": f"https://x.com/{username}",
+            "follower_count": _as_int(legacy.get("followers_count")),
+            "following_count": _as_int(legacy.get("friends_count")),
+            "total_posts": _as_int(legacy.get("statuses_count")),
+            "is_verified": bool(user_result.get("is_blue_verified") or legacy.get("verified")),
+            "user_id": str(user_result.get("rest_id") or legacy.get("id_str") or core.get("id_str") or "").strip()
+            or None,
         }
 
     def fetch_tweet_detail_summary(self, tweet_id: str, delay: float = 0.0) -> dict[str, Any] | None:

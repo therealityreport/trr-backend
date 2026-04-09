@@ -902,7 +902,7 @@ def test_post_social_account_catalog_backfill_surfaces_auth_preflight_failure_wh
     assert readiness["reason"] == "validation_exception:Error"
 
 
-def test_post_social_account_catalog_backfill_allows_local_inline_fallback_for_instagram(
+def test_post_social_account_catalog_backfill_prefers_modal_when_available_even_if_inline_fallback_allowed(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -915,6 +915,58 @@ def test_post_social_account_catalog_backfill_allows_local_inline_fallback_for_i
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
             "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ) as worker_guard,
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+            return_value={
+                "run_id": "catalog-run-modal-1",
+                "status": "queued",
+                "ingest_mode": "shared_account_catalog_backfill",
+            },
+        ) as mocked_start,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history", "allow_inline_dev_fallback": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "catalog-run-modal-1"
+    assert body["status"] == "queued"
+    assert body["execution_mode"] == "queued"
+    assert body["execution_mode_canonical"] == "queued"
+    assert body["execution_mode_legacy"] == "queue"
+    assert body["queue_enabled"] is True
+    assert body["used_inline_fallback"] is False
+    assert body["requires_modal_executor"] is True
+    worker_guard.assert_called_once()
+    mocked_background.assert_not_called()
+    assert mocked_start.call_args.kwargs["inline_worker_id"] is None
+    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is False
+
+
+def test_post_social_account_catalog_backfill_allows_local_inline_fallback_when_modal_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("APP_ENV", "development")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("api.routers.socials._start_runs_in_background") as mocked_background,
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError(
+                "modal executor unavailable",
+                worker_health={"healthy": False, "reason": "modal_dispatch_unavailable"},
+            ),
         ) as worker_guard,
         patch(
             "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
@@ -941,7 +993,7 @@ def test_post_social_account_catalog_backfill_allows_local_inline_fallback_for_i
     assert body["queue_enabled"] is False
     assert body["used_inline_fallback"] is True
     assert body["requires_modal_executor"] is True
-    worker_guard.assert_not_called()
+    worker_guard.assert_called_once()
     mocked_background.assert_called_once()
     assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
     assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
@@ -956,13 +1008,20 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
     monkeypatch.setenv("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE", "1")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
     with (
         patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
         patch("api.routers.socials.is_remote_job_plane_enabled", return_value=True),
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
             "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError("worker unavailable", worker_health={}),
         ) as worker_guard,
+        patch(
+            "api.routers.socials.resolve_modal_function",
+            return_value={"resolved": False, "reason": "not available", "error": None},
+        ),
         patch(
             "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
             return_value={
@@ -985,7 +1044,7 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
     assert body["execution_mode"] == "inline"
     assert body["execution_mode_canonical"] == "inline_fallback"
     assert body["execution_mode_legacy"] == "inline_fallback"
-    worker_guard.assert_not_called()
+    worker_guard.assert_called_once()
     mocked_background.assert_called_once()
     assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
     assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
@@ -1376,7 +1435,7 @@ def test_post_social_account_catalog_sync_recent_serializes_worker_health_on_mod
     mocked_start.assert_not_called()
 
 
-def test_post_social_account_catalog_sync_recent_allows_local_inline_fallback_for_instagram(
+def test_post_social_account_catalog_sync_recent_prefers_modal_when_available_even_if_inline_fallback_allowed(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1389,12 +1448,13 @@ def test_post_social_account_catalog_sync_recent_allows_local_inline_fallback_fo
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
             "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
         ) as worker_guard,
         patch(
             "trr_backend.repositories.social_season_analytics.sync_recent_social_account_catalog",
             return_value={
-                "run_id": "catalog-run-inline-2",
-                "status": "pending",
+                "run_id": "catalog-run-modal-2",
+                "status": "queued",
                 "ingest_mode": "shared_account_catalog_backfill",
             },
         ) as mocked_start,
@@ -1407,18 +1467,18 @@ def test_post_social_account_catalog_sync_recent_allows_local_inline_fallback_fo
 
     assert response.status_code == 200
     body = response.json()
-    assert body["run_id"] == "catalog-run-inline-2"
-    assert body["status"] == "started"
-    assert body["execution_mode"] == "inline"
-    assert body["execution_mode_canonical"] == "inline_fallback"
-    assert body["execution_mode_legacy"] == "inline_fallback"
-    assert body["queue_enabled"] is False
-    assert body["used_inline_fallback"] is True
+    assert body["run_id"] == "catalog-run-modal-2"
+    assert body["status"] == "queued"
+    assert body["execution_mode"] == "queued"
+    assert body["execution_mode_canonical"] == "queued"
+    assert body["execution_mode_legacy"] == "queue"
+    assert body["queue_enabled"] is True
+    assert body["used_inline_fallback"] is False
     assert body["requires_modal_executor"] is True
-    worker_guard.assert_not_called()
-    mocked_background.assert_called_once()
-    assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
-    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    worker_guard.assert_called_once()
+    mocked_background.assert_not_called()
+    assert mocked_start.call_args.kwargs["inline_worker_id"] is None
+    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is False
 
 
 def test_post_social_account_catalog_run_cancel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5022,6 +5082,7 @@ def test_get_health_dot_endpoint_returns_lightweight_payload(
         include_recent_failures=False,
         include_stuck_jobs=False,
         include_runs_summary=False,
+        summary_only=True,
     )
 
 

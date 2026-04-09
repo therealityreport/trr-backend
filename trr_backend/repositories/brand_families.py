@@ -737,6 +737,29 @@ def patch_family_link_rule(*, family_id: str, rule_id: str, payload: dict[str, A
     return _link_rule_row_to_api(rows[0])
 
 
+def cleanup_imported_family_link_rules(*, family_id: str | None = None) -> dict[str, Any]:
+    clauses = ["source = 'wikipedia_import'"]
+    params: list[Any] = []
+
+    if family_id:
+        _fetch_family_row(family_id)
+        clauses.append("family_id = %s::uuid")
+        params.append(family_id)
+
+    deleted = pg.execute_returning(
+        f"""
+        delete from admin.brand_family_link_rules
+        where {" and ".join(clauses)}
+        returning id
+        """,
+        params,
+    )
+    return {
+        "family_id": family_id,
+        "deleted_count": len(deleted),
+    }
+
+
 def list_family_suggestions() -> dict[str, Any]:
     rows = pg.fetch_all(
         """
@@ -1517,78 +1540,14 @@ def import_family_wikipedia_show_links(
             )
             imported_rows.append(_wiki_link_row_to_api(row))
 
-    rules_upserted = 0
-    apply_result: dict[str, Any] | None = None
-    created_rule_ids: list[str] = []
-
-    if apply_matched:
-        for row in imported_rows:
-            wikidata_id = _normalize_text(row.get("wikidata_id"))
-            if not wikidata_id:
-                continue
-            show_url = _normalize_text(row.get("show_url"))
-            if not show_url:
-                continue
-            rule = create_family_link_rule(
-                family_id=family_id,
-                payload={
-                    "link_group": "knowledge",
-                    "link_kind": "wikipedia",
-                    "label": "Wikipedia",
-                    "url": show_url,
-                    "coverage_type": "show_wikidata_exact",
-                    "coverage_value": wikidata_id.upper(),
-                    "source": "wikipedia_import",
-                    "priority": 50,
-                    "auto_apply": True,
-                    "is_active": True,
-                    "metadata": {
-                        "import_source": import_source,
-                    },
-                },
-                actor=actor,
-            )
-            rule_id = str(rule.get("id") or "")
-            if rule_id:
-                created_rule_ids.append(rule_id)
-                rules_upserted += 1
-
-        if created_rule_ids:
-            apply_result = apply_family_links(
-                family_id=family_id,
-                dry_run=False,
-                actor=actor,
-                rule_ids=created_rule_ids,
-            )
-            pg.execute_returning(
-                """
-                update admin.brand_family_wikipedia_show_links
-                set is_applied = true,
-                    updated_at = now()
-                where family_id = %s::uuid
-                  and wikidata_id is not null
-                  and matched_show_id is not null
-                  and show_url_key = any(%s::text[])
-                returning id
-                """,
-                [
-                    family_id,
-                    [
-                        _url_key(str(row.get("show_url") or ""))
-                        for row in imported_rows
-                        if str(row.get("wikidata_id") or "") and str(row.get("matched_show_id") or "")
-                    ],
-                ],
-            )
-
     return {
         "family_id": family_id,
         "entity_scope_count": len(scoped_members),
         "imported_count": len(imported_rows),
         "matched_count": matched_count,
-        "rules_upserted": rules_upserted,
+        "rules_upserted": 0,
         "apply_matched": apply_matched,
-        "apply_result": apply_result,
+        "apply_result": None,
         "fetch_errors": fetch_errors,
         "rows": imported_rows,
     }

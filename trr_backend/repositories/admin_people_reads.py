@@ -381,10 +381,45 @@ def _media_key(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _optional_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _normalize_gallery_bucket_fields(row: dict[str, Any]) -> dict[str, str | None]:
+    bucket_type = _optional_text(row.get("bucket_type"))
+    bucket_key = _optional_text(row.get("bucket_key"))
+    bucket_label = _optional_text(row.get("bucket_label"))
+    resolved_show_id = _optional_text(row.get("resolved_show_id"))
+    resolved_show_name = _optional_text(row.get("resolved_show_name"))
+
+    if (resolved_show_id or resolved_show_name) and bucket_type is None:
+        bucket_type = "show"
+
+    if bucket_type == "show":
+        if bucket_label is None:
+            bucket_label = resolved_show_name
+        if resolved_show_name is None:
+            resolved_show_name = bucket_label
+        if bucket_key is None:
+            bucket_key = resolved_show_id or (_slugify_token(resolved_show_name or bucket_label or "") or None)
+
+    return {
+        "bucket_type": bucket_type,
+        "bucket_key": bucket_key,
+        "bucket_label": bucket_label,
+        "resolved_show_id": resolved_show_id,
+        "resolved_show_name": resolved_show_name,
+    }
+
+
 def _map_cast_photo_row(row: dict[str, Any]) -> dict[str, Any]:
     crop = _thumbnail_crop_fields(row.get("thumbnail_crop"))
     people_count = row.get("people_count")
     people_count_source = row.get("people_count_source")
+    bucket_fields = _normalize_gallery_bucket_fields(row)
     return {
         "id": row["id"],
         "person_id": row["person_id"],
@@ -407,13 +442,7 @@ def _map_cast_photo_row(row: dict[str, Any]) -> dict[str, Any]:
         ),
         "face_boxes": _to_list(row.get("face_boxes")),
         "face_crops": _to_list(row.get("face_crops")),
-        "bucket_type": row.get("bucket_type") if isinstance(row.get("bucket_type"), str) else None,
-        "bucket_key": row.get("bucket_key") if isinstance(row.get("bucket_key"), str) else None,
-        "bucket_label": row.get("bucket_label") if isinstance(row.get("bucket_label"), str) else None,
-        "resolved_show_id": row.get("resolved_show_id") if isinstance(row.get("resolved_show_id"), str) else None,
-        "resolved_show_name": (
-            row.get("resolved_show_name") if isinstance(row.get("resolved_show_name"), str) else None
-        ),
+        **bucket_fields,
         "media_asset_id": None,
         "origin": "cast_photos",
         "source_page_url": row.get("source_page_url"),
@@ -425,6 +454,7 @@ def _map_media_link_row(row: dict[str, Any]) -> dict[str, Any] | None:
     crop = _thumbnail_crop_fields(row.get("thumbnail_crop"))
     context_people_count = _parse_optional_int(row.get("context_people_count"))
     metadata_people_count = _parse_optional_int(row.get("metadata_people_count"))
+    bucket_fields = _normalize_gallery_bucket_fields(row)
     return {
         "id": row["link_id"],
         "person_id": row["person_id"],
@@ -447,13 +477,7 @@ def _map_media_link_row(row: dict[str, Any]) -> dict[str, Any] | None:
         ),
         "face_boxes": _to_list(row.get("face_boxes")),
         "face_crops": _to_list(row.get("face_crops")),
-        "bucket_type": row.get("bucket_type") if isinstance(row.get("bucket_type"), str) else None,
-        "bucket_key": row.get("bucket_key") if isinstance(row.get("bucket_key"), str) else None,
-        "bucket_label": row.get("bucket_label") if isinstance(row.get("bucket_label"), str) else None,
-        "resolved_show_id": row.get("resolved_show_id") if isinstance(row.get("resolved_show_id"), str) else None,
-        "resolved_show_name": (
-            row.get("resolved_show_name") if isinstance(row.get("resolved_show_name"), str) else None
-        ),
+        **bucket_fields,
         "media_asset_id": row.get("media_asset_id"),
         "origin": "media_links",
         "source_page_url": row.get("source_page_url"),
@@ -494,52 +518,63 @@ def _count_person_gallery_rows(
     requested_sources: list[str] | None,
     include_broken: bool,
 ) -> int:
-    count_cast_rows = pg.fetch_all(
+    rows = pg.fetch_all(
         """
-        SELECT
-          cp.id,
-          cp.person_id::text AS person_id,
-          lower(cp.source) AS source,
-          cp.url,
-          cp.hosted_url,
-          cp.metadata ->> 'gallery_status' AS gallery_status
-        FROM core.cast_photos AS cp
-        WHERE cp.person_id = %s::uuid
-          AND cp.hosted_url IS NOT NULL
-          AND (%s::text[] IS NULL OR lower(cp.source) = ANY(%s::text[]))
-        ORDER BY cp.gallery_index ASC NULLS LAST, lower(cp.source) ASC, cp.id ASC
-        """,
-        [person_id, requested_sources, requested_sources],
-    )
-    count_media_rows = pg.fetch_all(
-        """
-        SELECT
-          ml.id::text AS link_id,
-          %s::text AS person_id,
-          ml.media_asset_id::text AS media_asset_id,
-          lower(ma.source) AS source,
-          COALESCE(ma.metadata ->> 'source_url', ma.source_url) AS resolved_source_url,
-          ma.hosted_url,
-          COALESCE(ml.context ->> 'gallery_status', ma.metadata ->> 'gallery_status') AS gallery_status
-        FROM core.media_links AS ml
-        JOIN core.media_assets AS ma
-          ON ma.id = ml.media_asset_id
-        WHERE ml.entity_type = 'person'
-          AND ml.entity_id = %s::uuid
-          AND ml.kind = 'gallery'
-          AND ma.hosted_url IS NOT NULL
-          AND (%s::text[] IS NULL OR lower(coalesce(ma.source, '')) = ANY(%s::text[]))
-        ORDER BY ml.position ASC NULLS LAST, ml.id ASC
-        """,
-        [person_id, person_id, requested_sources, requested_sources],
-    )
-    return len(
-        _merge_person_gallery_rows(
-            [_map_cast_photo_row(row) for row in count_cast_rows],
-            [row for row in (_map_media_link_row(item) for item in count_media_rows) if row is not None],
-            include_broken=include_broken,
+        WITH merged_gallery_rows AS (
+          SELECT DISTINCT
+            COALESCE(count_rows.media_asset_id, '') AS media_asset_id,
+            COALESCE(count_rows.hosted_url, '') AS hosted_url,
+            COALESCE(count_rows.url, '') AS url,
+            COALESCE(count_rows.source, '') AS source
+          FROM (
+            SELECT
+              NULL::text AS media_asset_id,
+              cp.hosted_url,
+              cp.url,
+              lower(cp.source) AS source,
+              cp.metadata ->> 'gallery_status' AS gallery_status
+            FROM core.cast_photos AS cp
+            WHERE cp.person_id = %s::uuid
+              AND cp.hosted_url IS NOT NULL
+              AND (%s::text[] IS NULL OR lower(cp.source) = ANY(%s::text[]))
+
+            UNION ALL
+
+            SELECT
+              ml.media_asset_id::text AS media_asset_id,
+              ma.hosted_url,
+              COALESCE(ma.metadata ->> 'source_url', ma.source_url) AS url,
+              lower(ma.source) AS source,
+              COALESCE(ml.context ->> 'gallery_status', ma.metadata ->> 'gallery_status') AS gallery_status
+            FROM core.media_links AS ml
+            JOIN core.media_assets AS ma
+              ON ma.id = ml.media_asset_id
+            WHERE ml.entity_type = 'person'
+              AND ml.entity_id = %s::uuid
+              AND ml.kind = 'gallery'
+              AND ma.hosted_url IS NOT NULL
+              AND (%s::text[] IS NULL OR lower(coalesce(ma.source, '')) = ANY(%s::text[]))
+          ) AS count_rows
+          WHERE (
+            %s::boolean
+            OR COALESCE(lower(count_rows.gallery_status), '') <> 'broken_unreachable'
+          )
         )
+        SELECT count(*)::int AS total_count
+        FROM merged_gallery_rows
+        """,
+        [
+            person_id,
+            requested_sources,
+            requested_sources,
+            person_id,
+            requested_sources,
+            requested_sources,
+            include_broken,
+        ],
     )
+    first_row = rows[0] if rows else {}
+    return int(first_row.get("total_count") or 0)
 
 
 def get_person_gallery_page(
@@ -667,5 +702,5 @@ def get_person_gallery_page(
                 "has_more": has_more,
             },
         },
-        4 if include_total_count else 2,
+        3 if include_total_count else 2,
     )

@@ -30,7 +30,7 @@ The API requires the following environment variables to be set:
 | `SCREENALYTICS_SERVICE_TOKEN` | Optional legacy bearer token for old `/api/v1/screenalytics/*` callers | `change-me-long-random-token` |
 | `SCREENALYTICS_API_URL` | Optional base URL for legacy outbound Screenalytics HTTP callers | `https://screenalytics.example.com` |
 
-Production screentime flows no longer require `SCREENALYTICS_SERVICE_TOKEN` or `SCREENALYTICS_API_URL`. Legacy `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*` endpoints accept either `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` when that token is configured, or a signed internal admin JWT. Keep `SCREENALYTICS_API_URL` only if you still run explicit legacy outbound HTTP calls to the standalone Screenalytics service.
+Production screentime flows no longer require `SCREENALYTICS_SERVICE_TOKEN` or `SCREENALYTICS_API_URL`. Legacy `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*` endpoints now default to signed internal admin JWT auth; service-token fallback is transitional and must be explicitly re-enabled with `TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK=1`. Keep `SCREENALYTICS_API_URL` only if you still run explicit legacy outbound HTTP calls to the standalone Screenalytics service.
 
 ### Internal Admin Proxy (TRR-APP -> TRR-Backend)
 
@@ -171,7 +171,7 @@ FastAPI ships with interactive API docs and an OpenAPI schema:
 | --- | --- | --- |
 | TRR App | `Authorization: Bearer <Supabase access token>` | Use for user-scoped endpoints under `/api/v1/*`. |
 | TRR App internal proxy (facebank toggle) | `Authorization: Bearer <internal admin JWT>` | Allowed only for `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`; TRR-APP signs the JWT with `TRR_INTERNAL_ADMIN_SHARED_SECRET`. |
-| Legacy Screenalytics compatibility | `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` or signed internal admin JWT | `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*` remain compatibility routes; production screentime does not require them. |
+| Legacy Screenalytics compatibility | Signed internal admin JWT by default; optional `Authorization: Bearer <SCREENALYTICS_SERVICE_TOKEN>` only when `TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK=1` | `/api/v1/screenalytics/*` and `/api/v1/screenalytics/v2/*` remain compatibility routes; production screentime does not require them. |
 
 Admin allowlist
 - Facebank seed toggle endpoint requires either an allowlisted user JWT or a valid internal admin JWT signed with `TRR_INTERNAL_ADMIN_SHARED_SECRET`.

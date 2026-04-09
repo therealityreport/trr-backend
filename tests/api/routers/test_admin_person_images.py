@@ -4642,6 +4642,37 @@ def test_refresh_stream_emits_terminal_error_for_unhandled_exception(client, mon
     assert "Refresh stream failed" in normalized_payload
 
 
+def test_refresh_stream_emits_terminal_error_when_operation_kickoff_fails(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    mock_db = MagicMock()
+
+    with patch("trr_backend.db.admin.create_supabase_admin_client", return_value=mock_db):
+        with patch(
+            "api.routers.admin_person_images._get_person_details",
+            return_value={"id": person_id, "full_name": "Example Person", "external_ids": {"imdb": "nm123"}},
+        ):
+            with patch("api.routers.admin_person_images._get_tmdb_id", return_value=None):
+                with patch("api.routers.admin_person_images._resolve_refresh_sources", return_value=(["imdb"], False)):
+                    with patch(
+                        "api.routers.admin_person_images.start_operation_for_stream",
+                        side_effect=RuntimeError("kickoff failed"),
+                    ):
+                        response = client.post(
+                            f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                            json={"skip_mirror": True},
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+
+    assert response.status_code == 200
+    normalized_payload = response.text.replace("\r\n", "\n")
+    assert "event: error" in normalized_payload
+    assert '"stage": "startup"' in normalized_payload or '"stage":"startup"' in normalized_payload
+    assert '"error_code": "STREAM_OPERATION_START_FAILED"' in normalized_payload or '"error_code":"STREAM_OPERATION_START_FAILED"' in normalized_payload
+    assert "kickoff failed" in normalized_payload
+
+
 def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, monkeypatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())

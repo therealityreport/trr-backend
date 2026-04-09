@@ -12,6 +12,7 @@ from trr_backend.socials.socialblade.scraper import (
     _normalize_table_data,
     _page_access_denied,
     _scrape_socialblade_in_context,
+    _socialblade_profile_url,
 )
 
 BODY_TEXT = """
@@ -75,7 +76,7 @@ Fri2026-03-06   145 474,018 -1  7,071   1   1,700
 
 
 def test_extract_profile_stats_from_body_text_prefers_primary_values() -> None:
-    stats, rankings = _extract_profile_stats_from_body_text(BODY_TEXT)
+    stats, rankings, labels = _extract_profile_stats_from_body_text(BODY_TEXT, "instagram")
 
     assert stats == {
         "followers": 475444,
@@ -91,12 +92,22 @@ def test_extract_profile_stats_from_body_text_prefers_primary_values() -> None:
         "followers_rank": "139,823rd",
         "engagement_rate_rank": "45,085th",
     }
+    assert labels["followers"] == "Followers"
+    assert labels["chart_metric_label"] == "Followers"
 
 
 def test_normalize_table_data_and_build_chart_from_followers_totals() -> None:
     metrics = _normalize_table_data(
         {
-            "headers": [],
+            "headers": [
+                "Date",
+                "Followers Delta",
+                "Followers Total",
+                "Following Delta",
+                "Following Total",
+                "Media Count Delta",
+                "Media Count Total",
+            ],
             "data": [
                 {
                     "Date": "Thu2026-03-05",
@@ -133,7 +144,7 @@ def test_normalize_table_data_and_build_chart_from_followers_totals() -> None:
         "Media Count Total",
     ]
 
-    chart = _followers_chart_from_table(metrics)
+    chart = _followers_chart_from_table(metrics, metric_label="Followers")
     assert chart == {
         "frequency": "daily",
         "metric": "total_followers",
@@ -148,6 +159,13 @@ def test_normalize_table_data_and_build_chart_from_followers_totals() -> None:
 
 def test_page_access_denied_detects_cloudflare_block() -> None:
     assert _page_access_denied("Access denied. Error reference number: 1020")
+
+
+def test_socialblade_profile_url_switches_route_by_platform() -> None:
+    assert _socialblade_profile_url("instagram", "lisabarlow14") == "https://socialblade.com/instagram/user/lisabarlow14"
+    assert _socialblade_profile_url("facebook", "bravotv") == "https://socialblade.com/facebook/user/bravotv"
+    assert _socialblade_profile_url("youtube", "facebookapp") == "https://socialblade.com/youtube/handle/facebookapp"
+    assert _socialblade_profile_url("youtube", "UCabc123") == "https://socialblade.com/youtube/channel/UCabc123"
 
 
 def test_build_profile_stats_from_user_payload_formats_ranks() -> None:
@@ -300,9 +318,9 @@ def test_scrape_context_retries_412_in_visible_shared_browser(monkeypatch: pytes
     )
     monkeypatch.setattr(
         "trr_backend.socials.socialblade.scraper.scrape_socialblade_with_shared_browser_session",
-        lambda handle, playwright=None: {
+        lambda handle, platform="instagram", playwright=None: {
             "username": handle,
-            "platform": "instagram",
+            "platform": platform,
             "history_source": "authenticated_api",
             "stats_refreshed": True,
         },
@@ -311,6 +329,7 @@ def test_scrape_context_retries_412_in_visible_shared_browser(monkeypatch: pytes
     payload = _scrape_socialblade_in_context(
         DummyContext(),
         "heathergay",
+        platform="instagram",
         playwright=None,
         cookies=[],
         allow_login_fallback=False,
@@ -364,15 +383,16 @@ def test_scrape_context_retries_search_challenge_in_visible_shared_browser(
         "trr_backend.socials.socialblade.scraper._scrape_authenticated_api",
         lambda _page, _handle: (_ for _ in ()).throw(
             RuntimeError(
-                "SocialBlade returned non-JSON data for /api/trpc/instagram.search?input=%7B%22json%22%3A%7B%22query%22%3A%22heathergay%22%7D%7D"
+                "SocialBlade returned non-JSON data for "
+                "/api/trpc/instagram.search?input=%7B%22json%22%3A%7B%22query%22%3A%22heathergay%22%7D%7D"
             )
         ),
     )
     monkeypatch.setattr(
         "trr_backend.socials.socialblade.scraper.scrape_socialblade_with_shared_browser_session",
-        lambda handle, playwright=None: {
+        lambda handle, platform="instagram", playwright=None: {
             "username": handle,
-            "platform": "instagram",
+            "platform": platform,
             "history_source": "authenticated_api",
             "stats_refreshed": True,
         },
@@ -381,6 +401,7 @@ def test_scrape_context_retries_search_challenge_in_visible_shared_browser(
     payload = _scrape_socialblade_in_context(
         DummyContext(),
         "heathergay",
+        platform="instagram",
         playwright=None,
         cookies=[],
         allow_login_fallback=False,
@@ -420,6 +441,15 @@ def test_scrape_context_configures_page_controls_before_table_fallback(
         def evaluate(self, _script: str):
             calls.append("evaluate_table")
             return {
+                "headers": [
+                    "Date",
+                    "Followers Delta",
+                    "Followers Total",
+                    "Following Delta",
+                    "Following Total",
+                    "Media Count Delta",
+                    "Media Count Total",
+                ],
                 "data": [
                     {
                         "Date": "Wed2026-03-25",
@@ -430,7 +460,7 @@ def test_scrape_context_configures_page_controls_before_table_fallback(
                         "Media Count Delta": "1",
                         "Media Count Total": "5",
                     }
-                ]
+                ],
             }
 
         def close(self) -> None:
@@ -460,6 +490,7 @@ def test_scrape_context_configures_page_controls_before_table_fallback(
     payload = _scrape_socialblade_in_context(
         DummyContext(),
         "heathergay",
+        platform="instagram",
         playwright=None,
         cookies=[],
         allow_login_fallback=False,
