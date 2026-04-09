@@ -1008,13 +1008,20 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
     monkeypatch.setenv("TRR_ALLOW_LOCAL_ADMIN_OPERATION_OVERRIDE", "1")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
+    from trr_backend.repositories.social_season_analytics import SocialWorkerUnavailableError
+
     with (
         patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
         patch("api.routers.socials.is_remote_job_plane_enabled", return_value=True),
         patch("api.routers.socials._start_runs_in_background") as mocked_background,
         patch(
             "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            side_effect=SocialWorkerUnavailableError("worker unavailable"),
         ) as worker_guard,
+        patch(
+            "api.routers.socials.resolve_modal_function",
+            return_value={"resolved": False, "reason": "not available", "error": None},
+        ),
         patch(
             "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
             return_value={
@@ -1037,7 +1044,7 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
     assert body["execution_mode"] == "inline"
     assert body["execution_mode_canonical"] == "inline_fallback"
     assert body["execution_mode_legacy"] == "inline_fallback"
-    worker_guard.assert_not_called()
+    worker_guard.assert_called_once()
     mocked_background.assert_called_once()
     assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:instagram"
     assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True

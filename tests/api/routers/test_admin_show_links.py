@@ -49,6 +49,15 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
+@pytest.fixture(autouse=True)
+def _mock_fandom_page_directory():
+    with patch(
+        "trr_backend.repositories.fandom_page_directory.pg.fetch_one",
+        return_value=None,
+    ):
+        yield
+
+
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(app)
