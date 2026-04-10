@@ -887,6 +887,7 @@ def _resolve_social_account_catalog_route_execution(
     *,
     platform: str,
     allow_inline_dev_fallback: bool,
+    execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     pipeline_ingest_mode: str = "shared_account_catalog_backfill",
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
@@ -899,14 +900,38 @@ def _resolve_social_account_catalog_route_execution(
     queue_enabled = is_queue_enabled()
     remote_plane_enforced = is_remote_job_plane_enabled()
     used_inline_fallback = False
+    normalized_execution_preference = (
+        str(execution_preference or "auto").strip().lower() or "auto"
+    )
+    prefer_local_inline = normalized_execution_preference == "prefer_local_inline"
     requires_modal_executor = _shared_account_catalog_requires_modal_executor(
         platform=platform,
         pipeline_ingest_mode=pipeline_ingest_mode,
     )
     can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
-        allow_inline_dev_fallback=allow_inline_dev_fallback,
+        allow_inline_dev_fallback=(allow_inline_dev_fallback or prefer_local_inline),
         remote_plane_enforced=remote_plane_enforced,
     )
+    if prefer_local_inline:
+        if not can_use_local_inline_fallback:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "SOCIAL_LOCAL_INLINE_PREFERENCE_UNAVAILABLE",
+                    "message": (
+                        "execution_preference=prefer_local_inline is only available when local/dev inline execution "
+                        "is permitted."
+                    ),
+                    "execution_preference": normalized_execution_preference,
+                    "is_local_or_dev_runtime": _is_local_or_dev_runtime(),
+                    "remote_plane_enforced": remote_plane_enforced,
+                },
+            )
+        return {
+            "queue_enabled": False,
+            "used_inline_fallback": True,
+            "requires_modal_executor": requires_modal_executor,
+        }
     if queue_enabled:
         try:
             assert_worker_available_when_queue_enabled(
@@ -2729,6 +2754,7 @@ class CatalogBackfillRequest(BaseModel):
     date_end: datetime | None = None
     backfill_scope: Literal["full_history", "bounded_window"] = Field(default="full_history")
     allow_inline_dev_fallback: bool = Field(default=False)
+    execution_preference: Literal["auto", "prefer_local_inline"] = Field(default="auto")
 
 
 class CatalogSyncRecentRequest(BaseModel):
@@ -4535,6 +4561,7 @@ async def post_social_account_catalog_backfill_route(
     execution_state = _resolve_social_account_catalog_route_execution(
         platform=platform,
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
+        execution_preference=payload.execution_preference,
     )
     queue_enabled = bool(execution_state["queue_enabled"])
     used_inline_fallback = bool(execution_state["used_inline_fallback"])
@@ -4556,6 +4583,7 @@ async def post_social_account_catalog_backfill_route(
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
+            execution_preference=payload.execution_preference,
             catalog_action="backfill",
             catalog_action_scope=payload.backfill_scope,
         )

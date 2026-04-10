@@ -27,6 +27,41 @@ TARGET_DEPENDENCY_GRAPH: dict[str, list[str]] = {
 }
 
 
+def build_show_refresh_sub_operation_request_payload(
+    *,
+    parent_request_payload: dict[str, Any] | None,
+    refresh_target: str,
+    show_id: int | str | None = None,
+    initiated_by: str | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    """Build the canonical single-target payload for a show refresh sub-operation."""
+    base_payload = dict(parent_request_payload) if isinstance(parent_request_payload, dict) else {}
+    nested_payload = dict(base_payload.get("payload")) if isinstance(base_payload.get("payload"), dict) else {}
+
+    nested_payload["targets"] = [refresh_target]
+    for flag in ("skip_s3", "verbose", "reload_schema_cache", "force_new_operation"):
+        nested_payload[flag] = bool(nested_payload.get(flag, False))
+
+    child_payload = dict(base_payload)
+    child_payload.pop("targets", None)
+    child_payload["payload"] = nested_payload
+
+    resolved_show_id = base_payload.get("show_id", show_id)
+    if resolved_show_id is not None:
+        child_payload["show_id"] = str(resolved_show_id)
+
+    resolved_request_id = request_id if request_id is not None else base_payload.get("request_id")
+    if resolved_request_id is not None:
+        child_payload["request_id"] = str(resolved_request_id)
+
+    resolved_initiated_by = initiated_by if initiated_by is not None else base_payload.get("initiated_by")
+    if resolved_initiated_by is not None:
+        child_payload["initiated_by"] = str(resolved_initiated_by)
+
+    return child_payload
+
+
 def execution_waves(targets: list[str]) -> list[list[str]]:
     """Sort targets into sequential waves respecting the dependency graph.
 
@@ -104,7 +139,13 @@ class ShowRefreshOrchestrator:
                     parent_operation_id=self._parent_id,
                     operation_type="admin_show_refresh",
                     refresh_target=target,
-                    request_payload={**self.request_payload, "targets": [target]},
+                    request_payload=build_show_refresh_sub_operation_request_payload(
+                        parent_request_payload=self.request_payload,
+                        refresh_target=target,
+                        show_id=self.show_id,
+                        initiated_by=self.initiated_by,
+                        request_id=self.request_id,
+                    ),
                     initiated_by=self.initiated_by,
                     request_id=self.request_id,
                     client_session_id=self.client_session_id,
@@ -128,7 +169,12 @@ class ShowRefreshOrchestrator:
         *,
         producer_factory: Any | None = None,
     ) -> int:
-        """Dispatch a wave of sub-operations. Returns count dispatched to Modal."""
+        """Dispatch a wave of sub-operations.
+
+        Returns the count dispatched to Modal. Local fallback requires a
+        producer_factory; otherwise this raises to avoid leaving
+        sub-operations pending with no executor.
+        """
         modal_dispatched = 0
         op_type = "admin_show_refresh"
         modal_supported = supports_admin_operation(op_type)

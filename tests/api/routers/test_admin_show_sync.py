@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from datetime import UTC, datetime, timedelta
@@ -1819,3 +1820,68 @@ class TestRefreshShowPhotosStream:
         assert "show_cast" not in table_calls
         assert "people" not in table_calls
         assert "cast_photos" not in table_calls
+
+
+def test_retry_refresh_target_reuses_parent_refresh_flags_in_child_payload() -> None:
+    from api.routers.admin_show_sync import retry_refresh_target
+
+    class _Request:
+        headers = {"x-trr-request-id": "req-retry-1"}
+
+    async def _run():
+        with patch(
+            "api.routers.admin_show_sync.admin_operations_repo.get_operation",
+            return_value={
+                "id": "parent-1",
+                "request_payload": {
+                    "show_id": "show-123",
+                    "request_id": "req-parent-1",
+                    "initiated_by": "admin@example.com",
+                    "payload": {
+                        "targets": ["show_core", "links", "cast_media"],
+                        "skip_s3": True,
+                        "verbose": True,
+                        "reload_schema_cache": True,
+                        "force_new_operation": False,
+                    },
+                },
+            },
+        ), patch(
+            "api.routers.admin_show_sync.admin_operations_repo.create_sub_operation",
+            return_value={
+                "id": "child-1",
+                "request_payload": {},
+            },
+        ) as create_sub_operation, patch(
+            "api.routers.admin_show_sync.supports_admin_operation",
+            return_value=False,
+        ), patch(
+            "api.routers.admin_show_sync.build_show_refresh_operation_producer",
+            return_value="producer",
+        ), patch(
+            "api.routers.admin_show_sync.ensure_operation_execution",
+        ), patch(
+            "api.routers.admin_show_sync.admin_operations_repo.update_operation_status",
+        ):
+            await retry_refresh_target(
+                show_id="show-123",
+                target="cast_media",
+                request=_Request(),
+                payload={"parent_operation_id": "parent-1"},
+                db=MagicMock(),
+            )
+        return create_sub_operation.call_args.kwargs["request_payload"]
+
+    child_payload = asyncio.run(_run())
+    assert child_payload == {
+        "show_id": "show-123",
+        "request_id": "req-retry-1",
+        "initiated_by": "admin@example.com",
+        "payload": {
+            "targets": ["cast_media"],
+            "skip_s3": True,
+            "verbose": True,
+            "reload_schema_cache": True,
+            "force_new_operation": False,
+        },
+    }

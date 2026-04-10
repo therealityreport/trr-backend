@@ -1303,6 +1303,7 @@ class TikTokScraper:
             parsed = self._safe_response_json(response, endpoint="fetch_posts")
             if parsed is None:
                 return None
+            self._record_endpoint_response(endpoint="fetch_posts", response=response)
             return parsed
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch posts: {e}")
@@ -1877,6 +1878,7 @@ class TikTokScraper:
             "api_preflight_fail_reason": api_preflight_fail_reason,
             "api_pagination_blocked_reason": api_pagination_blocked_reason,
             "pages_scanned": pages_scanned,
+            "posts_checked": posts_checked,
             "videos_scanned": posts_checked,
             "first_page_count": len(posts[:30]),
             "total_posts": max(self._safe_int_metric(profile_snapshot.get("total_posts")), len(posts)),

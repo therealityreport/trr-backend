@@ -3885,6 +3885,11 @@ def test_ingest_shared_accounts_catalog_mode_round_robins_multi_platform_brand_s
         "_shared_catalog_total_posts",
         lambda platform, *_args, **_kwargs: 4049 if platform == "instagram" else 1200,
     )
+    monkeypatch.setattr(
+        social_repo,
+        "_best_known_social_account_total_posts",
+        lambda platform, *_args, **_kwargs: 16454 if platform == "instagram" else 2876,
+    )
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
     monkeypatch.setattr(
@@ -3967,6 +3972,16 @@ def test_ingest_shared_accounts_catalog_mode_full_history_queues_discovery_for_s
         "_shared_catalog_total_posts",
         lambda platform, *_args, **_kwargs: 4049 if platform == "instagram" else 1200,
     )
+    monkeypatch.setattr(
+        social_repo,
+        "_best_known_social_account_total_posts",
+        lambda platform, *_args, **_kwargs: 16454 if platform == "instagram" else 2876,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_prefers_frontier_strategy",
+        lambda platform, **_kwargs: platform == "instagram",
+    )
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
     monkeypatch.setattr(
@@ -4042,6 +4057,8 @@ def test_ingest_shared_accounts_full_history_instagram_uses_frontier_strategy(
     monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 16454)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 4049)
+    monkeypatch.setattr(social_repo, "_best_known_social_account_total_posts", lambda *_args, **_kwargs: 16454)
+    monkeypatch.setattr(social_repo, "_shared_account_prefers_frontier_strategy", lambda **_kwargs: True)
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
     monkeypatch.setattr(social_repo, "_update_run_summary", lambda run_id: {"run_id": run_id})
@@ -4125,6 +4142,112 @@ def test_ingest_shared_accounts_full_history_instagram_allows_local_dev_inline_b
     assert captured_run_configs[0]["allow_local_dev_inline_bypass"] is True
     assert created_jobs[0]["config"]["required_execution_backend"] is None
     assert created_jobs[0]["config"]["allow_local_dev_inline_bypass"] is True
+
+
+def test_ingest_shared_accounts_tiktok_full_history_prefer_local_inline_seeds_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_jobs: list[dict[str, Any]] = []
+    captured_run_configs: list[dict[str, Any]] = []
+    best_known_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "_resolve_requested_platforms", lambda platforms: list(platforms or []))
+    monkeypatch.setattr(
+        social_repo,
+        "get_shared_account_sources",
+        lambda **_kwargs: {
+            "source_scope": "bravo",
+            "sources": [
+                {
+                    "id": "shared-source-1",
+                    "platform": "tiktok",
+                    "account_handle": "bravowwhl",
+                    "scrape_priority": 100,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_configured_execution_metadata",
+        lambda: {
+            "execution_owner": "local_api",
+            "execution_mode_canonical": "local",
+            "execution_backend_canonical": "local",
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: captured_run_configs.append(kwargs["config"]) or "inline-tiktok-run-1",
+    )
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
+    monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        social_repo,
+        "_best_known_social_account_total_posts",
+        lambda _platform, _account_handle, **kwargs: (best_known_calls.append(kwargs) or 3277),
+    )
+    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
+    monkeypatch.setattr(social_repo, "_update_run_summary", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_shared_discovery_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected discovery job")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda _context, **kwargs: created_jobs.append(kwargs) or "inline-tiktok-job-1",
+    )
+
+    payload = social_repo.ingest_shared_accounts(
+        platforms=["tiktok"],
+        source_scope="bravo",
+        pipeline_ingest_mode=social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        allow_local_dev_inline_bypass=True,
+        execution_preference="prefer_local_inline",
+        catalog_action="backfill",
+        catalog_action_scope="full_history",
+    )
+
+    assert payload["run_id"] == "inline-tiktok-run-1"
+    assert captured_run_configs[0]["runner_strategy"] == "single_runner_fallback"
+    assert captured_run_configs[0]["runner_count"] == 1
+    assert captured_run_configs[0]["partition_strategy"] is None
+    assert captured_run_configs[0]["required_execution_backend"] is None
+    assert captured_run_configs[0]["allow_local_dev_inline_bypass"] is True
+    assert captured_run_configs[0]["execution_preference"] == "prefer_local_inline"
+    assert captured_run_configs[0]["expected_total_posts_by_account"]["tiktok:bravowwhl"] == 3277
+    assert len(created_jobs) == 1
+    assert created_jobs[0]["config"]["stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
+    assert created_jobs[0]["config"]["runner_strategy"] == "single_runner_fallback"
+    assert created_jobs[0]["config"]["runner_count"] == 1
+    assert created_jobs[0]["config"]["partition_strategy"] is None
+    assert created_jobs[0]["config"]["required_execution_backend"] is None
+    assert created_jobs[0]["config"]["expected_total_posts"] == 3277
+    assert created_jobs[0]["config"]["allow_local_dev_inline_bypass"] is True
+    assert best_known_calls[0]["materialized_total_posts"] == 0
+    assert best_known_calls[0]["catalog_total_posts"] == 0
+
+
+def test_ingest_shared_accounts_rejects_prefer_local_inline_without_inline_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+
+    with pytest.raises(social_repo.SocialIngestValidationError) as exc_info:
+        social_repo.ingest_shared_accounts(
+            platforms=["tiktok"],
+            source_scope="bravo",
+            pipeline_ingest_mode=social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            execution_preference="prefer_local_inline",
+        )
+
+    assert exc_info.value.code == "SOCIAL_LOCAL_INLINE_PREFERENCE_UNAVAILABLE"
 
 
 def test_job_required_execution_backend_skips_implicit_modal_for_local_dev_bypass() -> None:
@@ -4408,6 +4531,59 @@ def test_start_social_account_catalog_backfill_skips_modal_guard_for_local_dev_i
     assert payload["run_id"] == "catalog-inline-1"
     assert worker_guard_calls == []
     assert ingest_calls[0]["allow_local_dev_inline_bypass"] is True
+
+
+def test_start_social_account_catalog_backfill_forwards_execution_preference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingest_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", lambda *_args, **_kwargs: {"locked": True})
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "get_active_social_account_catalog_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
+    monkeypatch.setattr(
+        social_repo,
+        "ingest_shared_accounts",
+        lambda **kwargs: ingest_calls.append(dict(kwargs)) or {"run_id": "catalog-inline-pref-1", "status": "pending"},
+    )
+
+    payload = social_repo.start_social_account_catalog_backfill(
+        "tiktok",
+        "bravowwhl",
+        allow_local_dev_inline_bypass=True,
+        execution_preference="prefer_local_inline",
+        catalog_action="backfill",
+        catalog_action_scope="full_history",
+    )
+
+    assert payload["run_id"] == "catalog-inline-pref-1"
+    assert ingest_calls[0]["execution_preference"] == "prefer_local_inline"
+
+
+def test_start_social_account_catalog_backfill_rejects_prefer_local_inline_without_inline_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", lambda *_args, **_kwargs: {"locked": True})
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "_assert_social_queue_schema_ready", lambda: None)
+    monkeypatch.setattr(social_repo, "get_active_social_account_catalog_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
+
+    with pytest.raises(social_repo.SocialIngestValidationError) as exc_info:
+        social_repo.start_social_account_catalog_backfill(
+            "tiktok",
+            "bravowwhl",
+            execution_preference="prefer_local_inline",
+            catalog_action="backfill",
+            catalog_action_scope="full_history",
+        )
+
+    assert exc_info.value.code == "SOCIAL_LOCAL_INLINE_PREFERENCE_UNAVAILABLE"
 
 
 def test_start_social_account_catalog_backfill_forwards_catalog_action_metadata(
@@ -7203,6 +7379,75 @@ def test_dismiss_social_account_catalog_run_allows_progress_derived_failed_run(m
         "status": "failed",
         "dismissed": True,
         "dismissed_at": "2026-04-08T17:52:00+00:00",
+    }
+    normalized_sql = " ".join(str(captured["sql"]).split()).lower()
+    assert "failure_dismissed_at" in normalized_sql
+    assert invalidate_calls == [True]
+
+
+def test_dismiss_social_account_catalog_run_allows_completion_gap_failed_progress_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidate_calls: list[bool] = []
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object] | None = None) -> dict[str, Any] | None:
+        normalized_sql = " ".join(str(sql).split()).lower()
+        if "from social.scrape_runs" in normalized_sql and "pipeline_ingest_mode" in normalized_sql:
+            return {
+                "id": "run-completed-gap-1",
+                "status": "completed",
+                "config": {
+                    "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+                    "platforms": ["tiktok"],
+                    "accounts_override": ["bravowwhl"],
+                },
+            }
+        if "update social.scrape_runs as r" in normalized_sql:
+            captured["sql"] = sql
+            captured["params"] = list(params or [])
+            return {
+                "id": "run-completed-gap-1",
+                "status": "completed",
+                "dismissed_at": "2026-04-09T23:10:00+00:00",
+            }
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_load_social_account_catalog_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-discovery",
+                "status": "completed",
+                "platform": "tiktok",
+                "job_type": social_repo.SHARED_ACCOUNT_DISCOVERY_JOB_TYPE,
+                "config": {"account": "bravowwhl", "stage": social_repo.SHARED_ACCOUNT_DISCOVERY_STAGE},
+                "metadata": {},
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(
+        social_repo,
+        "get_social_account_catalog_run_progress",
+        lambda *_args, **_kwargs: {"run_status": "failed", "completion_gap_reason": "fetch_incomplete"},
+    )
+    monkeypatch.setattr(social_repo, "_invalidate_queue_status_cache", lambda: invalidate_calls.append(True))
+
+    payload = social_repo.dismiss_social_account_catalog_run(
+        platform="tiktok",
+        account_handle="bravowwhl",
+        run_id="run-completed-gap-1",
+        dismissed_by="admin@test.local",
+    )
+
+    assert payload == {
+        "run_id": "run-completed-gap-1",
+        "status": "failed",
+        "dismissed": True,
+        "dismissed_at": "2026-04-09T23:10:00+00:00",
     }
     normalized_sql = " ".join(str(captured["sql"]).split()).lower()
     assert "failure_dismissed_at" in normalized_sql
@@ -22725,7 +22970,7 @@ def test_get_social_account_catalog_run_progress_exposes_recovery_payload_and_wa
     assert "recovery_wait_exceeded" in alert_codes
 
 
-def test_get_social_account_catalog_run_progress_clears_recovery_when_fetch_stage_is_active(
+def test_get_social_account_catalog_run_progress_keeps_recovery_active_when_recovery_fetch_stage_is_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_id = "acacacac-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -22733,7 +22978,7 @@ def test_get_social_account_catalog_run_progress_clears_recovery_when_fetch_stag
     run_row = {
         "run_id": run_id,
         "season_id": None,
-        "status": "running",
+        "status": "failed",
         "source_scope": "bravo",
         "config": {
             "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
@@ -22742,7 +22987,7 @@ def test_get_social_account_catalog_run_progress_clears_recovery_when_fetch_stag
             "runner_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
             "partition_strategy": social_repo.CATALOG_FULL_HISTORY_FRONTIER_STRATEGY,
         },
-        "summary": {"total_jobs": 3, "completed_jobs": 2, "failed_jobs": 0, "active_jobs": 1},
+        "summary": {"total_jobs": 3, "completed_jobs": 2, "failed_jobs": 1, "active_jobs": 1},
         "created_at": now_utc - timedelta(minutes=20),
         "started_at": now_utc - timedelta(minutes=19),
         "completed_at": None,
@@ -22829,10 +23074,119 @@ def test_get_social_account_catalog_run_progress_clears_recovery_when_fetch_stag
 
     payload = social_repo.get_social_account_catalog_run_progress("instagram", "bravotv", run_id)
 
-    assert payload["run_state"] == "fetching"
-    assert payload["recovery"] is None
+    assert payload["run_state"] == "recovering"
+    assert payload["operational_state"] == "recovering"
+    assert payload["recovery"]["reason"] == "no_partitions_discovered"
+    assert payload["recovery"]["status"] == "running"
+    assert payload["recovery"]["job_id"] == "job-fetch"
     alert_codes = {str(alert["code"]) for alert in payload["alerts"]}
     assert "recovery_waiting" not in alert_codes
+
+
+def test_get_social_account_catalog_run_progress_surfaces_failed_tiktok_direct_recovery_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "afafafaf-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    now_utc = datetime(2026, 4, 8, 18, 5, tzinfo=UTC)
+    run_row = {
+        "run_id": run_id,
+        "season_id": None,
+        "status": "failed",
+        "source_scope": "bravo",
+        "config": {
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "platforms": ["tiktok"],
+            "accounts_override": ["bravowwhl"],
+            "runner_strategy": "full_history_cursor_breakpoints",
+            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+        },
+        "summary": {"total_jobs": 2, "completed_jobs": 1, "failed_jobs": 1, "active_jobs": 0},
+        "created_at": now_utc - timedelta(minutes=20),
+        "started_at": now_utc - timedelta(minutes=19),
+        "completed_at": now_utc - timedelta(minutes=1),
+    }
+    job_rows = [
+        {
+            "id": "job-fallback",
+            "platform": "tiktok",
+            "job_type": social_repo.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "failed",
+            "items_found": 0,
+            "error_message": "Shared-account fallback ended early for @bravowwhl: checked 3 of 3277 discovered posts",
+            "last_error_code": "catalog_incomplete",
+            "created_at": now_utc - timedelta(minutes=3),
+            "started_at": now_utc - timedelta(minutes=2),
+            "completed_at": now_utc - timedelta(minutes=1),
+            "config": {
+                "account": "bravowwhl",
+                "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+                "runner_strategy": "single_runner_fallback",
+                "partition_strategy": None,
+                "recovery_depth": 1,
+            },
+            "metadata": {
+                "error_code": "catalog_incomplete",
+                "retrieval_meta": {"posts_checked": 3, "expected_total_posts": 3277},
+            },
+            "worker_id": "api-background:catalog:tiktok",
+        },
+        {
+            "id": "job-discovery",
+            "platform": "tiktok",
+            "job_type": social_repo.SHARED_ACCOUNT_DISCOVERY_JOB_TYPE,
+            "status": "completed",
+            "items_found": 0,
+            "error_message": None,
+            "last_error_code": None,
+            "created_at": now_utc - timedelta(minutes=6),
+            "started_at": now_utc - timedelta(minutes=6),
+            "completed_at": now_utc - timedelta(minutes=5),
+            "config": {
+                "account": "bravowwhl",
+                "stage": social_repo.SHARED_ACCOUNT_DISCOVERY_STAGE,
+            },
+            "metadata": {
+                "fallback_direct_job_enqueued": True,
+                "fallback_job_id": "job-fallback",
+                "fallback_job_stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+                "recovery_reason": "tiktok_empty_body_transport_failure",
+            },
+            "worker_id": "api-background:catalog:tiktok",
+        },
+    ]
+
+    monkeypatch.setattr(social_repo, "_now_utc", lambda: now_utc)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_scrape_jobs_features",
+        lambda: {"has_run_id": True, "has_queue_fields": True},
+    )
+    monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
+    monkeypatch.setattr(social_repo, "_shared_account_frontier_progress", lambda **_kwargs: {})
+
+    payload = social_repo.get_social_account_catalog_run_progress("tiktok", "bravowwhl", run_id)
+
+    assert payload["run_state"] == "failed"
+    assert payload["recovery"]["reason"] == "tiktok_empty_body_transport_failure"
+    assert payload["recovery"]["status"] == "failed"
+    assert payload["last_error_code"] == "catalog_incomplete"
+    assert "fallback ended early" in str(payload["last_error_message"] or "")
+    assert payload["run_diagnostics"]["last_error_code"] == "catalog_incomplete"
+    alert_codes = {str(alert["code"]) for alert in payload["alerts"]}
+    assert "tiktok_direct_fallback_failed" in alert_codes
+    terminal_alert = next(
+        alert for alert in payload["alerts"] if str(alert.get("code") or "") == "tiktok_direct_fallback_failed"
+    )
+    assert terminal_alert["error_code"] == "catalog_incomplete"
+    assert "fallback ended early" in str(terminal_alert.get("error_message") or "")
 
 
 def test_get_social_account_catalog_run_progress_skips_live_instagram_total_refresh_while_active(
@@ -24360,6 +24714,31 @@ def test_discover_instagram_cursor_partitions_invokes_partition_callback(
     assert callback_calls[2][0].shard_index == 2
 
 
+def test_discover_shared_account_cursor_partitions_forwards_partition_callback_to_tiktok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_discover_tiktok_cursor_partitions(**kwargs: Any) -> tuple[list[Any], dict[str, Any]]:
+        captured.update(kwargs)
+        return [], {"pages_scanned": 1, "posts_checked": 0, "total_posts": 3277}
+
+    def partition_callback(partition: Any, expected_count: int | None) -> None:
+        del partition, expected_count
+
+    monkeypatch.setattr(social_repo, "_discover_tiktok_cursor_partitions", fake_discover_tiktok_cursor_partitions)
+
+    social_repo._discover_shared_account_cursor_partitions(
+        platform="tiktok",
+        account_handle="bravowwhl",
+        runner_count=4,
+        progress_cb=None,
+        partition_callback=partition_callback,
+    )
+
+    assert captured["partition_callback"] is partition_callback
+
+
 def test_run_shared_account_discovery_stage_bootstraps_frontier_and_enqueues_fetch_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -24511,7 +24890,11 @@ def test_run_shared_account_frontier_posts_stage_continues_when_discovered_posts
     )
     monkeypatch.setattr(social_repo, "_release_shared_account_run_frontier", lambda **_kwargs: {})
     monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
-    monkeypatch.setattr(social_repo, "_enqueue_shared_classify_jobs_batched", lambda **kwargs: finish_calls.append(kwargs))
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_shared_classify_jobs_batched",
+        lambda **kwargs: finish_calls.append(kwargs),
+    )
     monkeypatch.setattr(social_repo, "_catalog_oldest_stored_post_at", lambda *_args, **_kwargs: None)
 
     posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
@@ -24613,7 +24996,11 @@ def test_run_shared_account_frontier_posts_stage_raises_when_oldest_stored_post_
         },
     )
     monkeypatch.setattr(social_repo, "_release_shared_account_run_frontier", lambda **_kwargs: {})
-    monkeypatch.setattr(social_repo, "_catalog_oldest_stored_post_at", lambda *_args, **_kwargs: datetime(2025, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(
+        social_repo,
+        "_catalog_oldest_stored_post_at",
+        lambda *_args, **_kwargs: datetime(2025, 1, 1, tzinfo=UTC),
+    )
 
     with pytest.raises(social_repo.SharedStageRuntimeError) as exc_info:
         social_repo._run_shared_account_posts_stage(
@@ -24635,7 +25022,10 @@ def test_run_shared_account_frontier_posts_stage_raises_when_oldest_stored_post_
         )
 
     assert exc_info.value.error_code == "catalog_incomplete"
-    assert exc_info.value.runtime_metadata["retrieval_meta"]["frontier_stop_reason"] == "catalog_oldest_stored_post_not_reached"
+    assert (
+        exc_info.value.runtime_metadata["retrieval_meta"]["frontier_stop_reason"]
+        == "catalog_oldest_stored_post_not_reached"
+    )
     assert frontier_updates[-1]["metadata_updates"]["frontier_stop_reason"] == "catalog_oldest_stored_post_not_reached"
 
 
@@ -24678,6 +25068,52 @@ def test_run_shared_account_posts_stage_raises_for_incomplete_single_runner_fall
     assert exc_info.value.error_code == "catalog_incomplete"
     assert exc_info.value.retryable is True
     assert exc_info.value.runtime_metadata["retrieval_meta"]["expected_total_posts"] == 16_454
+
+
+def test_run_shared_account_posts_stage_tiktok_transport_fallback_allows_source_total_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_scrape_shared_posts_for_account",
+        lambda **_kwargs: (
+            [{"source_id": "tiktok-1"}],
+            {
+                "retrieval_mode": "single_runner_fallback",
+                "posts_checked": 3277,
+                "total_posts": 3277,
+                "persist_counters": {"posts_upserted": 3277, "comments_upserted": 0},
+            },
+        ),
+    )
+
+    posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
+        run_id="33333333-3333-3333-3333-333333333333",
+        platform="tiktok",
+        source_scope="bravo",
+        account_handle="bravowwhl",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "tiktok",
+            "source_scope": "bravo",
+            "account": "bravowwhl",
+            "runner_strategy": "single_runner_fallback",
+            "recovery_reason": "tiktok_empty_body_transport_failure",
+            "discovery_total_posts": 3277,
+            "completion_target_posts": 3277,
+            "expected_total_posts": 4444,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        job_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert posts_count == 1
+    assert comments_count == 0
+    assert metadata["expected_total_posts"] == 4444
+    assert metadata["retrieval_meta"]["expected_total_posts"] == 4444
+    assert metadata["retrieval_meta"]["completion_target_posts"] == 3277
 
 
 @pytest.mark.parametrize("platform", ["twitter", "threads", "youtube", "facebook"])
@@ -24869,7 +25305,108 @@ def test_scrape_shared_tiktok_posts_single_runner_fallback_bypasses_partition_ap
     assert retrieval_meta["total_posts"] == 10_100
 
 
-def test_run_shared_account_discovery_stage_raises_for_tiktok_empty_first_page(
+def test_run_shared_account_discovery_stage_enqueues_tiktok_empty_body_transport_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_calls: list[dict[str, Any]] = []
+    best_known_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_shared_discovery_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected discovery recovery enqueue")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: create_calls.append(kwargs) or "shared-posts-fallback-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_expected_total_posts_from_config",
+        lambda *_args, **_kwargs: 3277,
+    )
+    monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        social_repo,
+        "_best_known_social_account_total_posts",
+        lambda _platform, _account, **kwargs: (best_known_calls.append(kwargs) or 4444),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_catalog_backfill_run_scheduler_lanes",
+        lambda _runner_count: ["lane-a", "lane-b"],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_discover_shared_account_cursor_partitions",
+        lambda **_kwargs: (
+            [],
+            {
+                "pages_scanned": 1,
+                "posts_checked": 0,
+                "total_posts": 3277,
+                "error_code": "tiktok_discovery_empty_first_page",
+                "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                "profile_snapshot": {"username": "bravowwhl", "total_posts": 3277},
+                "endpoint_responses": {
+                    "fetch_posts": {
+                        "failure_reason": "non_json_response",
+                        "http_status": 200,
+                        "content_type": "application/json",
+                        "content_length": 0,
+                        "request_id": "posts-logid",
+                    }
+                },
+            },
+        ),
+    )
+
+    posts_count, comments_count, metadata = social_repo._run_shared_account_discovery_stage(
+        run_id="33333333-3333-3333-3333-333333333333",
+        platform="tiktok",
+        source_scope="bravo",
+        account_handle="bravowwhl",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_DISCOVERY_STAGE,
+            "platform": "tiktok",
+            "source_scope": "bravo",
+            "account": "bravowwhl",
+            "runner_count": 4,
+            "runner_strategy": "full_history_cursor_breakpoints",
+            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "required_execution_backend": "modal",
+            "allow_local_dev_inline_bypass": True,
+            "recovery_depth": 0,
+        },
+        job_id="job-1",
+    )
+
+    assert posts_count == 0
+    assert comments_count == 0
+    assert metadata["fallback_direct_job_enqueued"] is True
+    assert metadata["recovery_reason"] == "tiktok_empty_body_transport_failure"
+    assert metadata["fallback_job_stage"] == social_repo.SHARED_ACCOUNT_POSTS_STAGE
+    assert metadata["partition_strategy"] is None
+    assert metadata["expected_total_posts"] == 4444
+    assert create_calls[0]["config"]["runner_strategy"] == "single_runner_fallback"
+    assert create_calls[0]["config"]["runner_count"] == 1
+    assert create_calls[0]["config"]["partition_strategy"] is None
+    assert create_calls[0]["config"]["required_execution_backend"] == "modal"
+    assert create_calls[0]["config"]["recovery_reason"] == "tiktok_empty_body_transport_failure"
+    assert create_calls[0]["config"]["recovery_depth"] == 1
+    assert create_calls[0]["config"]["expected_total_posts"] == 4444
+    assert create_calls[0]["config"]["completion_target_posts"] == 3277
+    assert create_calls[0]["max_attempts"] == 1
+    assert best_known_calls[0]["materialized_total_posts"] == 3277
+    assert best_known_calls[0]["catalog_total_posts"] == 0
+    assert best_known_calls[0]["allow_live_refresh"] is False
+
+
+def test_run_shared_account_discovery_stage_raises_for_tiktok_empty_first_page_when_not_empty_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
@@ -24893,6 +25430,80 @@ def test_run_shared_account_discovery_stage_raises_for_tiktok_empty_first_page(
                 "pages_scanned": 1,
                 "posts_checked": 0,
                 "total_posts": 3277,
+                "error_code": "tiktok_discovery_empty_first_page",
+                "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                "profile_snapshot": {"username": "bravowwhl", "total_posts": 3277},
+                "endpoint_responses": {
+                    "fetch_posts": {
+                        "failure_reason": "challenge_or_blocked",
+                        "http_status": 200,
+                        "content_type": "text/html",
+                        "content_length": 1248,
+                        "request_id": "posts-logid",
+                    }
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(social_repo.SharedStageRuntimeError) as exc_info:
+        social_repo._run_shared_account_discovery_stage(
+            run_id="33333333-3333-3333-3333-333333333333",
+            platform="tiktok",
+            source_scope="bravo",
+            account_handle="bravowwhl",
+            config={
+                "stage": social_repo.SHARED_ACCOUNT_DISCOVERY_STAGE,
+                "platform": "tiktok",
+                "source_scope": "bravo",
+                "account": "bravowwhl",
+                "runner_count": 4,
+                "runner_strategy": "full_history_cursor_breakpoints",
+                "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+                "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+                "allow_local_dev_inline_bypass": True,
+                "recovery_depth": 0,
+            },
+            job_id="job-1",
+        )
+
+    assert exc_info.value.error_code == "tiktok_discovery_empty_first_page"
+    assert exc_info.value.retryable is False
+    assert exc_info.value.runtime_metadata["retrieval_meta"]["endpoint_responses"]["fetch_posts"]["request_id"] == (
+        "posts-logid"
+    )
+
+
+def test_run_shared_account_discovery_stage_tiktok_empty_body_recovery_is_single_shot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("single-shot recovery should not requeue")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_expected_total_posts_from_config",
+        lambda *_args, **_kwargs: 3277,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_catalog_backfill_run_scheduler_lanes",
+        lambda _runner_count: ["lane-a", "lane-b"],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_discover_shared_account_cursor_partitions",
+        lambda **_kwargs: (
+            [],
+            {
+                "pages_scanned": 1,
+                "posts_checked": 0,
+                "total_posts": 3277,
+                "error_code": "tiktok_discovery_empty_first_page",
                 "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
                 "profile_snapshot": {"username": "bravowwhl", "total_posts": 3277},
                 "endpoint_responses": {
@@ -24924,15 +25535,12 @@ def test_run_shared_account_discovery_stage_raises_for_tiktok_empty_first_page(
                 "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
                 "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
                 "allow_local_dev_inline_bypass": True,
+                "recovery_depth": 1,
             },
             job_id="job-1",
         )
 
     assert exc_info.value.error_code == "tiktok_discovery_empty_first_page"
-    assert exc_info.value.retryable is False
-    assert exc_info.value.runtime_metadata["retrieval_meta"]["endpoint_responses"]["fetch_posts"]["request_id"] == (
-        "posts-logid"
-    )
 
 
 def test_run_shared_account_frontier_posts_stage_claims_frontier_and_completes(
@@ -25588,6 +26196,78 @@ def test_execute_shared_claimed_job_retries_on_retryable_shared_stage_error(
     assert finish_calls[0]["next_available_at"] is not None
     assert finish_calls[0]["metadata"]["retrieval_meta"]["expected_total_posts"] == 16_454
     assert finalize_calls == ["22222222-2222-2222-2222-222222222222:False"]
+
+
+def test_execute_shared_claimed_job_marks_tiktok_transport_fallback_terminal_when_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "run_id": "22222222-2222-2222-2222-222222222222",
+        "platform": "tiktok",
+        "source_scope": "bravo",
+        "attempt_count": 1,
+        "max_attempts": 1,
+        "config": {
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "tiktok",
+            "source_scope": "bravo",
+            "account": "bravowwhl",
+            "runner_strategy": "single_runner_fallback",
+            "partition_strategy": None,
+            "recovery_reason": "tiktok_empty_body_transport_failure",
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        "metadata": {"dispatch": {"dispatch_backend": "modal"}},
+    }
+    finish_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        social_repo,
+        "_run_shared_account_posts_stage",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            social_repo.SharedStageRuntimeError(
+                "catalog incomplete",
+                error_code="catalog_incomplete",
+                retryable=True,
+                runtime_metadata={"retrieval_meta": {"posts_checked": 3, "expected_total_posts": 3277}},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_shared_discovery_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("single-shot fallback must not auto-requeue")),
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda sql, params=None: (
+            {"items_found": 0, "metadata": {"activity": {"phase": "shared_account_posts"}}}
+            if "select items_found, metadata from social.scrape_jobs" in " ".join(str(sql).split()).lower()
+            else {}
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_finish_job",
+        lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}),
+    )
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        social_repo,
+        "_load_current_job_row",
+        lambda _job_id: {"id": "11111111-1111-1111-1111-111111111111", "status": "failed"},
+    )
+
+    payload = social_repo._execute_shared_claimed_job(job, worker_id="modal:test")
+
+    assert payload["status"] == "failed"
+    assert finish_calls[0]["status"] == "failed"
+    assert finish_calls[0]["last_error_code"] == "catalog_incomplete"
+    assert finish_calls[0]["next_available_at"] is None
+    assert finish_calls[0]["metadata"]["retryable"] is False
+    assert "retry_requeue" not in finish_calls[0]["metadata"]
 
 
 def test_execute_shared_claimed_job_escalates_retry_to_frontier_recovery(
