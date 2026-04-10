@@ -208,6 +208,7 @@ def test_aggregate_parent_status_returns_completed_when_all_children_completed()
         "fetch_one",
         return_value={
             "failed_count": 0,
+            "cancelled_count": 0,
             "active_count": 0,
             "pending_count": 0,
             "completed_count": 3,
@@ -227,6 +228,7 @@ def test_aggregate_parent_status_returns_failed_when_any_child_failed() -> None:
         "fetch_one",
         return_value={
             "failed_count": 1,
+            "cancelled_count": 0,
             "active_count": 0,
             "pending_count": 0,
             "completed_count": 2,
@@ -246,10 +248,31 @@ def test_aggregate_parent_status_returns_running_when_any_child_running() -> Non
         "fetch_one",
         return_value={
             "failed_count": 0,
+            "cancelled_count": 0,
             "active_count": 1,
             "pending_count": 1,
             "completed_count": 1,
             "total_count": 3,
+        },
+    ):
+        status = admin_operations.aggregate_parent_status(parent_id)
+
+    assert status == "running"
+
+
+def test_aggregate_parent_status_returns_running_when_children_are_only_pending() -> None:
+    parent_id = str(uuid4())
+
+    with patch.object(
+        admin_operations.pg,
+        "fetch_one",
+        return_value={
+            "failed_count": 0,
+            "cancelled_count": 0,
+            "active_count": 0,
+            "pending_count": 2,
+            "completed_count": 0,
+            "total_count": 2,
         },
     ):
         status = admin_operations.aggregate_parent_status(parent_id)
@@ -265,6 +288,7 @@ def test_aggregate_parent_status_returns_pending_when_no_children() -> None:
         "fetch_one",
         return_value={
             "failed_count": 0,
+            "cancelled_count": 0,
             "active_count": 0,
             "pending_count": 0,
             "completed_count": 0,
@@ -285,7 +309,7 @@ def test_aggregate_parent_status_returns_pending_when_db_returns_none() -> None:
     assert status == "pending"
 
 
-def test_aggregate_parent_status_failed_takes_priority_over_running() -> None:
+def test_aggregate_parent_status_remains_running_until_all_children_are_terminal() -> None:
     parent_id = str(uuid4())
 
     with patch.object(
@@ -302,7 +326,7 @@ def test_aggregate_parent_status_failed_takes_priority_over_running() -> None:
     ):
         status = admin_operations.aggregate_parent_status(parent_id)
 
-    assert status == "failed"
+    assert status == "running"
 
 
 def test_aggregate_parent_status_returns_cancelled_when_any_child_cancelled() -> None:

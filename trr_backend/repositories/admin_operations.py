@@ -1324,7 +1324,7 @@ def get_sub_operations(parent_operation_id: str) -> list[dict[str, Any]]:
 
 
 def aggregate_parent_status(parent_operation_id: str) -> str:
-    """Derive parent status from children: failed > cancelled > running/cancelling > pending > completed."""
+    """Return a terminal parent status only once every child is terminal."""
     row = pg.fetch_one(
         """
         select
@@ -1341,14 +1341,12 @@ def aggregate_parent_status(parent_operation_id: str) -> str:
     )
     if not row or int(row.get("total_count") or 0) == 0:
         return "pending"
+    if int(row.get("active_count") or 0) > 0 or int(row.get("pending_count") or 0) > 0:
+        return "running"
     if int(row.get("failed_count") or 0) > 0:
         return "failed"
     if int(row.get("cancelled_count") or 0) > 0:
         return "cancelled"
-    if int(row.get("active_count") or 0) > 0:
-        return "running"
-    if int(row.get("pending_count") or 0) > 0:
-        return "pending"
     return "completed"
 
 

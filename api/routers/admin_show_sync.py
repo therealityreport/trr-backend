@@ -75,7 +75,10 @@ from trr_backend.pipeline.admin_operations import (
     operation_stream_response_for_parent,
     start_operation_for_stream,
 )
-from trr_backend.pipeline.show_refresh_orchestrator import ShowRefreshOrchestrator
+from trr_backend.pipeline.show_refresh_orchestrator import (
+    ShowRefreshOrchestrator,
+    build_show_refresh_sub_operation_request_payload,
+)
 from trr_backend.repositories import admin_operations as admin_operations_repo
 from trr_backend.repositories import brand_families
 from trr_backend.repositories.media_assets import update_asset_with_mirror_result
@@ -4417,12 +4420,24 @@ async def retry_refresh_target(
         return JSONResponse(status_code=400, content={"error": "parent_operation_id is required"})
 
     request_id = (request.headers.get("x-trr-request-id") or "").strip() or None
+    parent_operation = admin_operations_repo.get_operation(parent_operation_id)
+    if not parent_operation:
+        return JSONResponse(status_code=404, content={"error": "parent operation not found"})
+
+    parent_request_payload = (
+        parent_operation.get("request_payload") if isinstance(parent_operation.get("request_payload"), dict) else {}
+    )
 
     child = admin_operations_repo.create_sub_operation(
         parent_operation_id=parent_operation_id,
         operation_type="admin_show_refresh",
         refresh_target=target,
-        request_payload={"show_id": show_id, "targets": [target]},
+        request_payload=build_show_refresh_sub_operation_request_payload(
+            parent_request_payload=parent_request_payload,
+            refresh_target=target,
+            show_id=show_id,
+            request_id=request_id,
+        ),
         initiated_by=request_id,
         request_id=request_id,
     )

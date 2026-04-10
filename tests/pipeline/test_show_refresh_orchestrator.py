@@ -142,10 +142,47 @@ class TestShowRefreshOrchestratorCreateOperations:
         calls = mock_admin_ops.create_sub_operation.call_args_list
         # First call: show_core
         assert calls[0].kwargs["refresh_target"] == "show_core"
-        assert calls[0].kwargs["request_payload"]["targets"] == ["show_core"]
+        assert calls[0].kwargs["request_payload"]["payload"]["targets"] == ["show_core"]
         # Second call: bravo
         assert calls[1].kwargs["refresh_target"] == "bravo"
-        assert calls[1].kwargs["request_payload"]["targets"] == ["bravo"]
+        assert calls[1].kwargs["request_payload"]["payload"]["targets"] == ["bravo"]
+
+    @patch("trr_backend.pipeline.show_refresh_orchestrator.admin_operations")
+    def test_create_operations_preserves_payload_flags_on_child_requests(self, mock_admin_ops):
+        parent_op = {"id": 1, "operation_type": "admin_show_refresh", "status": "pending"}
+        mock_admin_ops.create_or_attach_operation.return_value = (parent_op, False)
+        mock_admin_ops.create_sub_operation.side_effect = [_make_sub_op("cast_media", 10)]
+
+        orch = ShowRefreshOrchestrator(
+            show_id=42,
+            targets=["cast_media"],
+            request_payload={
+                "show_id": "42",
+                "request_id": "req-1",
+                "initiated_by": "admin-1",
+                "payload": {
+                    "targets": ["show_core", "cast_media"],
+                    "skip_s3": True,
+                    "verbose": True,
+                    "reload_schema_cache": True,
+                    "force_new_operation": False,
+                },
+            },
+        )
+
+        orch.create_operations()
+
+        child_payload = mock_admin_ops.create_sub_operation.call_args.kwargs["request_payload"]
+        assert child_payload["show_id"] == "42"
+        assert child_payload["request_id"] == "req-1"
+        assert child_payload["initiated_by"] == "admin-1"
+        assert child_payload["payload"] == {
+            "targets": ["cast_media"],
+            "skip_s3": True,
+            "verbose": True,
+            "reload_schema_cache": True,
+            "force_new_operation": False,
+        }
 
 
 class TestShowRefreshOrchestratorDispatchWave:
@@ -184,16 +221,15 @@ class TestShowRefreshOrchestratorDispatchWave:
 
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=False)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=False)
-    def test_dispatch_wave_warns_when_no_producer_and_no_modal(
+    def test_dispatch_wave_raises_when_no_producer_and_no_modal(
         self, mock_supports, mock_remote
     ):
         orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core"])
         orch._parent_id = "1"
         sub_ops = [_make_sub_op("show_core", 10)]
 
-        count = orch.dispatch_wave(sub_ops)  # no producer_factory
-
-        assert count == 0
+        with pytest.raises(RuntimeError, match="Cannot execute sub-operation"):
+            orch.dispatch_wave(sub_ops)  # no producer_factory
 
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=True)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=True)

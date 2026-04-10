@@ -7385,6 +7385,75 @@ def test_dismiss_social_account_catalog_run_allows_progress_derived_failed_run(m
     assert invalidate_calls == [True]
 
 
+def test_dismiss_social_account_catalog_run_allows_completion_gap_failed_progress_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidate_calls: list[bool] = []
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object] | None = None) -> dict[str, Any] | None:
+        normalized_sql = " ".join(str(sql).split()).lower()
+        if "from social.scrape_runs" in normalized_sql and "pipeline_ingest_mode" in normalized_sql:
+            return {
+                "id": "run-completed-gap-1",
+                "status": "completed",
+                "config": {
+                    "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+                    "platforms": ["tiktok"],
+                    "accounts_override": ["bravowwhl"],
+                },
+            }
+        if "update social.scrape_runs as r" in normalized_sql:
+            captured["sql"] = sql
+            captured["params"] = list(params or [])
+            return {
+                "id": "run-completed-gap-1",
+                "status": "completed",
+                "dismissed_at": "2026-04-09T23:10:00+00:00",
+            }
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_load_social_account_catalog_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-discovery",
+                "status": "completed",
+                "platform": "tiktok",
+                "job_type": social_repo.SHARED_ACCOUNT_DISCOVERY_JOB_TYPE,
+                "config": {"account": "bravowwhl", "stage": social_repo.SHARED_ACCOUNT_DISCOVERY_STAGE},
+                "metadata": {},
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(
+        social_repo,
+        "get_social_account_catalog_run_progress",
+        lambda *_args, **_kwargs: {"run_status": "failed", "completion_gap_reason": "fetch_incomplete"},
+    )
+    monkeypatch.setattr(social_repo, "_invalidate_queue_status_cache", lambda: invalidate_calls.append(True))
+
+    payload = social_repo.dismiss_social_account_catalog_run(
+        platform="tiktok",
+        account_handle="bravowwhl",
+        run_id="run-completed-gap-1",
+        dismissed_by="admin@test.local",
+    )
+
+    assert payload == {
+        "run_id": "run-completed-gap-1",
+        "status": "failed",
+        "dismissed": True,
+        "dismissed_at": "2026-04-09T23:10:00+00:00",
+    }
+    normalized_sql = " ".join(str(captured["sql"]).split()).lower()
+    assert "failure_dismissed_at" in normalized_sql
+    assert invalidate_calls == [True]
+
+
 def test_upsert_shared_catalog_instagram_post_uses_source_id_conflict_key(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 

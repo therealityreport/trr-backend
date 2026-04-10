@@ -52183,6 +52183,11 @@ def dismiss_social_account_catalog_run(
     )
     status = _derive_run_progress_status(stored_status, job_rows)
     if status not in {"failed", "cancelled"}:
+        progress_snapshot = get_social_account_catalog_run_progress(platform, account_handle, run_id)
+        progress_status = str(progress_snapshot.get("run_status") or "").strip().lower()
+        if progress_status in {"failed", "cancelled"}:
+            status = progress_status
+    if status not in {"failed", "cancelled"}:
         raise ValueError("Only failed or cancelled catalog runs can be dismissed.")
     run_config = _metadata_dict(run_row.get("config"))
     dismissed_at = str(run_config.get(_RUN_FAILURE_DISMISSED_AT_KEY) or "").strip()
