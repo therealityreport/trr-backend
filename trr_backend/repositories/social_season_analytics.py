@@ -882,10 +882,28 @@ def _shared_account_recovery_status_from_job_status(status: str | None, *, block
     return "idle"
 
 
+def _tiktok_discovery_empty_body_transport_failure(discovery_meta: Mapping[str, Any] | None) -> bool:
+    metadata = _metadata_dict(discovery_meta)
+    error_code = str(metadata.get("error_code") or "").strip().lower()
+    if error_code and error_code != "tiktok_discovery_empty_first_page":
+        return False
+    fetch_posts = _metadata_dict(_metadata_dict(metadata.get("endpoint_responses")).get("fetch_posts"))
+    failure_reason = str(fetch_posts.get("failure_reason") or "").strip().lower()
+    if failure_reason not in {"non_json_response", "empty_response"}:
+        return False
+    if _normalize_non_negative_int(fetch_posts.get("content_length")) > 0:
+        return False
+    return _normalize_non_negative_int(metadata.get("posts_checked")) <= 0
+
+
 def _shared_account_recovery_next_stage(stage: str | None, reason: str | None) -> str | None:
     normalized_stage = str(stage or "").strip().lower()
     normalized_reason = str(reason or "").strip().lower()
-    if normalized_reason in {"no_partitions_discovered", "initial_empty_page"}:
+    if normalized_reason in {
+        "no_partitions_discovered",
+        "initial_empty_page",
+        "tiktok_empty_body_transport_failure",
+    }:
         if normalized_stage == SHARED_ACCOUNT_DISCOVERY_STAGE:
             return SHARED_ACCOUNT_POSTS_STAGE
     return None
@@ -931,13 +949,6 @@ def _shared_account_recovery_payload(
     job_rows: Sequence[Mapping[str, Any]],
     now: datetime,
 ) -> dict[str, Any] | None:
-    if any(
-        _shared_account_job_stage(row) == SHARED_ACCOUNT_POSTS_STAGE
-        and str(row.get("status") or "").strip().lower() in _RUN_PROGRESS_ACTIVE_JOB_STATUSES
-        for row in job_rows
-    ):
-        return None
-
     job_by_id = {str(row.get("id") or "").strip(): row for row in job_rows if str(row.get("id") or "").strip()}
 
     def _sort_epoch(row: Mapping[str, Any]) -> float:
@@ -9679,6 +9690,7 @@ def _create_job(
     worker_id: str | None = None,
     preclaim: bool = False,
     available_at: datetime | None = None,
+    max_attempts: int | None = None,
     conn: Any | None = None,
     track_run_counters: bool = True,
 ) -> str:
@@ -9687,10 +9699,35 @@ def _create_job(
         effective_status = "running"
     config_payload = _metadata_dict(config)
     config_payload.setdefault("required_runtime_version", dict(_resolve_runtime_version_stamp()))
+    requested_max_attempts = max(1, int(max_attempts)) if max_attempts is not None else None
+    supports_queue_fields = bool(_scrape_jobs_features().get("has_queue_fields"))
+    insert_max_attempts_sql = ", max_attempts" if (requested_max_attempts is not None and supports_queue_fields) else ""
+    value_max_attempts_sql = ", %s" if (requested_max_attempts is not None and supports_queue_fields) else ""
+    insert_params: list[Any] = [
+        run_id,
+        platform,
+        job_type,
+        _json_dumps(config_payload),
+        effective_status,
+        _coerce_dt(available_at),
+        priority,
+        context.show_id if context is not None else None,
+        context.season_id if context is not None else None,
+        source_scope,
+        initiated_by,
+        _json_dumps(_job_runtime_metadata(stage)),
+        worker_id,
+        preclaim,
+        preclaim,
+        preclaim,
+        preclaim,
+    ]
+    if requested_max_attempts is not None and supports_queue_fields:
+        insert_params.append(requested_max_attempts)
     with pg.db_cursor(conn=conn) as cur:
         row = pg.fetch_one_with_cursor(
             cur,
-            """
+            f"""
         insert into social.scrape_jobs (
           run_id,
           platform,
@@ -9709,6 +9746,7 @@ def _create_job(
           claimed_at,
           heartbeat_at,
           attempt_count
+          {insert_max_attempts_sql}
         )
         values (
           %s,
@@ -9728,28 +9766,11 @@ def _create_job(
           case when %s then now() else null end,
           case when %s then now() else null end,
           case when %s then 1 else 0 end
+          {value_max_attempts_sql}
         )
         returning id::text
         """,
-            [
-                run_id,
-                platform,
-                job_type,
-                _json_dumps(config_payload),
-                effective_status,
-                _coerce_dt(available_at),
-                priority,
-                context.show_id if context is not None else None,
-                context.season_id if context is not None else None,
-                source_scope,
-                initiated_by,
-                _json_dumps(_job_runtime_metadata(stage)),
-                worker_id,
-                preclaim,
-                preclaim,
-                preclaim,
-                preclaim,
-            ],
+            insert_params,
         )
     if not row:
         raise RuntimeError("Failed to create scrape job")
@@ -30612,6 +30633,84 @@ def _run_shared_account_discovery_stage(
         # more jobs that will also fail.
         if discovery_checked == 0:
             if platform == "tiktok":
+                if (
+                    _tiktok_discovery_empty_body_transport_failure(discovery_meta)
+                    and recovery_depth <= 0
+                ):
+                    recovery_expected_total_posts = max(
+                        expected_total_posts,
+                        _best_known_social_account_total_posts(
+                            platform,
+                            account_handle,
+                            materialized_total_posts=expected_total_posts,
+                            catalog_total_posts=_shared_catalog_total_posts(platform, account_handle),
+                            allow_live_refresh=False,
+                        ),
+                    )
+                    fallback_job_id = _create_job(
+                        None,
+                        run_id=run_id,
+                        platform=platform,
+                        source_scope=source_scope,
+                        job_type=SHARED_ACCOUNT_POSTS_JOB_TYPE,
+                        stage=SHARED_ACCOUNT_POSTS_STAGE,
+                        config={
+                            "stage": SHARED_ACCOUNT_POSTS_STAGE,
+                            "platform": platform,
+                            "source_scope": source_scope,
+                            "account": account_handle,
+                            "shared_account_source_id": config.get("shared_account_source_id"),
+                            "pipeline_ingest_mode": config.get("pipeline_ingest_mode"),
+                            "partition_strategy": None,
+                            "runner_strategy": "single_runner_fallback",
+                            "runner_count": 1,
+                            "max_posts_per_target": 0,
+                            "discovery_total_posts": discovery_meta.get("total_posts"),
+                            "expected_total_posts": recovery_expected_total_posts,
+                            "completion_target_posts": _normalize_non_negative_int(
+                                discovery_meta.get("total_posts")
+                            )
+                            or expected_total_posts
+                            or recovery_expected_total_posts,
+                            "discovery_fallback_reason": "tiktok_empty_body_transport_failure",
+                            "recovery_reason": "tiktok_empty_body_transport_failure",
+                            "profile_snapshot": profile_snapshot,
+                            "required_worker_lane": config.get("required_worker_lane"),
+                            "required_execution_backend": config.get("required_execution_backend"),
+                            "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
+                            "recovery_depth": recovery_depth + 1,
+                        },
+                        initiated_by=None,
+                        status="queued" if is_queue_enabled() else "pending",
+                        priority=100,
+                        worker_id=None,
+                        preclaim=False,
+                        max_attempts=1,
+                    )
+                    activity["phase"] = "discovery_transport_recovery_enqueued"
+                    activity["queued_jobs"] = 1
+                    _flush_progress(force=True)
+                    return (
+                        0,
+                        0,
+                        {
+                            "stage": SHARED_ACCOUNT_DISCOVERY_STAGE,
+                            "platform": platform,
+                            "account": account_handle,
+                            "partition_strategy": None,
+                            "discovered_partition_count": 0,
+                            "fallback_direct_job_enqueued": True,
+                            "fallback_job_id": fallback_job_id,
+                            "fallback_job_stage": SHARED_ACCOUNT_POSTS_STAGE,
+                            "recovery_reason": "tiktok_empty_body_transport_failure",
+                            "retrieval_meta": discovery_meta,
+                            "expected_total_posts": recovery_expected_total_posts,
+                            "activity": dict(activity),
+                            "pipeline_ingest_mode": str(
+                                config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+                            ),
+                        },
+                    )
                 activity["phase"] = "shared_account_discovery_failed"
                 message = (
                     f"TikTok returned no posts for @{account_handle} on the first page. "
@@ -31360,15 +31459,30 @@ def _run_shared_account_posts_stage(
             account_handle=account_handle,
         ),
     )
+    completion_target_posts = expected_total_posts
+    configured_completion_target_posts = _normalize_non_negative_int(config.get("completion_target_posts"))
+    if configured_completion_target_posts > 0:
+        completion_target_posts = configured_completion_target_posts
     if (
         str(config.get("runner_strategy") or "").strip().lower() == "single_runner_fallback"
-        and expected_total_posts > 0
-        and max(scraped_posts, saved_posts) < expected_total_posts
+        and str(config.get("recovery_reason") or "").strip().lower() == "tiktok_empty_body_transport_failure"
+    ):
+        observed_current_total_posts = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
+        if observed_current_total_posts > 0:
+            completion_target_posts = (
+                min(completion_target_posts, observed_current_total_posts)
+                if completion_target_posts > 0
+                else observed_current_total_posts
+            )
+    if (
+        str(config.get("runner_strategy") or "").strip().lower() == "single_runner_fallback"
+        and completion_target_posts > 0
+        and max(scraped_posts, saved_posts) < completion_target_posts
     ):
         raise SharedStageRuntimeError(
             (
                 f"Shared-account fallback ended early for @{account_handle}: "
-                f"checked {scraped_posts} of {expected_total_posts} discovered posts"
+                f"checked {scraped_posts} of {completion_target_posts} discovered posts"
             ),
             error_code="catalog_incomplete",
             retryable=True,
@@ -31376,6 +31490,7 @@ def _run_shared_account_posts_stage(
                 "retrieval_meta": {
                     **dict(retrieval_meta or {}),
                     "expected_total_posts": expected_total_posts,
+                    "completion_target_posts": completion_target_posts,
                     "observed_posts_checked": scraped_posts,
                     "observed_posts_saved": saved_posts,
                 }
@@ -31390,6 +31505,7 @@ def _run_shared_account_posts_stage(
     elif expected_total_posts > 0:
         activity["total_posts"] = expected_total_posts
     retrieval_meta["expected_total_posts"] = expected_total_posts or None
+    retrieval_meta["completion_target_posts"] = completion_target_posts or None
     retrieval_meta["activity"] = dict(activity)
     _flush_progress(force=True)
     source_ids = sorted(
@@ -33990,6 +34106,7 @@ def ingest_shared_accounts(
     initiated_by: str | None = None,
     inline_worker_id: str | None = None,
     allow_local_dev_inline_bypass: bool = False,
+    execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     resume_frontier_cursor: str | None = None,
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
     catalog_action: str | None = None,
@@ -33999,6 +34116,14 @@ def ingest_shared_accounts(
     if source_scope not in SUPPORTED_SCOPES:
         raise ValueError(f"Unsupported source scope: {source_scope}")
     normalized_ingest_mode = str(pipeline_ingest_mode or SHARED_ACCOUNT_ASYNC_INGEST_MODE).strip().lower()
+    normalized_execution_preference = str(execution_preference or "auto").strip().lower() or "auto"
+    if normalized_execution_preference not in {"auto", "prefer_local_inline"}:
+        normalized_execution_preference = "auto"
+    if normalized_execution_preference == "prefer_local_inline" and not allow_local_dev_inline_bypass:
+        raise SocialIngestValidationError(
+            "SOCIAL_LOCAL_INLINE_PREFERENCE_UNAVAILABLE",
+            "execution_preference=prefer_local_inline requires an approved local inline execution bypass.",
+        )
     if normalized_ingest_mode not in SUPPORTED_PIPELINE_INGEST_MODES:
         raise ValueError(f"Unsupported shared ingest mode: {pipeline_ingest_mode}")
     normalized_platforms = set(_resolve_requested_platforms(platforms)) if platforms else set(SUPPORTED_PLATFORMS)
@@ -34039,12 +34164,22 @@ def ingest_shared_accounts(
 
     expected_total_posts_by_account: dict[str, int] = {}
     catalog_total_posts_by_account: dict[str, int] = {}
+    force_tiktok_local_inline_source_keys: set[tuple[str, str]] = set()
     modal_executor_required = False
     for row in sources:
         platform = _normalize_platform_name(row.get("platform"))
         account_handle = _normalize_account_handle(row.get("account_handle"))
         if not platform or not account_handle:
             continue
+        source_key = (platform, account_handle)
+        if (
+            platform == "tiktok"
+            and normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+            and full_history_partition_enabled
+            and bool(allow_local_dev_inline_bypass)
+            and normalized_execution_preference == "prefer_local_inline"
+        ):
+            force_tiktok_local_inline_source_keys.add(source_key)
         if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
             catalog_total_posts = _shared_catalog_total_posts(platform, account_handle)
             expected_total_posts = _best_known_social_account_total_posts(
@@ -34087,6 +34222,25 @@ def ingest_shared_accounts(
     catalog_runner_count = 1
     catalog_runner_strategy = "single_runner"
     catalog_partition_strategy: str | None = None
+    partition_eligible_sources = [
+        row
+        for row in sources
+        if (
+            (_normalize_platform_name(row.get("platform")) or "")
+            and (
+                _normalize_account_handle(row.get("account_handle"))
+                or str(row.get("account_handle") or "").strip()
+            )
+            and (
+                (
+                    _normalize_platform_name(row.get("platform")) or "",
+                    _normalize_account_handle(row.get("account_handle"))
+                    or str(row.get("account_handle") or "").strip(),
+                )
+                not in force_tiktok_local_inline_source_keys
+            )
+        )
+    ]
     catalog_window_shard_days_by_platform: dict[str, int] = {}
     catalog_total_shards_by_platform: dict[str, int] = {}
     catalog_source_shards: dict[tuple[str, str], list[IngestTimeShard]] = {}
@@ -34123,7 +34277,7 @@ def ingest_shared_accounts(
             catalog_runner_count = CATALOG_BACKFILL_MULTI_RUNNER_COUNT
             catalog_runner_strategy = "adaptive_dual_runner"
             catalog_partition_strategy = CATALOG_FULL_HISTORY_DATE_WINDOW_PARTITION_STRATEGY
-    elif full_history_partition_enabled:
+    elif full_history_partition_enabled and partition_eligible_sources:
         if all(
             _shared_account_prefers_frontier_strategy(
                 platform=row.get("platform"),
@@ -34145,15 +34299,21 @@ def ingest_shared_accounts(
                     )
                 ),
             )
-            for row in sources
+            for row in partition_eligible_sources
         ):
             catalog_runner_count = CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT
             catalog_runner_strategy = CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
             catalog_partition_strategy = CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
-        elif any(_catalog_full_history_partition_supported(row.get("platform")) for row in sources):
+        elif any(
+            _catalog_full_history_partition_supported(row.get("platform")) for row in partition_eligible_sources
+        ):
             catalog_runner_count = CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT
             catalog_runner_strategy = "full_history_cursor_breakpoints"
             catalog_partition_strategy = CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
+    if force_tiktok_local_inline_source_keys and not partition_eligible_sources:
+        catalog_runner_count = 1
+        catalog_runner_strategy = "single_runner_fallback"
+        catalog_partition_strategy = None
 
     run_config = {
         "pipeline_ingest_mode": normalized_ingest_mode,
@@ -34173,6 +34333,7 @@ def ingest_shared_accounts(
         ),
         "required_execution_backend": "modal" if effective_modal_executor_required else None,
         "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
+        "execution_preference": normalized_execution_preference,
         "resume_frontier_cursor": str(resume_frontier_cursor or "").strip() or None,
         "catalog_action": normalized_catalog_action,
         "catalog_action_scope": normalized_catalog_action_scope,
@@ -34188,6 +34349,7 @@ def ingest_shared_accounts(
     )
     initial_job_status = "queued" if is_queue_enabled() else "pending"
     job_ids: list[str] = []
+    discovery_jobs_created = False
     sorted_sources = sorted(
         sources,
         key=lambda row: (
@@ -34291,6 +34453,7 @@ def ingest_shared_accounts(
             )
             if not platform or not account_handle:
                 continue
+            force_tiktok_local_inline_direct = (platform, account_handle) in force_tiktok_local_inline_source_keys
             job_config = {
                 "stage": SHARED_ACCOUNT_POSTS_STAGE,
                 "platform": platform,
@@ -34322,9 +34485,15 @@ def ingest_shared_accounts(
             }
             if normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
                 job_config["max_posts_per_target"] = 0
+            if force_tiktok_local_inline_direct:
+                job_config["runner_strategy"] = "single_runner_fallback"
+                job_config["runner_count"] = 1
+                job_config["partition_strategy"] = None
+                job_config["required_execution_backend"] = None
             if (
                 normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
                 and full_history_partition_enabled
+                and not force_tiktok_local_inline_direct
                 and (
                     _shared_account_catalog_frontier_supported(
                         platform=platform,
@@ -34380,6 +34549,7 @@ def ingest_shared_accounts(
                     worker_id=inline_worker_id,
                     priority=max(1, int(row.get("scrape_priority") or 100)),
                 )
+                discovery_jobs_created = True
             else:
                 job_id = _create_job(
                     None,
@@ -34415,6 +34585,7 @@ def ingest_shared_accounts(
                         if (
                             normalized_ingest_mode == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
                             and full_history_partition_enabled
+                            and discovery_jobs_created
                         )
                         else SHARED_ACCOUNT_POSTS_STAGE
                     ): {
@@ -36110,10 +36281,10 @@ def _derive_catalog_run_state(
         if normalized_status == "failed":
             return "failed"
         return "completed"
-    if normalized_status == "failed":
-        return "failed"
     if _catalog_run_recovery_is_active(recovery):
         return "recovering"
+    if normalized_status == "failed":
+        return "failed"
     discovery_stage = _metadata_dict(stages_payload.get(SHARED_ACCOUNT_DISCOVERY_STAGE))
     posts_stage = _metadata_dict(stages_payload.get(SHARED_ACCOUNT_POSTS_STAGE))
     if _normalize_non_negative_int(discovery_stage.get("jobs_active")) > 0 or (
@@ -36300,6 +36471,24 @@ def _build_catalog_run_progress_alerts(
             code="no_authenticated_modal_workers",
             severity="error",
             message="Authenticated Modal Instagram workers were unavailable for the empty-page retry.",
+            execution_backend=str(recovery_payload.get("execution_backend") or "").strip().lower() or None,
+        )
+    if (
+        normalized_platform == "tiktok"
+        and recovery_reason == "tiktok_empty_body_transport_failure"
+        and recovery_status == "failed"
+    ):
+        _append_alert(
+            alerts,
+            code="tiktok_direct_fallback_failed",
+            severity="error",
+            message=(
+                "TikTok direct fallback failed after discovery returned an empty transport body. "
+                "The run is terminal until a new recovery attempt is started manually."
+            ),
+            stage=str(recovery_payload.get("stage") or "").strip().lower() or None,
+            error_code=last_error_code,
+            error_message=str(payload.get("last_error_message") or "").strip() or None,
             execution_backend=str(recovery_payload.get("execution_backend") or "").strip().lower() or None,
         )
 
@@ -51811,6 +52000,7 @@ def start_social_account_catalog_backfill(
     initiated_by: str | None = None,
     inline_worker_id: str | None = None,
     allow_local_dev_inline_bypass: bool = False,
+    execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     resume_frontier_cursor: str | None = None,
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
     catalog_action: str | None = None,
@@ -51818,6 +52008,9 @@ def start_social_account_catalog_backfill(
 ) -> dict[str, Any]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_execution_preference = str(execution_preference or "auto").strip().lower() or "auto"
+    if normalized_execution_preference not in {"auto", "prefer_local_inline"}:
+        normalized_execution_preference = "auto"
     action_seed = resolve_social_account_catalog_action_seed(
         date_start=date_start,
         date_end=date_end,
@@ -51920,6 +52113,7 @@ def start_social_account_catalog_backfill(
                 initiated_by=initiated_by,
                 inline_worker_id=inline_worker_id,
                 allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
+                execution_preference=normalized_execution_preference,
                 resume_frontier_cursor=normalized_resume_cursor,
                 resume_frontier_snapshot=normalized_resume_snapshot,
                 catalog_action=normalized_catalog_action,

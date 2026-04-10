@@ -948,6 +948,81 @@ def test_post_social_account_catalog_backfill_prefers_modal_when_available_even_
     assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is False
 
 
+def test_post_social_account_catalog_backfill_prefer_local_inline_forces_inline_when_available(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("api.routers.socials._is_local_or_dev_runtime", return_value=True),
+        patch("api.routers.socials._start_runs_in_background") as mocked_background,
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ) as worker_guard,
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill",
+            return_value={
+                "run_id": "catalog-run-inline-preference-1",
+                "status": "pending",
+                "ingest_mode": "shared_account_catalog_backfill",
+            },
+        ) as mocked_start,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/tiktok/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history", "execution_preference": "prefer_local_inline"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "catalog-run-inline-preference-1"
+    assert body["status"] == "started"
+    assert body["execution_mode"] == "inline"
+    assert body["execution_mode_canonical"] == "inline_fallback"
+    assert body["queue_enabled"] is False
+    assert body["used_inline_fallback"] is True
+    worker_guard.assert_not_called()
+    mocked_background.assert_called_once()
+    assert mocked_start.call_args.kwargs["inline_worker_id"] == "api-background:catalog:tiktok"
+    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    assert mocked_start.call_args.kwargs["execution_preference"] == "prefer_local_inline"
+
+
+def test_post_social_account_catalog_backfill_prefer_local_inline_returns_validation_error_when_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch("api.routers.socials._is_local_or_dev_runtime", return_value=False),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ) as worker_guard,
+        patch("trr_backend.repositories.social_season_analytics.start_social_account_catalog_backfill") as mocked_start,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/tiktok/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history", "execution_preference": "prefer_local_inline"},
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "SOCIAL_LOCAL_INLINE_PREFERENCE_UNAVAILABLE"
+    assert detail["execution_preference"] == "prefer_local_inline"
+    worker_guard.assert_not_called()
+    mocked_start.assert_not_called()
+
+
 def test_post_social_account_catalog_backfill_allows_local_inline_fallback_when_modal_unavailable(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -5143,8 +5218,14 @@ def test_get_live_status_aggregates_health_queue_and_operations(
         "active_operations": [],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_queue_status", return_value=queue_status) as mocked_queue:
-        with patch("trr_backend.repositories.admin_operations.get_admin_operations_health", return_value=operations_health) as mocked_ops:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_queue_status",
+        return_value=queue_status,
+    ) as mocked_queue:
+        with patch(
+            "trr_backend.repositories.admin_operations.get_admin_operations_health",
+            return_value=operations_health,
+        ) as mocked_ops:
             response = client.get(
                 "/api/v1/admin/socials/live-status",
                 headers={"Authorization": f"Bearer {token}"},
