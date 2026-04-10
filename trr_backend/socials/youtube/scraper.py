@@ -1852,10 +1852,18 @@ class YouTubeScraper:
                 in_range_hits += int(page_stats.get("in_range_hits") or 0)
                 timestamp_unknown_count += int(page_stats.get("timestamp_unknown") or 0)
 
+                # Treat pages with only before-window and/or undated items as
+                # "before window" for capping.  Without this, shorts pages full
+                # of undated items (timestamp_unknown) never count toward the
+                # pre_window_page_cap and the scraper paginates indefinitely.
+                _has_window = bool(page_stats.get("window_candidate_items"))
+                _has_after = bool(page_stats.get("after_window_items"))
+                _has_before = bool(page_stats.get("before_window_items"))
+                _has_unknown = bool(page_stats.get("timestamp_unknown"))
                 page_before_only = (
-                    bool(page_stats.get("before_window_items"))
-                    and not bool(page_stats.get("window_candidate_items"))
-                    and not bool(page_stats.get("after_window_items"))
+                    (_has_before or _has_unknown)
+                    and not _has_window
+                    and not _has_after
                 )
                 page_after_only = (
                     bool(page_stats.get("after_window_items"))
