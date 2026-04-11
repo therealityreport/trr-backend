@@ -1,8 +1,0 @@
-{
-  "commands": [
-    "set -e",
-    "DB_URL=$(grep -E '^SUPABASE_DB_URL=|^DATABASE_URL=' /etc/trr-api.env | head -n1 | cut -d= -f2-)",
-    "echo DB_URL_PREFIX=${DB_URL%%:*}",
-    "psql \"$DB_URL\" -t -A -c \"select 1 from core.admin_operations limit 1;\""
-  ]
-}

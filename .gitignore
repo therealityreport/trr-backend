@@ -128,4 +128,8 @@ scripts/socials/**/*.csv
 # Sensitive session data
 data/instagram_cookies.json
 data/social-browser-sessions/
+data/tiktok_cookies.json
 data/twitter_cookies.json
+docs/ai/evidence/**
+!docs/ai/evidence/
+!docs/ai/evidence/README.md

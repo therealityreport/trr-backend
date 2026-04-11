@@ -1,2 +1,0 @@
-Phase 8 DB snapshots for operation lifecycle were not captured because operation_id/event_seq could not be obtained.
-See scenario_api_recycle.log, scenario_worker_recycle.log, scenario_sse_replay.log and ssm_outputs/*kickoff_fallback.json.

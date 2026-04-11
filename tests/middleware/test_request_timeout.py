@@ -58,18 +58,31 @@ class TestRequestTimeoutMiddleware:
 
         assert _parse_timeout_from_env() == 42.0
 
-    def test_stream_endpoint_exempt(self):
-        """SSE/stream routes ending in /stream bypass timeout."""
+    def test_known_stream_endpoint_exempt(self):
+        """Known long-lived SSE routes bypass timeout enforcement."""
         app = _make_app(timeout_seconds=0.1)
 
-        @app.get("/api/v1/admin/some-resource/stream")
+        @app.get("/api/v1/admin/socials/live-status/stream")
         async def stream_endpoint():
             await asyncio.sleep(1)  # Would timeout if not exempt
             return {"streaming": True}
 
         client = TestClient(app)
-        response = client.get("/api/v1/admin/some-resource/stream")
+        response = client.get("/api/v1/admin/socials/live-status/stream")
         assert response.status_code == 200
+
+    def test_unknown_stream_endpoint_not_exempt(self):
+        """Arbitrary /stream paths should not bypass the timeout."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.get("/api/v1/admin/some-resource/stream")
+        async def stream_endpoint():
+            await asyncio.sleep(1)
+            return {"streaming": True}
+
+        client = TestClient(app)
+        response = client.get("/api/v1/admin/some-resource/stream")
+        assert response.status_code == 504
 
     def test_cast_screentime_upload_complete_endpoint_exempt(self):
         """Large screentime promotion requests must bypass the global request timeout."""

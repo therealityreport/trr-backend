@@ -9,10 +9,10 @@ from trr_backend.repositories.social_season_analytics import (
     cancel_stuck_jobs,
     debug_ingest_job_with_openai,
     dismiss_recent_failures,
-    reconcile_run_summaries,
     recover_stale_running_jobs,
     reset_social_ingest_health,
 )
+from trr_backend.socials.control_plane.run_lifecycle import reconcile_run_summaries
 
 __all__ = [
     "cancel_active_jobs",

@@ -93,8 +93,19 @@ def test_instagram_cli_uses_canonical_cookie_loader(
     load_env_called = {"value": False}
 
     class _FakeScraper:
-        def __init__(self, *, cookies: dict):
+        def __init__(
+            self,
+            *,
+            cookies: dict,
+            http_client_name: str | None = None,
+            proxy_urls: list[str] | None = None,
+            curl_cffi_impersonate: str | None = None,
+        ):
             scraper_init["cookies"] = cookies
+            scraper_init["http_client_name"] = http_client_name
+            scraper_init["proxy_urls"] = proxy_urls
+            scraper_init["curl_cffi_impersonate"] = curl_cffi_impersonate
+            self.last_retrieval_meta = {"http_client": http_client_name or "requests", "auth_mode": "with_cookies"}
 
         def scrape(self, config):  # noqa: ANN001
             assert config.username == "bravotv"
@@ -126,8 +137,19 @@ def test_tiktok_cli_uses_canonical_cookie_loader(monkeypatch: pytest.MonkeyPatch
     load_env_called = {"value": False}
 
     class _FakeScraper:
-        def __init__(self, *, cookies: dict):
+        def __init__(
+            self,
+            *,
+            cookies: dict,
+            http_client_name: str | None = None,
+            proxy_urls: list[str] | None = None,
+            curl_cffi_impersonate: str | None = None,
+        ):
             scraper_init["cookies"] = cookies
+            scraper_init["http_client_name"] = http_client_name
+            scraper_init["proxy_urls"] = proxy_urls
+            scraper_init["curl_cffi_impersonate"] = curl_cffi_impersonate
+            self.last_retrieval_meta = {"http_client": http_client_name or "requests", "auth_mode": "with_cookies"}
 
         def scrape(self, config):  # noqa: ANN001
             assert config.username == "bravotv"
@@ -136,7 +158,7 @@ def test_tiktok_cli_uses_canonical_cookie_loader(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(tiktok_cli, "load_env", lambda: load_env_called.__setitem__("value", True) or None)
     monkeypatch.setattr(tiktok_cli, "TikTokScraper", _FakeScraper)
     monkeypatch.setattr(
-        "trr_backend.repositories.social_season_analytics._load_tiktok_cookies",
+        "trr_backend.socials.control_plane._load_tiktok_cookies",
         lambda: {"sessionid": "fresh-session", "sid_tt": "fresh-sid"},
     )
     monkeypatch.setattr(
@@ -149,3 +171,108 @@ def test_tiktok_cli_uses_canonical_cookie_loader(monkeypatch: pytest.MonkeyPatch
 
     assert load_env_called["value"] is True
     assert scraper_init["cookies"] == {"sessionid": "fresh-session", "sid_tt": "fresh-sid"}
+    assert scraper_init["http_client_name"] is None
+    assert scraper_init["proxy_urls"] is None
+    assert scraper_init["http_client_name"] is None
+    assert scraper_init["proxy_urls"] is None
+
+
+def test_tiktok_cli_parses_http_client_proxy_and_diagnostics_args() -> None:
+    import scripts.socials.tiktok.scrape as tiktok_cli
+
+    args = tiktok_cli._parse_args(  # noqa: SLF001
+        [
+            "--username",
+            "bravotv",
+            "--hashtags",
+            "RHOSLC",
+            "--start",
+            "2025-01-01",
+            "--end",
+            "2025-01-02",
+            "--http-client",
+            "curl_cffi",
+            "--proxy-url",
+            "http://proxy-user:proxy-pass@proxy-host:8080",
+            "--diagnostics-json",
+            "/tmp/tiktok-diag.json",
+        ]
+    )
+
+    assert args.http_client == "curl_cffi"
+    assert args.proxy_url == "http://proxy-user:proxy-pass@proxy-host:8080"
+    assert args.diagnostics_json == "/tmp/tiktok-diag.json"
+
+
+def test_tiktok_cli_passes_transport_options_and_writes_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import scripts.socials.tiktok.scrape as tiktok_cli
+
+    diagnostics_path = tmp_path / "tiktok-diag.json"
+    scraper_init: dict[str, object] = {}
+
+    class _FakeScraper:
+        def __init__(
+            self,
+            *,
+            cookies: dict,
+            http_client_name: str | None = None,
+            proxy_urls: list[str] | None = None,
+            curl_cffi_impersonate: str | None = None,
+        ):
+            scraper_init["cookies"] = cookies
+            scraper_init["http_client_name"] = http_client_name
+            scraper_init["proxy_urls"] = proxy_urls
+            scraper_init["curl_cffi_impersonate"] = curl_cffi_impersonate
+            self.last_retrieval_meta = {
+                "http_client": http_client_name,
+                "curl_cffi_impersonate": curl_cffi_impersonate,
+                "proxy_enabled": bool(proxy_urls),
+                "proxy_label": "proxy-host",
+                "auth_mode": "without_cookies",
+                "endpoint_responses": {
+                    "fetch_posts": {
+                        "endpoint": "fetch_posts",
+                        "failure_reason": "non_json_response",
+                    }
+                },
+            }
+
+        def scrape(self, config):  # noqa: ANN001
+            assert config.username == "bravotv"
+            return []
+
+    monkeypatch.setattr(tiktok_cli, "load_env", lambda: None)
+    monkeypatch.setattr(tiktok_cli, "TikTokScraper", _FakeScraper)
+    monkeypatch.setattr(
+        "trr_backend.socials.control_plane._load_tiktok_cookies",
+        lambda: {},
+    )
+
+    code = tiktok_cli.main(
+        [
+            "--username",
+            "bravotv",
+            "--hashtags",
+            "RHOSLC",
+            "--start",
+            "2025-01-01",
+            "--end",
+            "2025-01-02",
+            "--http-client",
+            "curl_cffi",
+            "--proxy-url",
+            "http://proxy-user:proxy-pass@proxy-host:8080",
+            "--diagnostics-json",
+            str(diagnostics_path),
+        ]
+    )
+
+    assert code == 0
+    assert scraper_init["cookies"] == {}
+    assert scraper_init["http_client_name"] == "curl_cffi"
+    assert scraper_init["proxy_urls"] == ["http://proxy-user:proxy-pass@proxy-host:8080"]
+    assert diagnostics_path.exists() is True
+    assert json.loads(diagnostics_path.read_text(encoding="utf-8"))["http_client"] == "curl_cffi"

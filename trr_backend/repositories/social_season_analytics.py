@@ -2180,12 +2180,78 @@ def _build_worker_health_alerts(payload: Mapping[str, Any]) -> list[dict[str, An
     return alerts
 
 
+_TIKTOK_SINGLE_PATH_TOPOLOGY_DEFAULT: dict[str, Any] = {
+    "platform": "tiktok",
+    "primary_live_path": "ytdlp",
+    "browser_intercept_proven_live": False,
+}
+
+
+def _tiktok_recent_failure_looks_ytdlp_related(row: Mapping[str, Any]) -> bool:
+    if str(row.get("platform") or "").strip().lower() != "tiktok":
+        return False
+    joined_fields = " ".join(
+        str(row.get(field) or "").strip().lower()
+        for field in ("job_type", "status", "last_error_code", "last_error_class", "error_message")
+    )
+    return "ytdlp" in joined_fields.replace("-", "")
+
+
+def _build_tiktok_single_path_alerts(queue_payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    alerts: list[dict[str, Any]] = []
+    topology = dict(_TIKTOK_SINGLE_PATH_TOPOLOGY_DEFAULT)
+    primary_live_path = str(topology.get("primary_live_path") or "").strip().lower() or "ytdlp"
+    browser_intercept_proven_live = bool(topology.get("browser_intercept_proven_live"))
+
+    if primary_live_path == "ytdlp" and not browser_intercept_proven_live:
+        _append_alert(
+            alerts,
+            code="tiktok_single_path_risk",
+            severity="warning",
+            message=(
+                "TikTok posts currently rely on yt-dlp as the only proven live path. "
+                "Browser intercept is not yet proven live, so this is a single-path topology."
+            ),
+            primary_live_path="yt-dlp",
+            browser_intercept_proven_live=browser_intercept_proven_live,
+            topology=topology,
+        )
+
+    recent_failures = [
+        row
+        for row in list(queue_payload.get("recent_failures") or [])
+        if isinstance(row, dict) and _tiktok_recent_failure_looks_ytdlp_related(row)
+    ]
+    if recent_failures:
+        _append_alert(
+            alerts,
+            code="tiktok_single_path_degraded",
+            severity="critical",
+            message=(
+                "Recent TikTok queue failures include yt-dlp-related rows, so the primary TikTok path "
+                "should be treated as degraded until recovery clears."
+            ),
+            recent_failure_count=len(recent_failures),
+            recent_failure_codes=[
+                str(row.get("last_error_code") or "").strip() or str(row.get("error_message") or "").strip()
+                for row in recent_failures
+                if str(row.get("last_error_code") or "").strip() or str(row.get("error_message") or "").strip()
+            ][:5],
+            primary_live_path="yt-dlp",
+            browser_intercept_proven_live=browser_intercept_proven_live,
+            topology=topology,
+        )
+
+    return alerts
+
+
 def _build_queue_status_alerts(
     *,
     workers_payload: Mapping[str, Any],
     queue_payload: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     alerts = [dict(item) for item in list(workers_payload.get("alerts") or []) if isinstance(item, dict)]
+    alerts.extend(_build_tiktok_single_path_alerts(queue_payload))
     dispatch_blocked_total = _normalize_non_negative_int(queue_payload.get("dispatch_blocked_jobs_total"))
     if dispatch_blocked_total > 0:
         _append_alert(
@@ -3580,11 +3646,9 @@ def _count_visible_failed_runs() -> int:
 
 
 def _invalidate_queue_status_cache() -> None:
-    global _queue_status_cache, _queue_status_last_good_cache
-    _clear_social_hot_path_caches()
-    with _queue_status_cache_lock:
-        _queue_status_cache = None
-        _queue_status_last_good_cache = None
+    from trr_backend.socials.control_plane.queue_status import invalidate_queue_status_cache
+
+    invalidate_queue_status_cache()
 
 
 def _reconcile_active_queue_runs(*, limit: int = 100) -> list[str]:
@@ -3626,80 +3690,14 @@ def _reconcile_active_queue_runs(*, limit: int = 100) -> list[str]:
 
 
 def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[str, Any]]:
-    safe_limit = max(1, min(int(limit), 500))
-    blocked_rows, _ = _list_dispatch_blocked_jobs(limit=safe_limit)
-    no_progress_seconds = _resolve_modal_dispatch_no_progress_seconds()
-    blocked_failure_limit = _resolve_modal_dispatch_blocked_failure_limit()
-    recovered: list[dict[str, Any]] = []
-    affected_run_ids: set[str] = set()
-    for row in blocked_rows:
-        job_id = str(row.get("id") or "").strip()
-        if not job_id:
-            continue
-        full_row = (
-            pg.fetch_one(
-                """
-                select
-                  id::text as id,
-                  run_id::text as run_id,
-                  status,
-                  items_found,
-                  error_message,
-                  last_error_code,
-                  metadata
-                from social.scrape_jobs
-                where id = %s::uuid
-                """,
-                [job_id],
-            )
-            or {}
-        )
-        if not _job_is_dispatch_blocked(full_row):
-            continue
-        dispatch = _job_dispatch_metadata(full_row)
-        blocked_for_seconds = _dispatch_blocked_seconds(dispatch, full_row)
-        blocked_failure_count = _dispatch_metadata_blocked_failure_count(dispatch) or _dispatch_metadata_attempt_count(
-            dispatch
-        )
-        if blocked_for_seconds < no_progress_seconds and blocked_failure_count < blocked_failure_limit:
-            continue
-        reason = _normalize_dispatch_blocked_reason(
-            remote_blocked_reason=dispatch.get("remote_blocked_reason"),
-            last_dispatch_error_code=dispatch.get("last_dispatch_error_code"),
-            last_dispatch_error=dispatch.get("last_dispatch_error"),
-        )
-        _finish_job(
-            job_id,
-            status="failed",
-            items_found=_normalize_non_negative_int(full_row.get("items_found")),
-            error_message=str(dispatch.get("last_dispatch_error") or "Modal dispatch blocked"),
-            metadata={
-                "dispatch": {
-                    **dispatch,
-                    "remote_invocation_status": "failed",
-                    "remote_invocation_checked_at": _iso(_now_utc()),
-                    "remote_blocked_reason": reason,
-                    "dispatch_blocked_failure_count": blocked_failure_count,
-                    "dispatch_blocked_terminalized_at": _iso(_now_utc()),
-                }
-            },
-            last_error_code="modal_dispatch_blocked",
-            last_error_class="ModalDispatchBlocked",
-        )
-        run_id = str(full_row.get("run_id") or "").strip()
-        if run_id:
-            affected_run_ids.add(run_id)
-        recovered.append(
-            {
-                "id": job_id,
-                "run_id": run_id or None,
-                "status": "failed",
-                "stuck_reason": reason,
-            }
-        )
-    for run_id in sorted(affected_run_ids):
-        _finalize_run_status(run_id, force_recompute=True)
-    return recovered
+    from trr_backend.socials.control_plane.dispatch_runtime import (
+        recover_dispatch_blocked_no_progress_jobs as impl,
+    )
+
+    return impl(limit=limit)
+
+
+recover_dispatch_blocked_no_progress_jobs.__trr_delegates_to_control_plane__ = True
 
 
 def get_queue_status(
@@ -3713,445 +3711,17 @@ def get_queue_status(
     summary_only: bool = False,
     fresh: bool = False,
 ) -> dict[str, Any]:
-    global _queue_status_cache, _queue_status_last_good_cache
-    safe_recent_failures_limit = max(1, min(int(recent_failures_limit), 100))
-    safe_statement_timeout_ms = max(1000, min(int(statement_timeout_ms), 30000))
-    safe_include_recent_failures = bool(include_recent_failures)
-    safe_include_stuck_jobs = bool(include_stuck_jobs)
-    safe_stuck_jobs_limit = max(1, min(int(stuck_jobs_limit), 500))
-    safe_include_runs_summary = bool(include_runs_summary)
-    safe_summary_only = bool(summary_only)
-    cache_ttl_seconds = _resolve_positive_int_env(
-        "SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS",
-        SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT,
-        minimum=0,
-    )
+    from trr_backend.socials.control_plane.worker_health import get_queue_status as get_queue_status_impl
 
-    if cache_ttl_seconds > 0 and not fresh:
-        now = time_module.monotonic()
-        with _queue_status_cache_lock:
-            if _queue_status_cache is not None:
-                (
-                    cached_at,
-                    cached_limit,
-                    cached_timeout,
-                    cached_include_recent_failures,
-                    cached_include_stuck_jobs,
-                    cached_stuck_jobs_limit,
-                    cached_include_runs_summary,
-                    cached_summary_only,
-                    cached_payload,
-                ) = _queue_status_cache
-                if (
-                    cached_limit == safe_recent_failures_limit
-                    and cached_timeout == safe_statement_timeout_ms
-                    and cached_include_recent_failures == safe_include_recent_failures
-                    and cached_include_stuck_jobs == safe_include_stuck_jobs
-                    and cached_stuck_jobs_limit == safe_stuck_jobs_limit
-                    and cached_include_runs_summary == safe_include_runs_summary
-                    and cached_summary_only == safe_summary_only
-                    and (now - cached_at) < cache_ttl_seconds
-                ):
-                    return copy.deepcopy(cached_payload)
-
-    def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
-        if cache_ttl_seconds > 0:
-            with _queue_status_cache_lock:
-                _queue_status_cache = (
-                    time_module.monotonic(),
-                    safe_recent_failures_limit,
-                    safe_statement_timeout_ms,
-                    safe_include_recent_failures,
-                    safe_include_stuck_jobs,
-                    safe_stuck_jobs_limit,
-                    safe_include_runs_summary,
-                    safe_summary_only,
-                    payload,
-                )
-                if not payload.get("queue", {}).get("error"):
-                    _queue_status_last_good_cache = (time_module.monotonic(), copy.deepcopy(payload))
-        return copy.deepcopy(payload)
-
-    queue_payload: dict[str, Any] = {
-        "by_status": _empty_queue_status_counts(),
-        "by_stage": {},
-        "by_stage_platform": {},
-        "by_platform": {},
-        "by_job_type": {},
-        "running_jobs": [],
-        "recent_failures": [],
-        "stuck_jobs": [],
-        "stuck_jobs_total": 0,
-        "dispatch_blocked_jobs": [],
-        "dispatch_blocked_jobs_total": 0,
-        "dispatch_blocked_by_reason": {},
-        "waiting_for_claim_jobs_total": 0,
-        "retrying_dispatch_jobs_total": 0,
-        "stale_claims": {
-            "total": 0,
-            "by_reason": {},
-            "by_platform": {},
-            "by_stage": {},
-        },
-        "runs_by_status": _empty_queue_status_counts(),
-        "runs_total": 0,
-    }
-    errors: list[str] = []
-
-    try:
-        if not _relation_exists("social.scrape_jobs"):
-            queue_payload["error"] = "scrape_jobs_table_missing"
-            return _finalize(
-                {
-                    "queue_enabled": is_queue_enabled(),
-                    "workers": get_worker_health(),
-                    "queue": queue_payload,
-                }
-            )
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"scrape_jobs_relation_check_failed: {exc}")
-
-    if not safe_summary_only:
-        try:
-            _reconcile_active_queue_runs(limit=200)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status active-run reconciliation failed: %s", exc)
-            errors.append(f"queue_run_reconciliation_failed: {exc}")
-
-        try:
-            recover_dispatch_blocked_no_progress_jobs(limit=safe_stuck_jobs_limit)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status blocked-job recovery failed: %s", exc)
-            errors.append(f"queue_dispatch_blocked_recovery_failed: {exc}")
-
-    try:
-        with pg.db_connection() as conn:
-            with pg.db_cursor(conn=conn) as cur:
-                cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
-                aggregate_rows = pg.fetch_all_with_cursor(
-                    cur,
-                    """
-                    with active_runs as (
-                      select id
-                      from social.scrape_runs
-                      where status = any(%s::text[])
-                    )
-                    select
-                      coalesce(j.platform, 'unknown') as platform,
-                      coalesce(j.job_type, 'unknown') as job_type,
-                      coalesce(j.status, 'unknown') as status,
-                      lower(
-                        coalesce(
-                          nullif(j.config->>'stage', ''),
-                          nullif(j.metadata->>'stage', ''),
-                          nullif(j.job_type, ''),
-                          'unknown'
-                        )
-                      ) as stage,
-                      count(*)::bigint as total
-                    from social.scrape_jobs j
-                    left join active_runs ar on ar.id = j.run_id
-                    where j.status = any(%s::text[])
-                       or ar.id is not null
-                    group by 1, 2, 3, 4
-                    """,
-                    [list(_RUN_PROGRESS_ACTIVE_JOB_STATUSES), list(_RUN_PROGRESS_ACTIVE_JOB_STATUSES)],
-                )
-        by_status = _empty_queue_status_counts()
-        by_stage: dict[str, dict[str, int]] = {}
-        by_stage_platform: dict[str, dict[str, dict[str, int]]] = {}
-        by_platform: dict[str, dict[str, int]] = {}
-        by_job_type: dict[str, dict[str, int]] = {}
-
-        for row in aggregate_rows:
-            status = str(row.get("status") or "unknown").strip().lower() or "unknown"
-            platform = str(row.get("platform") or "unknown").strip().lower() or "unknown"
-            job_type = str(row.get("job_type") or "unknown").strip().lower() or "unknown"
-            stage = _normalize_social_job_stage_for_stale(row.get("stage")) or "unknown"
-            total = int(row.get("total") or 0)
-
-            by_status[status] = by_status.get(status, 0) + total
-            stage_bucket = by_stage.setdefault(stage, {})
-            stage_bucket[status] = int(stage_bucket.get(status) or 0) + total
-            stage_platform_bucket = by_stage_platform.setdefault(stage, {}).setdefault(platform, {})
-            stage_platform_bucket[status] = int(stage_platform_bucket.get(status) or 0) + total
-            platform_bucket = by_platform.setdefault(platform, {})
-            platform_bucket[status] = int(platform_bucket.get(status) or 0) + total
-            job_type_bucket = by_job_type.setdefault(job_type, {})
-            job_type_bucket[status] = int(job_type_bucket.get(status) or 0) + total
-
-        queue_payload["by_status"] = by_status
-        queue_payload["by_stage"] = by_stage
-        queue_payload["by_stage_platform"] = by_stage_platform
-        queue_payload["by_platform"] = by_platform
-        queue_payload["by_job_type"] = by_job_type
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Queue status aggregate query failed: %s", exc)
-        errors.append(f"queue_aggregate_query_failed: {exc}")
-
-    if not safe_summary_only:
-        try:
-            running_jobs = pg.fetch_all(
-                """
-                select
-                  j.id::text as id,
-                  j.run_id::text as run_id,
-                  j.platform,
-                  j.job_type,
-                  lower(
-                    coalesce(
-                      nullif(j.config->>'stage', ''),
-                      nullif(j.metadata->>'stage', ''),
-                      nullif(j.job_type, ''),
-                      'unknown'
-                    )
-                  ) as stage,
-                  nullif(coalesce(j.config->>'account', j.metadata->>'account', ''), '') as account_handle,
-                  j.worker_id,
-                  j.started_at,
-                  j.heartbeat_at,
-                  nullif(coalesce(j.metadata->'dispatch'->>'dispatch_backend', ''), '') as dispatch_backend,
-                  nullif(coalesce(j.config->>'required_execution_backend', ''), '') as required_execution_backend
-                from social.scrape_jobs j
-                where j.status = 'running'
-                order by coalesce(j.heartbeat_at, j.started_at, j.created_at) desc, j.created_at desc
-                """
-            )
-            queue_payload["running_jobs"] = [
-                {
-                    "id": str(row.get("id") or ""),
-                    "run_id": str(row.get("run_id") or "").strip() or None,
-                    "platform": str(row.get("platform") or "").strip().lower() or "unknown",
-                    "job_type": str(row.get("job_type") or "").strip().lower() or "unknown",
-                    "stage": _normalize_social_job_stage_for_stale(row.get("stage")) or "unknown",
-                    "account_handle": str(row.get("account_handle") or "").strip() or None,
-                    "worker_id": str(row.get("worker_id") or "").strip() or None,
-                    "started_at": _iso(_coerce_dt(row.get("started_at"))),
-                    "heartbeat_at": _iso(_coerce_dt(row.get("heartbeat_at"))),
-                    "dispatch_backend": str(row.get("dispatch_backend") or "").strip().lower() or None,
-                    "required_execution_backend": str(row.get("required_execution_backend") or "").strip().lower()
-                    or None,
-                }
-                for row in running_jobs
-            ]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status running-jobs query failed: %s", exc)
-            errors.append(f"queue_running_jobs_query_failed: {exc}")
-
-    if safe_include_recent_failures and not safe_summary_only:
-        try:
-            features = _scrape_jobs_features()
-            select_run_id = "run_id::text as run_id" if features.get("has_run_id") else "null::text as run_id"
-            select_last_error_code = (
-                "last_error_code" if features.get("has_queue_fields") else "null::text as last_error_code"
-            )
-            select_last_error_class = (
-                "last_error_class" if features.get("has_queue_fields") else "null::text as last_error_class"
-            )
-
-            with pg.db_connection() as conn:
-                with pg.db_cursor(conn=conn) as cur:
-                    cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
-                    recent_failures = pg.fetch_all_with_cursor(
-                        cur,
-                        f"""
-                        select
-                          id::text as id,
-                          {select_run_id},
-                          platform,
-                          job_type,
-                          status,
-                          error_message,
-                          {select_last_error_code},
-                          {select_last_error_class},
-                          created_at,
-                          completed_at
-                        from social.scrape_jobs
-                        where status = any(%s::text[])
-                          and {_recent_failure_not_dismissed_sql("social.scrape_jobs")}
-                        order by coalesce(completed_at, created_at) desc
-                        limit %s
-                        """,
-                        [list(_RECENT_FAILURE_TERMINAL_STATUSES), safe_recent_failures_limit],
-                    )
-            queue_payload["recent_failures"] = [
-                {
-                    "id": str(row.get("id") or ""),
-                    "run_id": str(row.get("run_id") or "").strip() or None,
-                    "platform": str(row.get("platform") or ""),
-                    "job_type": str(row.get("job_type") or ""),
-                    "status": str(row.get("status") or ""),
-                    "error_message": str(row.get("error_message") or "") or None,
-                    "last_error_code": str(row.get("last_error_code") or "") or None,
-                    "last_error_class": str(row.get("last_error_class") or "") or None,
-                    "created_at": _iso(_coerce_dt(row.get("created_at"))),
-                    "completed_at": _iso(_coerce_dt(row.get("completed_at"))),
-                }
-                for row in recent_failures
-            ]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status recent-failures query failed: %s", exc)
-            errors.append(f"queue_recent_failures_query_failed: {exc}")
-
-    if safe_include_stuck_jobs and not safe_summary_only:
-        try:
-            stuck_jobs, stuck_jobs_total = _list_stuck_jobs(limit=safe_stuck_jobs_limit)
-            queue_payload["stuck_jobs"] = stuck_jobs
-            queue_payload["stuck_jobs_total"] = stuck_jobs_total
-            stale_claims_by_reason: dict[str, int] = {}
-            stale_claims_by_platform: dict[str, int] = {}
-            stale_claims_by_stage: dict[str, int] = {}
-            for row in stuck_jobs:
-                reason = str(row.get("stuck_reason") or "unknown").strip().lower() or "unknown"
-                platform = str(row.get("platform") or "unknown").strip().lower() or "unknown"
-                stage = _normalize_social_job_stage_for_stale(row.get("job_type")) or "unknown"
-                stale_claims_by_reason[reason] = int(stale_claims_by_reason.get(reason) or 0) + 1
-                stale_claims_by_platform[platform] = int(stale_claims_by_platform.get(platform) or 0) + 1
-                stale_claims_by_stage[stage] = int(stale_claims_by_stage.get(stage) or 0) + 1
-            queue_payload["stale_claims"] = {
-                "total": int(stuck_jobs_total or 0),
-                "by_reason": stale_claims_by_reason,
-                "by_platform": stale_claims_by_platform,
-                "by_stage": stale_claims_by_stage,
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status stuck-jobs query failed: %s", exc)
-            errors.append(f"queue_stuck_jobs_query_failed: {exc}")
-
-    if not safe_summary_only:
-        try:
-            dispatch_blocked_jobs, dispatch_blocked_jobs_total = _list_dispatch_blocked_jobs(
-                limit=safe_stuck_jobs_limit
-            )
-            queue_payload["dispatch_blocked_jobs"] = dispatch_blocked_jobs
-            queue_payload["dispatch_blocked_jobs_total"] = dispatch_blocked_jobs_total
-            blocked_by_reason: dict[str, int] = {}
-            for row in dispatch_blocked_jobs:
-                reason = str(row.get("stuck_reason") or "dispatch_blocked").strip().lower() or "dispatch_blocked"
-                blocked_by_reason[reason] = int(blocked_by_reason.get(reason) or 0) + 1
-            queue_payload["dispatch_blocked_by_reason"] = blocked_by_reason
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status dispatch-blocked query failed: %s", exc)
-            errors.append(f"queue_dispatch_blocked_query_failed: {exc}")
-
-        try:
-            dispatch_rows = pg.fetch_all(
-                """
-                select
-                  id::text as id,
-                  status,
-                  worker_id,
-                  metadata,
-                  available_at,
-                  created_at
-                from social.scrape_jobs
-                where status in ('queued', 'pending', 'retrying')
-                  and lower(coalesce(metadata->'dispatch'->>'dispatch_backend', '')) = 'modal'
-                """
-            )
-            dispatch_health = _build_run_dispatch_health(dispatch_rows)
-            queue_payload["waiting_for_claim_jobs_total"] = _normalize_non_negative_int(
-                dispatch_health.get("queued_unclaimed_jobs")
-            )
-            queue_payload["retrying_dispatch_jobs_total"] = _normalize_non_negative_int(
-                dispatch_health.get("retrying_dispatch_jobs")
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status dispatch-health query failed: %s", exc)
-            errors.append(f"queue_dispatch_health_query_failed: {exc}")
-
-    if safe_include_runs_summary and not safe_summary_only:
-        try:
-            if _relation_exists("social.scrape_runs"):
-                run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
-                with pg.db_connection() as conn:
-                    with pg.db_cursor(conn=conn) as cur:
-                        cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
-                        run_rows = pg.fetch_all_with_cursor(
-                            cur,
-                            f"""
-                            select
-                              coalesce(status, 'unknown') as status,
-                              count(*)::bigint as total
-                            from social.scrape_runs r
-                            where (
-                              coalesce(r.status, 'unknown') not in ('failed', 'retrying')
-                              or {run_failure_not_dismissed_sql}
-                            )
-                            group by 1
-                            """,
-                        )
-                runs_by_status = _empty_queue_status_counts()
-                runs_total = 0
-                for row in run_rows:
-                    status = str(row.get("status") or "unknown").strip().lower() or "unknown"
-                    total = int(row.get("total") or 0)
-                    runs_by_status[status] = runs_by_status.get(status, 0) + total
-                    runs_total += total
-                queue_payload["runs_by_status"] = runs_by_status
-                queue_payload["runs_total"] = runs_total
-            else:
-                queue_payload["runs_by_status"] = _empty_queue_status_counts()
-                queue_payload["runs_total"] = 0
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Queue status runs-summary query failed: %s", exc)
-            errors.append(f"queue_runs_summary_query_failed: {exc}")
-
-    workers_payload: dict[str, Any]
-    try:
-        workers_payload = get_worker_health()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Queue status worker-health query failed: %s", exc)
-        errors.append(f"queue_worker_health_failed: {exc}")
-        queue_payload["error"] = "; ".join(errors)
-        workers_payload = {
-            "healthy": False,
-            "healthy_workers": 0,
-            "fresh_workers": 0,
-            "stale_workers": 0,
-            "stale_hidden_count": 0,
-            "active_workers": 0,
-            "total_workers": 0,
-            "stale_after_seconds": _resolve_positive_int_env(
-                "SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS",
-                SOCIAL_WORKER_HEARTBEAT_STALE_SECONDS_DEFAULT,
-                minimum=30,
-            ),
-            "executor_backend": "modal" if is_modal_remote_executor_enabled() else execution_backend_canonical(),
-            "dispatch_enabled": False,
-            "dispatcher_heartbeat_fresh": False,
-            "active_invocations": 0,
-            "oldest_queued_age_seconds": None,
-            "stale_running_count": 0,
-            "last_dispatch_success_at": None,
-            "last_dispatch_error": None,
-            "workers": [],
-            "reason": "health_query_failed",
-        }
-        workers_payload["alerts"] = _build_worker_health_alerts(workers_payload)
-
-    if errors:
-        stale_fallback_seconds = _resolve_positive_int_env(
-            "SOCIAL_QUEUE_STATUS_STALE_FALLBACK_SECONDS",
-            SOCIAL_QUEUE_STATUS_STALE_FALLBACK_SECONDS_DEFAULT,
-            minimum=0,
-        )
-        if stale_fallback_seconds > 0:
-            with _queue_status_cache_lock:
-                if _queue_status_last_good_cache is not None:
-                    cached_at, cached_payload = _queue_status_last_good_cache
-                    if (time_module.monotonic() - cached_at) <= stale_fallback_seconds:
-                        return copy.deepcopy(cached_payload)
-        queue_payload["error"] = "; ".join(errors)
-
-    return _finalize(
-        {
-            "queue_enabled": is_queue_enabled(),
-            "remote_plane": _configured_execution_metadata(),
-            "workers": workers_payload,
-            "queue": queue_payload,
-            "alerts": _build_queue_status_alerts(workers_payload=workers_payload, queue_payload=queue_payload),
-        }
+    return get_queue_status_impl(
+        recent_failures_limit=recent_failures_limit,
+        statement_timeout_ms=statement_timeout_ms,
+        include_recent_failures=include_recent_failures,
+        include_stuck_jobs=include_stuck_jobs,
+        stuck_jobs_limit=stuck_jobs_limit,
+        include_runs_summary=include_runs_summary,
+        summary_only=summary_only,
+        fresh=fresh,
     )
 
 
@@ -9415,125 +8985,9 @@ def get_season_shared_status(
     *,
     source_scope: str = "bravo",
 ) -> dict[str, Any]:
-    cache_key = (
-        "season_shared_status",
-        str(season_id or "").strip(),
-        str(source_scope or "").strip().lower() or "bravo",
-    )
-    cached_payload = _get_social_hot_path_cache(cache_key)
-    if isinstance(cached_payload, dict):
-        return cached_payload
-    context = get_season_context(season_id)
-    match_rows = pg.fetch_all(
-        """
-        select
-          status,
-          source_id,
-          updated_at,
-          metadata
-        from social.shared_post_matches
-        where source_scope = %s
-          and matched_season_id = %s::uuid
-        order by updated_at desc
-        limit 500
-        """,
-        [source_scope, season_id],
-    )
-    review_count_row = pg.fetch_one(
-        """
-        select count(*)::int as count
-        from social.shared_post_review_queue
-        where source_scope = %s
-          and review_status = 'open'
-          and exists (
-            select 1
-            from jsonb_array_elements(coalesce(payload->'candidate_matches', '[]'::jsonb)) as candidate
-            where candidate->>'season_id' = %s
-          )
-        """,
-        [source_scope, season_id],
-    ) or {"count": 0}
-    retained_unassigned_row = pg.fetch_one(
-        """
-        select count(*)::int as count
-        from social.shared_post_matches
-        where source_scope = %s
-          and status = 'unmatched'
-        """,
-        [source_scope],
-    ) or {"count": 0}
-    recent_run = pg.fetch_one(
-        """
-        select
-          r.id::text as id,
-          r.status,
-          r.config,
-          r.summary,
-          r.created_at,
-          r.started_at,
-          r.completed_at
-        from social.scrape_runs r
-        join (
-          select run_id, max(updated_at) as updated_at
-          from (
-            select run_id, updated_at
-            from social.shared_post_matches
-            where source_scope = %s
-              and matched_season_id = %s::uuid
-              and run_id is not null
-            union all
-            select q.run_id, q.updated_at
-            from social.shared_post_review_queue q
-            where q.source_scope = %s
-              and q.review_status = 'open'
-              and q.run_id is not null
-              and exists (
-                select 1
-                from jsonb_array_elements(coalesce(q.payload->'candidate_matches', '[]'::jsonb)) as candidate
-                where candidate->>'season_id' = %s
-              )
-          ) relevant
-          group by run_id
-          order by max(updated_at) desc nulls last
-          limit 1
-        ) recent on recent.run_id = r.id
-        where coalesce(r.config->>'pipeline_ingest_mode', '') = %s
-        limit 1
-        """,
-        [source_scope, season_id, source_scope, season_id, SHARED_ACCOUNT_ASYNC_INGEST_MODE],
-    )
-    stage_counts = {}
-    if isinstance(recent_run, dict):
-        stage_counts = dict((recent_run.get("summary") or {}).get("stage_counts") or {})
-    payload = {
-        "season_id": context.season_id,
-        "show_id": context.show_id,
-        "show_name": context.show_name,
-        "season_number": context.season_number,
-        "source_scope": source_scope,
-        "ingest_mode": SHARED_ACCOUNT_ASYNC_INGEST_MODE,
-        "matched_posts": len(match_rows),
-        "matched_source_ids": [
-            str(row.get("source_id") or "") for row in match_rows if str(row.get("source_id") or "").strip()
-        ],
-        "latest_match_at": _iso(match_rows[0].get("updated_at")) if match_rows else None,
-        "review_queue_count": _normalize_non_negative_int(review_count_row.get("count")),
-        "retained_unassigned_count": _normalize_non_negative_int(retained_unassigned_row.get("count")),
-        "shared_scrape_status": _shared_stage_status_summary(stage_counts, SHARED_ACCOUNT_POSTS_STAGE),
-        "classification_status": _shared_stage_status_summary(stage_counts, POST_CLASSIFY_STAGE),
-        "materialization_status": _shared_stage_status_summary(stage_counts, SEASON_MATERIALIZE_STAGE),
-        "latest_shared_run": {
-            "run_id": str(recent_run.get("id") or "").strip() or None,
-            "status": str(recent_run.get("status") or "").strip() or None,
-            "created_at": _iso(recent_run.get("created_at")),
-            "started_at": _iso(recent_run.get("started_at")),
-            "completed_at": _iso(recent_run.get("completed_at")),
-        }
-        if recent_run
-        else None,
-    }
-    _set_social_hot_path_cache(cache_key, payload)
-    return payload
+    from trr_backend.socials.control_plane.shared_accounts import get_season_shared_status as impl
+
+    return impl(season_id, source_scope=source_scope)
 
 
 # ---------------------------------------------------------------------------
@@ -10269,128 +9723,45 @@ def _create_run(
     config: dict[str, Any],
     status: str,
 ) -> str:
-    initial_summary = {
-        "total_jobs": 0,
-        "completed_jobs": 0,
-        "failed_jobs": 0,
-        "active_jobs": 0,
-        "items_found_total": 0,
-        "stage_counts": {},
-    }
-    row = pg.fetch_one(
-        """
-        insert into social.scrape_runs (
-          season_id,
-          show_id,
-          source_scope,
-          status,
-          initiated_by,
-          config,
-          summary,
-          started_at
-        )
-        values (
-          %s,
-          %s,
-          %s,
-          %s,
-          %s,
-          %s::jsonb,
-          %s::jsonb,
-          case when %s = 'running' then now() else null end
-        )
-        returning id::text
-        """,
-        [
-            context.season_id if context is not None else None,
-            context.show_id if context is not None else None,
-            source_scope,
-            status,
-            initiated_by,
-            json.dumps(config),
-            json.dumps(initial_summary),
-            status,
-        ],
+    from trr_backend.socials.control_plane.run_lifecycle import _create_run as impl
+
+    return impl(
+        context,
+        source_scope=source_scope,
+        initiated_by=initiated_by,
+        config=config,
+        status=status,
     )
-    if not row:
-        raise RuntimeError("Failed to create social scrape run")
-    run_id = str(row["id"])
-    if _column_exists("social", "scrape_runs", "sync_session_id"):
-        sync_session_id = str(config.get("sync_session_id") or "").strip() or None
-        pass_kind = str(config.get("pass_kind") or "").strip() or None
-        pass_attempt = _normalize_non_negative_int(config.get("pass_attempt")) or None
-        pass_sequence = _normalize_non_negative_int(config.get("pass_sequence")) or None
-        if sync_session_id or pass_kind or pass_attempt is not None or pass_sequence is not None:
-            pg.fetch_one(
-                """
-                update social.scrape_runs
-                set
-                  sync_session_id = %s::uuid,
-                  pass_kind = %s,
-                  pass_attempt = %s,
-                  pass_sequence = %s
-                where id = %s::uuid
-                returning id::text
-                """,
-                [sync_session_id, pass_kind, pass_attempt, pass_sequence, run_id],
-            )
-    return run_id
 
 
 def _set_run_status(run_id: str, status: str) -> None:
-    pg.fetch_one(
-        """
-        update social.scrape_runs
-        set
-          status = %s,
-          started_at = case
-            when %s = 'running' then coalesce(started_at, now())
-            else started_at
-          end,
-          completed_at = case
-            when %s in ('completed', 'failed', 'cancelled') then coalesce(completed_at, now())
-            else completed_at
-          end,
-          cancelled_at = case
-            when %s = 'cancelled' then coalesce(cancelled_at, now())
-            else cancelled_at
-          end
-        where id = %s
-        returning id::text
-        """,
-        [status, status, status, status, run_id],
-    )
-    _invalidate_queue_status_cache()
-    if status in {"completed", "failed", "cancelled"}:
-        _invalidate_week_detail_cache_after_run_terminal_status()
+    from trr_backend.socials.control_plane.run_lifecycle import _set_run_status as impl
+
+    impl(run_id, status)
 
 
 def _status_is_active(status: str | None) -> bool:
-    return str(status or "").strip().lower() in {"queued", "pending", "retrying", "running"}
+    from trr_backend.socials.control_plane.run_lifecycle import _status_is_active as impl
+
+    return impl(status)
 
 
 def _status_is_completed(status: str | None) -> bool:
-    return str(status or "").strip().lower() == "completed"
+    from trr_backend.socials.control_plane.run_lifecycle import _status_is_completed as impl
+
+    return impl(status)
 
 
 def _status_is_failed(status: str | None) -> bool:
-    return str(status or "").strip().lower() == "failed"
+    from trr_backend.socials.control_plane.run_lifecycle import _status_is_failed as impl
+
+    return impl(status)
 
 
 def _normalize_stage_counts(stage_counts: Any) -> dict[str, dict[str, int]]:
-    if not isinstance(stage_counts, dict):
-        return {}
-    normalized: dict[str, dict[str, int]] = {}
-    for stage, counters in stage_counts.items():
-        stage_key = str(stage or "").strip() or "unknown"
-        counter_map = dict(counters) if isinstance(counters, dict) else {}
-        normalized[stage_key] = {
-            "total": _normalize_non_negative_int(counter_map.get("total")),
-            "completed": _normalize_non_negative_int(counter_map.get("completed")),
-            "failed": _normalize_non_negative_int(counter_map.get("failed")),
-            "active": _normalize_non_negative_int(counter_map.get("active")),
-        }
-    return normalized
+    from trr_backend.socials.control_plane.run_lifecycle import _normalize_stage_counts as impl
+
+    return impl(stage_counts)
 
 
 def _build_run_summary_payload(
@@ -10402,14 +9773,16 @@ def _build_run_summary_payload(
     items_found_total: Any,
     stage_counts: Any,
 ) -> dict[str, Any]:
-    return {
-        "total_jobs": _normalize_non_negative_int(total_jobs),
-        "completed_jobs": _normalize_non_negative_int(completed_jobs),
-        "failed_jobs": _normalize_non_negative_int(failed_jobs),
-        "active_jobs": _normalize_non_negative_int(active_jobs),
-        "items_found_total": _normalize_non_negative_int(items_found_total),
-        "stage_counts": _normalize_stage_counts(stage_counts),
-    }
+    from trr_backend.socials.control_plane.run_lifecycle import _build_run_summary_payload as impl
+
+    return impl(
+        total_jobs=total_jobs,
+        completed_jobs=completed_jobs,
+        failed_jobs=failed_jobs,
+        active_jobs=active_jobs,
+        items_found_total=items_found_total,
+        stage_counts=stage_counts,
+    )
 
 
 def _shared_account_catalog_scrape_complete(
@@ -10461,7 +9834,11 @@ def _persist_run_counters_and_summary(
     items_found_total: int,
     stage_counts: dict[str, dict[str, int]],
 ) -> dict[str, Any]:
-    summary = _build_run_summary_payload(
+    from trr_backend.socials.control_plane.run_lifecycle import _persist_run_counters_and_summary as impl
+
+    return impl(
+        conn=conn,
+        run_id=run_id,
         total_jobs=total_jobs,
         completed_jobs=completed_jobs,
         failed_jobs=failed_jobs,
@@ -10469,34 +9846,6 @@ def _persist_run_counters_and_summary(
         items_found_total=items_found_total,
         stage_counts=stage_counts,
     )
-    with pg.db_cursor(conn=conn) as cur:
-        pg.fetch_one_with_cursor(
-            cur,
-            """
-            update social.scrape_runs
-            set
-              total_jobs = %s,
-              completed_jobs = %s,
-              failed_jobs = %s,
-              active_jobs = %s,
-              items_found_total = %s,
-              stage_counts = %s::jsonb,
-              summary = %s::jsonb
-            where id = %s
-            returning id::text
-            """,
-            [
-                int(total_jobs),
-                int(completed_jobs),
-                int(failed_jobs),
-                int(active_jobs),
-                int(items_found_total),
-                json.dumps(stage_counts),
-                json.dumps(summary),
-                run_id,
-            ],
-        )
-    return summary
 
 
 def _increment_stage_counter(
@@ -10506,60 +9855,15 @@ def _increment_stage_counter(
     key: str,
     delta: int,
 ) -> dict[str, dict[str, int]]:
-    if not delta:
-        return stage_counts
-    bucket = dict(stage_counts.get(stage) or {"total": 0, "completed": 0, "failed": 0, "active": 0})
-    bucket[key] = max(0, _normalize_non_negative_int(bucket.get(key)) + int(delta))
-    stage_counts[stage] = bucket
-    return stage_counts
+    from trr_backend.socials.control_plane.run_lifecycle import _increment_stage_counter as impl
+
+    return impl(stage_counts, stage=stage, key=key, delta=delta)
 
 
 def _increment_run_counters_on_job_create(*, run_id: str, stage: str, status: str) -> None:
-    if not run_id or not _run_counter_columns_ready():
-        return
-    stage_key = str(stage or "unknown").strip() or "unknown"
-    with pg.db_connection() as conn:
-        with pg.db_cursor(conn=conn) as cur:
-            row = (
-                pg.fetch_one_with_cursor(
-                    cur,
-                    """
-                select
-                  total_jobs,
-                  completed_jobs,
-                  failed_jobs,
-                  active_jobs,
-                  items_found_total,
-                  stage_counts
-                from social.scrape_runs
-                where id = %s
-                for update
-                """,
-                    [run_id],
-                )
-                or {}
-            )
-            if not row:
-                return
-            total_jobs = _normalize_non_negative_int(row.get("total_jobs")) + 1
-            completed_jobs = _normalize_non_negative_int(row.get("completed_jobs"))
-            failed_jobs = _normalize_non_negative_int(row.get("failed_jobs"))
-            active_jobs = _normalize_non_negative_int(row.get("active_jobs")) + (1 if _status_is_active(status) else 0)
-            items_found_total = _normalize_non_negative_int(row.get("items_found_total"))
-            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
-            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=1)
-            if _status_is_active(status):
-                stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=1)
-            _persist_run_counters_and_summary(
-                conn=conn,
-                run_id=run_id,
-                total_jobs=total_jobs,
-                completed_jobs=completed_jobs,
-                failed_jobs=failed_jobs,
-                active_jobs=active_jobs,
-                items_found_total=items_found_total,
-                stage_counts=stage_counts,
-            )
+    from trr_backend.socials.control_plane.run_lifecycle import _increment_run_counters_on_job_create as impl
+
+    impl(run_id=run_id, stage=stage, status=status)
 
 
 def _increment_run_counters_on_job_finish(
@@ -10571,301 +9875,46 @@ def _increment_run_counters_on_job_finish(
     prior_items_found: int,
     new_items_found: int,
 ) -> None:
-    if not run_id or not _run_counter_columns_ready():
-        return
-    stage_key = str(stage or "unknown").strip() or "unknown"
-    active_delta = (1 if _status_is_active(new_status) else 0) - (1 if _status_is_active(prior_status) else 0)
-    completed_delta = (1 if _status_is_completed(new_status) else 0) - (1 if _status_is_completed(prior_status) else 0)
-    failed_delta = (1 if _status_is_failed(new_status) else 0) - (1 if _status_is_failed(prior_status) else 0)
-    items_delta = _normalize_non_negative_int(new_items_found) - _normalize_non_negative_int(prior_items_found)
+    from trr_backend.socials.control_plane.run_lifecycle import _increment_run_counters_on_job_finish as impl
 
-    with pg.db_connection() as conn:
-        with pg.db_cursor(conn=conn) as cur:
-            row = (
-                pg.fetch_one_with_cursor(
-                    cur,
-                    """
-                select
-                  total_jobs,
-                  completed_jobs,
-                  failed_jobs,
-                  active_jobs,
-                  items_found_total,
-                  stage_counts
-                from social.scrape_runs
-                where id = %s
-                for update
-                """,
-                    [run_id],
-                )
-                or {}
-            )
-            if not row:
-                return
-            total_jobs = _normalize_non_negative_int(row.get("total_jobs"))
-            completed_jobs = max(0, _normalize_non_negative_int(row.get("completed_jobs")) + completed_delta)
-            failed_jobs = max(0, _normalize_non_negative_int(row.get("failed_jobs")) + failed_delta)
-            active_jobs = max(0, _normalize_non_negative_int(row.get("active_jobs")) + active_delta)
-            items_found_total = max(0, _normalize_non_negative_int(row.get("items_found_total")) + items_delta)
-            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
-            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=active_delta)
-            stage_counts = _increment_stage_counter(
-                stage_counts, stage=stage_key, key="completed", delta=completed_delta
-            )
-            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="failed", delta=failed_delta)
-            _persist_run_counters_and_summary(
-                conn=conn,
-                run_id=run_id,
-                total_jobs=total_jobs,
-                completed_jobs=completed_jobs,
-                failed_jobs=failed_jobs,
-                active_jobs=active_jobs,
-                items_found_total=items_found_total,
-                stage_counts=stage_counts,
-            )
+    impl(
+        run_id=run_id,
+        stage=stage,
+        prior_status=prior_status,
+        new_status=new_status,
+        prior_items_found=prior_items_found,
+        new_items_found=new_items_found,
+    )
 
 
 def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
-    summary_row = (
-        pg.fetch_one(
-            """
-        with stats as (
-          select
-            count(*)::int as total_jobs,
-            count(*) filter (where status = 'completed')::int as completed_jobs,
-            count(*) filter (where status = 'failed')::int as failed_jobs,
-            count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active_jobs,
-            coalesce(sum(items_found), 0)::int as items_found_total
-          from social.scrape_jobs
-          where run_id = %s
-        ),
-        stage_stats as (
-          select
-            coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage,
-            count(*)::int as total,
-            count(*) filter (where status = 'completed')::int as completed,
-            count(*) filter (where status = 'failed')::int as failed,
-            count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active
-          from social.scrape_jobs
-          where run_id = %s
-          group by coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown')
-        )
-        select
-          (select row_to_json(stats) from stats) as stats,
-          coalesce((select jsonb_object_agg(stage, jsonb_build_object(
-            'total', total,
-            'completed', completed,
-            'failed', failed,
-            'active', active
-          )) from stage_stats), '{}'::jsonb) as stage_counts
-        """,
-            [run_id, run_id],
-        )
-        or {}
-    )
-    stats = dict(summary_row.get("stats") or {})
-    return _build_run_summary_payload(
-        total_jobs=stats.get("total_jobs"),
-        completed_jobs=stats.get("completed_jobs"),
-        failed_jobs=stats.get("failed_jobs"),
-        active_jobs=stats.get("active_jobs"),
-        items_found_total=stats.get("items_found_total"),
-        stage_counts=summary_row.get("stage_counts"),
-    )
+    from trr_backend.socials.control_plane.run_lifecycle import _recompute_run_summary_from_jobs as impl
+
+    return impl(run_id)
 
 
 def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
-    if _run_counter_columns_ready() and not force_recompute:
-        row = (
-            pg.fetch_one(
-                """
-                select
-                  total_jobs,
-                  completed_jobs,
-                  failed_jobs,
-                  active_jobs,
-                  items_found_total,
-                  stage_counts
-                from social.scrape_runs
-                where id = %s
-                """,
-                [run_id],
-            )
-            or {}
-        )
-        summary = _build_run_summary_payload(
-            total_jobs=row.get("total_jobs"),
-            completed_jobs=row.get("completed_jobs"),
-            failed_jobs=row.get("failed_jobs"),
-            active_jobs=row.get("active_jobs"),
-            items_found_total=row.get("items_found_total"),
-            stage_counts=row.get("stage_counts"),
-        )
-        pg.fetch_one(
-            """
-            update social.scrape_runs
-            set summary = %s::jsonb
-            where id = %s
-            returning id::text
-            """,
-            [json.dumps(summary), run_id],
-        )
-        return summary
+    from trr_backend.socials.control_plane.run_lifecycle import _update_run_summary as impl
 
-    summary = _recompute_run_summary_from_jobs(run_id)
-    if _run_counter_columns_ready():
-        with pg.db_connection() as conn:
-            _persist_run_counters_and_summary(
-                conn=conn,
-                run_id=run_id,
-                total_jobs=int(summary.get("total_jobs") or 0),
-                completed_jobs=int(summary.get("completed_jobs") or 0),
-                failed_jobs=int(summary.get("failed_jobs") or 0),
-                active_jobs=int(summary.get("active_jobs") or 0),
-                items_found_total=int(summary.get("items_found_total") or 0),
-                stage_counts=dict(summary.get("stage_counts") or {}),
-            )
-    else:
-        pg.fetch_one(
-            """
-            update social.scrape_runs
-            set summary = %s::jsonb
-            where id = %s
-            returning id::text
-            """,
-            [json.dumps(summary), run_id],
-        )
-    return summary
+    return impl(run_id, force_recompute=force_recompute)
 
 
 def reconcile_run_summaries(*, run_ids: list[str] | None = None, limit: int = 100) -> dict[str, Any]:
-    if not _run_counter_columns_ready():
-        return {"reconciled_runs": 0, "run_ids": []}
+    from trr_backend.socials.control_plane.run_lifecycle import reconcile_run_summaries as impl
 
-    safe_limit = max(1, min(int(limit), 500))
-    if run_ids:
-        candidate_run_ids = [str(run_id).strip() for run_id in run_ids if str(run_id).strip()][:safe_limit]
-    else:
-        rows = pg.fetch_all(
-            """
-            select id::text as id
-            from social.scrape_runs
-            where status in ('queued', 'running', 'failed')
-            order by created_at desc
-            limit %s
-            """,
-            [safe_limit],
-        )
-        candidate_run_ids = [str(row.get("id") or "").strip() for row in rows if str(row.get("id") or "").strip()]
-
-    reconciled: list[str] = []
-    for candidate_run_id in candidate_run_ids:
-        summary = _recompute_run_summary_from_jobs(candidate_run_id)
-        with pg.db_connection() as conn:
-            _persist_run_counters_and_summary(
-                conn=conn,
-                run_id=candidate_run_id,
-                total_jobs=int(summary.get("total_jobs") or 0),
-                completed_jobs=int(summary.get("completed_jobs") or 0),
-                failed_jobs=int(summary.get("failed_jobs") or 0),
-                active_jobs=int(summary.get("active_jobs") or 0),
-                items_found_total=int(summary.get("items_found_total") or 0),
-                stage_counts=dict(summary.get("stage_counts") or {}),
-            )
-        reconciled.append(candidate_run_id)
-    return {"reconciled_runs": len(reconciled), "run_ids": reconciled}
+    return impl(run_ids=run_ids, limit=limit)
 
 
 def _run_job_status_breakdown(run_id: str) -> dict[str, int]:
-    row = (
-        pg.fetch_one(
-            """
-            select
-              count(*) filter (where status = 'running')::int as running_jobs,
-              count(*) filter (where status in ('queued', 'pending', 'retrying'))::int as queued_jobs,
-              count(*) filter (where status = 'cancelling')::int as cancelling_jobs
-            from social.scrape_jobs
-            where run_id = %s::uuid
-            """,
-            [run_id],
-        )
-        or {}
-    )
-    return {
-        "running_jobs": _normalize_non_negative_int(row.get("running_jobs")),
-        "queued_jobs": _normalize_non_negative_int(row.get("queued_jobs")),
-        "cancelling_jobs": _normalize_non_negative_int(row.get("cancelling_jobs")),
-    }
+    from trr_backend.socials.control_plane.run_lifecycle import _run_job_status_breakdown as impl
+
+    return impl(run_id)
 
 
 def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
-    # Acquire a session-level advisory lock keyed on the run_id to prevent
-    # concurrent workers from finalising the same run simultaneously.
-    lock_key = int(hashlib.md5(run_id.encode()).hexdigest()[:15], 16) % (2**31)
-    lock_row = pg.fetch_one("SELECT pg_try_advisory_lock(%s) AS locked", [lock_key])
-    got_lock = bool(lock_row and lock_row.get("locked"))
-    if not got_lock:
-        logger.debug("[finalize_run_status] skipped — another worker is finalizing run=%s", run_id[:8])
-        # Return a minimal summary; the winner will write the correct status.
-        current = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
-        return {"status": current.get("status", "running")}
-    try:
-        summary = _update_run_summary(run_id, force_recompute=force_recompute)
-        active_jobs = int(summary.get("active_jobs") or 0)
-        failed_jobs = int(summary.get("failed_jobs") or 0)
-        current = pg.fetch_one("select status, config from social.scrape_runs where id = %s", [run_id]) or {}
-        if str(current.get("status")) == "cancelled":
-            return summary
-        current_config = _metadata_dict(current.get("config"))
-        stage_counts = _normalize_stage_counts(_metadata_dict(summary).get("stage_counts"))
-        classify_stage = _metadata_dict(stage_counts.get(POST_CLASSIFY_STAGE))
-        classify_jobs_created = 0
-        if _normalize_non_negative_int(classify_stage.get("total")) <= 0:
-            classify_jobs_created = _maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
-                run_id=run_id,
-                source_scope=str(current_config.get("source_scope") or "").strip() or "bravo",
-                run_config=current_config,
-            )
-        if classify_jobs_created > 0:
-            summary = _update_run_summary(run_id, force_recompute=True)
-            active_jobs = int(summary.get("active_jobs") or 0)
-            failed_jobs = int(summary.get("failed_jobs") or 0)
-        status_breakdown = _run_job_status_breakdown(run_id)
-        fetch_terminal_error = _resolve_pipeline_ingest_mode(
-            current_config.get("pipeline_ingest_mode")
-        ) == SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and _shared_catalog_fetch_has_terminal_error(run_id)
-        if status_breakdown["running_jobs"] > 0:
-            _set_run_status(run_id, "running")
-        elif status_breakdown["cancelling_jobs"] > 0:
-            _set_run_status(run_id, "cancelling")
-        elif active_jobs > 0 or status_breakdown["queued_jobs"] > 0:
-            _set_run_status(run_id, "queued")
-        elif failed_jobs > 0 or fetch_terminal_error:
-            _set_run_status(run_id, "failed")
-        else:
-            _set_run_status(run_id, "completed")
-        if _column_exists("social", "scrape_runs", "sync_session_id"):
-            run_row = (
-                pg.fetch_one(
-                    "select sync_session_id::text as sync_session_id from social.scrape_runs where id = %s::uuid",
-                    [run_id],
-                )
-                or {}
-            )
-            sync_session_id = str(run_row.get("sync_session_id") or "").strip()
-            if sync_session_id:
-                try:
-                    from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
+    from trr_backend.socials.control_plane.run_lifecycle import _finalize_run_status as impl
 
-                    evaluate_sync_session(sync_session_id)
-                except Exception:  # noqa: BLE001
-                    logger.exception("Failed to evaluate sync session after run finalization: run=%s", run_id)
-        return summary
-    finally:
-        try:
-            pg.fetch_one("SELECT pg_advisory_unlock(%s)", [lock_key])
-        except Exception:  # noqa: BLE001
-            logger.debug("[finalize_run_status] advisory unlock failed for run=%s", run_id[:8], exc_info=True)
+    return impl(run_id, force_recompute=force_recompute)
 
 
 def _normalize_non_negative_int(value: Any) -> int:
@@ -11291,150 +10340,19 @@ def recover_stale_unclaimed_dispatched_jobs(
     account_handle: str | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    features = _scrape_jobs_features()
-    if not bool(features.get("has_queue_fields")):
-        return []
-    safe_limit = max(1, min(int(limit), 250))
-    normalized_platform = _normalize_platform_name(platform) or None
-    normalized_account = _normalize_account_handle(account_handle) or None
-    rows = pg.fetch_all(
-        """
-        select
-          id::text as id,
-          run_id::text as run_id,
-          platform,
-          status,
-          items_found,
-          attempt_count,
-          error_message,
-          last_error_code,
-          config,
-          metadata
-        from social.scrape_jobs
-        where status in ('queued', 'pending', 'retrying')
-          and (%s::uuid is null or run_id = %s::uuid)
-          and (%s::text is null or platform = %s::text)
-          and (%s::text is null or lower(coalesce(config->>'account', '')) = %s::text)
-          and coalesce(worker_id, '') = ''
-          and claimed_at is null
-          and coalesce(metadata->'dispatch'->>'dispatch_backend', '') = 'modal'
-          and nullif(coalesce(metadata->'dispatch'->>'dispatch_requested_at', ''), '') is not null
-          and nullif(coalesce(metadata->'dispatch'->>'lease_expires_at', ''), '') is not null
-          and (metadata->'dispatch'->>'lease_expires_at')::timestamptz <= now()
-        order by (metadata->'dispatch'->>'lease_expires_at')::timestamptz asc, created_at asc
-        limit %s
-        """,
-        [run_id, run_id, normalized_platform, normalized_platform, normalized_account, normalized_account, safe_limit],
+    from trr_backend.socials.control_plane.dispatch_runtime import (
+        recover_stale_unclaimed_dispatched_jobs as impl,
     )
-    if not rows:
-        return []
 
-    recovered_rows: list[dict[str, Any]] = []
-    recovery_limit = _resolve_stale_modal_dispatch_recovery_limit()
-    recovery_backoff = timedelta(seconds=max(5, _modal_dispatch_retry_delay_seconds()))
-    recovery_error = "Remote Modal dispatch lease expired before any worker claimed the job."
-    now_utc = _now_utc()
+    return impl(
+        run_id=run_id,
+        platform=platform,
+        account_handle=account_handle,
+        limit=limit,
+    )
 
-    for row in rows:
-        job_id = str(row.get("id") or "").strip()
-        if not job_id:
-            continue
-        existing_metadata = dict(row.get("metadata") or {})
-        dispatch = _job_dispatch_metadata(row)
-        remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
-        if remote_invocation_id:
-            refreshed_lease_expires_at = _now_utc() + timedelta(
-                seconds=_resolve_stale_seconds_for_job(
-                    platform=str(row.get("platform") or ""),
-                    stage=_job_stage_from_row(row),
-                    has_queue_fields=True,
-                )
-            )
-            inspection = _refresh_remote_modal_invocation_state(
-                row,
-                lease_expires_at=refreshed_lease_expires_at,
-            )
-            if (
-                _modal_invocation_is_nonterminal(str(inspection.get("status") or ""))
-                or str(inspection.get("status") or "").strip().lower() == "unknown"
-            ):
-                continue
 
-        recovery_count = _dispatch_metadata_recovery_count(dispatch) + 1
-        exhausted = recovery_count >= recovery_limit
-        dispatch_payload = {
-            **dispatch,
-            "remote_invocation_id": None if remote_invocation_id else dispatch.get("remote_invocation_id"),
-            "remote_invocation_status": (
-                "failed" if remote_invocation_id else _modal_invocation_status(dispatch) or None
-            ),
-            "remote_invocation_checked_at": (
-                _iso(now_utc) if remote_invocation_id else dispatch.get("remote_invocation_checked_at")
-            ),
-            "remote_task_id": None,
-            "remote_pending_since": None,
-            "remote_blocked_reason": None,
-            "lease_expires_at": None,
-            "last_dispatch_error": recovery_error,
-            "last_dispatch_error_at": _iso(now_utc),
-            "last_dispatch_error_code": STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE,
-            "stale_unclaimed_recovery_count": recovery_count,
-            "stale_unclaimed_recovered_at": _iso(now_utc),
-            "stale_unclaimed_recovery_limit": recovery_limit,
-            "stale_unclaimed_dispatch_exhausted": exhausted,
-        }
-        metadata_updates = {
-            **existing_metadata,
-            "dispatch": dispatch_payload,
-            "job_error_code": STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE,
-            "retryable": not exhausted,
-        }
-        if exhausted:
-            _finish_job(
-                job_id,
-                status="failed",
-                items_found=_normalize_non_negative_int(row.get("items_found")),
-                error_message=recovery_error,
-                metadata=metadata_updates,
-                last_error_code=STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE,
-                last_error_class="ModalDispatchUnclaimed",
-            )
-            recovered_rows.append(
-                {
-                    "id": job_id,
-                    "run_id": str(row.get("run_id") or "").strip() or None,
-                    "platform": str(row.get("platform") or "").strip() or None,
-                    "status": "failed",
-                    "recovery_count": recovery_count,
-                    "exhausted": True,
-                }
-            )
-            continue
-        _finish_job(
-            job_id,
-            status="retrying",
-            items_found=_normalize_non_negative_int(row.get("items_found")),
-            error_message=recovery_error,
-            metadata=metadata_updates,
-            last_error_code=STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE,
-            last_error_class="ModalDispatchUnclaimed",
-            next_available_at=now_utc + recovery_backoff,
-        )
-        recovered_rows.append(
-            {
-                "id": job_id,
-                "run_id": str(row.get("run_id") or "").strip() or None,
-                "platform": str(row.get("platform") or "").strip() or None,
-                "status": "retrying",
-                "recovery_count": recovery_count,
-                "exhausted": False,
-            }
-        )
-
-    affected_run_ids = sorted({str(row.get("run_id") or "").strip() for row in recovered_rows if row.get("run_id")})
-    for affected_run_id in affected_run_ids:
-        _finalize_run_status(affected_run_id, force_recompute=True)
-    return recovered_rows
+recover_stale_unclaimed_dispatched_jobs.__trr_delegates_to_control_plane__ = True
 
 
 def _parse_platform_time(ts: Any) -> datetime | None:
@@ -19673,6 +18591,7 @@ def _ingest_tiktok(
                 default=0.35,
             ),
             max_pages=None,
+            scrape_mode="ytdlp",
             show_id=context.show_id,
             season_number=context.season_number,
         )
@@ -25166,11 +24085,30 @@ def _cached_live_profile_snapshot(platform: str, account_handle: str) -> dict[st
             from trr_backend.socials.tiktok import TikTokScraper
 
             scraper = TikTokScraper(cookies=_load_tiktok_cookies())
-            user_data = scraper.fetch_user_detail(normalized_account, 0.0)
-            html_data = scraper._fetch_profile_html(normalized_account, 0.0)  # noqa: SLF001
-            snapshot = scraper.build_profile_snapshot(normalized_account, user_data=user_data, html_data=html_data)
+            try:
+                user_data = scraper.fetch_user_detail(normalized_account, 0.0)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[tiktok] live profile snapshot user-detail enrichment failed for @%s",
+                    normalized_account,
+                )
+                user_data = None
+            try:
+                html_data = scraper._fetch_profile_html(normalized_account, 0.0)  # noqa: SLF001
+            except Exception:  # noqa: BLE001
+                logger.warning("[tiktok] live profile snapshot html enrichment failed for @%s", normalized_account)
+                html_data = None
+            try:
+                snapshot = scraper.build_profile_snapshot(normalized_account, user_data=user_data, html_data=html_data)
+            except Exception:  # noqa: BLE001
+                logger.warning("[tiktok] live profile snapshot build failed for @%s", normalized_account)
+                snapshot = {}
             if not _normalize_non_negative_int(snapshot.get("total_posts")) and isinstance(html_data, dict):
-                html_items, _ = scraper._extract_posts_from_html_data(html_data, normalized_account)  # noqa: SLF001
+                try:
+                    html_items, _ = scraper._extract_posts_from_html_data(html_data, normalized_account)  # noqa: SLF001
+                except Exception:  # noqa: BLE001
+                    logger.warning("[tiktok] live profile snapshot html parsing failed for @%s", normalized_account)
+                    html_items = []
                 if html_items:
                     snapshot["total_posts"] = max(
                         _normalize_non_negative_int(snapshot.get("total_posts")),
@@ -28942,10 +27880,30 @@ def _bootstrap_shared_tiktok_account_context(
     from trr_backend.socials.tiktok import TikTokScraper
 
     tiktok_scraper = scraper or TikTokScraper(cookies=_load_tiktok_cookies())
-    user_data = tiktok_scraper.fetch_user_detail(account_handle, delay_seconds)
-    html_data = tiktok_scraper._fetch_profile_html(account_handle, delay_seconds)  # noqa: SLF001
-    html_items, html_sec_uid = tiktok_scraper._extract_posts_from_html_data(html_data or {}, account_handle)  # noqa: SLF001
-    profile_snapshot = tiktok_scraper.build_profile_snapshot(account_handle, user_data=user_data, html_data=html_data)
+    try:
+        user_data = tiktok_scraper.fetch_user_detail(account_handle, delay_seconds)
+    except Exception:  # noqa: BLE001
+        logger.warning("[tiktok] shared-account user-detail enrichment failed for @%s", account_handle)
+        user_data = None
+    try:
+        html_data = tiktok_scraper._fetch_profile_html(account_handle, delay_seconds)  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        logger.warning("[tiktok] shared-account html enrichment failed for @%s", account_handle)
+        html_data = None
+    try:
+        html_items, html_sec_uid = tiktok_scraper._extract_posts_from_html_data(html_data or {}, account_handle)  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        logger.warning("[tiktok] shared-account html parsing failed for @%s", account_handle)
+        html_items, html_sec_uid = [], None
+    try:
+        profile_snapshot = tiktok_scraper.build_profile_snapshot(
+            account_handle,
+            user_data=user_data,
+            html_data=html_data,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[tiktok] shared-account profile snapshot build failed for @%s", account_handle)
+        profile_snapshot = {}
     sec_uid = str(profile_snapshot.get("sec_uid") or html_sec_uid or "").strip() or None
     total_posts = max(
         _normalize_non_negative_int(profile_snapshot.get("total_posts")),
@@ -29095,7 +28053,9 @@ def _discover_tiktok_cursor_partitions(
         "partition_strategy": CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
         "profile_snapshot": _metadata_dict(context.get("profile_snapshot")),
     }
-    endpoint_responses = _metadata_dict(_metadata_dict(scraper.last_retrieval_meta).get("endpoint_responses"))
+    endpoint_responses = _metadata_dict(
+        _metadata_dict(getattr(scraper, "last_retrieval_meta", {}) or {}).get("endpoint_responses")
+    )
     if endpoint_responses:
         retrieval_meta["endpoint_responses"] = endpoint_responses
     if pages_scanned == 1 and posts_checked <= 0 and total_posts > 0:
@@ -29390,7 +28350,9 @@ def _scrape_shared_tiktok_posts_partitioned(
         "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
         "profile_snapshot": profile_snapshot,
     }
-    endpoint_responses = _metadata_dict(_metadata_dict(scraper.last_retrieval_meta).get("endpoint_responses"))
+    endpoint_responses = _metadata_dict(
+        _metadata_dict(getattr(scraper, "last_retrieval_meta", {}) or {}).get("endpoint_responses")
+    )
     if endpoint_responses:
         retrieval_meta["endpoint_responses"] = endpoint_responses
     if error_code and not partition_completed:
@@ -29495,18 +28457,6 @@ def _scrape_shared_tiktok_posts(
     job_id: str,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    runner_strategy = str(config.get("runner_strategy") or "").strip().lower()
-    if (
-        str(config.get("partition_strategy") or "").strip().lower() == CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
-        and runner_strategy != "single_runner_fallback"
-    ):
-        return _scrape_shared_tiktok_posts_partitioned(
-            run_id=run_id,
-            account_handle=account_handle,
-            config=config,
-            progress_cb=progress_cb,
-        )
-
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
     scraper = TikTokScraper(cookies=_load_tiktok_cookies())
@@ -34618,44 +33568,9 @@ def list_shared_runs(
     source_scope: str | None = None,
     run_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    safe_limit = max(1, min(int(limit), 250))
-    sql = """
-        select
-          id::text as id,
-          season_id::text as season_id,
-          show_id::text as show_id,
-          source_scope,
-          status,
-          config,
-          summary,
-          initiated_by,
-          created_at,
-          started_at,
-          completed_at,
-          cancelled_at
-        from social.scrape_runs
-        where coalesce(config->>'pipeline_ingest_mode', '') = %s
-    """
-    params: list[Any] = [SHARED_ACCOUNT_ASYNC_INGEST_MODE]
-    if status:
-        sql += " and status = %s"
-        params.append(status)
-    if source_scope:
-        sql += " and source_scope = %s"
-        params.append(source_scope)
-    if run_id:
-        sql += " and id = %s::uuid"
-        params.append(run_id)
-    sql += " order by created_at desc limit %s"
-    params.append(safe_limit)
-    rows = pg.fetch_all(sql, params)
-    for row in rows:
-        config = dict(row.get("config") or {})
-        row["execution_owner"] = str(config.get("execution_owner") or "").strip() or None
-        row["execution_mode_canonical"] = str(config.get("execution_mode_canonical") or "").strip() or None
-        row["execution_backend_canonical"] = str(config.get("execution_backend_canonical") or "").strip() or None
-        row["ingest_mode"] = str(config.get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE)
-    return rows
+    from trr_backend.socials.control_plane.shared_accounts import list_shared_runs as impl
+
+    return impl(limit=limit, status=status, source_scope=source_scope, run_id=run_id)
 
 
 def cancel_shared_run(run_id: str, *, cancelled_by: str | None = None) -> dict[str, Any]:
@@ -35469,100 +34384,21 @@ def list_runs(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    safe_limit = max(1, min(int(limit), 250))
-    normalized_platforms = _resolve_requested_platforms(platforms) if platforms else None
-    normalized_date_start = _coerce_dt(date_start)
-    normalized_date_end = _coerce_dt(date_end)
-    requires_config_filtering = any(
-        [
-            normalized_platforms is not None,
-            week_index is not None,
-            normalized_date_start is not None,
-            normalized_date_end is not None,
-        ]
+    from trr_backend.socials.control_plane.dispatch import list_runs as impl
+
+    return impl(
+        season_id,
+        limit=limit,
+        status=status,
+        source_scope=source_scope,
+        run_id=run_id,
+        client_session_id=client_session_id,
+        client_workflow_id=client_workflow_id,
+        platforms=platforms,
+        week_index=week_index,
+        date_start=date_start,
+        date_end=date_end,
     )
-    sql = """
-        select
-          id::text,
-          season_id::text as season_id,
-          show_id::text as show_id,
-          source_scope,
-          status,
-          config,
-          summary,
-          initiated_by,
-          created_at,
-          started_at,
-          completed_at,
-          cancelled_at
-        from social.scrape_runs
-        where season_id = %s
-    """
-    params: list[Any] = [season_id]
-    if status:
-        sql += " and status = %s"
-        params.append(status)
-    if source_scope:
-        sql += " and source_scope = %s"
-        params.append(source_scope)
-    if run_id:
-        sql += " and id = %s::uuid"
-        params.append(run_id)
-    if client_session_id:
-        sql += " and coalesce(config->>'client_session_id', '') = %s"
-        params.append(client_session_id)
-    if client_workflow_id:
-        sql += " and coalesce(config->>'client_workflow_id', '') = %s"
-        params.append(client_workflow_id)
-    sql += " order by created_at desc limit %s"
-    params.append(250 if requires_config_filtering else safe_limit)
-    rows = pg.fetch_all(sql, params)
-    filtered_rows: list[dict[str, Any]] = []
-    for row in rows:
-        config = row.get("config") if isinstance(row.get("config"), dict) else {}
-        if not _run_matches_scope_filters(
-            config,
-            platforms=normalized_platforms,
-            week_index=week_index,
-            date_start=normalized_date_start,
-            date_end=normalized_date_end,
-        ):
-            continue
-        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
-        total_jobs = int(summary.get("total_jobs") or 0)
-        completed_jobs = int(summary.get("completed_jobs") or 0)
-        failed_jobs = int(summary.get("failed_jobs") or 0)
-        active_jobs = int(summary.get("active_jobs") or 0)
-        if completed_jobs == 0 and total_jobs > 0:
-            completed_jobs = max(0, total_jobs - failed_jobs - active_jobs)
-        summary_normalized = dict(summary)
-        if summary_normalized:
-            summary_normalized["completed_jobs"] = completed_jobs
-        row["summary_normalized"] = summary_normalized
-        row["execution_owner"] = str(config.get("execution_owner") or "").strip() or None
-        row["execution_mode_canonical"] = str(config.get("execution_mode_canonical") or "").strip() or None
-        row["execution_backend_canonical"] = str(config.get("execution_backend_canonical") or "").strip() or None
-        row["ingest_mode"] = (
-            str(config.get("pipeline_ingest_mode") or LEGACY_SEASON_TARGETED_INGEST_MODE).strip()
-            or LEGACY_SEASON_TARGETED_INGEST_MODE
-        )
-        row["orchestration_id"] = (
-            str(config.get("orchestration_id") or config.get("client_workflow_id") or "").strip() or None
-        )
-        row["orchestration_scope"] = str(config.get("orchestration_scope") or "").strip() or None
-        row["orchestration_slot_key"] = str(config.get("orchestration_slot_key") or "").strip() or None
-        row["orchestration_position"] = _normalize_non_negative_int(config.get("orchestration_position"))
-        row["orchestration_total_runs"] = _normalize_non_negative_int(config.get("orchestration_total_runs"))
-        row["orchestration_week_index"] = (
-            _normalize_non_negative_int(config.get("orchestration_week_index"))
-            if config.get("orchestration_week_index") is not None
-            else None
-        )
-        row["orchestration_platform"] = str(config.get("orchestration_platform") or "").strip() or None
-        filtered_rows.append(row)
-        if len(filtered_rows) >= safe_limit:
-            break
-    return filtered_rows
 
 
 def list_run_summaries(
@@ -35577,26 +34413,9 @@ def list_run_summaries(
     date_start: datetime | None = None,
     date_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    cache_key = (
-        "run_summaries",
-        str(season_id or "").strip(),
-        int(limit),
-        str(source_scope or "").strip().lower() or None,
-        str(client_session_id or "").strip() or None,
-        str(client_workflow_id or "").strip() or None,
-        tuple(
-            sorted(
-                {str(platform or "").strip().lower() for platform in (platforms or []) if str(platform or "").strip()}
-            )
-        ),
-        int(week_index) if week_index is not None else None,
-        _iso(_coerce_dt(date_start)),
-        _iso(_coerce_dt(date_end)),
-    )
-    cached_payload = _get_social_hot_path_cache(cache_key)
-    if isinstance(cached_payload, list):
-        return cached_payload
-    runs = list_runs(
+    from trr_backend.socials.control_plane.dispatch import list_run_summaries as impl
+
+    return impl(
         season_id,
         limit=limit,
         source_scope=source_scope,
@@ -35607,129 +34426,6 @@ def list_run_summaries(
         date_start=date_start,
         date_end=date_end,
     )
-    if not runs:
-        return []
-
-    run_ids = [str(run.get("id") or "") for run in runs if str(run.get("id") or "").strip()]
-    if not run_ids:
-        return []
-
-    job_rows = pg.fetch_all(
-        """
-        select
-          run_id::text as run_id,
-          platform,
-          status,
-          error_message,
-          last_error_code,
-          last_error_class,
-          metadata
-        from social.scrape_jobs
-        where season_id = %s
-          and run_id = any(%s::uuid[])
-        """,
-        [season_id, run_ids],
-    )
-
-    by_run: dict[str, dict[str, Any]] = {}
-    for row in job_rows:
-        run_id = str(row.get("run_id") or "")
-        if not run_id:
-            continue
-        bucket = by_run.setdefault(
-            run_id,
-            {
-                "affected_platforms": set(),
-                "error_counts": Counter(),
-                "failed_jobs": 0,
-                "active_jobs": 0,
-                "total_jobs": 0,
-            },
-        )
-        bucket["total_jobs"] += 1
-        platform = str(row.get("platform") or "").strip().lower()
-        if platform:
-            bucket["affected_platforms"].add(platform)
-        status = str(row.get("status") or "").strip().lower()
-        if status == "failed":
-            bucket["failed_jobs"] += 1
-        if status in {"queued", "pending", "retrying", "running"}:
-            bucket["active_jobs"] += 1
-        if status in {"failed", "retrying"}:
-            metadata = row.get("metadata")
-            metadata_map = metadata if isinstance(metadata, dict) else {}
-            metadata_error_code = metadata_map.get("job_error_code")
-            normalized = (
-                str(metadata_error_code).strip().upper()
-                if isinstance(metadata_error_code, str) and metadata_error_code.strip()
-                else _normalize_job_error_code(
-                    raw_error_code=str(row.get("last_error_code") or ""),
-                    error_message=str(row.get("error_message") or ""),
-                    error_class=str(row.get("last_error_class") or ""),
-                )
-            )
-            bucket["error_counts"][normalized] += 1
-
-    now_utc = _now_utc()
-    summaries: list[dict[str, Any]] = []
-    for run in runs:
-        run_id = str(run.get("id") or "")
-        if not run_id:
-            continue
-        summary = run.get("summary") if isinstance(run.get("summary"), dict) else {}
-        aggregate = by_run.get(run_id) or {}
-        started_at = run.get("started_at")
-        completed_at = run.get("completed_at")
-        duration_seconds: int | None = None
-        if isinstance(started_at, datetime):
-            end_ref = completed_at if isinstance(completed_at, datetime) else now_utc
-            duration_seconds = max(0, int((end_ref - started_at).total_seconds()))
-
-        total_jobs = int(summary.get("total_jobs") or aggregate.get("total_jobs") or 0)
-        completed_jobs = int(summary.get("completed_jobs") or 0)
-        failed_jobs = int(summary.get("failed_jobs") or aggregate.get("failed_jobs") or 0)
-        active_jobs = int(summary.get("active_jobs") or aggregate.get("active_jobs") or 0)
-        if completed_jobs == 0 and total_jobs > 0:
-            completed_jobs = max(0, total_jobs - failed_jobs - active_jobs)
-        items_found_total = int(summary.get("items_found_total") or 0)
-        stage_counts = summary.get("stage_counts") if isinstance(summary.get("stage_counts"), dict) else {}
-        affected_platforms = sorted(aggregate.get("affected_platforms") or set())
-        error_counts = dict(sorted((aggregate.get("error_counts") or Counter()).items()))
-        success_rate_pct = _safe_percent(completed_jobs, max(1, total_jobs))
-
-        summaries.append(
-            {
-                "run_id": run_id,
-                "status": run.get("status"),
-                "source_scope": run.get("source_scope"),
-                "execution_owner": run.get("execution_owner"),
-                "execution_mode_canonical": run.get("execution_mode_canonical"),
-                "execution_backend_canonical": run.get("execution_backend_canonical"),
-                "ingest_mode": run.get("ingest_mode"),
-                "orchestration_id": run.get("orchestration_id"),
-                "orchestration_scope": run.get("orchestration_scope"),
-                "orchestration_slot_key": run.get("orchestration_slot_key"),
-                "orchestration_position": run.get("orchestration_position"),
-                "orchestration_total_runs": run.get("orchestration_total_runs"),
-                "orchestration_week_index": run.get("orchestration_week_index"),
-                "orchestration_platform": run.get("orchestration_platform"),
-                "created_at": _iso(run.get("created_at")),
-                "started_at": _iso(started_at),
-                "completed_at": _iso(completed_at),
-                "duration_seconds": duration_seconds,
-                "total_jobs": total_jobs,
-                "completed_jobs": completed_jobs,
-                "failed_jobs": failed_jobs,
-                "active_jobs": active_jobs,
-                "items_found_total": items_found_total,
-                "stage_counts": stage_counts,
-                "affected_platforms": affected_platforms,
-                "error_counts": error_counts,
-                "success_rate_pct": success_rate_pct,
-            }
-        )
-    _set_social_hot_path_cache(cache_key, summaries)
-    return summaries
 
 
 _RUN_PROGRESS_ACTIVE_JOB_STATUSES = {"queued", "pending", "retrying", "running", "cancelling"}
@@ -36864,102 +35560,9 @@ def get_run_progress_snapshot(
     *,
     recent_log_limit: int = 20,
 ) -> dict[str, Any]:
-    safe_recent_log_limit = max(1, min(int(recent_log_limit), 100))
-    if not _relation_exists("social.scrape_runs") or not _relation_exists("social.scrape_jobs"):
-        raise ValueError("social_ingest_queue_schema_missing")
-    features = _scrape_jobs_features()
-    if not bool(features.get("has_run_id")):
-        raise ValueError("run_progress_requires_scrape_jobs_run_id")
+    from trr_backend.socials.control_plane.dispatch import get_run_progress_snapshot as impl
 
-    run_row = pg.fetch_one(
-        """
-        select
-          id::text as run_id,
-          season_id::text as season_id,
-          status,
-          source_scope,
-          config,
-          summary,
-          created_at,
-          started_at,
-          completed_at
-        from social.scrape_runs
-        where id = %s::uuid
-          and season_id = %s::uuid
-        limit 1
-        """,
-        [run_id, season_id],
-    )
-    if not run_row:
-        raise ValueError("run_not_found")
-
-    select_worker_id = "j.worker_id" if bool(features.get("has_queue_fields")) else "null::text as worker_id"
-    select_last_error_code = (
-        "j.last_error_code" if bool(features.get("has_queue_fields")) else "null::text as last_error_code"
-    )
-    job_rows = pg.fetch_all(
-        f"""
-        select
-          j.id::text as id,
-          j.platform,
-          j.job_type,
-          j.status,
-          j.items_found,
-          j.error_message,
-          j.created_at,
-          j.started_at,
-          j.completed_at,
-          j.config,
-          j.metadata,
-          {select_worker_id},
-          {select_last_error_code}
-        from social.scrape_jobs j
-        where j.season_id = %s::uuid
-          and j.run_id = %s::uuid
-        order by coalesce(j.completed_at, j.started_at, j.created_at) desc, j.created_at desc
-        """,
-        [season_id, run_id],
-    )
-
-    computed_summary = _summarize_run_progress_job_rows(job_rows)
-    stored_summary = _metadata_dict(run_row.get("summary"))
-    run_status = str(run_row.get("status") or "").strip().lower()
-    if _run_progress_summary_needs_refresh(stored_summary, computed_summary) or (
-        run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_summary["active_jobs"] == 0
-    ):
-        if run_status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES and computed_summary["active_jobs"] == 0:
-            _finalize_run_status(run_id, force_recompute=True)
-        else:
-            _update_run_summary(run_id, force_recompute=True)
-        refreshed_run_row = pg.fetch_one(
-            """
-            select
-              id::text as run_id,
-              season_id::text as season_id,
-              status,
-              source_scope,
-              config,
-              summary,
-              created_at,
-              started_at,
-              completed_at
-            from social.scrape_runs
-            where id = %s::uuid
-              and season_id = %s::uuid
-            limit 1
-            """,
-            [run_id, season_id],
-        )
-        if refreshed_run_row:
-            run_row = refreshed_run_row
-
-    return _build_run_progress_snapshot_payload(
-        run_row=run_row,
-        job_rows=job_rows,
-        run_id=run_id,
-        season_id=season_id,
-        recent_log_limit=safe_recent_log_limit,
-    )
+    return impl(season_id, run_id, recent_log_limit=recent_log_limit)
 
 
 def _cached_live_profile_total_posts(platform: str, account_handle: str) -> int | None:

@@ -1,4 +1,0 @@
-api_health_http=502 attempt=1
-api_health_http=502 attempt=2
-api_health_http=200 attempt=3
-{"status":"healthy"}

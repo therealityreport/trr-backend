@@ -13,6 +13,24 @@ from trr_backend.repositories import admin_operations as admin_ops_repo
 
 
 @pytest.fixture(autouse=True)
+def _allow_service_role_admin_in_router_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in to service_role admin promotion for router tests.
+
+    Production auth (`api/auth.py`) hardens `require_admin` / `require_internal_admin`
+    so they no longer accept `role=service_role` unless the corresponding env flag
+    is explicitly set. Router tests mint `service_role` JWTs (see `_make_admin_token`
+    helpers throughout `tests/api/routers/`) as a shortcut for authenticating as admin,
+    so we enable the opt-in flags here to preserve that test affordance without
+    weakening production defaults. Tests that want to validate the hardened-default
+    behavior live in `tests/api/test_auth.py`, which sits above this conftest and is
+    therefore unaffected.
+    """
+
+    monkeypatch.setenv("TRR_ADMIN_ALLOW_SERVICE_ROLE", "1")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_ALLOW_SERVICE_ROLE", "1")
+
+
+@pytest.fixture(autouse=True)
 def _clear_social_router_caches() -> None:
     socials_router._clear_account_profile_caches()
     socials_router.invalidate_week_detail_cache()

@@ -6,13 +6,14 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
 
+import trr_backend.socials.tiktok.scraper as tiktok_scraper_module
 from trr_backend.socials.facebook.scraper import FacebookScrapeConfig, FacebookScraper
 from trr_backend.socials.instagram.scraper import InstagramScraper
 from trr_backend.socials.instagram.scraper import ScrapeConfig as InstagramScrapeConfig
@@ -28,6 +29,7 @@ class _FakeResponse:
     payload: dict
     headers: dict[str, str] | None = None
     text: str = ""
+    content: bytes = b"{}"
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -56,6 +58,7 @@ def test_tiktok_fetch_comments_adds_required_aid_param(monkeypatch: pytest.Monke
     scraper = TikTokScraper()
     captured_params: dict[str, int] = {}
     captured_timeout: object | None = None
+    monkeypatch.setenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", "1")
 
     def _fake_get(url: str, params: dict | None = None, **_: object) -> _FakeResponse:
         nonlocal captured_params, captured_timeout
@@ -81,7 +84,7 @@ def test_tiktok_fetch_comments_adds_required_aid_param(monkeypatch: pytest.Monke
         )
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
-    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
 
     comments = scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)
     assert len(comments) == 1
@@ -91,12 +94,13 @@ def test_tiktok_fetch_comments_adds_required_aid_param(monkeypatch: pytest.Monke
 
 def test_tiktok_fetch_comments_sets_failure_reason_for_nonzero_status(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = TikTokScraper()
+    monkeypatch.setenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", "1")
 
     def _fake_get(url: str, params: dict | None = None, **_: object) -> _FakeResponse:
         return _FakeResponse(status_code=200, payload={"status_code": 5, "status_msg": "blocked"})
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
-    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
 
     comments = scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)
     assert comments == []
@@ -116,7 +120,7 @@ def test_tiktok_fetch_user_detail_applies_request_timeout(monkeypatch: pytest.Mo
         )
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
-    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
 
     payload = scraper.fetch_user_detail("bravotv", delay=0)
     assert payload is not None
@@ -137,7 +141,7 @@ def test_tiktok_fetch_user_detail_records_empty_body_response_metadata(monkeypat
         )
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
-    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
 
     payload = scraper.fetch_user_detail("bravotv", delay=0)
 
@@ -167,7 +171,7 @@ def test_tiktok_fetch_posts_records_empty_body_response_metadata(monkeypatch: py
         )
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
-    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
 
     payload = scraper.fetch_posts("bravotv", "sec-1", 0, delay=0)
 
@@ -198,7 +202,7 @@ def test_tiktok_fetch_posts_records_success_response_metadata(monkeypatch: pytes
         )
 
     monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
-    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
 
     payload = scraper.fetch_posts("bravotv", "sec-1", cursor=0, delay=0)
 
@@ -209,6 +213,94 @@ def test_tiktok_fetch_posts_records_success_response_metadata(monkeypatch: pytes
         "content_type": "application/json",
         "content_length": 0,
         "request_id": "posts-logid",
+    }
+
+
+def test_tiktok_fetch_profile_html_uses_http_client_and_records_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+
+    def _fake_get(url: str, **_: object) -> _FakeResponse:
+        assert url == "https://www.tiktok.com/@bravotv"
+        return _FakeResponse(
+            status_code=200,
+            payload={},
+            headers={"content-type": "text/html", "x-tt-logid": "html-logid"},
+            text=(
+                '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">'
+                '{"__DEFAULT_SCOPE__":{"webapp.user-detail":{"userInfo":{"user":{"secUid":"sec-1"}}}}}'
+                "</script>"
+            ),
+            content=b"<html></html>",
+        )
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
+
+    payload = scraper._fetch_profile_html("bravotv", delay=0)  # noqa: SLF001
+
+    assert payload == {"__DEFAULT_SCOPE__": {"webapp.user-detail": {"userInfo": {"user": {"secUid": "sec-1"}}}}}
+    assert scraper.last_retrieval_meta["endpoint_responses"]["profile_html"] == {
+        "endpoint": "profile_html",
+        "http_status": 200,
+        "content_type": "text/html",
+        "content_length": len(b"<html></html>"),
+        "request_id": "html-logid",
+    }
+
+
+def test_tiktok_fetch_comment_replies_uses_http_client_and_records_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TikTokScraper()
+    monkeypatch.setenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", "1")
+
+    def _fake_get(url: str, params: dict | None = None, **_: object) -> _FakeResponse:
+        assert params is not None
+        assert params["aid"] == 1988
+        return _FakeResponse(
+            status_code=200,
+            payload={"status_code": 0, "comments": [], "has_more": 0, "cursor": 0},
+            headers={"content-type": "application/json", "x-tt-logid": "reply-logid"},
+        )
+
+    monkeypatch.setattr(scraper, "_rate_limit", lambda delay, **_kw: None)
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
+
+    replies = scraper._fetch_comment_replies("123", "comment-1", "https://www.tiktok.com/@acct/video/123", delay=0)  # noqa: SLF001
+
+    assert replies == []
+    assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_comment_replies"] == {
+        "endpoint": "fetch_comment_replies",
+        "http_status": 200,
+        "content_type": "application/json",
+        "content_length": len(b"{}"),
+        "request_id": "reply-logid",
+    }
+
+
+def test_tiktok_fetch_oembed_thumbnail_uses_http_client_and_records_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+
+    def _fake_get(url: str, params: dict | None = None, **_: object) -> _FakeResponse:
+        assert url == "https://www.tiktok.com/oembed"
+        assert params == {"url": "https://www.tiktok.com/@acct/video/123"}
+        return _FakeResponse(
+            status_code=200,
+            payload={"thumbnail_url": "https://cdn.example/thumb.jpg"},
+            headers={"content-type": "application/json", "x-tt-logid": "oembed-logid"},
+        )
+
+    monkeypatch.setattr(scraper._http_client, "get", _fake_get)
+
+    thumbnail_url = scraper._fetch_oembed_thumbnail("https://www.tiktok.com/@acct/video/123")  # noqa: SLF001
+
+    assert thumbnail_url == "https://cdn.example/thumb.jpg"
+    assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_oembed_thumbnail"] == {
+        "endpoint": "fetch_oembed_thumbnail",
+        "http_status": 200,
+        "content_type": "application/json",
+        "content_length": len(b"{}"),
+        "request_id": "oembed-logid",
     }
 
 
@@ -3109,6 +3201,147 @@ def test_tiktok_parse_ytdlp_metadata_populates_thumbnail_from_metadata() -> None
     assert parsed.saves == 12
 
 
+def test_tiktok_ytdlp_fallback_treats_naive_bounds_as_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+    config = TikTokScrapeConfig(
+        username="bravotv",
+        hashtags=["RHOSLC"],
+        date_start=datetime(2026, 1, 1),
+        date_end=datetime(2026, 1, 2),
+    )
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: None)
+    monkeypatch.setattr(
+        scraper,
+        "_parse_ytdlp_metadata",
+        lambda data, _config: SimpleNamespace(
+            video_id=str(data.get("id") or ""),
+            date_time="2026-01-01 02:00:00",
+            views=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.tiktok.scraper.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "id": "in-range",
+                            "timestamp": int(datetime(2026, 1, 1, 2, 0, tzinfo=UTC).timestamp()),
+                            "title": "#RHOSLC clip",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "id": "before-range",
+                            "timestamp": int(datetime(2025, 12, 31, 23, 0, tzinfo=UTC).timestamp()),
+                            "title": "#RHOSLC clip",
+                        }
+                    ),
+                ]
+            ),
+            stderr="",
+        ),
+    )
+
+    posts = scraper._scrape_via_ytdlp(config)  # noqa: SLF001
+
+    assert [post.video_id for post in posts] == ["in-range"]
+
+
+def test_tiktok_ytdlp_fallback_clamps_future_naive_start_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+    future_start = datetime.now(tz=UTC).replace(tzinfo=None) + timedelta(days=30)
+    config = TikTokScrapeConfig(
+        username="bravotv",
+        hashtags=["RHOSLC"],
+        date_start=future_start,
+        date_end=future_start + timedelta(days=1),
+    )
+
+    captured_cmd: list[str] = []
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: None)
+    monkeypatch.setattr(
+        "trr_backend.socials.tiktok.scraper.subprocess.run",
+        lambda cmd, **kwargs: captured_cmd.extend(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert scraper._scrape_via_ytdlp(config) == []  # noqa: SLF001
+    assert captured_cmd[captured_cmd.index("--playlist-end") + 1] == "500"
+
+
+def test_tiktok_ytdlp_fallback_treats_naive_end_date_as_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper()
+    config = TikTokScrapeConfig(
+        username="bravotv",
+        hashtags=["RHOSLC"],
+        date_start=datetime(2025, 12, 31),
+        date_end=datetime(2026, 1, 2),
+    )
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: None)
+    monkeypatch.setattr(
+        scraper,
+        "_parse_ytdlp_metadata",
+        lambda data, _config: SimpleNamespace(
+            video_id=str(data.get("id") or ""),
+            date_time="2026-01-01 23:00:00",
+            views=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.tiktok.scraper.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "id": "in-range",
+                            "timestamp": int(datetime(2026, 1, 1, 23, 0, tzinfo=UTC).timestamp()),
+                            "title": "#RHOSLC clip",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "id": "after-range",
+                            "timestamp": int(datetime(2026, 1, 2, 2, 0, tzinfo=UTC).timestamp()),
+                            "title": "#RHOSLC clip",
+                        }
+                    ),
+                ]
+            ),
+            stderr="",
+        ),
+    )
+
+    posts = scraper._scrape_via_ytdlp(config)  # noqa: SLF001
+
+    assert [post.video_id for post in posts] == ["in-range"]
+
+
+def test_tiktok_naive_bounds_are_utc_in_config_date_range() -> None:
+    config = TikTokScrapeConfig(
+        username="bravotv",
+        date_start=datetime(2026, 1, 1),
+        date_end=datetime(2026, 1, 2),
+    )
+
+    in_range_ts = int(datetime(2026, 1, 1, 2, 0, tzinfo=UTC).timestamp())
+    before_range_ts = int(datetime(2025, 12, 31, 23, 0, tzinfo=UTC).timestamp())
+    after_range_ts = int(datetime(2026, 1, 2, 2, 0, tzinfo=UTC).timestamp())
+
+    assert config.is_in_date_range(in_range_ts) is True
+    assert config.is_in_date_range(before_range_ts) is None
+    assert config.is_in_date_range(after_range_ts) is False
+
+
 def test_instagram_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={})
     config = InstagramScrapeConfig(username="bravotv")
@@ -3315,7 +3548,7 @@ def test_tiktok_scrape_skips_items_without_valid_timestamp(monkeypatch: pytest.M
     assert [post.video_id for post in posts] == ["vid-2"]
 
 
-def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_ytdlp(
+def test_tiktok_default_ytdlp_mode_skips_direct_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scraper = TikTokScraper(cookies={"sessionid": "token"})
@@ -3324,28 +3557,18 @@ def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_yt
         date_start=datetime(2025, 1, 1, tzinfo=UTC),
         date_end=datetime(2027, 1, 1, tzinfo=UTC),
     )
-    calls = {"fetch_posts": 0}
-    progress_events: list[dict[str, object]] = []
+    calls = {"fetch_user_detail": 0, "fetch_posts": 0}
 
     def _fake_fetch_user_detail(username: str, delay: float = 0) -> None:
         del username, delay
-        scraper._last_api_fail_reason = "non_json_response"  # noqa: SLF001
+        calls["fetch_user_detail"] += 1
         return None
 
     monkeypatch.setattr(scraper, "fetch_user_detail", _fake_fetch_user_detail)
     monkeypatch.setattr(
         scraper,
         "_fetch_profile_html",
-        lambda username, delay=0, **_kw: {
-            "__DEFAULT_SCOPE__": {
-                "webapp.user-detail": {
-                    "userInfo": {
-                        "user": {"secUid": "sec-1"},
-                        "itemList": [],
-                    }
-                }
-            }
-        },
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("html")),
     )
     monkeypatch.setattr(
         scraper,
@@ -3390,48 +3613,24 @@ def test_tiktok_scrape_skips_api_pagination_after_poisoned_preflight_and_uses_yt
         ],
     )
 
-    posts = scraper.scrape(config, progress_cb=progress_events.append)
+    posts = scraper.scrape(config)
 
     assert [post.video_id for post in posts] == ["vid-1"]
+    assert calls["fetch_user_detail"] == 0
     assert calls["fetch_posts"] == 0
-    assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp_fallback"
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp"
     assert scraper.last_retrieval_meta["posts_checked"] == 1_200
     assert scraper.last_retrieval_meta["videos_scanned"] == 1_200
-    assert scraper.last_retrieval_meta["api_pagination_blocked_reason"] == "non_json_response"
-    assert progress_events[-1]["phase"] == "scrape_ytdlp_fallback"
-    assert progress_events[-1]["posts_checked"] == 1_200
+    assert scraper.last_retrieval_meta["profile_enrichment_status"] == "skipped"
 
 
-def test_tiktok_auto_mode_uses_ytdlp_after_empty_browser_intercept(
+def test_tiktok_auto_mode_is_ytdlp_alias_without_direct_fallbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scraper = TikTokScraper(cookies={"sessionid": "token"})
     config = TikTokScrapeConfig(username="bravotv", scrape_mode="auto", ytdlp_max_videos_hint=10_100)
 
-    api_calls = {"count": 0}
-    browser_calls = {"count": 0}
     ytdlp_calls = {"count": 0}
-
-    def _fake_scrape_api(_config, progress_cb=None):
-        del _config, progress_cb
-        api_calls["count"] += 1
-        scraper.last_retrieval_meta = {
-            "retrieval_mode": "none",
-            "pages_scanned": 0,
-            "posts_checked": 0,
-        }
-        return []
-
-    def _fake_browser_intercept(_config, progress_cb=None):
-        del _config, progress_cb
-        browser_calls["count"] += 1
-        scraper.last_retrieval_meta = {
-            "retrieval_mode": "browser_intercept",
-            "pages_scanned": 5,
-            "posts_checked": 0,
-            "stop_reason": "no_new_data",
-        }
-        return []
 
     def _fake_scrape_via_ytdlp(_config, **_kwargs):
         assert _kwargs["max_videos_hint"] == 10_100
@@ -3462,19 +3661,240 @@ def test_tiktok_auto_mode_uses_ytdlp_after_empty_browser_intercept(
             )
         ]
 
-    monkeypatch.setattr(scraper, "_scrape_api", _fake_scrape_api)
-    monkeypatch.setattr(scraper, "_scrape_browser_intercept", _fake_browser_intercept)
+    monkeypatch.setattr(scraper, "_scrape_api", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("api")))
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_browser_intercept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("browser_intercept")),
+    )
     monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
     monkeypatch.setattr(scraper, "_scrape_via_ytdlp", _fake_scrape_via_ytdlp)
 
     posts = scraper.scrape(config)
 
     assert [post.video_id for post in posts] == ["vid-1"]
-    assert api_calls["count"] == 1
-    assert browser_calls["count"] == 1
     assert ytdlp_calls["count"] == 1
-    assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp_fallback"
-    assert scraper.last_retrieval_meta["auto_fallback_chain"] == ["api", "browser_intercept", "yt_dlp"]
+    assert scraper.last_retrieval_meta["profile_enrichment_status"] == "skipped"
+
+
+def test_tiktok_scraper_does_not_build_http_client_for_default_ytdlp_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_calls: list[dict[str, object]] = []
+
+    def _fake_build_http_client(
+        client_name: str | None = None,
+        *,
+        retry_total: int = 3,
+        backoff_factor: float = 1.5,
+        proxy_url: str | None = None,
+        impersonate: str | None = None,
+    ) -> SimpleNamespace:
+        build_calls.append(
+            {
+                "client_name": client_name,
+                "retry_total": retry_total,
+                "backoff_factor": backoff_factor,
+                "proxy_url": proxy_url,
+                "impersonate": impersonate,
+            }
+        )
+        return SimpleNamespace(
+            client_name="requests",
+            impersonate=impersonate,
+            proxy_label=None,
+            get=lambda *a, **k: {},
+        )
+
+    monkeypatch.setattr(tiktok_scraper_module, "build_tiktok_http_client", _fake_build_http_client)
+
+    scraper = TikTokScraper(cookies={"sessionid": "token"})
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_via_ytdlp",
+        lambda _config, **_kwargs: [
+            SimpleNamespace(
+                video_id="vid-1",
+                date_time="2026-01-01 00:00:00",
+                create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
+                description="clip",
+                hashtags=[],
+                mentions=[],
+                likes=1,
+                comments=2,
+                shares=3,
+                saves=4,
+                views=5,
+                url="https://www.tiktok.com/@bravotv/video/vid-1",
+                username="bravotv",
+                author_nickname="Bravo",
+                duration=10,
+                music_title="song",
+                music_author="artist",
+                user_avatar_url=None,
+                thumbnail_url=None,
+            )
+        ],
+    )
+
+    posts = scraper.scrape(TikTokScrapeConfig(username="bravotv"))
+
+    assert [post.video_id for post in posts] == ["vid-1"]
+    assert build_calls == []
+
+
+def test_tiktok_auto_mode_is_ytdlp_alias_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "token"})
+
+    monkeypatch.setattr(scraper, "_scrape_api", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("api")))
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_browser_intercept",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("browser_intercept")),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_via_ytdlp",
+        lambda _config, **_kwargs: scraper.__dict__.__setitem__(
+            "last_retrieval_meta",
+            {
+                "retrieval_mode": "ytdlp",
+                "http_client": "yt_dlp",
+                "fallback_chain": ["yt_dlp"],
+            },
+        )
+        or [
+            SimpleNamespace(
+                video_id="vid-1",
+                date_time="2026-01-01 00:00:00",
+                create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
+                description="clip",
+                hashtags=[],
+                mentions=[],
+                likes=1,
+                comments=2,
+                shares=3,
+                saves=4,
+                views=5,
+                url="https://www.tiktok.com/@bravotv/video/vid-1",
+                username="bravotv",
+                author_nickname="Bravo",
+                duration=10,
+                music_title="song",
+                music_author="artist",
+                user_avatar_url=None,
+                thumbnail_url=None,
+            )
+        ],
+    )
+
+    posts = scraper.scrape(TikTokScrapeConfig(username="bravotv", scrape_mode="auto"))
+
+    assert [post.video_id for post in posts] == ["vid-1"]
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp"
+    assert scraper.last_retrieval_meta["fallback_chain"] == ["yt_dlp"]
+
+
+def test_tiktok_primary_ytdlp_metadata_is_first_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "token"})
+    config = TikTokScrapeConfig(
+        username="bravotv",
+        hashtags=["RHOBH"],
+        date_start=datetime(2026, 3, 31),
+        date_end=datetime(2026, 4, 10),
+        scrape_mode="ytdlp",
+    )
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: "/tmp/tiktok-cookies.txt")
+    monkeypatch.setattr(
+        scraper,
+        "_parse_ytdlp_metadata",
+        lambda data, _config: SimpleNamespace(
+            video_id=str(data.get("id") or ""),
+            date_time="2026-04-02 00:00:00",
+            create_time=int(datetime(2026, 4, 2, tzinfo=UTC).timestamp()),
+            description=str(data.get("title") or ""),
+            hashtags=["RHOBH"],
+            mentions=[],
+            likes=1,
+            comments=2,
+            shares=3,
+            saves=4,
+            views=5,
+            url="https://www.tiktok.com/@bravotv/video/vid-1",
+            username="bravotv",
+            author_nickname="Bravo",
+            duration=10,
+            music_title="song",
+            music_author="artist",
+            user_avatar_url=None,
+            thumbnail_url=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.tiktok.scraper.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "id": "vid-1",
+                    "timestamp": int(datetime(2026, 4, 2, tzinfo=UTC).timestamp()),
+                    "title": "#RHOBH clip",
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    posts = scraper.scrape(config)
+
+    assert [post.video_id for post in posts] == ["vid-1"]
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "ytdlp"
+    assert scraper.last_retrieval_meta["http_client"] == "yt_dlp"
+    assert scraper.last_retrieval_meta["fallback_chain"] == ["yt_dlp"]
+    assert scraper.last_retrieval_meta["proxy_enabled"] is False
+    assert scraper.last_retrieval_meta["proxy_label"] is None
+    assert scraper.last_retrieval_meta["auth_mode"] == "ytdlp_cookies"
+    assert scraper.last_retrieval_meta["ytdlp_cookie_file_present"] is True
+    assert scraper.last_retrieval_meta["ytdlp_cookie_file_used"] is True
+    assert scraper.last_retrieval_meta["stop_reason"] == "playlist_exhausted"
+
+
+def test_tiktok_api_mode_zero_posts_sets_structured_failure_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "token"})
+
+    monkeypatch.setattr(scraper, "fetch_user_detail", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_fetch_profile_html", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: False)
+
+    posts = scraper.scrape(TikTokScrapeConfig(username="bravotv", scrape_mode="api"))
+
+    assert posts == []
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "api"
+    assert scraper.last_retrieval_meta["error_code"] == "api_zero_posts"
+    assert scraper.last_retrieval_meta["stop_reason"] == "api_zero_posts"
+
+
+def test_tiktok_fetch_comments_is_parked_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "token"})
+    monkeypatch.delenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", raising=False)
+
+    with caplog.at_level("WARNING"):
+        comments = scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)
+
+    assert comments == []
+    assert scraper.last_comment_fetch_reason == "direct_api_parked"
+    assert scraper.last_comment_fetch_meta == {
+        "retrieval_mode": "direct_api_parked",
+        "reason": "direct_api_parked",
+    }
+    assert "tiktok_comments_direct_api_parked" in caplog.text
 
 
 def test_twitter_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) -> None:

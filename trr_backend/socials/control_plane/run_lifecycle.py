@@ -1,0 +1,585 @@
+"""Run lifecycle mutation entrypoints for the social control plane."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import trr_backend.repositories.social_season_analytics as legacy
+
+
+def _create_run(
+    context: legacy.SeasonContext | None,
+    *,
+    source_scope: str,
+    initiated_by: str | None,
+    config: dict[str, Any],
+    status: str,
+) -> str:
+    initial_summary = _build_run_summary_payload(
+        total_jobs=0,
+        completed_jobs=0,
+        failed_jobs=0,
+        active_jobs=0,
+        items_found_total=0,
+        stage_counts={},
+    )
+    row = legacy.pg.fetch_one(
+        """
+        insert into social.scrape_runs (
+          season_id,
+          show_id,
+          source_scope,
+          status,
+          initiated_by,
+          config,
+          summary,
+          started_at
+        )
+        values (
+          %s,
+          %s,
+          %s,
+          %s,
+          %s,
+          %s::jsonb,
+          %s::jsonb,
+          case when %s = 'running' then now() else null end
+        )
+        returning id::text
+        """,
+        [
+            context.season_id if context is not None else None,
+            context.show_id if context is not None else None,
+            source_scope,
+            status,
+            initiated_by,
+            legacy.json.dumps(config),
+            legacy.json.dumps(initial_summary),
+            status,
+        ],
+    )
+    if not row:
+        raise RuntimeError("Failed to create social scrape run")
+    run_id = str(row["id"])
+    if legacy._column_exists("social", "scrape_runs", "sync_session_id"):
+        sync_session_id = str(config.get("sync_session_id") or "").strip() or None
+        pass_kind = str(config.get("pass_kind") or "").strip() or None
+        pass_attempt = legacy._normalize_non_negative_int(config.get("pass_attempt")) or None
+        pass_sequence = legacy._normalize_non_negative_int(config.get("pass_sequence")) or None
+        if sync_session_id or pass_kind or pass_attempt is not None or pass_sequence is not None:
+            legacy.pg.fetch_one(
+                """
+                update social.scrape_runs
+                set
+                  sync_session_id = %s::uuid,
+                  pass_kind = %s,
+                  pass_attempt = %s,
+                  pass_sequence = %s
+                where id = %s::uuid
+                returning id::text
+                """,
+                [sync_session_id, pass_kind, pass_attempt, pass_sequence, run_id],
+            )
+    return run_id
+
+
+def _set_run_status(run_id: str, status: str) -> None:
+    legacy.pg.fetch_one(
+        """
+        update social.scrape_runs
+        set
+          status = %s,
+          started_at = case
+            when %s = 'running' then coalesce(started_at, now())
+            else started_at
+          end,
+          completed_at = case
+            when %s in ('completed', 'failed', 'cancelled') then coalesce(completed_at, now())
+            else completed_at
+          end,
+          cancelled_at = case
+            when %s = 'cancelled' then coalesce(cancelled_at, now())
+            else cancelled_at
+          end
+        where id = %s
+        returning id::text
+        """,
+        [status, status, status, status, run_id],
+    )
+    legacy._invalidate_queue_status_cache()
+    if status in {"completed", "failed", "cancelled"}:
+        legacy._invalidate_week_detail_cache_after_run_terminal_status()
+
+
+def _status_is_active(status: str | None) -> bool:
+    return str(status or "").strip().lower() in {"queued", "pending", "retrying", "running"}
+
+
+def _status_is_completed(status: str | None) -> bool:
+    return str(status or "").strip().lower() == "completed"
+
+
+def _status_is_failed(status: str | None) -> bool:
+    return str(status or "").strip().lower() == "failed"
+
+
+def _normalize_stage_counts(stage_counts: Any) -> dict[str, dict[str, int]]:
+    if not isinstance(stage_counts, dict):
+        return {}
+    normalized: dict[str, dict[str, int]] = {}
+    for stage, counters in stage_counts.items():
+        stage_key = str(stage or "").strip() or "unknown"
+        counter_map = dict(counters) if isinstance(counters, dict) else {}
+        normalized[stage_key] = {
+            "total": legacy._normalize_non_negative_int(counter_map.get("total")),
+            "completed": legacy._normalize_non_negative_int(counter_map.get("completed")),
+            "failed": legacy._normalize_non_negative_int(counter_map.get("failed")),
+            "active": legacy._normalize_non_negative_int(counter_map.get("active")),
+        }
+    return normalized
+
+
+def _build_run_summary_payload(
+    *,
+    total_jobs: Any,
+    completed_jobs: Any,
+    failed_jobs: Any,
+    active_jobs: Any,
+    items_found_total: Any,
+    stage_counts: Any,
+) -> dict[str, Any]:
+    return {
+        "total_jobs": legacy._normalize_non_negative_int(total_jobs),
+        "completed_jobs": legacy._normalize_non_negative_int(completed_jobs),
+        "failed_jobs": legacy._normalize_non_negative_int(failed_jobs),
+        "active_jobs": legacy._normalize_non_negative_int(active_jobs),
+        "items_found_total": legacy._normalize_non_negative_int(items_found_total),
+        "stage_counts": _normalize_stage_counts(stage_counts),
+    }
+
+
+def _persist_run_counters_and_summary(
+    *,
+    conn: Any,
+    run_id: str,
+    total_jobs: int,
+    completed_jobs: int,
+    failed_jobs: int,
+    active_jobs: int,
+    items_found_total: int,
+    stage_counts: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    summary = _build_run_summary_payload(
+        total_jobs=total_jobs,
+        completed_jobs=completed_jobs,
+        failed_jobs=failed_jobs,
+        active_jobs=active_jobs,
+        items_found_total=items_found_total,
+        stage_counts=stage_counts,
+    )
+    with legacy.pg.db_cursor(conn=conn) as cur:
+        legacy.pg.fetch_one_with_cursor(
+            cur,
+            """
+            update social.scrape_runs
+            set
+              total_jobs = %s,
+              completed_jobs = %s,
+              failed_jobs = %s,
+              active_jobs = %s,
+              items_found_total = %s,
+              stage_counts = %s::jsonb,
+              summary = %s::jsonb
+            where id = %s
+            returning id::text
+            """,
+            [
+                int(total_jobs),
+                int(completed_jobs),
+                int(failed_jobs),
+                int(active_jobs),
+                int(items_found_total),
+                legacy.json.dumps(stage_counts),
+                legacy.json.dumps(summary),
+                run_id,
+            ],
+        )
+    return summary
+
+
+def _increment_stage_counter(
+    stage_counts: dict[str, dict[str, int]],
+    *,
+    stage: str,
+    key: str,
+    delta: int,
+) -> dict[str, dict[str, int]]:
+    if not delta:
+        return stage_counts
+    bucket = dict(stage_counts.get(stage) or {"total": 0, "completed": 0, "failed": 0, "active": 0})
+    bucket[key] = max(0, legacy._normalize_non_negative_int(bucket.get(key)) + int(delta))
+    stage_counts[stage] = bucket
+    return stage_counts
+
+
+def _increment_run_counters_on_job_create(*, run_id: str, stage: str, status: str) -> None:
+    if not run_id or not legacy._run_counter_columns_ready():
+        return
+    stage_key = str(stage or "unknown").strip() or "unknown"
+    with legacy.pg.db_connection() as conn:
+        with legacy.pg.db_cursor(conn=conn) as cur:
+            row = (
+                legacy.pg.fetch_one_with_cursor(
+                    cur,
+                    """
+                select
+                  total_jobs,
+                  completed_jobs,
+                  failed_jobs,
+                  active_jobs,
+                  items_found_total,
+                  stage_counts
+                from social.scrape_runs
+                where id = %s
+                for update
+                """,
+                    [run_id],
+                )
+                or {}
+            )
+            if not row:
+                return
+            total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs")) + 1
+            completed_jobs = legacy._normalize_non_negative_int(row.get("completed_jobs"))
+            failed_jobs = legacy._normalize_non_negative_int(row.get("failed_jobs"))
+            active_jobs = legacy._normalize_non_negative_int(row.get("active_jobs")) + (
+                1 if _status_is_active(status) else 0
+            )
+            items_found_total = legacy._normalize_non_negative_int(row.get("items_found_total"))
+            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
+            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=1)
+            if _status_is_active(status):
+                stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=1)
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=run_id,
+                total_jobs=total_jobs,
+                completed_jobs=completed_jobs,
+                failed_jobs=failed_jobs,
+                active_jobs=active_jobs,
+                items_found_total=items_found_total,
+                stage_counts=stage_counts,
+            )
+
+
+def _increment_run_counters_on_job_finish(
+    *,
+    run_id: str,
+    stage: str,
+    prior_status: str,
+    new_status: str,
+    prior_items_found: int,
+    new_items_found: int,
+) -> None:
+    if not run_id or not legacy._run_counter_columns_ready():
+        return
+    stage_key = str(stage or "unknown").strip() or "unknown"
+    active_delta = (1 if _status_is_active(new_status) else 0) - (1 if _status_is_active(prior_status) else 0)
+    completed_delta = (1 if _status_is_completed(new_status) else 0) - (1 if _status_is_completed(prior_status) else 0)
+    failed_delta = (1 if _status_is_failed(new_status) else 0) - (1 if _status_is_failed(prior_status) else 0)
+    items_delta = legacy._normalize_non_negative_int(new_items_found) - legacy._normalize_non_negative_int(
+        prior_items_found
+    )
+
+    with legacy.pg.db_connection() as conn:
+        with legacy.pg.db_cursor(conn=conn) as cur:
+            row = (
+                legacy.pg.fetch_one_with_cursor(
+                    cur,
+                    """
+                select
+                  total_jobs,
+                  completed_jobs,
+                  failed_jobs,
+                  active_jobs,
+                  items_found_total,
+                  stage_counts
+                from social.scrape_runs
+                where id = %s
+                for update
+                """,
+                    [run_id],
+                )
+                or {}
+            )
+            if not row:
+                return
+            total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs"))
+            completed_jobs = max(0, legacy._normalize_non_negative_int(row.get("completed_jobs")) + completed_delta)
+            failed_jobs = max(0, legacy._normalize_non_negative_int(row.get("failed_jobs")) + failed_delta)
+            active_jobs = max(0, legacy._normalize_non_negative_int(row.get("active_jobs")) + active_delta)
+            items_found_total = max(0, legacy._normalize_non_negative_int(row.get("items_found_total")) + items_delta)
+            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
+            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=active_delta)
+            stage_counts = _increment_stage_counter(
+                stage_counts,
+                stage=stage_key,
+                key="completed",
+                delta=completed_delta,
+            )
+            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="failed", delta=failed_delta)
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=run_id,
+                total_jobs=total_jobs,
+                completed_jobs=completed_jobs,
+                failed_jobs=failed_jobs,
+                active_jobs=active_jobs,
+                items_found_total=items_found_total,
+                stage_counts=stage_counts,
+            )
+
+
+def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
+    summary_row = (
+        legacy.pg.fetch_one(
+            """
+        with stats as (
+          select
+            count(*)::int as total_jobs,
+            count(*) filter (where status = 'completed')::int as completed_jobs,
+            count(*) filter (where status = 'failed')::int as failed_jobs,
+            count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active_jobs,
+            coalesce(sum(items_found), 0)::int as items_found_total
+          from social.scrape_jobs
+          where run_id = %s
+        ),
+        stage_stats as (
+          select
+            coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage,
+            count(*)::int as total,
+            count(*) filter (where status = 'completed')::int as completed,
+            count(*) filter (where status = 'failed')::int as failed,
+            count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active
+          from social.scrape_jobs
+          where run_id = %s
+          group by coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown')
+        )
+        select
+          (select row_to_json(stats) from stats) as stats,
+          coalesce((select jsonb_object_agg(stage, jsonb_build_object(
+            'total', total,
+            'completed', completed,
+            'failed', failed,
+            'active', active
+          )) from stage_stats), '{}'::jsonb) as stage_counts
+        """,
+            [run_id, run_id],
+        )
+        or {}
+    )
+    stats = dict(summary_row.get("stats") or {})
+    return _build_run_summary_payload(
+        total_jobs=stats.get("total_jobs"),
+        completed_jobs=stats.get("completed_jobs"),
+        failed_jobs=stats.get("failed_jobs"),
+        active_jobs=stats.get("active_jobs"),
+        items_found_total=stats.get("items_found_total"),
+        stage_counts=summary_row.get("stage_counts"),
+    )
+
+
+def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
+    if legacy._run_counter_columns_ready() and not force_recompute:
+        row = (
+            legacy.pg.fetch_one(
+                """
+                select
+                  total_jobs,
+                  completed_jobs,
+                  failed_jobs,
+                  active_jobs,
+                  items_found_total,
+                  stage_counts
+                from social.scrape_runs
+                where id = %s
+                """,
+                [run_id],
+            )
+            or {}
+        )
+        summary = _build_run_summary_payload(
+            total_jobs=row.get("total_jobs"),
+            completed_jobs=row.get("completed_jobs"),
+            failed_jobs=row.get("failed_jobs"),
+            active_jobs=row.get("active_jobs"),
+            items_found_total=row.get("items_found_total"),
+            stage_counts=row.get("stage_counts"),
+        )
+        legacy.pg.fetch_one(
+            """
+            update social.scrape_runs
+            set summary = %s::jsonb
+            where id = %s
+            returning id::text
+            """,
+            [legacy.json.dumps(summary), run_id],
+        )
+        return summary
+
+    summary = _recompute_run_summary_from_jobs(run_id)
+    if legacy._run_counter_columns_ready():
+        with legacy.pg.db_connection() as conn:
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=run_id,
+                total_jobs=int(summary.get("total_jobs") or 0),
+                completed_jobs=int(summary.get("completed_jobs") or 0),
+                failed_jobs=int(summary.get("failed_jobs") or 0),
+                active_jobs=int(summary.get("active_jobs") or 0),
+                items_found_total=int(summary.get("items_found_total") or 0),
+                stage_counts=dict(summary.get("stage_counts") or {}),
+            )
+    else:
+        legacy.pg.fetch_one(
+            """
+            update social.scrape_runs
+            set summary = %s::jsonb
+            where id = %s
+            returning id::text
+            """,
+            [legacy.json.dumps(summary), run_id],
+        )
+    return summary
+
+
+def reconcile_run_summaries(*, run_ids: list[str] | None = None, limit: int = 100) -> dict[str, Any]:
+    if not legacy._run_counter_columns_ready():
+        return {"reconciled_runs": 0, "run_ids": []}
+
+    safe_limit = max(1, min(int(limit), 500))
+    if run_ids:
+        candidate_run_ids = [str(run_id).strip() for run_id in run_ids if str(run_id).strip()][:safe_limit]
+    else:
+        rows = legacy.pg.fetch_all(
+            """
+            select id::text as id
+            from social.scrape_runs
+            where status in ('queued', 'running', 'failed')
+            order by created_at desc
+            limit %s
+            """,
+            [safe_limit],
+        )
+        candidate_run_ids = [str(row.get("id") or "").strip() for row in rows if str(row.get("id") or "").strip()]
+
+    reconciled: list[str] = []
+    for candidate_run_id in candidate_run_ids:
+        summary = _recompute_run_summary_from_jobs(candidate_run_id)
+        with legacy.pg.db_connection() as conn:
+            _persist_run_counters_and_summary(
+                conn=conn,
+                run_id=candidate_run_id,
+                total_jobs=int(summary.get("total_jobs") or 0),
+                completed_jobs=int(summary.get("completed_jobs") or 0),
+                failed_jobs=int(summary.get("failed_jobs") or 0),
+                active_jobs=int(summary.get("active_jobs") or 0),
+                items_found_total=int(summary.get("items_found_total") or 0),
+                stage_counts=dict(summary.get("stage_counts") or {}),
+            )
+        reconciled.append(candidate_run_id)
+    return {"reconciled_runs": len(reconciled), "run_ids": reconciled}
+
+
+def _run_job_status_breakdown(run_id: str) -> dict[str, int]:
+    row = (
+        legacy.pg.fetch_one(
+            """
+            select
+              count(*) filter (where status = 'running')::int as running_jobs,
+              count(*) filter (where status in ('queued', 'pending', 'retrying'))::int as queued_jobs,
+              count(*) filter (where status = 'cancelling')::int as cancelling_jobs
+            from social.scrape_jobs
+            where run_id = %s::uuid
+            """,
+            [run_id],
+        )
+        or {}
+    )
+    return {
+        "running_jobs": legacy._normalize_non_negative_int(row.get("running_jobs")),
+        "queued_jobs": legacy._normalize_non_negative_int(row.get("queued_jobs")),
+        "cancelling_jobs": legacy._normalize_non_negative_int(row.get("cancelling_jobs")),
+    }
+
+
+def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
+    lock_key = int(legacy.hashlib.md5(run_id.encode()).hexdigest()[:15], 16) % (2**31)
+    lock_row = legacy.pg.fetch_one("SELECT pg_try_advisory_lock(%s) AS locked", [lock_key])
+    got_lock = bool(lock_row and lock_row.get("locked"))
+    if not got_lock:
+        legacy.logger.debug("[finalize_run_status] skipped — another worker is finalizing run=%s", run_id[:8])
+        current = legacy.pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+        return {"status": current.get("status", "running")}
+    try:
+        summary = _update_run_summary(run_id, force_recompute=force_recompute)
+        active_jobs = int(summary.get("active_jobs") or 0)
+        failed_jobs = int(summary.get("failed_jobs") or 0)
+        current = legacy.pg.fetch_one("select status, config from social.scrape_runs where id = %s", [run_id]) or {}
+        if str(current.get("status")) == "cancelled":
+            return summary
+        current_config = legacy._metadata_dict(current.get("config"))
+        stage_counts = _normalize_stage_counts(legacy._metadata_dict(summary).get("stage_counts"))
+        classify_stage = legacy._metadata_dict(stage_counts.get(legacy.POST_CLASSIFY_STAGE))
+        classify_jobs_created = 0
+        if legacy._normalize_non_negative_int(classify_stage.get("total")) <= 0:
+            classify_jobs_created = legacy._maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
+                run_id=run_id,
+                source_scope=str(current_config.get("source_scope") or "").strip() or "bravo",
+                run_config=current_config,
+            )
+        if classify_jobs_created > 0:
+            summary = _update_run_summary(run_id, force_recompute=True)
+            active_jobs = int(summary.get("active_jobs") or 0)
+            failed_jobs = int(summary.get("failed_jobs") or 0)
+        status_breakdown = _run_job_status_breakdown(run_id)
+        fetch_terminal_error = legacy._resolve_pipeline_ingest_mode(
+            current_config.get("pipeline_ingest_mode")
+        ) == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and legacy._shared_catalog_fetch_has_terminal_error(
+            run_id
+        )
+        if status_breakdown["running_jobs"] > 0:
+            _set_run_status(run_id, "running")
+        elif status_breakdown["cancelling_jobs"] > 0:
+            _set_run_status(run_id, "cancelling")
+        elif active_jobs > 0 or status_breakdown["queued_jobs"] > 0:
+            _set_run_status(run_id, "queued")
+        elif failed_jobs > 0 or fetch_terminal_error:
+            _set_run_status(run_id, "failed")
+        else:
+            _set_run_status(run_id, "completed")
+        if legacy._column_exists("social", "scrape_runs", "sync_session_id"):
+            run_row = (
+                legacy.pg.fetch_one(
+                    "select sync_session_id::text as sync_session_id from social.scrape_runs where id = %s::uuid",
+                    [run_id],
+                )
+                or {}
+            )
+            sync_session_id = str(run_row.get("sync_session_id") or "").strip()
+            if sync_session_id:
+                try:
+                    from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
+
+                    evaluate_sync_session(sync_session_id)
+                except Exception:  # noqa: BLE001
+                    legacy.logger.exception(
+                        "Failed to evaluate sync session after run finalization: run=%s",
+                        run_id,
+                    )
+        return summary
+    finally:
+        try:
+            legacy.pg.fetch_one("SELECT pg_advisory_unlock(%s)", [lock_key])
+        except Exception:  # noqa: BLE001
+            legacy.logger.debug("[finalize_run_status] advisory unlock failed for run=%s", run_id[:8], exc_info=True)

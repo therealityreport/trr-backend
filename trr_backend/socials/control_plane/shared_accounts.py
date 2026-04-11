@@ -11,7 +11,6 @@ from trr_backend.repositories.social_season_analytics import (
     cancel_social_account_catalog_run,
     dismiss_social_account_catalog_run,
     get_season_context,
-    get_season_shared_status,
     get_shared_account_sources,
     get_social_account_catalog_freshness,
     get_social_account_catalog_gap_analysis_status,
@@ -26,12 +25,15 @@ from trr_backend.repositories.social_season_analytics import (
     get_social_account_profile_summary,
     get_targets,
     list_shared_review_queue,
-    list_shared_runs,
     put_shared_account_sources,
     put_social_account_profile_hashtags,
     put_targets,
     resolve_shared_review_queue_item,
     resolve_social_account_catalog_review_queue_item,
+)
+from trr_backend.socials.control_plane.shared_status_reads import (
+    get_season_shared_status,
+    list_shared_runs,
 )
 
 batch_upsert_shared_catalog_instagram_posts = _batch_upsert_shared_catalog_instagram_posts

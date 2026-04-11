@@ -124,7 +124,7 @@ def _build_live_status_payload() -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_queue_status
 
     queue_status = get_queue_status(
-        include_recent_failures=False,
+        include_recent_failures=True,
         include_stuck_jobs=False,
         include_runs_summary=False,
     )
@@ -5422,7 +5422,7 @@ def get_social_ingest_health_dot(_: InternalAdminUser = None) -> dict[str, Any]:
 
     try:
         status_payload = get_queue_status(
-            include_recent_failures=False,
+            include_recent_failures=True,
             include_stuck_jobs=False,
             include_runs_summary=False,
             summary_only=True,
@@ -5450,7 +5450,7 @@ async def stream_social_live_status(request: Request, _: InternalAdminUser = Non
         while True:
             if await request.is_disconnected():
                 return
-            payload = _build_live_status_payload()
+            payload = await _run_admin_repo_call(_build_live_status_payload)
             yield "event: live_status\n"
             yield f"data: {json.dumps(payload, default=str)}\n\n"
             await asyncio.sleep(_LIVE_STATUS_STREAM_INTERVAL_SECONDS)

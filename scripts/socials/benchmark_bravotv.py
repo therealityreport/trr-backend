@@ -217,6 +217,7 @@ def benchmark_tiktok():
         date_end=DATE_END,
         max_pages=1,
         fast_mode=True,
+        scrape_mode="ytdlp",
     )
 
     t0 = time.monotonic()

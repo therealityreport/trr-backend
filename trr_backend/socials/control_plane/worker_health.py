@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from trr_backend.repositories.social_season_analytics import (
     assert_worker_available_when_queue_enabled,
-    get_queue_status,
     get_worker_auth_capabilities,
     get_worker_detail,
     get_worker_health,
@@ -14,6 +13,7 @@ from trr_backend.repositories.social_season_analytics import (
     purge_inactive_workers,
     update_worker_heartbeat,
 )
+from trr_backend.socials.control_plane.queue_status import get_queue_status
 
 __all__ = [
     "assert_worker_available_when_queue_enabled",

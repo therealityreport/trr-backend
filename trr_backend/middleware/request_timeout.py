@@ -2,7 +2,7 @@
 
 Uses asyncio.wait_for to cancel requests exceeding a configurable limit.
 Health/metrics/liveness endpoints are exempt so monitoring probes never time out.
-SSE and streaming routes can opt out via exempt_paths configuration.
+Known long-lived SSE routes opt out via explicit path patterns.
 """
 
 from __future__ import annotations
@@ -29,13 +29,26 @@ EXEMPT_PATHS: frozenset[str] = frozenset(
     }
 )
 
-# SSE/streaming route path suffixes that must be exempt.
-# These are identified from the Phase 0 route inventory.
-EXEMPT_STREAM_SUFFIXES: tuple[str, ...] = ("/stream",)
-
 # Long-running screentime promotion requests can exceed the generic API timeout
 # when they verify and promote large uploaded videos into canonical assets.
 EXEMPT_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^/api/v1/admin/bravotv/images/stream$"),
+    re.compile(r"^/api/v1/admin/bravotv/images/shows/[^/]+/stream$"),
+    re.compile(r"^/api/v1/admin/bravotv/images/people/[^/]+/stream$"),
+    re.compile(r"^/api/v1/admin/operations/[^/]+/stream$"),
+    re.compile(r"^/api/v1/admin/person/[^/]+/refresh-images/stream$"),
+    re.compile(r"^/api/v1/admin/person/[^/]+/refresh-profile/stream$"),
+    re.compile(r"^/api/v1/admin/person/[^/]+/reprocess-images/stream$"),
+    re.compile(r"^/api/v1/admin/scrape/import/stream$"),
+    re.compile(r"^/api/v1/admin/shows/[^/]+/assets/batch-jobs/stream$"),
+    re.compile(r"^/api/v1/admin/shows/[^/]+/get-images/stream$"),
+    re.compile(r"^/api/v1/admin/shows/[^/]+/import-bravo/preview/stream$"),
+    re.compile(r"^/api/v1/admin/shows/[^/]+/links/discover/stream$"),
+    re.compile(r"^/api/v1/admin/shows/[^/]+/refresh-photos/stream$"),
+    re.compile(r"^/api/v1/admin/shows/[^/]+/refresh/stream$"),
+    re.compile(r"^/api/v1/admin/shows/[^/]+/seasons/[^/]+/assets/batch-jobs/stream$"),
+    re.compile(r"^/api/v1/admin/socials/live-status/stream$"),
+    re.compile(r"^/api/v1/admin/socials/seasons/[^/]+/sync-sessions/[^/]+/stream$"),
     re.compile(r"^/api/v1/admin/cast-screentime/upload-sessions/[^/]+/complete$"),
     re.compile(r"^/api/v1/admin/cast-screentime/video-assets/[^/]+/runs$"),
     re.compile(r"^/api/v1/admin/people/[^/]+/socialblade/refresh$"),
@@ -69,13 +82,10 @@ def _is_exempt(path: str) -> bool:
 
     Uses path-based matching because pure ASGI middleware runs before
     FastAPI routing, so route-level metadata is not yet available.
-    The /stream suffix convention covers all SSE endpoints identified
-    in the Phase 0 route inventory.
+    Known long-lived stream routes are explicitly enumerated to avoid
+    granting arbitrary `/stream` paths an unlimited runtime.
     """
     if path in EXEMPT_PATHS:
-        return True
-    # SSE/streaming routes end with /stream
-    if any(path.endswith(suffix) for suffix in EXEMPT_STREAM_SUFFIXES):
         return True
     return any(pattern.match(path) for pattern in EXEMPT_PATH_PATTERNS)
 

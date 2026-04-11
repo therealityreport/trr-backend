@@ -153,8 +153,9 @@ def test_require_internal_admin_accepts_signed_internal_token(monkeypatch):
     assert response.json() == {"user_id": "internal-admin-proxy", "role": "internal_admin"}
 
 
-def test_require_internal_admin_accepts_matching_shared_secret_header(monkeypatch):
+def test_require_internal_admin_accepts_matching_shared_secret_header_when_fallback_enabled(monkeypatch):
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", "1")
     app = _build_app()
     client = TestClient(app)
 
@@ -165,6 +166,20 @@ def test_require_internal_admin_accepts_matching_shared_secret_header(monkeypatc
 
     assert response.status_code == 200
     assert response.json() == {"user_id": "internal-admin:shared-secret", "role": "internal_admin"}
+
+
+def test_require_internal_admin_rejects_matching_shared_secret_header_by_default(monkeypatch):
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    app = _build_app()
+    client = TestClient(app)
+
+    response = client.get(
+        "/auth/internal-admin",
+        headers={"X-TRR-Internal-Admin-Secret": "internal-secret-32-bytes-minimum"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authentication required. Please provide a valid access token."
 
 
 def test_require_internal_admin_rejects_matching_shared_secret_header_when_fallback_disabled(monkeypatch):
@@ -203,9 +218,28 @@ def test_require_internal_admin_rejects_non_allowlisted_user_token(monkeypatch):
     assert response.json() == {"detail": "Allowlist admin access required"}
 
 
-def test_require_admin_accepts_service_role(monkeypatch):
+def test_require_admin_rejects_service_role_by_default(monkeypatch):
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")
+    app = _build_app()
+    client = TestClient(app)
+
+    token = _make_token(
+        "test-secret-32-bytes-minimum-abcdef",
+        "service-role-subject",
+        timedelta(minutes=5),
+        issuer="https://project123.supabase.co/auth/v1",
+        extra_claims={"ref": "project123", "role": "service_role"},
+    )
+    response = client.get("/auth/admin", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Admin access required"}
+
+
+def test_require_admin_accepts_service_role_when_enabled(monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")
+    monkeypatch.setenv("TRR_ADMIN_ALLOW_SERVICE_ROLE", "1")
     app = _build_app()
     client = TestClient(app)
 
@@ -221,8 +255,25 @@ def test_require_admin_accepts_service_role(monkeypatch):
     assert response.json() == {"user_id": "service_role:project123", "role": "service_role"}
 
 
-def test_require_internal_admin_accepts_service_role(monkeypatch):
+def test_require_internal_admin_rejects_service_role_by_default(monkeypatch):
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    app = _build_app()
+    client = TestClient(app)
+
+    token = _make_token(
+        "test-secret-32-bytes-minimum-abcdef",
+        "service-role-subject",
+        timedelta(minutes=5),
+        extra_claims={"role": "service_role"},
+    )
+    response = client.get("/auth/internal-admin", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Allowlist admin access required"}
+
+
+def test_require_internal_admin_accepts_service_role_when_enabled(monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_ALLOW_SERVICE_ROLE", "1")
     app = _build_app()
     client = TestClient(app)
 
@@ -237,9 +288,10 @@ def test_require_internal_admin_accepts_service_role(monkeypatch):
     assert response.json() == {"user_id": "service_role:unknown", "role": "service_role"}
 
 
-def test_require_internal_admin_accepts_service_role_with_legacy_supabase_issuer(monkeypatch):
+def test_require_internal_admin_accepts_service_role_with_legacy_supabase_issuer_when_enabled(monkeypatch):
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_ALLOW_SERVICE_ROLE", "1")
     app = _build_app()
     client = TestClient(app)
 
