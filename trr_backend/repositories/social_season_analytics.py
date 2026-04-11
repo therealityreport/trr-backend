@@ -29510,7 +29510,6 @@ def _scrape_shared_tiktok_posts(
     from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
 
     scraper = TikTokScraper(cookies=_load_tiktok_cookies())
-    runner_strategy = str(config.get("runner_strategy") or "").strip().lower()
     expected_total_posts = max(
         _normalize_non_negative_int(config.get("discovery_total_posts")),
         _shared_account_expected_total_posts_from_config(
@@ -29526,7 +29525,7 @@ def _scrape_shared_tiktok_posts(
         date_end=_coerce_dt(config.get("date_end")),
         delay_seconds=0.35,
         max_pages=_shared_stage_post_limit(config),
-        scrape_mode="auto" if runner_strategy == "single_runner_fallback" else "api",
+        scrape_mode="ytdlp",
         ytdlp_max_videos_hint=expected_total_posts or None,
     )
     posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
@@ -30633,10 +30632,7 @@ def _run_shared_account_discovery_stage(
         # more jobs that will also fail.
         if discovery_checked == 0:
             if platform == "tiktok":
-                if (
-                    _tiktok_discovery_empty_body_transport_failure(discovery_meta)
-                    and recovery_depth <= 0
-                ):
+                if _tiktok_discovery_empty_body_transport_failure(discovery_meta) and recovery_depth <= 0:
                     recovery_expected_total_posts = max(
                         expected_total_posts,
                         _best_known_social_account_total_posts(
@@ -30667,9 +30663,7 @@ def _run_shared_account_discovery_stage(
                             "max_posts_per_target": 0,
                             "discovery_total_posts": discovery_meta.get("total_posts"),
                             "expected_total_posts": recovery_expected_total_posts,
-                            "completion_target_posts": _normalize_non_negative_int(
-                                discovery_meta.get("total_posts")
-                            )
+                            "completion_target_posts": _normalize_non_negative_int(discovery_meta.get("total_posts"))
                             or expected_total_posts
                             or recovery_expected_total_posts,
                             "discovery_fallback_reason": "tiktok_empty_body_transport_failure",
@@ -34227,10 +34221,7 @@ def ingest_shared_accounts(
         for row in sources
         if (
             (_normalize_platform_name(row.get("platform")) or "")
-            and (
-                _normalize_account_handle(row.get("account_handle"))
-                or str(row.get("account_handle") or "").strip()
-            )
+            and (_normalize_account_handle(row.get("account_handle")) or str(row.get("account_handle") or "").strip())
             and (
                 (
                     _normalize_platform_name(row.get("platform")) or "",
@@ -34304,9 +34295,7 @@ def ingest_shared_accounts(
             catalog_runner_count = CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT
             catalog_runner_strategy = CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
             catalog_partition_strategy = CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
-        elif any(
-            _catalog_full_history_partition_supported(row.get("platform")) for row in partition_eligible_sources
-        ):
+        elif any(_catalog_full_history_partition_supported(row.get("platform")) for row in partition_eligible_sources):
             catalog_runner_count = CATALOG_BACKFILL_FULL_HISTORY_RUNNER_COUNT
             catalog_runner_strategy = "full_history_cursor_breakpoints"
             catalog_partition_strategy = CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY
