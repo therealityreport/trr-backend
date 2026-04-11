@@ -1,5 +1,0 @@
-trr-admin-operations-worker.service active=activating enabled=enabled
-trr-reddit-refresh-worker.service active=active enabled=enabled
-trr-google-news-worker.service active=active enabled=enabled
-trr-social-worker-pool.service active=active enabled=enabled
-

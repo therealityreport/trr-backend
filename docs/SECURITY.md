@@ -12,11 +12,14 @@ This document describes the security measures in place to protect sensitive data
 - Private keys and certificates (`*.pem`, `*.key`)
 - Database credentials (PGPASSWORD, connection strings)
 - Backup files that may contain secrets (`worktree-backups*`, `*.patch`)
+- Local scrape/session artifacts (for example `data/tiktok_cookies.json`)
+- Operational evidence captures under `docs/ai/evidence/`
 
 **Safe to commit:**
 - `.env.example` with placeholder values
 - Environment variable names (references only)
 - Documentation with `REDACTED` or masked values
+- A tracked `docs/ai/evidence/README.md` that documents the local-only evidence policy
 
 ### Protection Layers
 

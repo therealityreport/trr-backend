@@ -33,6 +33,9 @@ jobs:
             --required SCREENALYTICS_API_URL TRR_INTERNAL_ADMIN_SHARED_SECRET SCREENALYTICS_SERVICE_TOKEN \
             --allow-hyphen GEMINI-MODEL
 
+      - name: Check repo hygiene
+        run: python scripts/check_repo_hygiene.py
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
         with:
@@ -74,6 +77,9 @@ jobs:
             --file .env.example \
             --required SCREENALYTICS_API_URL TRR_INTERNAL_ADMIN_SHARED_SECRET SCREENALYTICS_SERVICE_TOKEN \
             --allow-hyphen GEMINI-MODEL
+
+      - name: Check repo hygiene
+        run: python scripts/check_repo_hygiene.py
 
       - name: Install dependencies
         run: |

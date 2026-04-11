@@ -1411,12 +1411,12 @@ def test_post_social_account_catalog_repair_auth_route(
             "trr_backend.repositories.social_season_analytics.execute_social_account_catalog_run_auth_repair",
             return_value={"ok": True},
         ) as mocked_execute,
-        ):
-            response = client.post(
+    ):
+        response = client.post(
             f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/repair-auth",
-                headers={"Authorization": f"Bearer {token}"},
-                json={},
-            )
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
 
     assert response.status_code == 200
     body = response.json()
@@ -5123,6 +5123,18 @@ def test_get_health_dot_endpoint_returns_lightweight_payload(
                 "failed": 1,
             },
         },
+        "alerts": [
+            {
+                "code": "tiktok_single_path_risk",
+                "severity": "warning",
+                "message": "TikTok posts currently rely on yt-dlp as the only proven live path.",
+            },
+            {
+                "code": "tiktok_single_path_degraded",
+                "severity": "critical",
+                "message": "Recent TikTok queue failures include yt-dlp-related rows.",
+            },
+        ],
         "updated_at": "2026-02-28T12:00:00Z",
     }
 
@@ -5141,6 +5153,7 @@ def test_get_health_dot_endpoint_returns_lightweight_payload(
                     "failed": 1,
                 },
             },
+            "alerts": expected["alerts"],
         }
         response = client.get(
             "/api/v1/admin/socials/ingest/health-dot",
@@ -5152,9 +5165,10 @@ def test_get_health_dot_endpoint_returns_lightweight_payload(
     assert body["queue_enabled"] is expected["queue_enabled"]
     assert body["workers"] == expected["workers"]
     assert body["queue"] == expected["queue"]
+    assert body["alerts"] == expected["alerts"]
     assert isinstance(body.get("updated_at"), str)
     mocked.assert_called_once_with(
-        include_recent_failures=False,
+        include_recent_failures=True,
         include_stuck_jobs=False,
         include_runs_summary=False,
         summary_only=True,
@@ -5240,11 +5254,61 @@ def test_get_live_status_aggregates_health_queue_and_operations(
     assert isinstance(body["generated_at"], str)
     assert isinstance(body["sequence"], int)
     mocked_queue.assert_called_once_with(
-        include_recent_failures=False,
+        include_recent_failures=True,
         include_stuck_jobs=False,
         include_runs_summary=False,
     )
     mocked_ops.assert_called_once()
+
+
+def test_live_status_stream_uses_threadpool_for_payload_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.routers.socials as router_module
+
+    payload = {
+        "health_dot": {"queue_enabled": True},
+        "queue_status": {"queue_enabled": True},
+        "admin_operations": {"summary": {"active_total": 0}},
+        "generated_at": "2026-02-28T12:00:00Z",
+        "sequence": 7,
+    }
+    captured: dict[str, Any] = {}
+    disconnect_checks = {"count": 0}
+
+    async def _fake_run_in_threadpool(func: Any, *args: Any, **kwargs: Any) -> Any:
+        captured["func"] = func
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return payload
+
+    class _DummyRequest:
+        async def is_disconnected(self) -> bool:
+            disconnect_checks["count"] += 1
+            return disconnect_checks["count"] > 1
+
+    with (
+        patch.object(router_module, "run_in_threadpool", side_effect=_fake_run_in_threadpool) as mocked_threadpool,
+        patch.object(router_module, "_build_live_status_payload") as mocked_builder,
+    ):
+        response = asyncio.run(router_module.stream_social_live_status(_DummyRequest(), None))
+
+        async def _collect_chunks() -> list[str]:
+            chunks: list[str] = []
+            async for chunk in response.body_iterator:
+                chunks.append(chunk)
+            return chunks
+
+        chunks = asyncio.run(_collect_chunks())
+
+    assert response.status_code == 200
+    assert chunks[0] == "event: live_status\n"
+    assert '"sequence": 7' in chunks[1]
+    assert mocked_threadpool.call_count == 1
+    mocked_builder.assert_not_called()
+    assert captured["func"] is mocked_builder
+    assert captured["args"] == ()
+    assert captured["kwargs"] == {}
 
 
 def test_cancel_stuck_jobs_endpoint_accepts_targeted_job_ids(

@@ -1,1 +1,0 @@
-worker_ssm_ping=Online attempt=1

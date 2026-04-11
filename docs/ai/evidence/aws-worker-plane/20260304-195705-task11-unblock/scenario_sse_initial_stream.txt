@@ -1,3 +1,0 @@
-event: operation
-data: {"status": "pending", "attached": false, "request_id": "task11-sse-replay-1772679486", "operation_id": "8de0dc8a-def6-4078-8601-5bd1ea9dd1b6", "execution_owner": "remote_worker", "execution_mode_canonical": "remote", "event_seq": 1}
-

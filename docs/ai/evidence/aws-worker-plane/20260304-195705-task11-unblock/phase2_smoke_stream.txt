@@ -1,1 +1,0 @@
-{"detail":[{"type":"value_error","loc":["body"],"msg":"Value error, show_id required for show","input":{"entity_type":"show","source_url":"https://task11.example/smoke","images":[{"candidate_id":"task11-smoke-1","url":"https://picsum.photos/seed/task11-smoke-1/320/180","kind":"other"}]},"ctx":{"error":{}}}]}

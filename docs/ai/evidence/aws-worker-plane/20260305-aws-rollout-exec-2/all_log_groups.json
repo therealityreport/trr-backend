@@ -1,9 +1,0 @@
-[
-    "/aws/lambda/trr-jobplane-metrics-publisher",
-    "/aws/rds/instance/trr-metadata-db/postgresql",
-    "/trr/api/bootstrap",
-    "/trr/ec2/cloud-init",
-    "/trr/ec2/cloud-init-output",
-    "/trr/worker/bootstrap",
-    "RDSOSMetrics"
-]

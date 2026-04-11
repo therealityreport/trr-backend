@@ -1,1 +1,0 @@
-api_id=i-0ef0f25520eba8b91 worker_id=i-0dd68b716caf8d3ca

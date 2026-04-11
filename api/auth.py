@@ -56,11 +56,19 @@ def _build_internal_admin_identity(payload: dict[str, Any], token: str) -> dict[
 
 
 def _internal_admin_secret_matches(request: Request) -> bool:
-    if not _env_flag("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", True):
-        return False
     secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     header_secret = (request.headers.get("X-TRR-Internal-Admin-Secret") or "").strip()
     return bool(secret and header_secret and hmac.compare_digest(header_secret, secret))
+
+
+def _raw_internal_admin_fallback_matches(request: Request) -> bool:
+    if not _env_flag("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", False):
+        return False
+    return _internal_admin_secret_matches(request)
+
+
+def _service_role_allowed(env_name: str) -> bool:
+    return _env_flag(env_name, False)
 
 
 async def get_current_user(request: Request) -> dict | None:
@@ -148,7 +156,9 @@ def _admin_email_allowlist() -> set[str]:
 
 async def require_admin(user: CurrentUser) -> dict:
     role = (user.get("role") or "").lower()
-    if role in ("admin", "internal_admin", "service_role"):
+    if role in ("admin", "internal_admin"):
+        return user
+    if role == "service_role" and _service_role_allowed("TRR_ADMIN_ALLOW_SERVICE_ROLE"):
         return user
     allowlist = _admin_email_allowlist()
     email = (user.get("email") or "").lower()
@@ -193,10 +203,10 @@ async def require_internal_admin(request: Request) -> dict:
         return matched_user
 
     role = (current_user or {}).get("role") if isinstance(current_user, dict) else None
-    if role == "service_role":
+    if role == "service_role" and _service_role_allowed("TRR_INTERNAL_ADMIN_ALLOW_SERVICE_ROLE"):
         return current_user
 
-    if _internal_admin_secret_matches(request):
+    if _raw_internal_admin_fallback_matches(request):
         logger.info("internal admin auth fallback accepted via raw shared secret header")
         return {
             "id": "internal-admin:shared-secret",
