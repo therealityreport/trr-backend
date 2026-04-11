@@ -4188,7 +4188,7 @@ def test_ingest_shared_accounts_tiktok_full_history_prefer_local_inline_seeds_di
     monkeypatch.setattr(
         social_repo,
         "_best_known_social_account_total_posts",
-        lambda _platform, _account_handle, **kwargs: (best_known_calls.append(kwargs) or 3277),
+        lambda _platform, _account_handle, **kwargs: best_known_calls.append(kwargs) or 3277,
     )
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_counter_columns_ready", lambda: False)
@@ -4644,8 +4644,10 @@ def test_start_social_account_catalog_backfill_auto_resumes_instagram_full_histo
     monkeypatch.setattr(
         social_repo,
         "ingest_shared_accounts",
-        lambda **kwargs: ingest_calls.append(dict(kwargs))
-        or {"run_id": "catalog-run-auto-resume-1", "status": "queued", "catalog_action": "backfill"},
+        lambda **kwargs: (
+            ingest_calls.append(dict(kwargs))
+            or {"run_id": "catalog-run-auto-resume-1", "status": "queued", "catalog_action": "backfill"}
+        ),
     )
 
     payload = social_repo.start_social_account_catalog_backfill(
@@ -4680,8 +4682,10 @@ def test_start_social_account_catalog_backfill_starts_fresh_without_resumable_fr
     monkeypatch.setattr(
         social_repo,
         "ingest_shared_accounts",
-        lambda **kwargs: ingest_calls.append(dict(kwargs))
-        or {"run_id": "catalog-run-fresh-1", "status": "queued", "catalog_action": "backfill"},
+        lambda **kwargs: (
+            ingest_calls.append(dict(kwargs))
+            or {"run_id": "catalog-run-fresh-1", "status": "queued", "catalog_action": "backfill"}
+        ),
     )
 
     payload = social_repo.start_social_account_catalog_backfill(
@@ -24874,19 +24878,21 @@ def test_run_shared_account_frontier_posts_stage_continues_when_discovered_posts
     monkeypatch.setattr(
         social_repo,
         "_update_shared_account_run_frontier",
-        lambda **kwargs: frontier_updates.append(kwargs)
-        or {
-            "status": kwargs.get("status"),
-            "next_cursor": kwargs.get("next_cursor"),
-            "pages_scanned": kwargs.get("pages_scanned"),
-            "posts_checked": kwargs.get("posts_checked"),
-            "posts_saved": kwargs.get("posts_saved"),
-            "total_posts": kwargs.get("total_posts"),
-            "last_transport": kwargs.get("last_transport"),
-            "retry_count": kwargs.get("retry_count", 0),
-            "metadata": kwargs.get("metadata_updates", {}),
-            "exhausted": kwargs.get("exhausted"),
-        },
+        lambda **kwargs: (
+            frontier_updates.append(kwargs)
+            or {
+                "status": kwargs.get("status"),
+                "next_cursor": kwargs.get("next_cursor"),
+                "pages_scanned": kwargs.get("pages_scanned"),
+                "posts_checked": kwargs.get("posts_checked"),
+                "posts_saved": kwargs.get("posts_saved"),
+                "total_posts": kwargs.get("total_posts"),
+                "last_transport": kwargs.get("last_transport"),
+                "retry_count": kwargs.get("retry_count", 0),
+                "metadata": kwargs.get("metadata_updates", {}),
+                "exhausted": kwargs.get("exhausted"),
+            }
+        ),
     )
     monkeypatch.setattr(social_repo, "_release_shared_account_run_frontier", lambda **_kwargs: {})
     monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
@@ -24981,19 +24987,21 @@ def test_run_shared_account_frontier_posts_stage_raises_when_oldest_stored_post_
     monkeypatch.setattr(
         social_repo,
         "_update_shared_account_run_frontier",
-        lambda **kwargs: frontier_updates.append(kwargs)
-        or {
-            "status": kwargs.get("status"),
-            "next_cursor": kwargs.get("next_cursor"),
-            "pages_scanned": kwargs.get("pages_scanned"),
-            "posts_checked": kwargs.get("posts_checked"),
-            "posts_saved": kwargs.get("posts_saved"),
-            "total_posts": kwargs.get("total_posts"),
-            "last_transport": kwargs.get("last_transport"),
-            "retry_count": kwargs.get("retry_count", 0),
-            "metadata": kwargs.get("metadata_updates", {}),
-            "exhausted": kwargs.get("exhausted"),
-        },
+        lambda **kwargs: (
+            frontier_updates.append(kwargs)
+            or {
+                "status": kwargs.get("status"),
+                "next_cursor": kwargs.get("next_cursor"),
+                "pages_scanned": kwargs.get("pages_scanned"),
+                "posts_checked": kwargs.get("posts_checked"),
+                "posts_saved": kwargs.get("posts_saved"),
+                "total_posts": kwargs.get("total_posts"),
+                "last_transport": kwargs.get("last_transport"),
+                "retry_count": kwargs.get("retry_count", 0),
+                "metadata": kwargs.get("metadata_updates", {}),
+                "exhausted": kwargs.get("exhausted"),
+            }
+        ),
     )
     monkeypatch.setattr(social_repo, "_release_shared_account_run_frontier", lambda **_kwargs: {})
     monkeypatch.setattr(
@@ -25263,7 +25271,7 @@ def test_scrape_shared_tiktok_posts_single_runner_fallback_bypasses_partition_ap
             }
 
         def scrape(self, _config: Any, progress_cb=None) -> list[SimpleNamespace]:
-            assert _config.scrape_mode == "auto"
+            assert _config.scrape_mode == "ytdlp"
             assert _config.ytdlp_max_videos_hint == 10_100
             if progress_cb:
                 progress_cb(
@@ -25305,6 +25313,57 @@ def test_scrape_shared_tiktok_posts_single_runner_fallback_bypasses_partition_ap
     assert retrieval_meta["total_posts"] == 10_100
 
 
+def test_scrape_shared_tiktok_posts_cursor_breakpoints_still_bypass_partition_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partitioned_calls: list[dict[str, Any]] = []
+
+    def fake_partitioned(**kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        partitioned_calls.append(kwargs)
+        return [], {"retrieval_mode": "api_partition", "posts_checked": 0}
+
+    class FakeTikTokScraper:
+        def __init__(self, *, cookies: Any) -> None:
+            self.last_retrieval_meta = {
+                "pages_scanned": 2,
+                "posts_checked": 8,
+                "total_posts": 10_100,
+                "profile_snapshot": {"username": "bravotv", "display_name": "BravoTV"},
+            }
+
+        def scrape(self, _config: Any, progress_cb=None) -> list[SimpleNamespace]:
+            assert _config.scrape_mode == "ytdlp"
+            assert _config.ytdlp_max_videos_hint == 10_100
+            return [SimpleNamespace(video_id="123", author_nickname=None, user_avatar_url=None)]
+
+    monkeypatch.setattr(social_repo, "_scrape_shared_tiktok_posts_partitioned", fake_partitioned)
+    monkeypatch.setattr("trr_backend.socials.tiktok.TikTokScraper", FakeTikTokScraper)
+    monkeypatch.setattr(social_repo, "_load_tiktok_cookies", lambda: [])
+    monkeypatch.setattr(social_repo, "_shared_catalog_progress_interval_posts", lambda: 50)
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_shared_catalog_post",
+        lambda **kwargs: {"source_id": getattr(kwargs["post"], "video_id", None)},
+    )
+
+    rows, retrieval_meta = social_repo._scrape_shared_tiktok_posts(
+        run_id="run-1",
+        account_handle="bravotv",
+        config={
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "partition_strategy": social_repo.CATALOG_FULL_HISTORY_CURSOR_PARTITION_STRATEGY,
+            "runner_strategy": "full_history_cursor_breakpoints",
+            "discovery_total_posts": 10_100,
+        },
+        job_id="job-1",
+        progress_cb=None,
+    )
+
+    assert partitioned_calls == []
+    assert len(rows) == 1
+    assert retrieval_meta["persist_counters"]["posts_upserted"] == 1
+
+
 def test_run_shared_account_discovery_stage_enqueues_tiktok_empty_body_transport_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -25332,7 +25391,7 @@ def test_run_shared_account_discovery_stage_enqueues_tiktok_empty_body_transport
     monkeypatch.setattr(
         social_repo,
         "_best_known_social_account_total_posts",
-        lambda _platform, _account, **kwargs: (best_known_calls.append(kwargs) or 4444),
+        lambda _platform, _account, **kwargs: best_known_calls.append(kwargs) or 4444,
     )
     monkeypatch.setattr(
         social_repo,
@@ -25808,12 +25867,14 @@ def test_run_shared_account_frontier_posts_stage_allows_public_transport_when_au
     monkeypatch.setattr(
         social_repo,
         "_fetch_shared_instagram_graphql_posts_page",
-        lambda **kwargs: fetch_calls.append(kwargs)
-        or (
-            [{"shortcode": "def", "taken_at": 1738454400}],
-            {"has_next_page": False, "end_cursor": None},
-            {"total_posts": 34},
-            "public",
+        lambda **kwargs: (
+            fetch_calls.append(kwargs)
+            or (
+                [{"shortcode": "def", "taken_at": 1738454400}],
+                {"has_next_page": False, "end_cursor": None},
+                {"total_posts": 34},
+                "public",
+            )
         ),
     )
     monkeypatch.setattr(
