@@ -1860,11 +1860,7 @@ class YouTubeScraper:
                 _has_after = bool(page_stats.get("after_window_items"))
                 _has_before = bool(page_stats.get("before_window_items"))
                 _has_unknown = bool(page_stats.get("timestamp_unknown"))
-                page_before_only = (
-                    (_has_before or _has_unknown)
-                    and not _has_window
-                    and not _has_after
-                )
+                page_before_only = (_has_before or _has_unknown) and not _has_window and not _has_after
                 page_after_only = (
                     bool(page_stats.get("after_window_items"))
                     and not bool(page_stats.get("window_candidate_items"))
