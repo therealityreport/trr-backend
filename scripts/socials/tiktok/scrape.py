@@ -19,6 +19,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Add project root to path (scripts/socials/tiktok -> project root)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -42,6 +43,115 @@ logger = logging.getLogger(__name__)
 def parse_date(date_str: str) -> datetime:
     """Parse date string in YYYY-MM-DD format."""
     return datetime.strptime(date_str, "%Y-%m-%d")
+
+
+def _proxy_label(proxy_url: str | None) -> str | None:
+    if not proxy_url:
+        return None
+    parsed = urlparse(str(proxy_url))
+    return parsed.hostname or str(proxy_url)
+
+
+def _parse_args(argv: list[str] | None = None) -> tuple[argparse.ArgumentParser, argparse.Namespace]:
+    parser = argparse.ArgumentParser(
+        description="Scrape TikTok posts and comments",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Scrape @bravotv posts with #RHOSLC
+  python -m scripts.socials.tiktok.scrape --username bravotv --hashtags RHOSLC --start 2025-08-14 --end 2026-02-04
+
+  # Scrape comments from a specific video
+  python -m scripts.socials.tiktok.scrape --comments --video 7123456789012345678 --video-user bravotv
+
+  # Scrape comments with replies and limit
+  python -m scripts.socials.tiktok.scrape --comments --video 7123456789012345678 --with-replies --max-comments 100
+        """,
+    )
+
+    parser.add_argument("--username", help="TikTok username to scrape (without @)")
+    parser.add_argument("--hashtags", nargs="+", help="Hashtags to filter by (without #)")
+    parser.add_argument("--start", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", help="End date (YYYY-MM-DD)")
+    parser.add_argument(
+        "--scrape-mode",
+        choices=("ytdlp", "api", "browser_intercept", "auto"),
+        default="ytdlp",
+        help=(
+            "Post scrape mode. Use 'ytdlp' for the production path. "
+            "'api' and 'browser_intercept' are experimental direct modes; "
+            "'auto' is a deprecated compatibility alias for 'ytdlp'."
+        ),
+    )
+    parser.add_argument("--comments", action="store_true", help="Scrape comments instead of posts")
+    parser.add_argument("--video", help="Video ID to scrape comments from (aweme_id)")
+    parser.add_argument("--video-user", help="Username of the video author (optional, for building URL)")
+    parser.add_argument("--with-replies", action="store_true", help="Also fetch replies to comments")
+    parser.add_argument("--max-comments", type=int, help="Maximum number of top-level comments to fetch")
+    parser.add_argument("--cookies", default="tiktok_cookies.json", help="Path to TikTok cookies JSON file")
+    parser.add_argument("--no-auth", action="store_true", help="Run without authentication (may limit availability)")
+    parser.add_argument("--output", help="Output file prefix (default: {username}_tiktok_posts or {video_id}_comments)")
+    parser.add_argument("--delay", type=float, default=2.0, help="Delay between requests in seconds (default: 2.0)")
+    parser.add_argument("--max-pages", type=int, help="Maximum number of pages to fetch (posts only)")
+    parser.add_argument("--show-id", type=int, help="Associated show ID for metadata")
+    parser.add_argument("--season", type=int, help="Associated season number for metadata")
+    parser.add_argument("--person-id", type=int, help="Associated person ID for metadata")
+    parser.add_argument(
+        "--http-client",
+        choices=("requests", "curl_cffi"),
+        help="HTTP transport for experimental direct TikTok requests only",
+    )
+    parser.add_argument(
+        "--proxy-url",
+        help="Single proxy URL for the experimental direct TikTok scraper transport only",
+    )
+    parser.add_argument("--diagnostics-json", help="Optional path to write scraper diagnostics JSON")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    return parser, parser.parse_args(argv)
+
+
+def _emit_diagnostics_summary(
+    *,
+    target_label: str,
+    scrape_mode: str,
+    diagnostics: dict[str, object],
+) -> None:
+    endpoint_responses = diagnostics.get("endpoint_responses") if isinstance(diagnostics, dict) else {}
+    endpoint_responses = endpoint_responses if isinstance(endpoint_responses, dict) else {}
+    failure_summary = {
+        endpoint: payload.get("failure_reason")
+        for endpoint, payload in endpoint_responses.items()
+        if isinstance(payload, dict) and payload.get("failure_reason")
+    }
+
+    print("\nDiagnostics:")
+    print(f"  Target: {target_label}")
+    print(f"  Scrape mode: {scrape_mode}")
+    print(f"  HTTP client: {diagnostics.get('http_client') or 'requests'}")
+    if diagnostics.get("curl_cffi_impersonate"):
+        print(f"  Impersonate: {diagnostics.get('curl_cffi_impersonate')}")
+    print(f"  Proxy: {diagnostics.get('proxy_label') or 'none'}")
+    print(f"  Auth mode: {diagnostics.get('auth_mode') or 'without_cookies'}")
+    if diagnostics.get("risk_state"):
+        print(f"  Risk state: {diagnostics.get('risk_state')}")
+    if diagnostics.get("operator_summary"):
+        print(f"  Operator summary: {diagnostics.get('operator_summary')}")
+    if diagnostics.get("operator_action"):
+        print(f"  Operator action: {diagnostics.get('operator_action')}")
+    if diagnostics.get("triage_bucket"):
+        print(f"  Triage bucket: {diagnostics.get('triage_bucket')}")
+    if diagnostics.get("stop_reason"):
+        print(f"  Stop reason: {diagnostics.get('stop_reason')}")
+    if failure_summary:
+        print(f"  Endpoint failures: {json.dumps(failure_summary, sort_keys=True)}")
+
+
+def _write_diagnostics_json(path: str | None, diagnostics: dict[str, object]) -> None:
+    if not path:
+        return
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(diagnostics, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
 
 
 def save_results(posts: list[TikTokPost], output_prefix: str):
@@ -158,112 +268,8 @@ def save_comments(comments: list[TikTokComment], output_prefix: str, video_id: s
     logger.info(f"Saved {len(rows)} comments to {csv_file}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Scrape TikTok posts and comments",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Scrape @bravotv posts with #RHOSLC
-  python -m scripts.socials.tiktok.scrape --username bravotv --hashtags RHOSLC --start 2025-08-14 --end 2026-02-04
-
-  # Scrape comments from a specific video
-  python -m scripts.socials.tiktok.scrape --comments --video 7123456789012345678 --video-user bravotv
-
-  # Scrape comments with replies and limit
-  python -m scripts.socials.tiktok.scrape --comments --video 7123456789012345678 --with-replies --max-comments 100
-        """,
-    )
-
-    # Post scraping arguments
-    parser.add_argument("--username", help="TikTok username to scrape (without @)")
-    parser.add_argument(
-        "--hashtags",
-        nargs="+",
-        help="Hashtags to filter by (without #)",
-    )
-    parser.add_argument(
-        "--start",
-        help="Start date (YYYY-MM-DD)",
-    )
-    parser.add_argument(
-        "--end",
-        help="End date (YYYY-MM-DD)",
-    )
-
-    # Comment scraping arguments
-    parser.add_argument(
-        "--comments",
-        action="store_true",
-        help="Scrape comments instead of posts",
-    )
-    parser.add_argument(
-        "--video",
-        help="Video ID to scrape comments from (aweme_id)",
-    )
-    parser.add_argument(
-        "--video-user",
-        help="Username of the video author (optional, for building URL)",
-    )
-    parser.add_argument(
-        "--with-replies",
-        action="store_true",
-        help="Also fetch replies to comments",
-    )
-    parser.add_argument(
-        "--max-comments",
-        type=int,
-        help="Maximum number of top-level comments to fetch",
-    )
-
-    # Common arguments
-    parser.add_argument(
-        "--cookies",
-        default="tiktok_cookies.json",
-        help="Path to TikTok cookies JSON file",
-    )
-    parser.add_argument(
-        "--no-auth",
-        action="store_true",
-        help="Run without authentication (may limit availability)",
-    )
-    parser.add_argument(
-        "--output",
-        help="Output file prefix (default: {username}_tiktok_posts or {video_id}_comments)",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=2.0,
-        help="Delay between requests in seconds (default: 2.0)",
-    )
-    parser.add_argument(
-        "--max-pages",
-        type=int,
-        help="Maximum number of pages to fetch (posts only)",
-    )
-    parser.add_argument(
-        "--show-id",
-        type=int,
-        help="Associated show ID for metadata",
-    )
-    parser.add_argument(
-        "--season",
-        type=int,
-        help="Associated season number for metadata",
-    )
-    parser.add_argument(
-        "--person-id",
-        type=int,
-        help="Associated person ID for metadata",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging",
-    )
-
-    args = parser.parse_args()
+def main(argv: list[str] | None = None):
+    parser, args = _parse_args(argv)
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -288,7 +294,11 @@ Examples:
         except Exception as exc:
             logger.error("Failed to load TikTok cookies: %s", exc)
             logger.warning("Running TikTok scrape without authenticated cookies")
-    scraper = TikTokScraper(cookies=tiktok_cookies)
+    scraper = TikTokScraper(
+        cookies=tiktok_cookies,
+        http_client_name=args.http_client,
+        proxy_urls=[args.proxy_url] if args.proxy_url else None,
+    )
 
     # Comment scraping mode
     if args.comments:
@@ -355,12 +365,19 @@ Examples:
         date_end=parse_date(args.end),
         delay_seconds=args.delay,
         max_pages=args.max_pages,
+        scrape_mode=args.scrape_mode,
         show_id=args.show_id,
         season_number=args.season,
         person_id=args.person_id,
     )
 
     posts = scraper.scrape(config)
+    diagnostics = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    if args.proxy_url and "proxy_label" not in diagnostics:
+        diagnostics["proxy_label"] = _proxy_label(args.proxy_url)
+    if diagnostics:
+        _emit_diagnostics_summary(target_label=args.username, scrape_mode=args.scrape_mode, diagnostics=diagnostics)
+        _write_diagnostics_json(args.diagnostics_json, diagnostics)
 
     # Print summary
     print("\n" + "=" * 60)

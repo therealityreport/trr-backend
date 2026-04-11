@@ -900,9 +900,7 @@ def _resolve_social_account_catalog_route_execution(
     queue_enabled = is_queue_enabled()
     remote_plane_enforced = is_remote_job_plane_enabled()
     used_inline_fallback = False
-    normalized_execution_preference = (
-        str(execution_preference or "auto").strip().lower() or "auto"
-    )
+    normalized_execution_preference = str(execution_preference or "auto").strip().lower() or "auto"
     prefer_local_inline = normalized_execution_preference == "prefer_local_inline"
     requires_modal_executor = _shared_account_catalog_requires_modal_executor(
         platform=platform,
@@ -1461,7 +1459,25 @@ class TikTokScrapeResponse(BaseModel):
     posts_found: int
     posts: list[TikTokPostResponse]
     filters_applied: dict
+    diagnostics: dict[str, Any] | None = None
     error: str | None = None
+
+
+def _build_tiktok_scrape_diagnostics(retrieval_meta: dict[str, Any]) -> dict[str, Any] | None:
+    allowed_keys = (
+        "retrieval_mode",
+        "http_client",
+        "fallback_chain",
+        "stop_reason",
+        "error_code",
+        "risk_state",
+        "operator_summary",
+        "operator_action",
+        "triage_bucket",
+        "profile_enrichment_status",
+    )
+    diagnostics = {key: retrieval_meta[key] for key in allowed_keys if key in retrieval_meta}
+    return diagnostics or None
 
 
 # TikTok Endpoints
@@ -1499,6 +1515,7 @@ async def scrape_tiktok(
         tiktok_cookies = _load_social_auth_or_503(platform="tiktok", surface="scrape", loader=_load_tiktok_cookies)
         scraper = TikTokScraper(cookies=tiktok_cookies)
         posts = scraper.scrape(config)
+        diagnostics = _build_tiktok_scrape_diagnostics(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
 
         return TikTokScrapeResponse(
             success=True,
@@ -1529,6 +1546,7 @@ async def scrape_tiktok(
                 "date_start": request.date_start.isoformat(),
                 "date_end": request.date_end.isoformat(),
             },
+            diagnostics=diagnostics,
         )
     except HTTPException:
         raise
