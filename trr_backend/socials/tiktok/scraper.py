@@ -31,6 +31,24 @@ logger = logging.getLogger(__name__)
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
 
+def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+class _DeferredTikTokHttpClient:
+    """Lazy wrapper so the default yt-dlp path does not eagerly build direct transports."""
+
+    def __init__(self, owner: "TikTokScraper") -> None:
+        self._owner = owner
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        return self._owner._ensure_http_client().get(*args, **kwargs)
+
+
 @dataclass
 class TikTokScrapeConfig:
     """Configuration for a TikTok scrape operation."""
@@ -46,10 +64,10 @@ class TikTokScrapeConfig:
     fast_mode: bool = False
     """When True, uses aggressive rate-limiting tiers and reduced delays."""
 
-    scrape_mode: str = "api"
-    """Scraping strategy: 'api' (default, direct TikTok API), 'browser_intercept'
-    (headless Playwright scroll + response interception), or 'auto' (api first,
-    browser_intercept fallback)."""
+    scrape_mode: str = "ytdlp"
+    """Scraping strategy: 'ytdlp' (production default), 'api' (experimental
+    direct TikTok API), 'browser_intercept' (experimental Playwright
+    interception), or 'auto' (compatibility alias to 'ytdlp')."""
 
     ytdlp_max_videos_hint: int | None = None
     """Advisory upper bound for yt-dlp profile enumeration in fallback mode."""
@@ -75,11 +93,13 @@ class TikTokScrapeConfig:
 
     @property
     def start_timestamp(self) -> float:
-        return self.date_start.timestamp() if self.date_start else 0
+        coerced = _coerce_utc_datetime(self.date_start)
+        return coerced.timestamp() if coerced else 0
 
     @property
     def end_timestamp(self) -> float:
-        return self.date_end.timestamp() if self.date_end else datetime.now(UTC).timestamp()
+        coerced = _coerce_utc_datetime(self.date_end)
+        return coerced.timestamp() if coerced else datetime.now(UTC).timestamp()
 
     def matches_hashtags(self, text: str) -> bool:
         """Check if text contains any of the configured hashtags."""
@@ -200,14 +220,28 @@ class TikTokScraper:
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_TIMEOUT_SECONDS = (10, 45)
 
-    def __init__(self, cookies: dict | None = None):
+    def __init__(
+        self,
+        cookies: dict | None = None,
+        *,
+        http_client_name: str | None = None,
+        proxy_urls: list[str] | tuple[str, ...] | None = None,
+    ):
         self.cookies = cookies or {}
-        self.session = self._create_session()
+        self._http_client_name_input = str(http_client_name or "").strip().lower() or None
+        self._proxy_urls_input = list(proxy_urls or [])
+        self._selected_proxy_url = next(
+            (str(value or "").strip() for value in self._proxy_urls_input if str(value or "").strip()),
+            None,
+        )
+        self._direct_http_client: requests.Session | None = None
+        self.session = _DeferredTikTokHttpClient(self)
         self._request_count = 0
         self._consecutive_success = 0
         self.last_retrieval_meta: dict[str, Any] = {}
         self._last_api_fail_reason: str | None = None
         self.last_comment_fetch_reason: str | None = None
+        self.last_comment_fetch_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
 
     @staticmethod
@@ -240,6 +274,13 @@ class TikTokScraper:
         normalized = str(reason or "").strip().lower()
         return normalized in {"non_json_response", "challenge_or_blocked"}
 
+    @staticmethod
+    def _proxy_label(proxy_url: str | None) -> str | None:
+        if not proxy_url:
+            return None
+        parsed = urlparse(str(proxy_url))
+        return parsed.hostname or str(proxy_url)
+
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
         session = requests.Session()
@@ -252,7 +293,48 @@ class TikTokScraper:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
+        if self._selected_proxy_url:
+            session.proxies.update({"http": self._selected_proxy_url, "https": self._selected_proxy_url})
         return session
+
+    def _ensure_http_client(self) -> requests.Session:
+        if self._direct_http_client is None:
+            self._direct_http_client = self._create_session()
+        return self._direct_http_client
+
+    def _run_context_meta(self, *, retrieval_mode: str | None = None, auth_mode: str | None = None) -> dict[str, Any]:
+        resolved_auth_mode = auth_mode or ("with_cookies" if self.cookies else "without_cookies")
+        mode = str(retrieval_mode or "").strip().lower() or None
+        if mode == "ytdlp":
+            return {
+                "http_client": "yt_dlp",
+                "proxy_label": None,
+                "auth_mode": resolved_auth_mode,
+            }
+        return {
+            "http_client": self._http_client_name_input or "requests",
+            "proxy_label": self._proxy_label(self._selected_proxy_url),
+            "auth_mode": resolved_auth_mode,
+        }
+
+    def _set_retrieval_meta(
+        self,
+        *,
+        context_mode: str | None = None,
+        auth_mode: str | None = None,
+        **values: Any,
+    ) -> None:
+        endpoint_responses = dict(self.last_retrieval_meta.get("endpoint_responses") or {})
+        payload = self._run_context_meta(
+            retrieval_mode=context_mode or str(values.get("retrieval_mode") or "").strip() or None,
+            auth_mode=auth_mode,
+        )
+        if context_mode == "ytdlp":
+            payload["endpoint_responses"] = {}
+        elif endpoint_responses:
+            payload["endpoint_responses"] = endpoint_responses
+        payload.update(values)
+        self.last_retrieval_meta = payload
 
     def _get_headers(self, referer: str | None = None) -> dict:
         """Get request headers."""
@@ -780,6 +862,21 @@ class TikTokScraper:
         yt-dlp for authenticated access.
         """
         if not self._has_ytdlp():
+            self._set_retrieval_meta(
+                context_mode="ytdlp",
+                auth_mode="none",
+                retrieval_mode="ytdlp",
+                error_code="ytdlp_unavailable",
+                stop_reason="ytdlp_unavailable",
+                pages_scanned=0,
+                posts_checked=0,
+                videos_scanned=0,
+                ytdlp_posts_found=0,
+                ytdlp_max_videos=0,
+                ytdlp_cookie_file_present=False,
+                ytdlp_cookie_file_used=False,
+                fallback_chain=["yt_dlp"],
+            )
             return []
 
         logger.info("Attempting yt-dlp bulk fallback scraper...")
@@ -787,8 +884,10 @@ class TikTokScraper:
         # Estimate how many videos to fetch based on date range.
         # @bravotv posts ~16 videos/day across all shows; use 22/day for buffer.
         max_videos = 500
-        if config.date_start:
-            days_back = (datetime.now(tz=UTC) - config.date_start).days
+        start_dt = _coerce_utc_datetime(config.date_start)
+        end_dt = _coerce_utc_datetime(config.date_end)
+        if start_dt:
+            days_back = max(0, (datetime.now(tz=UTC) - start_dt).days)
             max_videos = max(500, min(12000, days_back * 22))
         config_max_videos_hint = (
             max(0, int(config.ytdlp_max_videos_hint or 0)) if config.ytdlp_max_videos_hint is not None else 0
@@ -812,6 +911,7 @@ class TikTokScraper:
 
         # Pass cookies if a Netscape-format file exists
         cookie_file = self._find_ytdlp_cookie_file()
+        cookie_file_used = bool(cookie_file)
         if cookie_file:
             cmd.extend(["--cookies", cookie_file])
             logger.info(f"yt-dlp using cookies from {cookie_file}")
@@ -828,10 +928,45 @@ class TikTokScraper:
             )
         except subprocess.TimeoutExpired:
             logger.warning("yt-dlp bulk listing timed out")
+            self._set_retrieval_meta(
+                context_mode="ytdlp",
+                auth_mode="ytdlp_cookies" if cookie_file_used else "none",
+                retrieval_mode="ytdlp",
+                error_code="ytdlp_timeout",
+                stop_reason="timeout",
+                pages_scanned=0,
+                posts_checked=0,
+                videos_scanned=0,
+                ytdlp_posts_found=0,
+                ytdlp_max_videos=max_videos,
+                ytdlp_cookie_file_present=bool(cookie_file),
+                ytdlp_cookie_file_used=cookie_file_used,
+                fallback_chain=["yt_dlp"],
+            )
+            return []
+        if int(getattr(proc, "returncode", 0) or 0) != 0:
+            logger.warning("yt-dlp bulk listing exited non-zero: %s", getattr(proc, "stderr", "")[:240])
+            self._set_retrieval_meta(
+                context_mode="ytdlp",
+                auth_mode="ytdlp_cookies" if cookie_file_used else "none",
+                retrieval_mode="ytdlp",
+                error_code="ytdlp_nonzero_exit",
+                stop_reason="nonzero_exit",
+                error_message=str(getattr(proc, "stderr", "") or "")[:240] or None,
+                pages_scanned=0,
+                posts_checked=0,
+                videos_scanned=0,
+                ytdlp_posts_found=0,
+                ytdlp_max_videos=max_videos,
+                ytdlp_cookie_file_present=bool(cookie_file),
+                ytdlp_cookie_file_used=cookie_file_used,
+                fallback_chain=["yt_dlp"],
+            )
             return []
 
         posts: list[TikTokPost] = []
         total = 0
+        stop_reason = "playlist_exhausted"
         for line in proc.stdout.strip().splitlines():
             try:
                 data = json.loads(line)
@@ -840,10 +975,11 @@ class TikTokScraper:
             total += 1
 
             ts = data.get("timestamp", 0) or 0
-            in_range = config.is_in_date_range(ts)
-            if in_range is None:
+            item_dt = datetime.fromtimestamp(ts, tz=UTC)
+            if start_dt and item_dt < start_dt:
+                stop_reason = "date_start_reached"
                 break  # Before date range, stop
-            if in_range is False:
+            if end_dt and item_dt > end_dt:
                 continue  # After date range, skip
 
             description = data.get("title", "") or data.get("description", "") or ""
@@ -869,17 +1005,24 @@ class TikTokScraper:
                     logger.debug("TikTok yt-dlp progress callback raised", exc_info=True)
 
             if max_posts_hint and len(posts) >= max_posts_hint:
+                stop_reason = "max_posts_reached"
                 break
 
         logger.info(f"yt-dlp bulk: scanned {total} videos, found {len(posts)} matches")
-        self.last_retrieval_meta = {
-            "retrieval_mode": "ytdlp",
-            "pages_scanned": 0,
-            "posts_checked": total,
-            "videos_scanned": total,
-            "ytdlp_posts_found": len(posts),
-            "ytdlp_max_videos": max_videos,
-        }
+        self._set_retrieval_meta(
+            context_mode="ytdlp",
+            auth_mode="ytdlp_cookies" if cookie_file_used else "none",
+            retrieval_mode="ytdlp",
+            pages_scanned=0,
+            posts_checked=total,
+            videos_scanned=total,
+            ytdlp_posts_found=len(posts),
+            ytdlp_max_videos=max_videos,
+            stop_reason=stop_reason,
+            fallback_chain=["yt_dlp"],
+            ytdlp_cookie_file_present=bool(cookie_file),
+            ytdlp_cookie_file_used=cookie_file_used,
+        )
         return posts
 
     def _extract_hashtags(self, text: str) -> list[str]:
@@ -1380,8 +1523,14 @@ class TikTokScraper:
             self.last_retrieval_meta.update(
                 {
                     "retrieval_mode": "browser_intercept",
+                    "auth_mode": "with_cookies" if self.cookies else "without_cookies",
                     "error_code": "playwright_unavailable",
                     "error_class": type(exc).__name__,
+                    "playwright_error": type(exc).__name__,
+                    "intercepted_post_responses": 0,
+                    "intercepted_user_detail_responses": 0,
+                    "dom_cards_seen": 0,
+                    "scroll_iterations": 0,
                 }
             )
             return []
@@ -1399,14 +1548,32 @@ class TikTokScraper:
         no_new_data_scrolls = 0
         max_no_new_data_scrolls = 5
         scroll_count = 0
+        intercepted_post_responses = 0
+        intercepted_user_detail_responses = 0
+        dom_cards_seen = 0
+        playwright_error: str | None = None
+        auth_mode = "with_cookies" if self.cookies else "without_cookies"
+
+        self.last_retrieval_meta.update(
+            {
+                "retrieval_mode": "browser_intercept",
+                "auth_mode": auth_mode,
+                "intercepted_post_responses": intercepted_post_responses,
+                "intercepted_user_detail_responses": intercepted_user_detail_responses,
+                "dom_cards_seen": dom_cards_seen,
+                "scroll_iterations": scroll_count,
+                "playwright_error": playwright_error,
+            }
+        )
 
         user_agent = self._get_headers().get("user-agent", "Mozilla/5.0")
         timeout_ms = 60_000
         max_posts = config.max_pages * 50 if config.max_pages else 10_000
 
-        with sync_playwright() as playwright:
-            browser = launch_browser(playwright, headless=True)
-            try:
+        browser: Any | None = None
+        try:
+            with sync_playwright() as playwright:
+                browser = launch_browser(playwright, headless=True)
                 context = browser.new_context(
                     viewport={"width": 1280, "height": 900},
                     user_agent=user_agent,
@@ -1437,12 +1604,31 @@ class TikTokScraper:
                 except Exception:  # noqa: BLE001
                     pass
 
-                # Register response interceptor for post list API
+                # Register response interceptor for browser traffic relevant to recovery triage.
                 def _handle_post_list_response(response: Any) -> None:
-                    nonlocal reached_date_limit, no_new_data_scrolls
+                    nonlocal intercepted_post_responses, intercepted_user_detail_responses, reached_date_limit
+                    nonlocal no_new_data_scrolls
                     try:
-                        if "/api/post/item_list/" not in str(response.url or ""):
+                        response_url = str(response.url or "")
+                        normalized_response_url = response_url.lower()
+                        if (
+                            "/api/user/detail/" in normalized_response_url
+                            or "fetch_user_detail" in normalized_response_url
+                        ):
+                            if response.ok:
+                                try:
+                                    browser_user_detail_payload = response.json()
+                                except Exception:  # noqa: BLE001
+                                    browser_user_detail_payload = None
+                                if isinstance(browser_user_detail_payload, (dict, list)):
+                                    intercepted_user_detail_responses += 1
+                                    self.last_retrieval_meta["intercepted_user_detail_responses"] = (
+                                        intercepted_user_detail_responses
+                                    )
+                        if "/api/post/item_list/" not in normalized_response_url:
                             return
+                        intercepted_post_responses += 1
+                        self.last_retrieval_meta["intercepted_post_responses"] = intercepted_post_responses
                         if not response.ok:
                             return
                         payload = response.json()
@@ -1516,6 +1702,9 @@ class TikTokScraper:
                         no_new_data_scrolls += 1
                     else:
                         no_new_data_scrolls = 0
+                    dom_cards_seen = max(dom_cards_seen, int(page.locator("a[href*='/video/']").count() or 0))
+                    self.last_retrieval_meta["dom_cards_seen"] = dom_cards_seen
+                    self.last_retrieval_meta["scroll_iterations"] = scroll_count
 
                     if scroll_count % 20 == 0:
                         logger.info(
@@ -1524,21 +1713,28 @@ class TikTokScraper:
                             len(posts),
                         )
 
-            except Exception as exc:
-                logger.error(
-                    "browser_intercept failed for @%s: %s",
-                    config.username,
-                    exc,
-                )
-                self.last_retrieval_meta.update(
-                    {
-                        "retrieval_mode": "browser_intercept",
-                        "error_code": "browser_intercept_error",
-                        "error_class": type(exc).__name__,
-                        "error_message": str(exc),
-                    }
-                )
-            finally:
+        except Exception as exc:
+            playwright_error = type(exc).__name__
+            logger.error(
+                "browser_intercept failed for @%s: %s",
+                config.username,
+                exc,
+            )
+            self.last_retrieval_meta.update(
+                {
+                    "retrieval_mode": "browser_intercept",
+                    "error_code": "browser_intercept_error",
+                    "error_class": playwright_error,
+                    "error_message": str(exc),
+                    "intercepted_post_responses": intercepted_post_responses,
+                    "intercepted_user_detail_responses": intercepted_user_detail_responses,
+                    "dom_cards_seen": dom_cards_seen,
+                    "scroll_iterations": scroll_count,
+                    "playwright_error": playwright_error,
+                }
+            )
+        finally:
+            if browser is not None:
                 browser.close()
 
         stop_reason = (
@@ -1557,13 +1753,84 @@ class TikTokScraper:
             scroll_count,
             stop_reason,
         )
-        self.last_retrieval_meta = {
-            "retrieval_mode": "browser_intercept",
-            "posts_checked": len(seen_ids),
-            "pages_scanned": scroll_count,
-            "stop_reason": stop_reason,
-        }
+        error_code = str(self.last_retrieval_meta.get("error_code") or "").strip() or None
+        error_class = str(self.last_retrieval_meta.get("error_class") or "").strip() or None
+        error_message = str(self.last_retrieval_meta.get("error_message") or "").strip() or None
+        fallback_chain = self.last_retrieval_meta.get("fallback_chain") or None
+        self._set_retrieval_meta(
+            retrieval_mode="browser_intercept",
+            auth_mode=auth_mode,
+            posts_checked=len(seen_ids),
+            pages_scanned=scroll_count,
+            stop_reason=stop_reason,
+            intercepted_post_responses=intercepted_post_responses,
+            intercepted_user_detail_responses=intercepted_user_detail_responses,
+            dom_cards_seen=dom_cards_seen,
+            scroll_iterations=scroll_count,
+            playwright_error=playwright_error,
+            error_code=error_code,
+            error_class=error_class,
+            error_message=error_message,
+            fallback_chain=fallback_chain,
+        )
+        self.last_retrieval_meta["playwright_error"] = playwright_error
         return posts
+
+    def _ensure_structured_direct_failure(self, *, mode: str) -> None:
+        if self.last_retrieval_meta.get("error_code"):
+            return
+        stop_reason = f"{mode}_zero_posts"
+        self._set_retrieval_meta(
+            retrieval_mode=mode,
+            error_code=stop_reason,
+            stop_reason=stop_reason,
+            fallback_chain=[mode],
+        )
+
+    def _set_tiktok_path_health(
+        self,
+        *,
+        retrieval_mode: str,
+        posts_found: int,
+        stop_reason: str | None = None,
+    ) -> None:
+        mode = str(retrieval_mode or "").strip().lower() or "ytdlp"
+        self.last_retrieval_meta["retrieval_mode"] = mode
+        self.last_retrieval_meta["path_role"] = "primary" if mode == "ytdlp" else "fallback"
+        self.last_retrieval_meta["topology_state"] = "single_path_ytdlp"
+        if stop_reason:
+            self.last_retrieval_meta["stop_reason"] = stop_reason
+        if mode == "ytdlp" and posts_found <= 0:
+            self.last_retrieval_meta["risk_state"] = "critical"
+            self.last_retrieval_meta["operator_summary"] = (
+                "TikTok posts path degraded: yt-dlp returned zero posts while browser_intercept is not proven live."
+            )
+        elif mode == "ytdlp":
+            self.last_retrieval_meta["risk_state"] = "healthy"
+            self.last_retrieval_meta["operator_summary"] = "TikTok posts path healthy on yt-dlp."
+
+    def _classify_browser_intercept_failure(
+        self,
+        *,
+        posts_found: int,
+        intercepted_post_responses: int,
+        intercepted_user_detail_responses: int,
+        dom_cards_seen: int,
+        scroll_iterations: int,
+        authenticated: bool,
+        playwright_error: str | None,
+    ) -> str:
+        if playwright_error:
+            return "playwright_runtime_change"
+        if not authenticated:
+            return "auth_or_session_state"
+        if intercepted_post_responses == 0 and intercepted_user_detail_responses > 0:
+            return "interception_target_drift"
+        if dom_cards_seen == 0 and scroll_iterations > 0:
+            return "scroll_or_pagination_drift"
+        if posts_found <= 0:
+            return "unclassified_zero_posts"
+        return "healthy"
 
     def scrape(
         self,
@@ -1591,71 +1858,58 @@ class TikTokScraper:
             )
 
         # ----- scrape_mode routing -----
-        mode = (config.scrape_mode or "api").strip().lower()
+        mode = (config.scrape_mode or "ytdlp").strip().lower()
 
-        if mode == "browser_intercept":
-            return self._scrape_browser_intercept(config, progress_cb=progress_cb)
-
-        if mode == "auto":
-            # Try the default API path first; fall back to browser_intercept
-            # if the API returns fewer than 5 posts.
-            api_posts = self._scrape_api(config, progress_cb=progress_cb)
-            if len(api_posts) >= 5:
-                return api_posts
-            logger.info(
-                "auto mode: API returned only %d posts for @%s; falling back to browser_intercept",
-                len(api_posts),
-                config.username,
-            )
-            intercept_posts = self._scrape_browser_intercept(
-                config,
-                progress_cb=progress_cb,
-            )
-            # Merge, preferring the larger result set and deduplicating
-            if len(intercept_posts) > len(api_posts):
-                seen = {p.video_id for p in intercept_posts}
-                for p in api_posts:
-                    if p.video_id and p.video_id not in seen:
-                        intercept_posts.append(p)
-                        seen.add(p.video_id)
-                return intercept_posts
-            seen = {p.video_id for p in api_posts}
-            for p in intercept_posts:
-                if p.video_id and p.video_id not in seen:
-                    api_posts.append(p)
-                    seen.add(p.video_id)
-            if len(api_posts) >= 5 or not self._has_ytdlp():
-                return api_posts
-            logger.info(
-                "auto mode: API + browser_intercept returned only %d posts for @%s; falling back to yt-dlp",
-                len(api_posts),
-                config.username,
-            )
-            combined_posts_before_ytdlp = len(api_posts)
-            ytdlp_posts = self._scrape_via_ytdlp(
+        if mode in {"ytdlp", "auto"}:
+            if mode == "auto":
+                logger.warning("TikTok scrape_mode=auto is deprecated; using ytdlp alias")
+            posts = self._scrape_via_ytdlp(
                 config,
                 max_videos_hint=config.ytdlp_max_videos_hint,
                 max_posts_hint=config.ytdlp_max_videos_hint,
                 progress_cb=progress_cb,
             )
-            if not ytdlp_posts:
-                return api_posts
-            seen = {p.video_id for p in api_posts}
-            for p in ytdlp_posts:
-                if p.video_id and p.video_id not in seen:
-                    api_posts.append(p)
-                    seen.add(p.video_id)
-            merged_meta = dict(self.last_retrieval_meta or {})
-            merged_meta["retrieval_mode"] = "ytdlp_fallback"
-            merged_meta["auto_fallback_chain"] = ["api", "browser_intercept", "yt_dlp"]
-            merged_meta["auto_combined_posts_before_ytdlp"] = combined_posts_before_ytdlp
-            merged_meta["auto_browser_intercept_posts"] = len(intercept_posts)
-            merged_meta["auto_ytdlp_posts"] = len(ytdlp_posts)
-            self.last_retrieval_meta = merged_meta
-            return api_posts
+            self._set_tiktok_path_health(
+                retrieval_mode="ytdlp",
+                posts_found=len(posts),
+                stop_reason=str(self.last_retrieval_meta.get("stop_reason") or "").strip() or None,
+            )
+            self.last_retrieval_meta["profile_enrichment_status"] = "skipped"
+            return posts
 
-        # Default: mode == "api" — fall through to existing logic below
-        return self._scrape_api(config, progress_cb=progress_cb)
+        if mode == "browser_intercept":
+            posts = self._scrape_browser_intercept(config, progress_cb=progress_cb)
+            if not posts:
+                browser_intercept_meta = {
+                    "intercepted_post_responses": int(self.last_retrieval_meta.get("intercepted_post_responses") or 0),
+                    "intercepted_user_detail_responses": int(
+                        self.last_retrieval_meta.get("intercepted_user_detail_responses") or 0
+                    ),
+                    "dom_cards_seen": int(self.last_retrieval_meta.get("dom_cards_seen") or 0),
+                    "scroll_iterations": int(self.last_retrieval_meta.get("scroll_iterations") or 0),
+                    "auth_mode": str(self.last_retrieval_meta.get("auth_mode") or "").strip() or None,
+                    "playwright_error": str(self.last_retrieval_meta.get("playwright_error") or "").strip() or None,
+                }
+                self._ensure_structured_direct_failure(mode="browser_intercept")
+                self.last_retrieval_meta.update(browser_intercept_meta)
+                self.last_retrieval_meta["triage_bucket"] = self._classify_browser_intercept_failure(
+                    posts_found=0,
+                    intercepted_post_responses=browser_intercept_meta["intercepted_post_responses"],
+                    intercepted_user_detail_responses=browser_intercept_meta["intercepted_user_detail_responses"],
+                    dom_cards_seen=browser_intercept_meta["dom_cards_seen"],
+                    scroll_iterations=browser_intercept_meta["scroll_iterations"],
+                    authenticated=bool(browser_intercept_meta["auth_mode"] == "with_cookies"),
+                    playwright_error=browser_intercept_meta["playwright_error"],
+                )
+            return posts
+
+        if mode == "api":
+            posts = self._scrape_api(config, progress_cb=progress_cb)
+            if not posts:
+                self._ensure_structured_direct_failure(mode="api")
+            return posts
+
+        raise ValueError(f"Unsupported TikTok scrape_mode: {config.scrape_mode}")
 
     def _scrape_api(
         self,
