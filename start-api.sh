@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Start TRR Backend API
-# Run this once, leave it running for all frontends (TRR-APP, screenalytics, etc.)
+# Run this once, leave it running for all local consumers (TRR-APP and backend-owned admin flows).
 
 cd "$(dirname "$0")"
 

@@ -33,8 +33,14 @@ Python 3.11+ is required.
    - `TVDB_API_KEY`
    - `IMDB_API_KEY`
 
-   Optional legacy compatibility only:
-   - `SCREENALYTICS_SERVICE_TOKEN` for old `/api/v1/screenalytics/*` callers that still use service-token auth
+   Optional hosted-asset support:
+   - `OBJECT_STORAGE_PROVIDER`
+   - `OBJECT_STORAGE_BUCKET`
+   - `OBJECT_STORAGE_REGION`
+   - `OBJECT_STORAGE_ENDPOINT_URL`
+   - `OBJECT_STORAGE_ACCESS_KEY_ID`
+   - `OBJECT_STORAGE_SECRET_ACCESS_KEY`
+   - `OBJECT_STORAGE_PUBLIC_BASE_URL`
 
 3. **Verify environment**
    ```bash

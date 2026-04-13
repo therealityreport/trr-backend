@@ -11,12 +11,12 @@ Read `../AGENTS.md` first. That workspace file is the canonical policy; use this
 - `scripts/` — backend developer tooling, maintenance scripts, and operational helpers
 
 ## Non-Negotiable Rules
-- Backend lands API, schema, and exposed SQL changes before downstream screenalytics or TRR-APP follow-through.
+- Backend lands API, schema, and exposed SQL changes before downstream TRR-APP follow-through.
 - Current API prefix is `/api/v1`. Breaking changes require a new version prefix rather than silent contract drift.
 - Prefer additive API changes. If a response shape changes, update affected consumers in the same session.
 - Never edit an existing migration. Add a new migration, keep schema docs current, and run `./scripts/reload_postgrest_schema.sh` when PostgREST or exposed SQL surfaces change.
-- Keep screenalytics-facing contracts current in `trr_backend/clients/screenalytics.py`.
-- Preserve `ADMIN_EMAIL_ALLOWLIST`, `TRR_INTERNAL_ADMIN_SHARED_SECRET`, and `SCREENALYTICS_SERVICE_TOKEN`.
+- Keep backend-owned people-count and image-analysis contracts current in `trr_backend/vision/people_count_service.py`.
+- Preserve `ADMIN_EMAIL_ALLOWLIST` and `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
 
 ## Supabase Conventions
 - Migrations are additive and never rewritten after landing.

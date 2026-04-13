@@ -417,7 +417,7 @@ class RefreshImagesRequest(BaseModel):
     )
     prefer_fast_pass: bool = Field(
         default=True,
-        description="Prefer fast-pass detection path with guarded fallback in screenalytics.",
+        description="Prefer fast-pass detection path with guarded fallback in the backend vision service.",
     )
     async_job: bool = Field(
         default=True,
@@ -670,7 +670,7 @@ class ReprocessImagesRequest(BaseModel):
     )
     prefer_fast_pass: bool = Field(
         default=True,
-        description="Prefer fast-pass detection path with guarded fallback in screenalytics.",
+        description="Prefer fast-pass detection path with guarded fallback in the backend vision service.",
     )
     async_job: bool = Field(
         default=True,
@@ -7033,9 +7033,7 @@ def _recenter_person_gallery_images(
                     last_error = exc
             try:
                 if result is None:
-                    raise last_error or person_image_detection.ScreenalyticsClientError(
-                        "Unable to center/crop image"
-                    )
+                    raise last_error or person_image_detection.ScreenalyticsClientError("Unable to center/crop image")
                 owner_crop_payload = _owner_face_crop_payload(
                     _extract_detection_boxes(result, kind="face"),
                     owner_person_id=person_id,

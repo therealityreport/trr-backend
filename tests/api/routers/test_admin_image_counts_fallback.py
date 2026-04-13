@@ -108,10 +108,10 @@ def test_auto_count_cast_photo_retries_next_url_when_first_fails(monkeypatch) ->
 
     calls: list[str] = []
 
-    def fake_count_people(image_url, mode="faces_then_yolo"):  # noqa: ANN001
+    def fake_count_people(image_url, mode="faces_then_yolo", **kwargs):  # noqa: ANN001
         calls.append(image_url)
         if "bad.jpeg" in image_url:
-            raise counts.ScreenalyticsClientError("Failed to download source_url: 404")
+            raise counts.PeopleCountServiceError("Failed to download source_url: 404")
         return SimpleNamespace(
             people_count=1,
             face_count=1,

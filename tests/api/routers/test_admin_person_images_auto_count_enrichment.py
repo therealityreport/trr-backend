@@ -79,12 +79,12 @@ def test_auto_count_cast_photos_persists_face_boxes_face_crops_and_auto_people(m
     upsert_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.is_screenalytics_configured",
+        "trr_backend.services.person_images.detection.is_runtime_configured",
         lambda: True,
     )
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.count_people",
-        lambda _url: SimpleNamespace(
+        "trr_backend.services.person_images.detection.count_people_with_fallback",
+        lambda _url, **_kwargs: SimpleNamespace(
             people_count=2,
             detector="retinaface",
             detections=[
@@ -176,11 +176,11 @@ def test_auto_count_cast_photos_force_recount_allows_identity_without_trr_show(m
     )
 
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.is_screenalytics_configured",
+        "trr_backend.services.person_images.detection.is_runtime_configured",
         lambda: True,
     )
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.count_people",
+        "trr_backend.services.person_images.detection.count_people_with_fallback",
         lambda _url, **_kwargs: SimpleNamespace(
             people_count=1,
             detector="retinaface",
@@ -237,12 +237,12 @@ def test_auto_count_media_links_persists_face_boxes_face_crops_and_auto_people(m
     db = _FakeDb({"media_links": []})
 
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.is_screenalytics_configured",
+        "trr_backend.services.person_images.detection.is_runtime_configured",
         lambda: True,
     )
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.count_people",
-        lambda _url: SimpleNamespace(
+        "trr_backend.services.person_images.detection.count_people_with_fallback",
+        lambda _url, **_kwargs: SimpleNamespace(
             people_count=2,
             detector="retinaface",
             detections=[
@@ -342,9 +342,14 @@ def test_auto_count_cast_photos_promotes_owner_by_similarity_and_assigns_remaini
     )
     captured_candidates: list[list[str]] = []
 
-    monkeypatch.setattr("trr_backend.clients.screenalytics.is_screenalytics_configured", lambda: True)
+    monkeypatch.setattr("trr_backend.services.person_images.detection.is_runtime_configured", lambda: True)
 
-    def _fake_count_people(_url: str, *, candidate_person_ids: list[str] | None = None) -> SimpleNamespace:
+    def _fake_count_people(
+        _url: str,
+        *,
+        candidate_person_ids: list[str] | None = None,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
         captured_candidates.append(list(candidate_person_ids or []))
         return SimpleNamespace(
             people_count=2,
@@ -375,7 +380,7 @@ def test_auto_count_cast_photos_promotes_owner_by_similarity_and_assigns_remaini
             ],
         )
 
-    monkeypatch.setattr("trr_backend.clients.screenalytics.count_people", _fake_count_people)
+    monkeypatch.setattr("trr_backend.services.person_images.detection.count_people_with_fallback", _fake_count_people)
     monkeypatch.setattr(
         "trr_backend.repositories.cast_photo_tags.get_tags_by_photo_ids",
         lambda _db, _ids: {
@@ -437,9 +442,9 @@ def test_auto_count_cast_photos_does_not_force_owner_to_best_unrelated_similarit
         }
     )
 
-    monkeypatch.setattr("trr_backend.clients.screenalytics.is_screenalytics_configured", lambda: True)
+    monkeypatch.setattr("trr_backend.services.person_images.detection.is_runtime_configured", lambda: True)
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.count_people",
+        "trr_backend.services.person_images.detection.count_people_with_fallback",
         lambda _url, **_kwargs: SimpleNamespace(
             people_count=2,
             detector="retinaface",
@@ -533,9 +538,9 @@ def test_auto_count_cast_photos_keeps_existing_thumbnail_crop_without_confident_
         }
     )
 
-    monkeypatch.setattr("trr_backend.clients.screenalytics.is_screenalytics_configured", lambda: True)
+    monkeypatch.setattr("trr_backend.services.person_images.detection.is_runtime_configured", lambda: True)
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.count_people",
+        "trr_backend.services.person_images.detection.count_people_with_fallback",
         lambda _url, **_kwargs: SimpleNamespace(
             people_count=1,
             detector="retinaface",
@@ -603,10 +608,10 @@ def test_auto_count_cast_photos_backfills_face_metadata_when_people_count_alread
         }
     )
 
-    monkeypatch.setattr("trr_backend.clients.screenalytics.is_screenalytics_configured", lambda: True)
+    monkeypatch.setattr("trr_backend.services.person_images.detection.is_runtime_configured", lambda: True)
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.count_people",
-        lambda _url: SimpleNamespace(
+        "trr_backend.services.person_images.detection.count_people_with_fallback",
+        lambda _url, **_kwargs: SimpleNamespace(
             people_count=1,
             detector="retinaface",
             detections=[
@@ -687,10 +692,10 @@ def test_auto_count_cast_photos_generates_person_fallback_boxes_when_no_faces_de
         }
     )
 
-    monkeypatch.setattr("trr_backend.clients.screenalytics.is_screenalytics_configured", lambda: True)
+    monkeypatch.setattr("trr_backend.services.person_images.detection.is_runtime_configured", lambda: True)
     monkeypatch.setattr(
-        "trr_backend.clients.screenalytics.count_people",
-        lambda _url: SimpleNamespace(
+        "trr_backend.services.person_images.detection.count_people_with_fallback",
+        lambda _url, **_kwargs: SimpleNamespace(
             people_count=2,
             detector="yolo",
             detections=[

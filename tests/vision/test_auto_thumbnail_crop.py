@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from trr_backend.clients.screenalytics import auto_thumbnail_crop
+from trr_backend.vision.people_count_service import auto_thumbnail_crop
 
 
 def test_auto_thumbnail_crop_prefers_matched_face_over_higher_confidence() -> None:

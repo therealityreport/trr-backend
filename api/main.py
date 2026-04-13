@@ -17,7 +17,6 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -110,7 +109,6 @@ async def _run_cast_screentime_stale_sweeper(stop_event: asyncio.Event) -> None:
 
 def _validate_startup_config() -> None:
     """Validate high-impact service env configuration with actionable logs."""
-    screenalytics_api_url = (os.getenv("SCREENALYTICS_API_URL") or "").strip()
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     supabase_jwt_secret = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
     log_database_resolution_summary()
@@ -170,20 +168,6 @@ def _validate_startup_config() -> None:
                 "local worker lanes and DB pool sizing conservative when using "
                 "pooler.supabase.com:5432"
             )
-
-    if screenalytics_api_url:
-        parsed = urlparse(screenalytics_api_url)
-        if not parsed.scheme or not parsed.netloc:
-            logger.warning(
-                "[startup-config] SCREENALYTICS_API_URL looks malformed: %s; only legacy outbound Screenalytics HTTP "
-                "flows depend on this setting",
-                screenalytics_api_url,
-            )
-    else:
-        logger.info(
-            "[startup-config] SCREENALYTICS_API_URL not set; only legacy outbound Screenalytics HTTP flows are "
-            "disabled. Screentime and covered admin image-analysis stay on backend-owned runtimes."
-        )
 
     missing_required: list[str] = []
     if not admin_shared_secret:
@@ -361,8 +345,6 @@ from api.routers import (  # noqa: E402
     admin_socialblade,
     discussions,
     dms,
-    screenalytics,
-    screenalytics_runs_v2,
     shows,
     socials,
     surveys,
@@ -374,8 +356,6 @@ app.include_router(surveys.router, prefix="/api/v1")
 app.include_router(discussions.router, prefix="/api/v1")
 app.include_router(dms.router, prefix="/api/v1")
 app.include_router(ws.router, prefix="/api/v1")
-app.include_router(screenalytics.router, prefix="/api/v1")
-app.include_router(screenalytics_runs_v2.router, prefix="/api/v1")
 app.include_router(admin_asset_flags.router, prefix="/api/v1")
 app.include_router(admin_asset_batch_jobs.router, prefix="/api/v1")
 app.include_router(admin_bravotv_images.router, prefix="/api/v1")

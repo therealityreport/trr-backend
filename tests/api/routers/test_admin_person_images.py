@@ -4669,7 +4669,10 @@ def test_refresh_stream_emits_terminal_error_when_operation_kickoff_fails(client
     normalized_payload = response.text.replace("\r\n", "\n")
     assert "event: error" in normalized_payload
     assert '"stage": "startup"' in normalized_payload or '"stage":"startup"' in normalized_payload
-    assert '"error_code": "STREAM_OPERATION_START_FAILED"' in normalized_payload or '"error_code":"STREAM_OPERATION_START_FAILED"' in normalized_payload
+    assert (
+        '"error_code": "STREAM_OPERATION_START_FAILED"' in normalized_payload
+        or '"error_code":"STREAM_OPERATION_START_FAILED"' in normalized_payload
+    )
     assert "kickoff failed" in normalized_payload
 
 
@@ -6342,7 +6345,7 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
                             return_value=(4, 3, 1, 2, 2, 0),
                         ):
                             with patch(
-                                "trr_backend.clients.screenalytics.is_screenalytics_configured",
+                                "trr_backend.services.person_images.detection.is_runtime_configured",
                                 return_value=False,
                             ):
                                 with patch(
@@ -6439,7 +6442,7 @@ def test_mirror_person_media_assets_recovers_from_duplicate_sha_conflict() -> No
                                             "api.routers.admin_person_images._resize_person_gallery_images"
                                         ) as resize_mock:
                                             with patch(
-                                                "trr_backend.clients.screenalytics.is_screenalytics_configured"
+                                                "trr_backend.services.person_images.detection.is_runtime_configured"
                                             ) as screen_cfg_mock:
                                                 with patch(
                                                     "trr_backend.vision.text_overlay.is_text_overlay_detection_configured"

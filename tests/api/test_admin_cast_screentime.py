@@ -11,6 +11,11 @@ from api.auth import require_cast_screentime_admin
 from api.main import app
 from api.routers import admin_cast_screentime as router_module
 from trr_backend.repositories import cast_screentime as repo
+from trr_backend.security.internal_admin import (
+    DEFAULT_INTERNAL_ADMIN_ISSUER,
+    INTERNAL_ADMIN_AUDIENCE,
+    INTERNAL_ADMIN_SCOPE,
+)
 from trr_backend.services import cast_screentime_artifacts, retained_cast_screentime_dispatch
 
 
@@ -28,9 +33,10 @@ def override_admin(request):
 
 
 @pytest.fixture(autouse=True)
-def set_service_token(monkeypatch):
-    monkeypatch.setenv("SCREENALYTICS_SERVICE_TOKEN", "test-token")
-    monkeypatch.setenv("TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK", "1")
+def set_internal_admin_auth_env(monkeypatch):
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret")
+    monkeypatch.delenv("SCREENALYTICS_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK", raising=False)
     yield
 
 
@@ -42,6 +48,20 @@ def _make_admin_token(secret: str, subject: str = "admin-1") -> str:
         "nbf": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=5)).timestamp()),
         "role": "service_role",
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+def _make_internal_admin_token(secret: str, subject: str = "internal-worker-1") -> str:
+    now = datetime.now(tz=UTC)
+    payload = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+        "iss": DEFAULT_INTERNAL_ADMIN_ISSUER,
+        "aud": INTERNAL_ADMIN_AUDIENCE,
+        "scope": INTERNAL_ADMIN_SCOPE,
     }
     return jwt.encode(payload, secret, algorithm="HS256")
 
@@ -641,7 +661,8 @@ def fake_storage(monkeypatch):
 
 
 def _service_headers():
-    return {"Authorization": "Bearer test-token"}
+    token = _make_internal_admin_token("internal-secret")
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_upload_complete_and_run_flow():
@@ -1095,6 +1116,21 @@ def test_internal_finalize_and_reads():
     artifact_response = client.get(f"/api/v1/admin/cast-screentime/runs/{run_id}/artifacts/shots.json")
     assert artifact_response.status_code == 200
     assert artifact_response.json()["payload"]["shots"][0]["shot_key"] == "shot-1"
+
+
+def test_internal_worker_routes_reject_legacy_service_token(monkeypatch):
+    monkeypatch.setenv("SCREENALYTICS_SERVICE_TOKEN", "test-token")
+    monkeypatch.setenv("TRR_SCREENALYTICS_ALLOW_SERVICE_TOKEN_FALLBACK", "1")
+
+    client = TestClient(app)
+    response = client.patch(
+        f"/api/v1/internal/screenalytics/cast-screentime/runs/{uuid4()}/status",
+        headers={"Authorization": "Bearer test-token"},
+        json={"status": "running"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Valid internal admin token required for retained screentime worker endpoints"
 
 
 def test_review_status_rejects_non_success_run():

@@ -39,8 +39,6 @@ Set exactly one runtime DB URL in Cloud Run. The canonical runtime contract is `
 | `SUPABASE_JWT_SECRET` | Y | Y | Supabase | JWT signing secret used to verify Supabase access tokens. |
 | `CORS_ALLOW_ORIGINS` | N | N | App config | Comma-separated origins. Include Vercel prod and any preview domains you need. Credentials require explicit origins. |
 | `ADMIN_EMAIL_ALLOWLIST` | N | N | App config | Comma-separated emails for allowlist-only admin endpoints. |
-| `SCREENALYTICS_SERVICE_TOKEN` | N (required for `/screenalytics` endpoints) | Y | Screenalytics | Bearer token for service-to-service auth. |
-| `SCREENALYTICS_API_URL` | N (non-admin legacy consumers only) | N | Screenalytics | Base URL for Screenalytics API. Covered admin auto-count runs through the backend-owned vision runtime instead. |
 | `REDIS_URL` | N (required for multi-instance realtime) | Y | Redis provider | `redis://...` for pub/sub fanout. |
 
 ## Cloud Run Service Settings (Recommended Defaults)

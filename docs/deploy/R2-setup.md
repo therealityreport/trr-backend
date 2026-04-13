@@ -1,8 +1,8 @@
 # Cloudflare R2 Setup
 
-Use this document as the canonical operator reference for the TRR R2 setup.
-Keep AWS S3 live during migration. Do not delete AWS buckets until R2 is
-verified, writes have cut over, and the rollback window has elapsed.
+Use this document as the canonical operator reference for the TRR backend R2 runtime.
+The live backend contract is `OBJECT_STORAGE_*`; do not add separate `AWS_*`,
+`S3_*`, `SCREENALYTICS_OBJECT_STORE_*`, or `FACEBANK_S3_*` runtime envs.
 
 ## Recommended Bucket Layout
 
@@ -11,10 +11,7 @@ Create these buckets in Cloudflare R2:
 - `trr-media-prod`
   - Public bucket for application media and hosted assets.
   - Intended custom domain: `media.thereality.report`
-  - Use for the current `trr-backend` AWS bucket migration target.
-- `screenalytics-artifacts-prod`
-  - Private bucket for screenalytics artifacts, uploads, and generated files.
-  - No public domain.
+  - Canonical bucket referenced by `OBJECT_STORAGE_BUCKET`.
 - `ltsr-archive-prod`
   - Private archival bucket for the current `ltsr-data-bucket` contents.
   - No public domain.
@@ -39,9 +36,6 @@ Use this access model:
   - Do not rely on `r2.dev` in production.
   - Presigned uploads should still use the R2 S3-compatible endpoint, not the
     public custom domain.
-- `screenalytics-artifacts-prod`
-  - Private only.
-  - Accessed by signed requests or direct backend credentials.
 - `ltsr-archive-prod`
   - Private only.
   - Treat as archive storage, not an application read path.
@@ -76,7 +70,6 @@ Create one long-lived runtime token with:
 - Scope: `Apply to specific buckets only`
 - Buckets:
   - `trr-media-prod`
-  - `screenalytics-artifacts-prod`
   - add `ltsr-archive-prod` only if the live app needs write access there
 - Client IP filtering: leave blank
 
@@ -155,7 +148,8 @@ endpoint for those buckets only.
 
 ## Operational Checklist
 
-1. Create the three R2 buckets.
+1. Create the R2 buckets.
+   `trr-media-prod` is the required live runtime bucket; archival buckets are optional.
 2. Create the `trr-r2-runtime` account token with `Object Read & Write`.
 3. Record:
    - `Access Key ID`

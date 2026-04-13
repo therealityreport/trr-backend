@@ -16,7 +16,6 @@ def _clear_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "TRR_ENV",
         "TRR_ENVIRONMENT",
         "PYTHON_ENV",
-        "SCREENALYTICS_API_URL",
         "TRR_INTERNAL_ADMIN_SHARED_SECRET",
         "SUPABASE_JWT_SECRET",
     ):
@@ -57,7 +56,7 @@ def test_validate_startup_config_requires_deployed_only_secrets_for_deployed_run
     assert "SUPABASE_JWT_SECRET" in message
 
 
-def test_validate_startup_config_does_not_require_screenalytics_service_token_for_deployed_runtime(
+def test_validate_startup_config_does_not_require_retired_screenalytics_envs_for_deployed_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_runtime_env(monkeypatch)
@@ -82,10 +81,9 @@ def test_workspace_shared_env_manifest_matches_backend_contract() -> None:
     backend_contract = manifest["repo_validation"]["TRR-Backend"]
 
     assert {"TRR_DB_URL", "TRR_DB_FALLBACK_URL", "TRR_INTERNAL_ADMIN_SHARED_SECRET"} <= canonical
-    assert {"SCREENALYTICS_API_URL", "SCREENALYTICS_SERVICE_TOKEN"} <= transitional
+    assert "SCREENALYTICS_API_URL" not in transitional
+    assert "SCREENALYTICS_SERVICE_TOKEN" not in transitional
     assert set(backend_contract["db_any_of"]) == {"TRR_DB_URL", "TRR_DB_FALLBACK_URL"}
     assert set(backend_contract["required_in_deployed"]) == {"TRR_INTERNAL_ADMIN_SHARED_SECRET"}
-    assert set(backend_contract["transitional_compat"]) == {
-        "SCREENALYTICS_API_URL",
-        "SCREENALYTICS_SERVICE_TOKEN",
-    }
+    assert "SCREENALYTICS_API_URL" not in set(backend_contract["transitional_compat"])
+    assert "SCREENALYTICS_SERVICE_TOKEN" not in set(backend_contract["transitional_compat"])
