@@ -54,9 +54,8 @@ The TRR Backend Data Pipeline is a Supabase-first data processing system that tr
   - Optional secondary DSN: set `TRR_DB_FALLBACK_URL` to another session-mode pooler URL (`pooler.supabase.com:5432`); both `TRR_DB_URL` (primary) and `TRR_DB_FALLBACK_URL` (secondary) must use session pooler `:5432`
   - Set auth/runtime secrets in `.env`: `SUPABASE_JWT_SECRET`, `TRR_INTERNAL_ADMIN_SHARED_SECRET`
   - Optional Supabase JWT overrides when the project ref cannot be derived cleanly: `SUPABASE_PROJECT_REF` and `SUPABASE_JWT_ISSUER`
-  - Optional legacy compatibility only: `SCREENALYTICS_SERVICE_TOKEN` if you still call `/api/v1/screenalytics/*` with the old service-token pattern
   - Set API keys in `.env`: `TMDB_BEARER_TOKEN` (or `TMDB_API_KEY`), `TVDB_API_KEY`, `IMDB_API_KEY`, `GEMINI_API_KEY`
-  - Optional: `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_PUBLIC_BASE_URL` for media mirroring
+  - Optional object storage for hosted assets and mirroring: `OBJECT_STORAGE_PROVIDER`, `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_ENDPOINT_URL`, `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY`, `OBJECT_STORAGE_PUBLIC_BASE_URL`
 
 5. **Verify environment**
    ```bash
@@ -107,7 +106,7 @@ python -m scripts.sync_all_tables --tables shows,episodes,episode_appearances --
 
 Common filters: `--show-id`, `--tmdb-id`, `--imdb-id`, `--limit`, `--dry-run`, `--verbose`.
 
-Media mirroring requires `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, and `OBJECT_STORAGE_PUBLIC_BASE_URL` (must start with `https://` and not contain placeholders like `dxxxx`). Optional: `OBJECT_STORAGE_PROFILE`.
+Media mirroring uses the backend `OBJECT_STORAGE_*` contract. Production defaults are Cloudflare R2 with `OBJECT_STORAGE_PROVIDER=r2`, `OBJECT_STORAGE_REGION=auto`, and a public base URL such as `https://media.thereality.report`. Optional: `OBJECT_STORAGE_PROFILE`.
 Runtime DB access uses `TRR_DB_URL` and optional `TRR_DB_FALLBACK_URL`. Tooling can still accept legacy DB envs where explicitly documented.
 
 TMDb backfill flow: resolve missing `tmdb_id` via `/find` using IMDb ids, then backfill `/tv/{id}` details into `core.shows` (typed columns + `tmdb_meta`). Both scripts are idempotent; omit `--all` for incremental updates. See `docs/architecture.md` for the full TMDb enrichment pipeline documentation.

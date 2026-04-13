@@ -1442,19 +1442,19 @@ def import_images(
 
     if auto_count_assets:
         try:
-            from trr_backend.clients.screenalytics import (
-                ScreenalyticsClientError,
-                count_people,
-                is_screenalytics_configured,
-            )
             from trr_backend.repositories.media_links import (
                 has_manual_people_tags,
                 has_people_count,
                 list_person_links_by_asset_id,
                 update_person_links_context,
             )
+            from trr_backend.vision.people_count_service import (
+                PeopleCountServiceError,
+                count_people,
+                is_runtime_configured,
+            )
 
-            if not is_screenalytics_configured():
+            if not is_runtime_configured():
                 auto_count_assets = {}
             else:
                 for asset_id, image_url in auto_count_assets.items():
@@ -1478,7 +1478,7 @@ def import_images(
                                 "people_count_detector": result.detector,
                             },
                         )
-                    except ScreenalyticsClientError as exc:
+                    except PeopleCountServiceError as exc:
                         logger.warning("Auto-count failed for media_asset %s: %s", asset_id, exc)
         except Exception as exc:
             logger.warning("Auto-count setup failed: %s", exc)
@@ -2193,13 +2193,13 @@ async def import_images_stream(
 
         if auto_count_assets:
             try:
-                from trr_backend.clients.screenalytics import ScreenalyticsClientError, count_people
                 from trr_backend.repositories.media_links import (
                     has_manual_people_tags,
                     has_people_count,
                     list_person_links_by_asset_id,
                     update_person_links_context,
                 )
+                from trr_backend.vision.people_count_service import PeopleCountServiceError, count_people
 
                 for asset_id, image_url in auto_count_assets.items():
                     links = list_person_links_by_asset_id(db, asset_id)
@@ -2222,7 +2222,7 @@ async def import_images_stream(
                                 "people_count_detector": result.detector,
                             },
                         )
-                    except ScreenalyticsClientError as exc:
+                    except PeopleCountServiceError as exc:
                         logger.warning("Auto-count failed for media_asset %s: %s", asset_id, exc)
             except Exception as exc:
                 logger.warning("Auto-count setup failed: %s", exc)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from trr_backend.clients import screenalytics as client
+from trr_backend.vision import people_count_service as client
 
 
 def test_count_people_uses_local_backend_without_screenalytics_api_url(

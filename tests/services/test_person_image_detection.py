@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from trr_backend.clients.screenalytics import FaceBbox, PeopleCountResult
 from trr_backend.services.person_images import detection
+from trr_backend.vision.people_count_service import FaceBbox, PeopleCountResult
 
 
 def _result(*detections: FaceBbox) -> PeopleCountResult:
@@ -16,7 +16,7 @@ def _result(*detections: FaceBbox) -> PeopleCountResult:
 
 def test_build_auto_thumbnail_crop_payload_adds_timestamp(monkeypatch) -> None:
     monkeypatch.setattr(
-        detection.screenalytics,
+        detection.people_count_service,
         "auto_thumbnail_crop",
         lambda _result: {"x": 48.0, "y": 28.0, "zoom": 1.2},
     )
@@ -29,8 +29,8 @@ def test_build_auto_thumbnail_crop_payload_adds_timestamp(monkeypatch) -> None:
 
 
 def test_build_auto_thumbnail_crop_payload_falls_back_to_face_centroid(monkeypatch) -> None:
-    monkeypatch.setattr(detection.screenalytics, "auto_thumbnail_crop", lambda _result: None)
-    monkeypatch.setattr(detection.screenalytics, "face_centroid", lambda _result: (44.5, 21.0))
+    monkeypatch.setattr(detection.people_count_service, "auto_thumbnail_crop", lambda _result: None)
+    monkeypatch.setattr(detection.people_count_service, "face_centroid", lambda _result: (44.5, 21.0))
 
     payload = detection.build_auto_thumbnail_crop_payload(_result())
 
@@ -54,7 +54,7 @@ def test_count_people_with_fallback_retries_legacy_signature(monkeypatch) -> Non
             raise TypeError("legacy runtime")
         return expected
 
-    monkeypatch.setattr(detection.screenalytics, "count_people", fake_count_people)
+    monkeypatch.setattr(detection.people_count_service, "count_people", fake_count_people)
 
     result = detection.count_people_with_fallback(
         "https://example.com/image.jpg",
@@ -79,7 +79,7 @@ def test_count_people_batch_with_fallback_retries_without_fast_pass(monkeypatch)
             raise TypeError("legacy runtime")
         return expected
 
-    monkeypatch.setattr(detection.screenalytics, "count_people_batch", fake_count_people_batch)
+    monkeypatch.setattr(detection.people_count_service, "count_people_batch", fake_count_people_batch)
 
     result = detection.count_people_batch_with_fallback([{"image_url": "https://example.com/image.jpg"}])
 

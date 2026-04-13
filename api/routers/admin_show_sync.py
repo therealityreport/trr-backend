@@ -55,6 +55,7 @@ from trr_backend.ingestion.show_importer import (
     upsert_candidates_into_supabase,
 )
 from trr_backend.integrations.tmdb.client import resolve_api_key
+from trr_backend.job_plane import is_remote_job_plane_enabled
 from trr_backend.media.s3_mirror import (
     build_hosted_url,
     build_logo_s3_key,
@@ -67,7 +68,6 @@ from trr_backend.media.s3_mirror import (
     mirror_logo_monochrome_variants_row,
     upload_bytes_to_s3,
 )
-from trr_backend.job_plane import is_remote_job_plane_enabled
 from trr_backend.modal_dispatch import dispatch_admin_operation, supports_admin_operation
 from trr_backend.pipeline.admin_operations import (
     ensure_operation_execution,
@@ -4520,13 +4520,6 @@ def refresh_show_photos_stream(
     def event_generator():
         from uuid import UUID as _UUID
 
-        from trr_backend.clients.screenalytics import (
-            ScreenalyticsClientError,
-            ScreenalyticsUnavailableError,
-            count_people,
-            get_screenalytics_unavailable_state,
-            is_screenalytics_configured,
-        )
         from trr_backend.ingestion.cast_photo_sources import (
             fetch_fandom_gallery_cast_photos,
             fetch_fandom_person_cast_photos,
@@ -4580,6 +4573,13 @@ def refresh_show_photos_stream(
             fetch_show_images_missing_hosted,
             update_show_image_hosted_fields,
             upsert_show_images,
+        )
+        from trr_backend.vision.people_count_service import (
+            PeopleCountServiceError,
+            PeopleCountServiceUnavailableError,
+            count_people,
+            get_unavailable_state,
+            is_runtime_configured,
         )
 
         errors: list[str] = []
@@ -5606,8 +5606,8 @@ def refresh_show_photos_stream(
             )
         elif payload.skip_auto_count:
             yield progress(stage="auto_count", message="Skipping auto-count (fast mode).")
-        elif is_screenalytics_configured() and person_ids and not payload.skip_s3:
-            unavailable, retry_after_s, unavailable_reason = get_screenalytics_unavailable_state()
+        elif is_runtime_configured() and person_ids and not payload.skip_s3:
+            unavailable, retry_after_s, unavailable_reason = get_unavailable_state()
             if unavailable:
                 yield progress(
                     stage="auto_count",
@@ -5672,7 +5672,7 @@ def refresh_show_photos_stream(
                             updated_by_firebase_uid="system:auto",
                         )
                         auto_counts_succeeded += 1
-                    except ScreenalyticsUnavailableError as exc:
+                    except PeopleCountServiceUnavailableError as exc:
                         auto_counts_failed += 1
                         detail = str(exc) or "Vision unavailable"
                         errors.append(f"Auto-count service unavailable: {detail}")
@@ -5689,7 +5689,7 @@ def refresh_show_photos_stream(
                             },
                         )
                         break
-                    except ScreenalyticsClientError as exc:
+                    except PeopleCountServiceError as exc:
                         auto_counts_failed += 1
                         errors.append(f"Auto-count {row.get('id')}: {exc}")
                     auto_counts_attempted += 1

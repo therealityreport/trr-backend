@@ -30,7 +30,7 @@ jobs:
         run: |
           python scripts/check_env_example.py \
             --file .env.example \
-            --required SCREENALYTICS_API_URL TRR_INTERNAL_ADMIN_SHARED_SECRET SCREENALYTICS_SERVICE_TOKEN \
+            --required TRR_INTERNAL_ADMIN_SHARED_SECRET \
             --allow-hyphen GEMINI-MODEL
 
       - name: Check repo hygiene
@@ -75,7 +75,7 @@ jobs:
         run: |
           python scripts/check_env_example.py \
             --file .env.example \
-            --required SCREENALYTICS_API_URL TRR_INTERNAL_ADMIN_SHARED_SECRET SCREENALYTICS_SERVICE_TOKEN \
+            --required TRR_INTERNAL_ADMIN_SHARED_SECRET \
             --allow-hyphen GEMINI-MODEL
 
       - name: Check repo hygiene

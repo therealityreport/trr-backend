@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.clients import screenalytics
+from trr_backend.vision import people_count_service
 
-ScreenalyticsClientError = screenalytics.ScreenalyticsClientError
-ScreenalyticsUnavailableError = screenalytics.ScreenalyticsUnavailableError
+PeopleCountServiceError = people_count_service.PeopleCountServiceError
+PeopleCountServiceUnavailableError = people_count_service.PeopleCountServiceUnavailableError
+ScreenalyticsClientError = PeopleCountServiceError
+ScreenalyticsUnavailableError = PeopleCountServiceUnavailableError
 
 __all__ = [
     "ScreenalyticsClientError",
@@ -22,11 +24,11 @@ __all__ = [
 
 
 def is_runtime_configured() -> bool:
-    return screenalytics.is_screenalytics_configured()
+    return people_count_service.is_runtime_configured()
 
 
 def get_unavailable_state() -> tuple[bool, int, str | None]:
-    return screenalytics.get_screenalytics_unavailable_state()
+    return people_count_service.get_unavailable_state()
 
 
 def build_auto_thumbnail_crop_payload(
@@ -34,13 +36,13 @@ def build_auto_thumbnail_crop_payload(
     *,
     fallback_strategy: str = "face_centroid_v1",
 ) -> dict[str, Any] | None:
-    generated = screenalytics.auto_thumbnail_crop(result)
+    generated = people_count_service.auto_thumbnail_crop(result)
     if generated is not None:
         return {
             **generated,
             "generated_at": datetime.now(UTC).isoformat(),
         }
-    centroid = screenalytics.face_centroid(result)
+    centroid = people_count_service.face_centroid(result)
     if centroid is None:
         return None
     cx, cy = centroid
@@ -65,7 +67,7 @@ def count_people_with_fallback(
 ) -> Any:
     if candidate_person_ids:
         try:
-            return screenalytics.count_people(
+            return people_count_service.count_people(
                 image_url,
                 candidate_person_ids=candidate_person_ids,
                 owner_person_id=owner_person_id,
@@ -75,12 +77,12 @@ def count_people_with_fallback(
             )
         except TypeError:
             try:
-                return screenalytics.count_people(image_url, candidate_person_ids=candidate_person_ids)
+                return people_count_service.count_people(image_url, candidate_person_ids=candidate_person_ids)
             except TypeError:
-                return screenalytics.count_people(image_url)
+                return people_count_service.count_people(image_url)
 
     try:
-        return screenalytics.count_people(
+        return people_count_service.count_people(
             image_url,
             owner_person_id=owner_person_id,
             owner_reference_images=owner_reference_images,
@@ -88,7 +90,7 @@ def count_people_with_fallback(
             prefer_fast_pass=bool(prefer_fast_pass),
         )
     except TypeError:
-        return screenalytics.count_people(image_url)
+        return people_count_service.count_people(image_url)
 
 
 def count_people_batch_with_fallback(
@@ -97,6 +99,6 @@ def count_people_batch_with_fallback(
     prefer_fast_pass: bool = True,
 ) -> list[Any]:
     try:
-        return screenalytics.count_people_batch(image_requests, prefer_fast_pass=bool(prefer_fast_pass))
+        return people_count_service.count_people_batch(image_requests, prefer_fast_pass=bool(prefer_fast_pass))
     except TypeError:
-        return screenalytics.count_people_batch(image_requests)
+        return people_count_service.count_people_batch(image_requests)

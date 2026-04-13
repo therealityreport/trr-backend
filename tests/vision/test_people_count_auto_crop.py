@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from trr_backend.clients.screenalytics import FaceBbox, PeopleCountResult, auto_thumbnail_crop
+from trr_backend.vision.people_count_service import FaceBbox, PeopleCountResult, auto_thumbnail_crop
 
 
 def _result(*detections: FaceBbox) -> PeopleCountResult:

@@ -13,12 +13,6 @@ from pydantic import BaseModel
 
 from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
-from trr_backend.clients.screenalytics import (
-    ScreenalyticsClientError,
-    auto_thumbnail_crop,
-    count_people,
-    face_centroid,
-)
 from trr_backend.media.face_crops import generate_and_upload_face_crops
 from trr_backend.media.image_variants import generate_media_asset_variants
 from trr_backend.media.s3_mirror import normalize_fandom_file_url
@@ -45,6 +39,12 @@ from trr_backend.repositories.media_links import (
 from trr_backend.repositories.tagging_references import (
     build_owner_tagging_reference_profile,
     sync_owner_tagging_reference_usage,
+)
+from trr_backend.vision.people_count_service import (
+    PeopleCountServiceError,
+    auto_thumbnail_crop,
+    count_people,
+    face_centroid,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin-images"])
@@ -1485,7 +1485,7 @@ def auto_count_cast_photo(
     references_used: list[dict[str, Any]] = []
     result = None
     selected_image_url: str | None = None
-    last_error: ScreenalyticsClientError | None = None
+    last_error: PeopleCountServiceError | None = None
     for image_url in image_urls:
         try:
             if candidate_person_ids:
@@ -1518,13 +1518,13 @@ def auto_count_cast_photo(
                     result = count_people(image_url)
                     selected_image_url = image_url
                     break
-                except ScreenalyticsClientError as exc:
+                except PeopleCountServiceError as exc:
                     last_error = exc
                     continue
-            except ScreenalyticsClientError as exc:
+            except PeopleCountServiceError as exc:
                 last_error = exc
                 continue
-        except ScreenalyticsClientError as exc:
+        except PeopleCountServiceError as exc:
             last_error = exc
     if result is None:
         raise HTTPException(status_code=502, detail=str(last_error or "Failed to auto-count cast photo"))
@@ -1815,7 +1815,7 @@ def auto_count_media_asset(
     references_used: list[dict[str, Any]] = []
     result = None
     selected_image_url: str | None = None
-    last_error: ScreenalyticsClientError | None = None
+    last_error: PeopleCountServiceError | None = None
     for image_url in image_urls:
         try:
             if candidate_person_ids:
@@ -1848,13 +1848,13 @@ def auto_count_media_asset(
                     result = count_people(image_url)
                     selected_image_url = image_url
                     break
-                except ScreenalyticsClientError as exc:
+                except PeopleCountServiceError as exc:
                     last_error = exc
                     continue
-            except ScreenalyticsClientError as exc:
+            except PeopleCountServiceError as exc:
                 last_error = exc
                 continue
-        except ScreenalyticsClientError as exc:
+        except PeopleCountServiceError as exc:
             last_error = exc
     if result is None:
         raise HTTPException(status_code=502, detail=str(last_error or "Failed to auto-count media asset"))
@@ -2176,7 +2176,7 @@ def auto_count_show_images(
                     result = count_people(image_url)
                     selected_image_url = image_url
                     break
-                except ScreenalyticsClientError:
+                except PeopleCountServiceError:
                     continue
         except Exception:
             result = None
