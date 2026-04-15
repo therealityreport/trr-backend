@@ -32,6 +32,104 @@ def test_ytdlp_zero_posts_marks_single_path_degraded(monkeypatch) -> None:
     )
 
 
+def test_ytdlp_timeout_falls_back_to_api(monkeypatch) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "cookie"})
+    api_calls = 0
+
+    def _fake_ytdlp(*_args, **_kwargs):
+        scraper._set_retrieval_meta(  # noqa: SLF001
+            context_mode="ytdlp",
+            auth_mode="none",
+            retrieval_mode="ytdlp",
+            error_code="ytdlp_timeout",
+            stop_reason="timeout",
+            fallback_chain=["yt_dlp"],
+        )
+        return []
+
+    def _fake_api(*_args, **_kwargs):
+        nonlocal api_calls
+        api_calls += 1
+        scraper._set_retrieval_meta(  # noqa: SLF001
+            retrieval_mode="api",
+            fallback_chain=["yt_dlp", "api"],
+        )
+        return ["api-post"]
+
+    monkeypatch.setattr(scraper, "_scrape_via_ytdlp", _fake_ytdlp)
+    monkeypatch.setattr(scraper, "_scrape_api", _fake_api)
+
+    posts = scraper.scrape(_config())
+
+    assert posts == ["api-post"]
+    assert api_calls == 1
+
+
+def test_ytdlp_nonzero_exit_falls_back_to_api(monkeypatch) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "cookie"})
+    api_calls = 0
+
+    def _fake_ytdlp(*_args, **_kwargs):
+        scraper._set_retrieval_meta(  # noqa: SLF001
+            context_mode="ytdlp",
+            auth_mode="none",
+            retrieval_mode="ytdlp",
+            error_code="ytdlp_nonzero_exit",
+            stop_reason="nonzero_exit",
+            fallback_chain=["yt_dlp"],
+        )
+        return []
+
+    def _fake_api(*_args, **_kwargs):
+        nonlocal api_calls
+        api_calls += 1
+        scraper._set_retrieval_meta(  # noqa: SLF001
+            retrieval_mode="api",
+            fallback_chain=["yt_dlp", "api"],
+        )
+        return ["api-post"]
+
+    monkeypatch.setattr(scraper, "_scrape_via_ytdlp", _fake_ytdlp)
+    monkeypatch.setattr(scraper, "_scrape_api", _fake_api)
+
+    posts = scraper.scrape(_config())
+
+    assert posts == ["api-post"]
+    assert api_calls == 1
+
+
+def test_ytdlp_fallback_updates_path_health_topology(monkeypatch) -> None:
+    scraper = TikTokScraper(cookies={"sessionid": "cookie"})
+
+    def _fake_ytdlp(*_args, **_kwargs):
+        scraper._set_retrieval_meta(  # noqa: SLF001
+            context_mode="ytdlp",
+            auth_mode="none",
+            retrieval_mode="ytdlp",
+            error_code="ytdlp_unavailable",
+            stop_reason="ytdlp_unavailable",
+            fallback_chain=["yt_dlp"],
+        )
+        return []
+
+    def _fake_api(*_args, **_kwargs):
+        scraper._set_retrieval_meta(  # noqa: SLF001
+            retrieval_mode="api",
+            fallback_chain=["yt_dlp", "api"],
+        )
+        return ["api-post"]
+
+    monkeypatch.setattr(scraper, "_scrape_via_ytdlp", _fake_ytdlp)
+    monkeypatch.setattr(scraper, "_scrape_api", _fake_api)
+
+    posts = scraper.scrape(_config())
+
+    assert posts == ["api-post"]
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "api"
+    assert scraper.last_retrieval_meta["path_role"] == "fallback"
+    assert scraper.last_retrieval_meta["topology_state"] == "ytdlp_with_api_fallback"
+
+
 def test_browser_intercept_zero_posts_classifies_target_drift() -> None:
     scraper = TikTokScraper(cookies={"sessionid": "cookie"})
 

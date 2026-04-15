@@ -346,20 +346,22 @@ def test_validate_cookies_requires_complete_instagram_cookie_triplet(
 
 
 @pytest.mark.parametrize(
-    ("error_code", "cursor"),
+    ("error_code", "cursor", "expect_browser_fallback"),
     [
-        ("instagram_graphql_checkpoint_required", None),
-        ("instagram_graphql_cursor_rate_limited", "cursor-1"),
-        ("instagram_graphql_cursor_unauthorized", "cursor-1"),
-        ("instagram_graphql_cursor_forbidden", "cursor-1"),
+        ("instagram_graphql_checkpoint_required", None, True),
+        ("instagram_graphql_cursor_rate_limited", "cursor-1", False),
+        ("instagram_graphql_cursor_unauthorized", "cursor-1", True),
+        ("instagram_graphql_cursor_forbidden", "cursor-1", True),
     ],
 )
-def test_fetch_posts_graphql_skips_browser_fallback_for_unrecoverable_errors(
+def test_fetch_posts_graphql_applies_browser_fallback_policy(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
     cursor: str | None,
+    expect_browser_fallback: bool,
 ) -> None:
     scraper = InstagramScraper(cookies={})
+    scraper._fallback_chain = ["graphql"]
     browser_called = False
 
     monkeypatch.setattr(
@@ -384,11 +386,60 @@ def test_fetch_posts_graphql_skips_browser_fallback_for_unrecoverable_errors(
     monkeypatch.setattr(scraper, "_fetch_posts_graphql_with_browser", _fake_browser_fetch)
     monkeypatch.setattr(scraper, "_graphql_request_error_details", lambda **_kwargs: {"error_code": error_code})
     monkeypatch.setattr(scraper, "_resolve_graphql_retry_backoff_seconds", lambda *_args: 0.0)
+    monkeypatch.setattr(scraper, "_try_auto_refresh_cookies", lambda: {"refreshed": False})
+    monkeypatch.setattr(scraper, "_maybe_rotate_identity_after_failure", lambda **_kwargs: None)
+    monkeypatch.setattr(scraper, "_is_local_environment", lambda: False)
 
     payload = scraper.fetch_posts_graphql("bravotv", cursor, 0.0)
 
-    assert payload is None
-    assert browser_called is False
+    assert browser_called is expect_browser_fallback
+    if expect_browser_fallback:
+        assert payload == {"unexpected": True}
+        assert scraper.last_retrieval_meta["fallback_chain"] == ["graphql", "browser_intercept"]
+        assert scraper.last_retrieval_meta["identity_mode"] == "legacy"
+    else:
+        assert payload is None
+        assert scraper.last_retrieval_meta["fallback_chain"] == ["graphql"]
+        assert scraper.last_retrieval_meta["identity_mode"] == "legacy"
+
+
+def test_fetch_posts_graphql_browser_fallback_success_annotates_chain_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = InstagramScraper(cookies={})
+    scraper._fallback_chain = ["graphql"]
+
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *_args, **_kwargs: {
+            "lsd": "lsd-1",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+
+    def _fake_post(_url: str, **_kwargs: Any) -> _FakeResponse:
+        response = requests.Response()
+        response.status_code = 403
+        raise requests.exceptions.HTTPError("http_403", response=response)
+
+    def _fake_browser_fetch(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        scraper.last_retrieval_meta["transport"] = "playwright"
+        scraper.last_retrieval_meta["retrieval_transport"] = "playwright"
+        return {"ok": True}
+
+    monkeypatch.setattr(scraper, "_post", _fake_post)
+    monkeypatch.setattr(scraper, "_playwright_graphql_fallback_enabled", lambda: True)
+    monkeypatch.setattr(scraper, "_fetch_posts_graphql_with_browser", _fake_browser_fetch)
+    monkeypatch.setattr(scraper, "_try_auto_refresh_cookies", lambda: {"refreshed": False})
+    monkeypatch.setattr(scraper, "_maybe_rotate_identity_after_failure", lambda **_kwargs: None)
+    monkeypatch.setattr(scraper, "_is_local_environment", lambda: False)
+
+    payload = scraper.fetch_posts_graphql("bravotv", None, 0.0)
+
+    assert payload == {"ok": True}
+    assert scraper.last_retrieval_meta["fallback_chain"] == ["graphql", "browser_intercept"]
+    assert scraper.last_retrieval_meta["identity_mode"] == "legacy"
 
 
 def test_resolve_graphql_retry_backoff_seconds_uses_bounded_jitter(monkeypatch: pytest.MonkeyPatch) -> None:

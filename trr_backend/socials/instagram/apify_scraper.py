@@ -121,6 +121,13 @@ def normalize_apify_post(raw: dict[str, Any]) -> dict[str, Any]:
         try:
             posted_at = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
         except (ValueError, TypeError):
+            # Apify occasionally changes timestamp shape; log so operators
+            # can diagnose drift instead of silently nulling posted_at.
+            logger.debug(
+                "apify instagram timestamp parse failed: %r",
+                timestamp_str,
+                exc_info=True,
+            )
             posted_at = None
 
     # Extract hashtags from caption if not provided

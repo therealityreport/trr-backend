@@ -71,8 +71,15 @@ class InstagramIdentityPool:
     def acquire(self) -> InstagramScraperIdentity:
         with self._lock:
             while True:
-                active = [identity for identity in self._identities if not self._should_retire_for_age(identity)]
-                active = [identity for identity in active if not identity.retired]
+                # First pass: retire any identity that has aged out. Done as
+                # an explicit mutation step rather than inside the filter
+                # predicate so the iteration and the state change are
+                # clearly separated.
+                for identity in self._identities:
+                    if not identity.retired and self._is_expired_for_age(identity):
+                        identity.retired = True
+                        identity.retire_reason = "max_age_exceeded"
+                active = [identity for identity in self._identities if not identity.retired]
                 if active:
                     index = self._next_index % len(active)
                     self._next_index += 1
@@ -155,14 +162,15 @@ class InstagramIdentityPool:
             self._identities.append(identity)
             self._identities_by_id[identity.session_id] = identity
 
-    def _should_retire_for_age(self, identity: InstagramScraperIdentity) -> bool:
-        if identity.retired:
-            return True
-        if (self._clock() - identity.created_at) >= self.max_age_seconds:
-            identity.retired = True
-            identity.retire_reason = "max_age_exceeded"
-            return True
-        return False
+    def _is_expired_for_age(self, identity: InstagramScraperIdentity) -> bool:
+        """Pure predicate: True iff the identity has aged past max_age_seconds.
+
+        Previously this method also mutated `identity.retired` / `retire_reason`
+        as a side effect, which made it unsafe to call inside list
+        comprehensions. Callers that want to retire an expired identity
+        should do so explicitly after this returns True.
+        """
+        return (self._clock() - identity.created_at) >= self.max_age_seconds
 
     @staticmethod
     def _proxy_label(proxy_url: str | None) -> str | None:

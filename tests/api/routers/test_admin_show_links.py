@@ -364,8 +364,9 @@ def test_discover_show_links_ignores_existing_nonpreferred_real_housewives_fando
                     "api.routers.admin_show_links.load_fandom_community_allowlist",
                     return_value=("real-housewives.fandom.com", "another-housewives.fandom.com"),
                 ):
-                    with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
-                        links = _discover_show_links(show_id)
+                    with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
+                        with patch("api.routers.admin_show_links._fetch_html_with_status", side_effect=_fetch_html):
+                            links = _discover_show_links(show_id)
 
     fandom_links = [link for link in links if link.get("entity_type") == "show" and link.get("link_kind") == "fandom"]
     assert {str(link.get("url") or "") for link in fandom_links} == {rh_url}

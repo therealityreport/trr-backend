@@ -6,6 +6,16 @@ with support for filtering by hashtags, accounts, and date ranges.
 Includes comment and reply fetching with like counts.
 """
 
+from .auth_resolver import (
+    InstagramAuthSession,
+    auth_session_log_payload,
+    build_authenticated_instagram_scraper,
+    clear_instagram_auth_runtime_state,
+    get_current_instagram_auth_session,
+    resolve_instagram_auth_session,
+    set_current_instagram_auth_session,
+    set_instagram_runtime_override,
+)
 from .cookie_refresh import refresh_instagram_cookies
 from .crawlee_adapter import run_stage_with_crawlee
 from .permalink_metadata import (
@@ -30,8 +40,16 @@ __all__ = [
     "InstagramPost",
     "InstagramComment",
     "InstagramUserDetail",
+    "InstagramAuthSession",
     "ScrapeConfig",
     "load_cookies_from_file",
+    "resolve_instagram_auth_session",
+    "build_authenticated_instagram_scraper",
+    "get_current_instagram_auth_session",
+    "set_current_instagram_auth_session",
+    "set_instagram_runtime_override",
+    "clear_instagram_auth_runtime_state",
+    "auth_session_log_payload",
     "refresh_instagram_cookies",
     "InstagramPermalinkMetadata",
     "InstagramMediaResolution",

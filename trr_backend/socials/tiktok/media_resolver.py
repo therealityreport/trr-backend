@@ -341,7 +341,10 @@ def _extract_candidate_item(payload: Any, *, video_id: str) -> dict[str, Any] | 
             item_struct = item_info.get("itemStruct")
             if isinstance(item_struct, dict):
                 candidate_id = str(item_struct.get("id") or item_struct.get("aweme_id") or "")
-                if not video_id or not candidate_id or candidate_id == video_id:
+                # Accept when: no target id specified, OR candidate id matches.
+                # Previously accepted `not candidate_id` which let malformed
+                # payloads (missing id) masquerade as matches.
+                if not video_id or (candidate_id and candidate_id == video_id):
                     return item_struct
         item_module = payload.get("ItemModule")
         if isinstance(item_module, dict):

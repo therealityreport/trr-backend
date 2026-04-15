@@ -125,6 +125,9 @@ scripts/socials/**/*.csv
 # Playwright profiles
 .playwright-profiles/
 
+# Git worktrees
+/.worktrees/
+
 # Sensitive session data
 data/instagram_cookies.json
 data/social-browser-sessions/

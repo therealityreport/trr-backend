@@ -8,6 +8,7 @@ the active posts path.
 from __future__ import annotations
 
 import importlib
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -18,6 +19,13 @@ import requests
 DEFAULT_HTTP_CLIENT = "requests"
 DEFAULT_CURL_CFFI_IMPERSONATE = "chrome"
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# TikTok page-size assumptions. The scraper translates `max_pages` into a
+# `max_posts` budget by multiplying by this value. Keep in sync with the
+# actual TikTok feed page size; adjust only after verifying against fresh
+# responses (see trr_backend/socials/tiktok/scraper.py:_run_browser_intercept).
+TIKTOK_POSTS_PER_PAGE: int = 50
+TIKTOK_DEFAULT_MAX_POSTS: int = 10_000
 
 
 class TikTokHttpResponse(Protocol):
@@ -68,7 +76,14 @@ class _TikTokHttpClientBase:
     def _sleep_before_retry(self, attempt: int) -> None:
         if attempt >= self.retry_total:
             return
-        delay = self.backoff_factor * attempt
+        # True exponential backoff: factor * 2^(attempt-1) with +/-25% jitter.
+        # Linear backoff (factor * attempt) starves faster than TikTok's rate-limit
+        # recovery window; jitter prevents worker cohorts from retry-clustering.
+        base_delay = self.backoff_factor * (2 ** (attempt - 1))
+        if base_delay <= 0:
+            return
+        jitter = random.uniform(-base_delay * 0.25, base_delay * 0.25)
+        delay = max(0.0, base_delay + jitter)
         if delay > 0:
             time.sleep(delay)
 
@@ -203,6 +218,12 @@ class CurlCffiTikTokHttpClient(_TikTokHttpClientBase):
             proxies=proxies,
             impersonate=self.impersonate or DEFAULT_CURL_CFFI_IMPERSONATE,
         )
+
+
+# Public alias so downstream callers can type the returned client without
+# reaching into the underscore-prefixed base class. Keep `_TikTokHttpClientBase`
+# available for internal subclassing; `TikTokHttpClient` is the stable surface.
+TikTokHttpClient = _TikTokHttpClientBase
 
 
 def build_tiktok_http_client(

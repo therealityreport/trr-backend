@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     apply_workspace_runtime_env(repo_root=REPO_ROOT)
 
-    from trr_backend.socials.control_plane import get_social_account_catalog_verification
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_verification
 
     payload = get_social_account_catalog_verification(
         args.platform,

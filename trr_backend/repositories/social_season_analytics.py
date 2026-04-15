@@ -61,7 +61,7 @@ from trr_backend.socials.crawlee_runtime import (
     should_use_crawlee,
 )
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
-from trr_backend.socials.twitter import TwitterScraper
+from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
 logger = logging.getLogger(__name__)
 
@@ -6238,6 +6238,12 @@ def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str
     if refreshed:
         _instagram_cookie_runtime_override = dict(refreshed)
         _instagram_cookie_validation_cache = None
+        try:
+            from trr_backend.socials.instagram import set_instagram_runtime_override
+
+            set_instagram_runtime_override(refreshed)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed syncing Instagram auth resolver runtime override", exc_info=True)
     return refreshed
 
 
@@ -6272,9 +6278,121 @@ def _ensure_instagram_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
         return cookies
 
 
-def _load_instagram_cookies() -> dict[str, str]:
+def _load_instagram_cookies_legacy() -> dict[str, str]:
     cookies = _load_instagram_cookies_from_sources()
     return _ensure_instagram_cookies_fresh(cookies)
+
+
+def _build_legacy_instagram_auth_session(
+    *,
+    cookies: dict[str, str],
+    browser_account_id: str | None,
+    shadow_session: Any | None,
+) -> Any:
+    from trr_backend.socials.instagram import InstagramAuthSession
+
+    shadow_cookies = dict(getattr(shadow_session, "cookies", {}) or {})
+    parity_match = bool(cookies) and bool(shadow_cookies) and cookies == shadow_cookies
+    validation_reason = getattr(shadow_session, "validation_reason", None) if parity_match else "legacy_shadow_mismatch"
+    validation_category = (
+        str(getattr(shadow_session, "validation_category", "") or "").strip() or "legacy_loader"
+        if parity_match
+        else "shadow_mode"
+    )
+    stale_ok = bool(getattr(shadow_session, "stale_ok", False)) if parity_match else False
+    session_account_id = str(
+        getattr(shadow_session, "session_account_id", "")
+        or browser_account_id
+        or _instagram_cookie_validation_username()
+    ).strip() or None
+    caller_context = str(getattr(shadow_session, "caller_context", "") or "legacy_loader").strip() or "legacy_loader"
+    cookie_file_path = getattr(shadow_session, "cookie_file_path", None)
+    storage_state_path = getattr(shadow_session, "storage_state_path", None)
+    metadata = dict(getattr(shadow_session, "metadata", {}) or {})
+    metadata.update(
+        {
+            "shadow_mode": True,
+            "shadow_parity_match": parity_match,
+        }
+    )
+    return InstagramAuthSession(
+        cookies=dict(cookies),
+        source="legacy_loader",
+        validated=bool(parity_match and getattr(shadow_session, "validated", False)),
+        validation_reason=validation_reason,
+        validation_category=validation_category,
+        stale_ok=stale_ok,
+        browser_account_id=browser_account_id,
+        session_account_id=session_account_id,
+        caller_context=caller_context,
+        cookie_file_path=cookie_file_path,
+        storage_state_path=storage_state_path,
+        refreshed=False,
+        refresh_method=None,
+        repaired_from_browser_session=bool(
+            parity_match and getattr(shadow_session, "repaired_from_browser_session", False)
+        ),
+        resolver_version=int(getattr(shadow_session, "resolver_version", 2) or 2),
+        metadata=metadata,
+    )
+
+
+def _load_instagram_cookies() -> dict[str, str]:
+    from trr_backend.socials.instagram import (
+        auth_session_log_payload,
+        clear_instagram_auth_runtime_state,
+        resolve_instagram_auth_session,
+        set_current_instagram_auth_session,
+        set_instagram_runtime_override,
+    )
+
+    legacy_cookies = _load_instagram_cookies_legacy()
+    set_instagram_runtime_override(_instagram_cookie_runtime_override)
+
+    shadow_session: Any | None = None
+    try:
+        shadow_session = resolve_instagram_auth_session(
+            browser_account_id=_instagram_cookie_validation_username(),
+            caller_context="legacy_loader",
+            require_validation=_env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"),
+        )
+    except Exception:  # noqa: BLE001
+        if _env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"):
+            raise
+        logger.debug("Instagram auth resolver shadow evaluation failed", exc_info=True)
+
+    if _env_truthy("INSTAGRAM_AUTH_RESOLVER_V2"):
+        if shadow_session is not None:
+            set_current_instagram_auth_session(shadow_session)
+            return dict(shadow_session.cookies)
+        clear_instagram_auth_runtime_state()
+        return {}
+
+    legacy_session = _build_legacy_instagram_auth_session(
+        cookies=legacy_cookies,
+        browser_account_id=_instagram_cookie_validation_username(),
+        shadow_session=shadow_session,
+    )
+    set_current_instagram_auth_session(legacy_session)
+
+    if shadow_session is not None:
+        legacy_fingerprint = hashlib.sha256(
+            json.dumps(
+                sorted((str(key), str(value)) for key, value in legacy_cookies.items()),
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        shadow_fingerprint = str((shadow_session.metadata or {}).get("fingerprint") or "")
+        logger.debug(
+            "Instagram auth resolver shadow parity",
+            extra={
+                "instagram_auth_shadow_parity": legacy_cookies == dict(shadow_session.cookies),
+                "instagram_auth_shadow_legacy_fingerprint": legacy_fingerprint or None,
+                "instagram_auth_shadow_resolver_fingerprint": shadow_fingerprint or None,
+                **auth_session_log_payload(legacy_session),
+            },
+        )
+    return legacy_cookies
 
 
 def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dict[str, Any]:
@@ -11770,14 +11888,17 @@ def _resolve_instagram_media_for_shortcode(
     *,
     shortcode: str,
 ) -> dict[str, Any]:
-    from trr_backend.socials.instagram import InstagramScraper, resolve_instagram_media
+    from trr_backend.socials.instagram import resolve_instagram_media
 
-    cookies = _load_instagram_cookies()
     cache_scope = f"instagram:shortcode:{shortcode}"
+    cookies = _load_instagram_cookies()
     scraper = _get_cached_scraper(cookies, cache_scope=cache_scope)
     if scraper is None:
-        scraper = InstagramScraper(cookies=cookies, browser_account_id=shortcode)
-        _cache_scraper(cookies, scraper, cache_scope=cache_scope)
+        scraper = _build_instagram_scraper_with_auth_fallback(
+            browser_account_id=shortcode,
+            caller_context=f"shortcode:{shortcode}",
+        )
+        _cache_scraper(getattr(scraper, "cookies", cookies) or cookies, scraper, cache_scope=cache_scope)
 
     def _api_fetcher(value: str) -> dict[str, Any] | None:
         return scraper.fetch_post_info(value, delay=0.0)
@@ -12612,9 +12733,9 @@ def _mirror_instagram_profile_pics_for_post(
 
     if deferred_handles:
         try:
-            from trr_backend.socials.instagram import InstagramScraper
-
-            scraper = InstagramScraper(cookies=_load_instagram_cookies(), browser_account_id="comment-avatar-refresh")
+            scraper = _build_instagram_scraper_with_auth_fallback(
+                caller_context="comment-avatar-refresh",
+            )
             for handle in sorted(deferred_handles):
                 cached_entry = _avatar_registry_lookup_any(platform="instagram", account_handle=handle)
                 cached_status = str((cached_entry or {}).get("status") or "").strip().lower()
@@ -16784,7 +16905,7 @@ def _ingest_instagram(
     job_id: str,
     stage: str = "posts",
 ) -> tuple[int, int, dict[str, Any]]:
-    from trr_backend.socials.instagram import InstagramScraper, ScrapeConfig
+    from trr_backend.socials.instagram import ScrapeConfig
 
     try:
         post_delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
@@ -16802,8 +16923,11 @@ def _ingest_instagram(
     cache_scope = f"instagram:ingest:{account.strip().lower()}"
     scraper = _get_cached_scraper(cookies, cache_scope=cache_scope)
     if scraper is None:
-        scraper = InstagramScraper(cookies=cookies, browser_account_id=account)
-        _cache_scraper(cookies, scraper, cache_scope=cache_scope)
+        scraper = _build_instagram_scraper_with_auth_fallback(
+            browser_account_id=account,
+            caller_context=f"ingest:{account.strip().lower()}",
+        )
+        _cache_scraper(getattr(scraper, "cookies", cookies) or cookies, scraper, cache_scope=cache_scope)
 
     retrieval_meta: dict[str, Any] = {"instagram_authenticated": instagram_authenticated}
     matched_post_count = 0
@@ -25658,8 +25782,13 @@ def _historical_catalog_expected_total_posts(platform: str, account_handle: str,
     if normalized_platform not in {"twitter", "facebook", "threads"}:
         return 0
 
+    try:
+        recent_runs = _catalog_recent_runs(normalized_platform, normalized_account, limit=limit)
+    except Exception:  # noqa: BLE001
+        return 0
+
     best_total = 0
-    for row in _catalog_recent_runs(normalized_platform, normalized_account, limit=limit):
+    for row in recent_runs:
         run_config = _metadata_dict(row.get("run_config") if row.get("run_config") is not None else row.get("config"))
         metadata = _metadata_dict(row.get("metadata"))
         activity = _metadata_dict(metadata.get("activity"))
@@ -26946,14 +27075,51 @@ def _shared_catalog_progress_interval_posts() -> int:
     )
 
 
+_INSTAGRAM_HANDLE_LIKE_RE = re.compile(r"^[a-z0-9._]{1,30}$")
+
+
+def _sanitize_instagram_browser_account_id(browser_account_id: str | None) -> str | None:
+    normalized = str(browser_account_id or "").strip().lstrip("@").lower()
+    if not normalized:
+        return None
+    if _INSTAGRAM_HANDLE_LIKE_RE.fullmatch(normalized):
+        return normalized
+    return None
+
+
+def _build_instagram_scraper_with_auth_fallback(
+    *,
+    browser_account_id: str | None = None,
+    caller_context: str | None = None,
+    require_validation: bool | None = None,
+    allow_public_fallback: bool = True,
+):
+    from trr_backend.socials.instagram import InstagramScraper, build_authenticated_instagram_scraper
+
+    if require_validation is None:
+        require_validation = _env_truthy("INSTAGRAM_AUTH_RESOLVER_V2")
+    scraper = build_authenticated_instagram_scraper(
+        browser_account_id=browser_account_id,
+        caller_context=caller_context,
+        require_validation=require_validation,
+    )
+    if scraper is not None or not allow_public_fallback:
+        return scraper
+    return InstagramScraper(
+        cookies={},
+        browser_account_id=_sanitize_instagram_browser_account_id(browser_account_id),
+    )
+
+
 def _build_shared_instagram_scraper(*, authenticated: bool = False, browser_account_id: str | None = None):
     from trr_backend.socials.instagram import InstagramScraper
 
     if authenticated:
-        cookies = _load_instagram_cookies()
-        if not cookies.get("sessionid"):
-            return None
-        return InstagramScraper(cookies=cookies, browser_account_id=browser_account_id)
+        return _build_instagram_scraper_with_auth_fallback(
+            browser_account_id=browser_account_id,
+            caller_context="shared_instagram_scraper",
+            allow_public_fallback=False,
+        )
 
     # Shared-account catalog backfills prefer the warmed public path first to
     # avoid depending on auth cookies when the public transport is healthy.
@@ -28682,8 +28848,6 @@ def _scrape_shared_twitter_posts(
     job_id: str,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
-
     twitter_cookies, twitter_bearer = _load_twitter_auth()
     scraper = TwitterScraper(
         cookies=twitter_cookies,
@@ -28702,7 +28866,9 @@ def _scrape_shared_twitter_posts(
     date_start = requested_date_start or (
         datetime(2006, 1, 1, tzinfo=UTC) if full_history_requested else (_now_utc() - timedelta(days=30))
     )
-    date_end = requested_date_end or _now_utc()
+    date_end = requested_date_end or (
+        (_now_utc() - timedelta(days=1)) if full_history_requested else _now_utc()
+    )
     if full_history_requested and config.get("max_posts_per_target") is None:
         max_pages = None
     elif full_history_requested:
@@ -31261,13 +31427,23 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     )
 
     candidates = _list_candidate_jobs_for_modal_dispatch(run_id=run_id, limit=max(safe_limit * 4, 50))
-    (
-        running_by_stage,
-        running_by_stage_platform,
-        running_by_run,
-        running_by_run_stage_platform,
-        active_accounts_by_stage_platform,
-    ) = _current_modal_dispatch_running_counts()
+    running_counts = _current_modal_dispatch_running_counts()
+    if len(running_counts) == 4:
+        (
+            running_by_stage,
+            running_by_stage_platform,
+            running_by_run,
+            running_by_run_stage_platform,
+        ) = running_counts
+        active_accounts_by_stage_platform = {}
+    else:
+        (
+            running_by_stage,
+            running_by_stage_platform,
+            running_by_run,
+            running_by_run_stage_platform,
+            active_accounts_by_stage_platform,
+        ) = running_counts
     dispatched_job_ids: list[str] = []
     dispatch_attempts = 0
 
@@ -45875,8 +46051,15 @@ def _refresh_instagram_post_detail_sync(
         media_mirror_last_job_id=str(row_json.get("media_mirror_last_job_id") or "") or None,
     )
     scraper = InstagramScraper(
-        cookies=_load_instagram_cookies(), browser_account_id=str(post.username or post.pk or "post")
+        cookies={},
+        browser_account_id=None,
     )
+    authenticated_scraper = _build_instagram_scraper_with_auth_fallback(
+        browser_account_id=post.username or account or None,
+        caller_context=f"refresh_post_detail:{source_id}",
+    )
+    if authenticated_scraper is not None:
+        scraper = authenticated_scraper
     _enrich_instagram_post_from_permalink(post=post, scraper=scraper, now_utc=_now_utc())
     with pg.db_connection() as conn:
         upserted = _upsert_instagram_post(
@@ -46562,10 +46745,11 @@ def refresh_post_comments(
         if not row:
             raise ValueError("Post not found")
 
-        from trr_backend.socials.instagram import InstagramScraper
-
         account = str(row.get("account") or "")
-        scraper = InstagramScraper(cookies=_load_instagram_cookies(), browser_account_id=account)
+        scraper = _build_instagram_scraper_with_auth_fallback(
+            browser_account_id=account or None,
+            caller_context=f"refresh_post_comments:{source_id}",
+        )
         comments: list[Any] = []
         upserted = 0
         fetch_failed = False
@@ -49502,11 +49686,26 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
         )
         assignment_rows = []
     try:
-        totals = (
-            _social_account_profile_summary_totals_from_rows(normalized_platform, normalized_account, analysis_rows)
-            if normalized_platform == "instagram"
-            else _social_account_profile_summary_totals(normalized_platform, normalized_account)
-        )
+        if normalized_platform == "instagram":
+            row_totals = _social_account_profile_summary_totals_from_rows(
+                normalized_platform,
+                normalized_account,
+                analysis_rows,
+            )
+            collaborator_dataset_rows = any(
+                str((row or {}).get("_profile_match_mode") or "").strip().lower() == "collaborator"
+                or str((row or {}).get("_profile_source_surface") or "").strip().lower() == "catalog"
+                for row in analysis_rows
+            )
+            if collaborator_dataset_rows:
+                totals = row_totals
+            else:
+                totals = _social_account_profile_summary_totals(normalized_platform, normalized_account)
+                for key in ("total_posts", "total_engagement", "total_views", "first_post_at", "last_post_at"):
+                    if totals.get(key) is None:
+                        totals[key] = row_totals.get(key)
+        else:
+            totals = _social_account_profile_summary_totals(normalized_platform, normalized_account)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Social account profile summary totals query failed for %s/%s; falling back to loaded analysis rows: %s",
@@ -49525,6 +49724,7 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
             if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS)
             else {}
         )
+        catalog_totals_available = True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Social account profile catalog totals query failed for %s/%s; continuing without catalog totals: %s",
@@ -49533,6 +49733,7 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
             exc,
         )
         catalog_totals = {}
+        catalog_totals_available = False
     try:
         recent_catalog_runs = (
             _catalog_recent_runs(normalized_platform, normalized_account, limit=3)
@@ -49627,18 +49828,25 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
             )
         )
         source_status_rows.append(payload)
+    persisted_total_posts = max(
+        _normalize_non_negative_int(totals.get("total_posts")),
+        _normalize_non_negative_int(catalog_totals.get("catalog_total_posts")),
+        _historical_catalog_expected_total_posts(normalized_platform, normalized_account),
+    )
+    source_snapshot_present = isinstance(primary_source_metadata.get("profile_snapshot"), Mapping)
+    resolved_total_posts = max(
+        persisted_total_posts,
+        0
+        if source_snapshot_present or not catalog_totals_available
+        else _normalize_non_negative_int(identity_fields.get("live_total_posts")),
+    )
     return {
         "platform": normalized_platform,
         "account_handle": normalized_account,
         "network_name": shared_profile["network_name"],
         "profile_url": resolved_profile_url,
         "avatar_url": resolved_avatar_url,
-        "total_posts": _best_known_social_account_total_posts(
-            normalized_platform,
-            normalized_account,
-            materialized_total_posts=totals.get("total_posts"),
-            catalog_total_posts=catalog_totals.get("catalog_total_posts"),
-        ),
+        "total_posts": resolved_total_posts,
         "total_engagement": _normalize_non_negative_int(totals.get("total_engagement")),
         "total_views": _normalize_non_negative_int(totals.get("total_views")),
         "first_post_at": totals.get("first_post_at"),
