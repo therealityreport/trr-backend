@@ -2550,6 +2550,97 @@ def test_instagram_scrape_async_allows_explicit_local_dev_fallback(
     assert body["execution_owner"] == "local_api"
 
 
+def test_scrape_instagram_route_inherits_current_auth_session_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    from trr_backend.socials.instagram import InstagramAuthSession, set_current_instagram_auth_session
+    from trr_backend.socials.instagram.scraper import InstagramScraper
+
+    auth_session = InstagramAuthSession(
+        cookies={"sessionid": "resolver-session", "csrftoken": "resolver-csrf", "ds_user_id": "123"},
+        source="browser_session",
+        validated=True,
+        validation_reason=None,
+        validation_category="validated",
+        stale_ok=False,
+        browser_account_id="bravotv",
+        session_account_id="bravotv",
+        caller_context="api_route_test",
+        cookie_file_path=None,
+        storage_state_path=None,
+        refreshed=False,
+        refresh_method=None,
+        repaired_from_browser_session=False,
+    )
+    set_current_instagram_auth_session(auth_session)
+
+    captured: dict[str, object] = {}
+
+    def _fake_load_social_auth_or_503(*, platform: str, surface: str, loader: object) -> dict[str, str]:
+        captured["platform"] = platform
+        captured["surface"] = surface
+        return dict(auth_session.cookies)
+
+    def _fake_scrape(self: InstagramScraper, config: object) -> list[object]:
+        captured["browser_account_id"] = self.browser_account_id
+        captured["auth_session_account_id"] = self.last_retrieval_meta.get("auth_session_account_id")
+        captured["auth_cookie_source"] = self.last_retrieval_meta.get("auth_cookie_source")
+        captured["config"] = config
+        return [
+            type(
+                "_Post",
+                (),
+                {
+                    "shortcode": "abc123",
+                    "post_type": "image",
+                    "date_time": "2026-01-01T12:00:00Z",
+                    "caption": "caption",
+                    "profile_tags": [],
+                    "sponsored": False,
+                    "likes": 1,
+                    "comments": 2,
+                    "video_views": 0,
+                    "url": "https://instagram.com/p/abc123/",
+                    "username": "bravotv",
+                },
+            )()
+        ]
+
+    monkeypatch.setattr("api.routers.socials._load_social_auth_or_503", _fake_load_social_auth_or_503)
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.InstagramScraper.scrape", _fake_scrape)
+
+    try:
+        response = client.post(
+            "/api/v1/admin/socials/instagram/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "username": "bravotv",
+                "hashtags": [],
+                "date_start": "2026-01-01T00:00:00Z",
+                "date_end": "2026-01-02T00:00:00Z",
+                "entity_type": "show",
+                "show_id": None,
+                "season_number": None,
+                "person_id": None,
+            },
+        )
+    finally:
+        set_current_instagram_auth_session(None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert captured["platform"] == "instagram"
+    assert captured["surface"] == "scrape"
+    assert captured["browser_account_id"] == "bravotv"
+    assert captured["auth_session_account_id"] == "bravotv"
+    assert captured["auth_cookie_source"] == "browser_session"
+
+
 def test_post_shared_ingest_starts_inline_when_queue_disabled(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

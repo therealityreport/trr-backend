@@ -44,6 +44,11 @@ from trr_backend.socials.control_plane import (
     get_targets,
     sentiment_for_text,
 )
+from trr_backend.socials.instagram import (
+    InstagramAuthSession,
+    clear_instagram_auth_runtime_state,
+    get_current_instagram_auth_session,
+)
 from trr_backend.socials.instagram.resume_state import InstagramResumeState
 
 
@@ -70,6 +75,7 @@ def _clear_context_target_caches() -> None:
 def _clear_instagram_cookie_state(monkeypatch: pytest.MonkeyPatch) -> None:
     social_repo._instagram_cookie_validation_cache = None
     social_repo._instagram_cookie_runtime_override = None
+    clear_instagram_auth_runtime_state()
     social_repo._tiktok_cookie_validation_cache = None
     social_repo._tiktok_cookie_runtime_override = None
     social_repo._twitter_cookie_validation_cache = None
@@ -86,6 +92,9 @@ def _clear_instagram_cookie_state(monkeypatch: pytest.MonkeyPatch) -> None:
         "SOCIAL_INSTAGRAM_COOKIE_REFRESH_TIMEOUT_SECONDS",
         "SOCIAL_AUTH_INSTAGRAM_USERNAME",
         "SOCIAL_AUTH_INSTAGRAM_PASSWORD",
+        "INSTAGRAM_AUTH_RESOLVER_V2",
+        "SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID",
+        "SOCIAL_BROWSER_SESSION_DIR",
         "SOCIAL_TIKTOK_COOKIE_AUTO_REFRESH",
         "SOCIAL_TIKTOK_COOKIE_VALIDATION_TTL_SECONDS",
         "SOCIAL_TIKTOK_COOKIE_REFRESH_HEADLESS",
@@ -115,6 +124,7 @@ def _clear_instagram_cookie_state(monkeypatch: pytest.MonkeyPatch) -> None:
     yield
     social_repo._instagram_cookie_validation_cache = None
     social_repo._instagram_cookie_runtime_override = None
+    clear_instagram_auth_runtime_state()
     social_repo._tiktok_cookie_validation_cache = None
     social_repo._tiktok_cookie_runtime_override = None
     social_repo._twitter_cookie_validation_cache = None
@@ -1738,6 +1748,10 @@ def test_load_instagram_cookies_prefers_env_json(monkeypatch) -> None:
     assert cookies["csrftoken"] == "def"
     assert cookies["ds_user_id"] == "123"
     assert "_comment" not in cookies
+    auth_session = get_current_instagram_auth_session()
+    assert auth_session is not None
+    assert auth_session.cookies["sessionid"] == "abc"
+    assert auth_session.source == "legacy_loader"
 
 
 def test_load_instagram_cookies_uses_file_when_env_json_invalid(monkeypatch, tmp_path) -> None:
@@ -1831,6 +1845,37 @@ def test_load_instagram_cookies_refreshes_with_legacy_instagram_env_credentials(
     assert cookies["csrftoken"] == "fresh-csrf"
     assert cookies["ds_user_id"] == "222"
     assert refresh_calls == ["expired"]
+
+
+def test_load_instagram_cookies_uses_resolver_authoritatively_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INSTAGRAM_AUTH_RESOLVER_V2", "1")
+    monkeypatch.setattr(social_repo, "_load_instagram_cookies_legacy", lambda: {"sessionid": "legacy-session"})
+
+    expected_session = InstagramAuthSession(
+        cookies={"sessionid": "resolver-session", "csrftoken": "resolver-csrf", "ds_user_id": "123"},
+        source="browser_session",
+        validated=True,
+        validation_reason=None,
+        validation_category="validated",
+        stale_ok=False,
+        browser_account_id="bravotv",
+        session_account_id="bravotv",
+        caller_context="legacy_loader",
+        cookie_file_path=None,
+        storage_state_path=None,
+        refreshed=False,
+        refresh_method=None,
+        repaired_from_browser_session=False,
+    )
+
+    import trr_backend.socials.instagram as instagram_module
+
+    monkeypatch.setattr(instagram_module, "resolve_instagram_auth_session", lambda **_kwargs: expected_session)
+
+    cookies = social_repo._load_instagram_cookies()
+
+    assert cookies["sessionid"] == "resolver-session"
+    assert get_current_instagram_auth_session() is expected_session
 
 
 def test_get_worker_auth_capabilities_requires_valid_instagram_graphql_session(
@@ -19151,6 +19196,30 @@ def test_build_shared_instagram_scraper_prefers_public_requests(monkeypatch: pyt
 
 
 def test_build_shared_instagram_scraper_authenticated_uses_loaded_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.socials.instagram as instagram_module
+
+    expected = object()
+    captured: dict[str, Any] = {}
+
+    def _fake_builder(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(instagram_module, "build_authenticated_instagram_scraper", _fake_builder)
+
+    scraper = social_repo._build_shared_instagram_scraper(authenticated=True, browser_account_id="bravotv")
+
+    assert scraper is expected
+    assert captured["browser_account_id"] == "bravotv"
+    assert captured["caller_context"] == "shared_instagram_scraper"
+    assert captured["require_validation"] is False
+
+
+def test_build_instagram_scraper_with_auth_fallback_sanitizes_invalid_public_session_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trr_backend.socials.instagram as instagram_module
+
     captured: dict[str, Any] = {}
 
     class _FakeInstagramScraper:
@@ -19160,23 +19229,69 @@ def test_build_shared_instagram_scraper_authenticated_uses_loaded_cookies(monkey
             cookies: dict[str, Any] | None = None,
             browser_account_id: str | None = None,
         ) -> None:
-            captured["cookies"] = cookies
+            captured["cookies"] = dict(cookies or {})
             captured["browser_account_id"] = browser_account_id
 
-    import trr_backend.socials.instagram as instagram_module
-
+    monkeypatch.setattr(instagram_module, "build_authenticated_instagram_scraper", lambda **_kwargs: None)
     monkeypatch.setattr(instagram_module, "InstagramScraper", _FakeInstagramScraper)
-    monkeypatch.setattr(
-        social_repo,
-        "_load_instagram_cookies",
-        lambda: {"sessionid": "session", "csrftoken": "csrf", "ds_user_id": "123"},
+
+    scraper = social_repo._build_instagram_scraper_with_auth_fallback(  # noqa: SLF001
+        browser_account_id="comment-avatar-refresh",
+        caller_context="comment-avatar-refresh",
     )
 
-    scraper = social_repo._build_shared_instagram_scraper(authenticated=True, browser_account_id="bravotv")
-
     assert isinstance(scraper, _FakeInstagramScraper)
-    assert captured["cookies"]["sessionid"] == "session"
-    assert captured["browser_account_id"] == "bravotv"
+    assert captured["cookies"] == {}
+    assert captured["browser_account_id"] is None
+
+
+def test_resolve_instagram_media_for_shortcode_routes_shortcode_to_caller_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeScraper:
+        cookies = {"sessionid": "resolver-session"}
+        session = object()
+
+        def fetch_post_info(self, value: str, delay: float = 0.0) -> dict[str, Any] | None:
+            captured["fetch_post_info"] = {"value": value, "delay": delay}
+            return {"items": []}
+
+    monkeypatch.setattr(social_repo, "_load_instagram_cookies", lambda: {"sessionid": "resolver-session"})
+    monkeypatch.setattr(social_repo, "_get_cached_scraper", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_cache_scraper",
+        lambda cookies, scraper, *, cache_scope=None: captured.update(
+            {"cached_cookies": dict(cookies), "cache_scope": cache_scope, "cached_scraper": scraper}
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_build_instagram_scraper_with_auth_fallback",
+        lambda **kwargs: captured.update({"builder_kwargs": kwargs}) or _FakeScraper(),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.resolve_instagram_media",
+        lambda shortcode, **kwargs: SimpleNamespace(
+            source="graphql_shortcode",
+            media_type="video",
+            metadata=SimpleNamespace(media_urls=["https://cdn.test/video.mp4"], thumbnail_url="https://cdn.test/thumb.jpg"),
+            attempts=[{"source": "graphql_shortcode", "success": True}],
+        ),
+    )
+
+    payload = social_repo._resolve_instagram_media_for_shortcode(shortcode="CQ123ABC")
+
+    assert captured["builder_kwargs"] == {
+        "browser_account_id": "CQ123ABC",
+        "caller_context": "shortcode:CQ123ABC",
+    }
+    assert captured["cache_scope"] == "instagram:shortcode:CQ123ABC"
+    assert captured["cached_cookies"] == {"sessionid": "resolver-session"}
+    assert payload["source"] == "graphql_shortcode"
+    assert payload["thumbnail_url"] == "https://cdn.test/thumb.jpg"
 
 
 def test_scraper_cache_scope_isolated_for_matching_cookies() -> None:

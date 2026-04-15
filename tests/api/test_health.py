@@ -62,3 +62,12 @@ def test_health_live():
     body = resp.json()
     assert body["status"] == "alive"
     assert body["service"] == "trr-backend"
+
+
+def test_health_live_ignores_database_failure():
+    with patch.object(_real_pg, "db_connection", _fake_db_connection_fail):
+        resp = client.get("/health/live")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "alive"
+    assert body["service"] == "trr-backend"
