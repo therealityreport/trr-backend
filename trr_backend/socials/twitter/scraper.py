@@ -563,17 +563,20 @@ class TwitterScraper:
 
     @property
     def _search_timeline_url(self) -> str:
-        self._discover_graphql_hashes()
+        if not self._search_hash:
+            self._discover_graphql_hashes()
         return f"{self.GRAPHQL_BASE_URL}/{self._search_hash}/SearchTimeline"
 
     @property
     def _tweet_detail_url(self) -> str:
-        self._discover_graphql_hashes()
+        if not self._detail_hash:
+            self._discover_graphql_hashes()
         return f"{self.GRAPHQL_BASE_URL}/{self._detail_hash}/TweetDetail"
 
     @property
     def _user_by_screen_name_url(self) -> str:
-        self._discover_graphql_hashes()
+        if not self._user_by_screen_name_hash:
+            self._discover_graphql_hashes()
         return f"{self.GRAPHQL_BASE_URL}/{self._user_by_screen_name_hash}/UserByScreenName"
 
     def _rate_limit(self, delay: float, *, fast_mode: bool = False):
@@ -1075,7 +1078,7 @@ class TwitterScraper:
                 if missing_flags:
                     logger.info("TweetDetail requires %d additional feature flags; retrying", len(missing_flags))
                     for flag in missing_flags:
-                        features.setdefault(flag, False)
+                        features[flag] = False
                     response = _request(features)
             self._track_response_status(response.status_code)
             response.raise_for_status()
@@ -2126,7 +2129,7 @@ class TwitterScraper:
                 if missing_flags:
                     logger.info("TweetDetail requires %d additional feature flags; retrying", len(missing_flags))
                     for flag in missing_flags:
-                        features.setdefault(flag, False)
+                        features[flag] = False
                     response = _request(features)
             self._track_response_status(response.status_code)
             response.raise_for_status()
@@ -2346,7 +2349,7 @@ class TwitterScraper:
                 if missing_flags:
                     logger.info("TweetDetail requires %d additional feature flags; retrying", len(missing_flags))
                     for flag in missing_flags:
-                        features.setdefault(flag, False)
+                        features[flag] = False
                     response = _request(features)
             self._track_response_status(response.status_code)
             response.raise_for_status()
