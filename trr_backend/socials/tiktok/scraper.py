@@ -24,10 +24,23 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+from trr_backend.socials.tiktok.http_client import (
+    DEFAULT_CURL_CFFI_IMPERSONATE,
+    DEFAULT_HTTP_CLIENT,
+    TIKTOK_DEFAULT_MAX_POSTS,
+    TIKTOK_POSTS_PER_PAGE,
+    _TikTokHttpClientBase,
+)
+from trr_backend.socials.tiktok.http_client import (
+    build_tiktok_http_client as _build_tiktok_http_client,
+)
 
 logger = logging.getLogger(__name__)
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_YTDLP_API_FALLBACK_ERROR_CODES = frozenset({"ytdlp_unavailable", "ytdlp_timeout", "ytdlp_nonzero_exit"})
+_PRESERVED_RETRIEVAL_META_KEYS = ("proxy_source", "curl_cffi_impersonate")
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
 
@@ -47,6 +60,23 @@ class _DeferredTikTokHttpClient:
 
     def get(self, *args: Any, **kwargs: Any) -> Any:
         return self._owner._ensure_http_client().get(*args, **kwargs)
+
+
+def build_tiktok_http_client(
+    client_name: str | None = None,
+    *,
+    retry_total: int = 3,
+    backoff_factor: float = 1.5,
+    proxy_url: str | None = None,
+    impersonate: str | None = None,
+) -> _TikTokHttpClientBase:
+    return _build_tiktok_http_client(
+        client_name,
+        retry_total=retry_total,
+        backoff_factor=backoff_factor,
+        proxy_url=proxy_url,
+        impersonate=impersonate,
+    )
 
 
 @dataclass
@@ -228,8 +258,32 @@ class TikTokScraper:
         proxy_urls: list[str] | tuple[str, ...] | None = None,
     ):
         self.cookies = cookies or {}
-        self._http_client_name_input = str(http_client_name or "").strip().lower() or None
-        self._proxy_urls_input = list(proxy_urls or [])
+        self._http_client_name_input = (
+            str(http_client_name or os.getenv("SOCIAL_TIKTOK_HTTP_CLIENT") or "").strip().lower() or DEFAULT_HTTP_CLIENT
+        )
+        self._curl_cffi_impersonate = (
+            str(os.getenv("SOCIAL_TIKTOK_CURL_CFFI_IMPERSONATE") or "").strip() or DEFAULT_CURL_CFFI_IMPERSONATE
+        )
+        explicit_proxy_urls = [str(value or "").strip() for value in (proxy_urls or []) if str(value or "").strip()]
+        env_proxy_urls = [
+            value.strip()
+            for value in str(os.getenv("SOCIAL_TIKTOK_PROXY_URLS") or "").split(",")
+            if value.strip()
+        ]
+        crawlee_proxy_urls = [
+            value.strip()
+            for value in str(os.getenv("SOCIAL_CRAWLEE_PROXY_URLS_TIKTOK") or "").split(",")
+            if value.strip()
+        ]
+        if explicit_proxy_urls:
+            self._proxy_urls_input = explicit_proxy_urls
+            self._proxy_source = "constructor"
+        elif env_proxy_urls:
+            self._proxy_urls_input = env_proxy_urls
+            self._proxy_source = "SOCIAL_TIKTOK_PROXY_URLS"
+        else:
+            self._proxy_urls_input = crawlee_proxy_urls
+            self._proxy_source = "SOCIAL_CRAWLEE_PROXY_URLS_TIKTOK" if crawlee_proxy_urls else None
         self._selected_proxy_url = next(
             (str(value or "").strip() for value in self._proxy_urls_input if str(value or "").strip()),
             None,
@@ -238,7 +292,15 @@ class TikTokScraper:
         self.session = _DeferredTikTokHttpClient(self)
         self._request_count = 0
         self._consecutive_success = 0
-        self.last_retrieval_meta: dict[str, Any] = {}
+        self.last_retrieval_meta: dict[str, Any] = {
+            "http_client": self._http_client_name_input,
+            "proxy_enabled": bool(self._selected_proxy_url),
+            "proxy_label": self._proxy_label(self._selected_proxy_url),
+        }
+        if self._proxy_source:
+            self.last_retrieval_meta["proxy_source"] = self._proxy_source
+        if self._http_client_name_input == "curl_cffi":
+            self.last_retrieval_meta["curl_cffi_impersonate"] = self._curl_cffi_impersonate
         self._last_api_fail_reason: str | None = None
         self.last_comment_fetch_reason: str | None = None
         self.last_comment_fetch_meta: dict[str, Any] = {}
@@ -283,24 +345,23 @@ class TikTokScraper:
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
-        session = requests.Session()
-        retry_strategy = Retry(
-            total=self.MAX_RETRIES,
+        return build_tiktok_http_client(
+            self._http_client_name_input,
+            retry_total=self.MAX_RETRIES,
             backoff_factor=self.RETRY_BACKOFF_FACTOR,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
+            proxy_url=self._selected_proxy_url,
+            impersonate=self._curl_cffi_impersonate if self._http_client_name_input == "curl_cffi" else None,
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        if self._selected_proxy_url:
-            session.proxies.update({"http": self._selected_proxy_url, "https": self._selected_proxy_url})
-        return session
 
     def _ensure_http_client(self) -> requests.Session:
         if self._direct_http_client is None:
             self._direct_http_client = self._create_session()
         return self._direct_http_client
+
+    @property
+    def _http_client(self) -> requests.Session:
+        """Back-compat alias for tests and direct API callers."""
+        return self._ensure_http_client()
 
     def _run_context_meta(self, *, retrieval_mode: str | None = None, auth_mode: str | None = None) -> dict[str, Any]:
         resolved_auth_mode = auth_mode or ("with_cookies" if self.cookies else "without_cookies")
@@ -308,11 +369,13 @@ class TikTokScraper:
         if mode == "ytdlp":
             return {
                 "http_client": "yt_dlp",
+                "proxy_enabled": False,
                 "proxy_label": None,
                 "auth_mode": resolved_auth_mode,
             }
         return {
             "http_client": self._http_client_name_input or "requests",
+            "proxy_enabled": bool(self._selected_proxy_url),
             "proxy_label": self._proxy_label(self._selected_proxy_url),
             "auth_mode": resolved_auth_mode,
         }
@@ -325,9 +388,16 @@ class TikTokScraper:
         **values: Any,
     ) -> None:
         endpoint_responses = dict(self.last_retrieval_meta.get("endpoint_responses") or {})
-        payload = self._run_context_meta(
+        payload = {}
+        if context_mode != "ytdlp":
+            for key in _PRESERVED_RETRIEVAL_META_KEYS:
+                if key in self.last_retrieval_meta and key not in values:
+                    payload[key] = self.last_retrieval_meta[key]
+        payload.update(
+            self._run_context_meta(
             retrieval_mode=context_mode or str(values.get("retrieval_mode") or "").strip() or None,
             auth_mode=auth_mode,
+            )
         )
         if context_mode == "ytdlp":
             payload["endpoint_responses"] = {}
@@ -335,6 +405,16 @@ class TikTokScraper:
             payload["endpoint_responses"] = endpoint_responses
         payload.update(values)
         self.last_retrieval_meta = payload
+
+    def _env_flag_enabled(self, env_name: str) -> bool:
+        return str(os.getenv(env_name) or "").strip().lower() in _TRUTHY_ENV_VALUES
+
+    def _direct_comment_api_experiment_enabled(self) -> bool:
+        return self._env_flag_enabled("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT")
+
+    def _should_fallback_to_api_after_ytdlp_failure(self, error_code: str | None) -> bool:
+        normalized_error_code = str(error_code or "").strip().lower()
+        return normalized_error_code in _YTDLP_API_FALLBACK_ERROR_CODES
 
     def _get_headers(self, referer: str | None = None) -> dict:
         """Get request headers."""
@@ -386,15 +466,16 @@ class TikTokScraper:
         if normalized_failure_reason:
             payload["failure_reason"] = normalized_failure_reason
         if response is not None:
-            content_type = str(response.headers.get("content-type") or "").strip() or None
-            content_length_raw = str(response.headers.get("content-length") or "").strip()
+            headers = getattr(response, "headers", None) or {}
+            content_type = str(headers.get("content-type") or "").strip() or None
+            content_length_raw = str(headers.get("content-length") or "").strip()
             try:
                 content_length = int(content_length_raw) if content_length_raw else len(response.content or b"")
             except (TypeError, ValueError):
                 content_length = len(response.content or b"")
             request_id = (
-                str(response.headers.get("x-tt-logid") or "").strip()
-                or str(response.headers.get("x-request-id") or "").strip()
+                str(headers.get("x-tt-logid") or "").strip()
+                or str(headers.get("x-request-id") or "").strip()
                 or None
             )
             payload.update(
@@ -575,6 +656,7 @@ class TikTokScraper:
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
+            self._record_endpoint_response(endpoint="profile_html", response=response)
             html = response.text
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch TikTok profile HTML for @{username}: {e}")
@@ -1568,9 +1650,14 @@ class TikTokScraper:
 
         user_agent = self._get_headers().get("user-agent", "Mozilla/5.0")
         timeout_ms = 60_000
-        max_posts = config.max_pages * 50 if config.max_pages else 10_000
+        max_posts = (
+            config.max_pages * TIKTOK_POSTS_PER_PAGE
+            if config.max_pages
+            else TIKTOK_DEFAULT_MAX_POSTS
+        )
 
         browser: Any | None = None
+        context: Any | None = None
         try:
             with sync_playwright() as playwright:
                 browser = launch_browser(playwright, headless=True)
@@ -1734,8 +1821,20 @@ class TikTokScraper:
                 }
             )
         finally:
+            # Close context first so pages/cookies are flushed; wrap each
+            # close independently so one teardown failure doesn't skip the
+            # other. The outer `with sync_playwright()` also cleans up, but
+            # explicit close releases FDs sooner under high concurrency.
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:  # noqa: BLE001 - teardown best-effort
+                    logger.debug("tiktok playwright context close failed", exc_info=True)
             if browser is not None:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:  # noqa: BLE001 - teardown best-effort
+                    logger.debug("tiktok playwright browser close failed", exc_info=True)
 
         stop_reason = (
             "date_start_reached"
@@ -1795,19 +1894,51 @@ class TikTokScraper:
         stop_reason: str | None = None,
     ) -> None:
         mode = str(retrieval_mode or "").strip().lower() or "ytdlp"
+        fallback_chain = [
+            str(stage).strip().lower()
+            for stage in (self.last_retrieval_meta.get("fallback_chain") or [])
+            if str(stage).strip()
+        ]
+        used_ytdlp = "yt_dlp" in fallback_chain or mode == "ytdlp"
+        used_api = "api" in fallback_chain or mode == "api"
+        used_browser_intercept = "browser_intercept" in fallback_chain or mode == "browser_intercept"
         self.last_retrieval_meta["retrieval_mode"] = mode
-        self.last_retrieval_meta["path_role"] = "primary" if mode == "ytdlp" else "fallback"
-        self.last_retrieval_meta["topology_state"] = "single_path_ytdlp"
         if stop_reason:
             self.last_retrieval_meta["stop_reason"] = stop_reason
-        if mode == "ytdlp" and posts_found <= 0:
+
+        if used_ytdlp and used_api:
+            self.last_retrieval_meta["path_role"] = "fallback"
+            self.last_retrieval_meta["topology_state"] = "ytdlp_with_api_fallback"
+            self.last_retrieval_meta["risk_state"] = "healthy" if posts_found > 0 else "critical"
+            self.last_retrieval_meta["operator_summary"] = (
+                "TikTok posts recovered via API fallback after yt-dlp failure."
+                if posts_found > 0
+                else "TikTok posts path degraded after yt-dlp failure and API fallback returned zero posts."
+            )
+        elif used_ytdlp and used_browser_intercept:
+            self.last_retrieval_meta["path_role"] = "fallback"
+            self.last_retrieval_meta["topology_state"] = "ytdlp_with_browser_fallback"
+            self.last_retrieval_meta["risk_state"] = "healthy" if posts_found > 0 else "critical"
+            self.last_retrieval_meta["operator_summary"] = (
+                "TikTok posts recovered via browser_intercept fallback after yt-dlp failure."
+                if posts_found > 0
+                else "TikTok posts path degraded after yt-dlp failure and browser_intercept returned zero posts."
+            )
+        elif mode == "ytdlp" and posts_found <= 0:
+            self.last_retrieval_meta["path_role"] = "primary"
+            self.last_retrieval_meta["topology_state"] = "single_path_ytdlp"
             self.last_retrieval_meta["risk_state"] = "critical"
             self.last_retrieval_meta["operator_summary"] = (
                 "TikTok posts path degraded: yt-dlp returned zero posts while browser_intercept is not proven live."
             )
         elif mode == "ytdlp":
+            self.last_retrieval_meta["path_role"] = "primary"
+            self.last_retrieval_meta["topology_state"] = "single_path_ytdlp"
             self.last_retrieval_meta["risk_state"] = "healthy"
             self.last_retrieval_meta["operator_summary"] = "TikTok posts path healthy on yt-dlp."
+        else:
+            self.last_retrieval_meta["path_role"] = "fallback"
+            self.last_retrieval_meta["topology_state"] = f"single_path_{mode}"
 
     def _classify_browser_intercept_failure(
         self,
@@ -1874,6 +2005,21 @@ class TikTokScraper:
                 posts_found=len(posts),
                 stop_reason=str(self.last_retrieval_meta.get("stop_reason") or "").strip() or None,
             )
+            if posts:
+                self.last_retrieval_meta["profile_enrichment_status"] = "skipped"
+                return posts
+            ytdlp_error_code = str(self.last_retrieval_meta.get("error_code") or "").strip() or None
+            if self._should_fallback_to_api_after_ytdlp_failure(ytdlp_error_code):
+                logger.info("yt-dlp failed with %s; falling back to TikTok API scraper", ytdlp_error_code)
+                posts = self._scrape_api(config, progress_cb=progress_cb)
+                if not posts:
+                    self._ensure_structured_direct_failure(mode="api")
+                self._set_tiktok_path_health(
+                    retrieval_mode=str(self.last_retrieval_meta.get("retrieval_mode") or "api"),
+                    posts_found=len(posts),
+                    stop_reason=str(self.last_retrieval_meta.get("stop_reason") or "").strip() or None,
+                )
+                return posts
             self.last_retrieval_meta["profile_enrichment_status"] = "skipped"
             return posts
 
@@ -2123,23 +2269,20 @@ class TikTokScraper:
             if filled:
                 logger.info(f"Oembed backfill: {filled}/{len(missing_thumb)} thumbnails resolved")
 
-        endpoint_responses = dict((self.last_retrieval_meta or {}).get("endpoint_responses") or {})
-        self.last_retrieval_meta = {
-            "retrieval_mode": (
+        self._set_retrieval_meta(
+            retrieval_mode=(
                 "ytdlp_fallback" if ytdlp_used else ("api" if api_posts_found else ("html" if html_posts else "none"))
             ),
-            "api_fail_reason": self._last_api_fail_reason,
-            "api_preflight_fail_reason": api_preflight_fail_reason,
-            "api_pagination_blocked_reason": api_pagination_blocked_reason,
-            "pages_scanned": pages_scanned,
-            "posts_checked": posts_checked,
-            "videos_scanned": posts_checked,
-            "first_page_count": len(posts[:30]),
-            "total_posts": max(self._safe_int_metric(profile_snapshot.get("total_posts")), len(posts)),
-            "profile_snapshot": profile_snapshot,
-        }
-        if endpoint_responses:
-            self.last_retrieval_meta["endpoint_responses"] = endpoint_responses
+            api_fail_reason=self._last_api_fail_reason,
+            api_preflight_fail_reason=api_preflight_fail_reason,
+            api_pagination_blocked_reason=api_pagination_blocked_reason,
+            pages_scanned=pages_scanned,
+            posts_checked=posts_checked,
+            videos_scanned=posts_checked,
+            first_page_count=len(posts[:30]),
+            total_posts=max(self._safe_int_metric(profile_snapshot.get("total_posts")), len(posts)),
+            profile_snapshot=profile_snapshot,
+        )
         return posts
 
     def fetch_comments(
@@ -2168,6 +2311,15 @@ class TikTokScraper:
         self._last_api_fail_reason = None
         self.last_comment_fetch_reason = None
         self.comments_auth_failed = False
+        self.last_comment_fetch_meta = {}
+        if not self._direct_comment_api_experiment_enabled():
+            self.last_comment_fetch_reason = "direct_api_parked"
+            self.last_comment_fetch_meta = {
+                "retrieval_mode": "direct_api_parked",
+                "reason": "direct_api_parked",
+            }
+            logger.warning("tiktok_comments_direct_api_parked video_id=%s", video_id)
+            return []
         post_url = f"https://www.tiktok.com/@{username}/video/{video_id}" if username else ""
         logger.info(f"Fetching comments for video {video_id}")
 
@@ -2197,6 +2349,8 @@ class TikTokScraper:
                 )
                 response.raise_for_status()
                 data = self._safe_response_json(response, endpoint="fetch_comments")
+                if data is not None:
+                    self._record_endpoint_response(endpoint="fetch_comments", response=response)
             except requests.exceptions.RequestException as e:
                 self._set_comment_failure_reason("request_error")
                 self._record_endpoint_response(
@@ -2295,6 +2449,8 @@ class TikTokScraper:
                 )
                 response.raise_for_status()
                 data = self._safe_response_json(response, endpoint="fetch_comment_replies")
+                if data is not None:
+                    self._record_endpoint_response(endpoint="fetch_comment_replies", response=response)
             except requests.exceptions.RequestException as e:
                 self._set_comment_failure_reason("request_error")
                 self._record_endpoint_response(
@@ -2792,6 +2948,7 @@ class TikTokScraper:
                 timeout=10,
             )
             if resp.status_code == 200:
+                self._record_endpoint_response(endpoint="fetch_oembed_thumbnail", response=resp)
                 data = resp.json()
                 return data.get("thumbnail_url") or None
         except Exception:

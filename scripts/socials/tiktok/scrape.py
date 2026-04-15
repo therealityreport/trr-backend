@@ -52,7 +52,7 @@ def _proxy_label(proxy_url: str | None) -> str | None:
     return parsed.hostname or str(proxy_url)
 
 
-def _parse_args(argv: list[str] | None = None) -> tuple[argparse.ArgumentParser, argparse.Namespace]:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Scrape TikTok posts and comments",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -107,7 +107,11 @@ Examples:
     )
     parser.add_argument("--diagnostics-json", help="Optional path to write scraper diagnostics JSON")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    return parser, parser.parse_args(argv)
+    return parser
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return _build_parser().parse_args(argv)
 
 
 def _emit_diagnostics_summary(
@@ -269,7 +273,8 @@ def save_comments(comments: list[TikTokComment], output_prefix: str, video_id: s
 
 
 def main(argv: list[str] | None = None):
-    parser, args = _parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -346,7 +351,7 @@ def main(argv: list[str] | None = None):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             save_comments(comments, str(output_path), video_id)
 
-        return
+        return 0
 
     # Post scraping mode - validate required args
     if not args.username:
@@ -399,6 +404,8 @@ def main(argv: list[str] | None = None):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         save_results(posts, str(output_path))
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

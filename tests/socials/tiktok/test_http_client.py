@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from trr_backend.socials.tiktok.http_client import DEFAULT_CURL_CFFI_IMPERSONATE, build_tiktok_http_client
-from trr_backend.socials.tiktok.scraper import TikTokScraper
+from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
 
 
 @dataclass
@@ -153,3 +153,44 @@ def test_record_endpoint_response_accepts_transport_agnostic_response() -> None:
         "content_length": 2,
         "request_id": "agnostic-logid",
     }
+
+
+def test_scrape_api_preserves_transport_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_TIKTOK_HTTP_CLIENT", "curl_cffi")
+    monkeypatch.setenv("SOCIAL_TIKTOK_CURL_CFFI_IMPERSONATE", "chrome131")
+
+    original_import_module = importlib.import_module
+
+    class _FakeCurlSession:
+        def get(self, *args: object, **kwargs: object) -> _FakeResponse:
+            return _FakeResponse(headers={})
+
+    def _fake_import_module(name: str, package: str | None = None):  # noqa: ANN001
+        if name == "curl_cffi.requests":
+            return SimpleNamespace(Session=_FakeCurlSession, exceptions=SimpleNamespace(RequestException=Exception))
+        return original_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", _fake_import_module)
+
+    scraper = TikTokScraper()
+    scraper.last_retrieval_meta.update(
+        {
+            "proxy_source": "constructor",
+            "endpoint_responses": {"fetch_user_detail": {"endpoint": "fetch_user_detail", "http_status": 200}},
+        }
+    )
+
+    scraper.fetch_user_detail = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
+        "userInfo": {"user": {"secUid": "sec-1", "nickname": "Bravo"}}
+    }
+    scraper.fetch_posts = lambda *_args, **_kwargs: {"itemList": [], "hasMore": False, "cursor": 0}  # type: ignore[method-assign]
+    scraper.build_profile_snapshot = lambda *_args, **_kwargs: {"total_posts": 0, "avatar_url": None}  # type: ignore[method-assign]
+    scraper._has_ytdlp = lambda: False  # type: ignore[method-assign]
+
+    posts = scraper._scrape_api(TikTokScrapeConfig(username="bravotv"))  # type: ignore[attr-defined]
+
+    assert posts == []
+    assert scraper.last_retrieval_meta["http_client"] == "curl_cffi"
+    assert scraper.last_retrieval_meta["proxy_source"] == "constructor"
+    assert scraper.last_retrieval_meta["curl_cffi_impersonate"] == "chrome131"
+    assert scraper.last_retrieval_meta["endpoint_responses"]["fetch_user_detail"]["http_status"] == 200
