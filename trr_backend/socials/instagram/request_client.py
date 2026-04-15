@@ -55,18 +55,24 @@ class InstagramRequestClient:
             )
 
         if response.status_code == 401:
+            # Auth failure is terminal for a given cookie bundle; retrying
+            # won't flip credentials back to valid and burns identity-pool
+            # reputation. Caller triggers cookie refresh / identity rotation.
             raise InstagramRequestFailure(
                 "unauthorized",
                 status_code=401,
-                retryable=True,
+                retryable=False,
                 response_text=body_text,
             )
 
         if response.status_code == 403:
+            # 403 indicates account-level block (shadowban / restriction).
+            # Retrying accelerates suppression; caller should retire the
+            # identity and move on.
             raise InstagramRequestFailure(
                 "forbidden",
                 status_code=403,
-                retryable=True,
+                retryable=False,
                 response_text=body_text,
             )
 

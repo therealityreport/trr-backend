@@ -1,6 +1,34 @@
 from __future__ import annotations
 
 import os
+from enum import StrEnum
+
+
+class InstagramErrorCode(StrEnum):
+    """Canonical error codes raised by the Instagram scraping stack.
+
+    Before this enum, error classification used bare strings like
+    ``"rate_limited"``, ``"unauthorized"``, and ``"validation_skipped"`` that
+    flowed through ``InstagramRequestFailure`` and comparison sites. Typos in
+    any branch would silently skip handling. Use these members at every
+    raise-site and compare by identity (``code is InstagramErrorCode.RATE_LIMITED``)
+    when the value is known to be an enum instance; string comparisons still
+    work because ``StrEnum`` inherits from ``str``.
+    """
+
+    RATE_LIMITED = "rate_limited"
+    UNAUTHORIZED = "unauthorized"
+    FORBIDDEN = "forbidden"
+    REDIRECT_LOGIN = "redirect_login"
+    REQUEST_FAILED = "request_failed"
+    VALIDATION_SKIPPED = "validation_skipped"
+    STRUCTURAL_INVALID = "structural_invalid"
+    CHECKPOINT_REQUIRED = "checkpoint_required"
+    CHALLENGE_REQUIRED = "challenge_required"
+    FEEDBACK_REQUIRED = "feedback_required"
+    LOGIN_REQUIRED = "login_required"
+    CONSENT_REQUIRED = "consent_required"
+    SENTRY_BLOCK = "sentry_block"
 
 GRAPHQL_URL = "https://www.instagram.com/graphql/query"
 PROFILE_INFO_URL = "https://www.instagram.com/api/v1/users/web_profile_info/"

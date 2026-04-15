@@ -277,7 +277,7 @@ Examples:
     cookies = {}
     if not args.no_auth:
         try:
-            from trr_backend.socials.control_plane import _load_instagram_cookies
+            from trr_backend.repositories.social_season_analytics import _load_instagram_cookies
 
             if args.cookies and args.cookies != "instagram_cookies.json":
                 os.environ["SOCIAL_INSTAGRAM_COOKIES_FILE"] = str(Path(args.cookies).expanduser())

@@ -29,29 +29,63 @@ from urllib3.util.retry import Retry
 
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 from trr_backend.socials.instagram.constants import (
-    COMMENTS_URL as IG_COMMENTS_URL,
     COMMENT_REPLIES_URL as IG_COMMENT_REPLIES_URL,
+)
+from trr_backend.socials.instagram.constants import (
+    COMMENTS_URL as IG_COMMENTS_URL,
+)
+from trr_backend.socials.instagram.constants import (
     GRAPHQL_URL as IG_GRAPHQL_URL,
+)
+from trr_backend.socials.instagram.constants import (
     POST_INFO_URL as IG_POST_INFO_URL,
+)
+from trr_backend.socials.instagram.constants import (
     PROFILE_INFO_URL as IG_PROFILE_INFO_URL,
+)
+from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_DOC_IDS as IG_PROFILE_POSTS_DOC_IDS,
+)
+from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_FAST_PAGE_SIZE as IG_PROFILE_POSTS_FAST_PAGE_SIZE,
+)
+from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_PAGE_SIZE as IG_PROFILE_POSTS_PAGE_SIZE,
+)
+from trr_backend.socials.instagram.constants import (
     QUERY_TYPE_GRAPHQL_PROFILE_POSTS,
     QUERY_TYPE_LEGACY,
     QUERY_TYPE_PROFILE_INFO,
+)
+from trr_backend.socials.instagram.constants import (
     WEB_X_ASBD_ID as IG_WEB_X_ASBD_ID,
 )
 from trr_backend.socials.instagram.identity_pool import (
     InstagramIdentityPool,
     InstagramIdentityPoolExhausted,
 )
-from trr_backend.socials.instagram.permalink_metadata import _shortcode_to_media_id as permalink_shortcode_to_media_id
+from trr_backend.socials.instagram.permalink_metadata import (
+    _shortcode_to_media_id as permalink_shortcode_to_media_id,
+)
 from trr_backend.socials.instagram.rate_controller import InstagramRateController
 from trr_backend.socials.instagram.request_client import InstagramRequestClient, InstagramRequestFailure
 from trr_backend.socials.instagram.resume_state import InstagramResumeState
 
 logger = logging.getLogger(__name__)
+
+_GRAPHQL_RECOVERY_POLICY_BY_ERROR_CODE: dict[str, str] = {
+    "instagram_graphql_cursor_rate_limited": "never_browser_fallback",
+    "instagram_graphql_checkpoint_required": "browser_fallback",
+    "instagram_graphql_cursor_unauthorized": "browser_fallback",
+    "instagram_graphql_cursor_forbidden": "browser_fallback",
+    "checkpoint_required": "browser_fallback",
+    "challenge_required": "browser_fallback",
+    "feedback_required": "browser_fallback",
+    "login_required": "browser_fallback",
+    "redirect_login": "browser_fallback",
+    "unauthorized": "browser_fallback",
+    "forbidden": "browser_fallback",
+}
 _INSTAGRAM_BROWSER_SESSIONS = AccountBrowserSessionManager(
     platform="instagram",
     cookie_domains=(".instagram.com",),
@@ -331,6 +365,32 @@ class InstagramScraper:
         self._active_identity = None
         self._fallback_chain: list[str] = []
         self._identity_rotation_attempted_this_scrape = False
+        self._auth_session = None
+        self._attach_current_auth_session()
+
+    @property
+    def _request_count(self) -> int:
+        return self._rate_controller._request_count
+
+    @_request_count.setter
+    def _request_count(self, value: int) -> None:
+        self._rate_controller._request_count = int(value)
+
+    @property
+    def _consecutive_success(self) -> int:
+        return self._rate_controller._consecutive_success
+
+    @_consecutive_success.setter
+    def _consecutive_success(self, value: int) -> None:
+        self._rate_controller._consecutive_success = int(value)
+
+    @property
+    def _last_429_at(self) -> float | None:
+        return self._rate_controller._last_429_at
+
+    @_last_429_at.setter
+    def _last_429_at(self, value: float | None) -> None:
+        self._rate_controller._last_429_at = value
 
     @staticmethod
     def _env_truthy(name: str) -> bool:
@@ -398,6 +458,75 @@ class InstagramScraper:
             self.last_retrieval_meta["session_id"] = self._active_identity.session_id
             self.last_retrieval_meta["session_generation"] = getattr(self._active_identity, "generation", None)
             self.last_retrieval_meta["proxy_label"] = getattr(self._active_identity, "proxy_label", None)
+        self._annotate_auth_session_meta()
+
+    def _attach_current_auth_session(self) -> None:
+        try:
+            from trr_backend.socials.instagram.auth_resolver import get_current_instagram_auth_session
+        except Exception:  # noqa: BLE001
+            return
+        auth_session = get_current_instagram_auth_session()
+        if auth_session is None:
+            return
+        sessionid = str((self.cookies or {}).get("sessionid") or "").strip()
+        auth_sessionid = str((auth_session.cookies or {}).get("sessionid") or "").strip()
+        if sessionid and auth_sessionid and sessionid == auth_sessionid:
+            self.attach_auth_session(auth_session)
+
+    def attach_auth_session(self, auth_session: Any) -> None:
+        if auth_session is None:
+            return
+        self._auth_session = auth_session
+        if getattr(auth_session, "session_account_id", None):
+            self.browser_account_id = str(auth_session.session_account_id)
+        if getattr(auth_session, "cookies", None):
+            self.cookies = dict(auth_session.cookies)
+            for key, value in self.cookies.items():
+                self.session.cookies.set(str(key), str(value), domain=".instagram.com")
+        self._annotate_auth_session_meta()
+
+    def _annotate_auth_session_meta(self) -> None:
+        auth_session = getattr(self, "_auth_session", None)
+        if auth_session is None:
+            return
+        self.last_retrieval_meta.update(
+            {
+                "auth_cookie_source": getattr(auth_session, "source", None),
+                "auth_cookie_validated": bool(getattr(auth_session, "validated", False)),
+                "auth_cookie_validation_reason": getattr(auth_session, "validation_reason", None),
+                "auth_cookie_validation_category": getattr(auth_session, "validation_category", None),
+                "auth_cookie_refresh_attempted": bool(getattr(auth_session, "refreshed", False)),
+                "auth_cookie_refresh_method": getattr(auth_session, "refresh_method", None),
+                "auth_browser_session_used": bool(
+                    (getattr(auth_session, "metadata", {}) or {}).get("browser_session_used")
+                ),
+                "auth_cookie_repaired_from_browser_session": bool(
+                    getattr(auth_session, "repaired_from_browser_session", False)
+                ),
+                "auth_cookie_stale_ok": bool(getattr(auth_session, "stale_ok", False)),
+                "auth_session_account_id": getattr(auth_session, "session_account_id", None),
+                "auth_session_context": getattr(auth_session, "caller_context", None),
+                "auth_resolver_version": getattr(auth_session, "resolver_version", None),
+            }
+        )
+
+    def _graphql_recovery_policy(self, error_code: str | None) -> str | None:
+        normalized_error_code = str(error_code or "").strip().lower()
+        if not normalized_error_code:
+            return None
+        return _GRAPHQL_RECOVERY_POLICY_BY_ERROR_CODE.get(normalized_error_code)
+
+    def _graphql_auth_recoverable_errors(self) -> set[str]:
+        return {
+            error_code
+            for error_code, policy in _GRAPHQL_RECOVERY_POLICY_BY_ERROR_CODE.items()
+            if policy in {"retry_only", "browser_fallback"}
+        }
+
+    def _append_fallback_stage(self, stage: str) -> None:
+        normalized_stage = str(stage or "").strip()
+        if normalized_stage and normalized_stage not in self._fallback_chain:
+            self._fallback_chain.append(normalized_stage)
 
     def _resolved_browser_account_id(self, fallback_account_id: str | None = None) -> str:
         return self._browser_session_manager.resolve_account_id(
@@ -907,7 +1036,9 @@ class InstagramScraper:
         if preserve_session_cookies:
             preserved_cookies = self._request_cookies()
         else:
-            preserved_cookies = {str(key): str(value) for key, value in (self.cookies or {}).items() if value is not None}
+            preserved_cookies = {
+                str(key): str(value) for key, value in (self.cookies or {}).items() if value is not None
+            }
         self.session = self._create_session()
         if isinstance(self._request_client, InstagramRequestClient):
             self._request_client = InstagramRequestClient(session=self.session)
@@ -1354,12 +1485,25 @@ class InstagramScraper:
 
         context = self._extract_profile_page_context(response.text or "")
         if response.cookies:
-            self._request_cookies()
+            # Merge fresh Set-Cookie values into the session so rotated
+            # csrftoken / ds_user_id values persist for subsequent calls.
+            # Previously this line called _request_cookies() (a reader) and
+            # dropped the response, silently losing fresh auth state.
+            for cookie_name, cookie_value in response.cookies.items():
+                if cookie_value is None:
+                    continue
+                self.session.cookies.set(
+                    str(cookie_name),
+                    str(cookie_value),
+                    domain=".instagram.com",
+                )
         if context:
             self._profile_page_context_cache[username] = dict(context)
         return dict(context or cached)
 
     def _rate_limit(self, delay: float, *, fast_mode: bool = False):
+        self._rate_controller._sleeper = time.sleep
+        self._rate_controller._clock = time.monotonic
         self._rate_controller.before_query(
             QUERY_TYPE_LEGACY,
             base_delay=delay,
@@ -2406,7 +2550,12 @@ class InstagramScraper:
                             "graphql_cursor": str(cursor or "").strip() or None,
                         }
                     )
-                    if exc.error_code == "rate_limited" and self._identity_pool_enabled and self._identity_pool and self._active_identity:
+                    if (
+                        exc.error_code == "rate_limited"
+                        and self._identity_pool_enabled
+                        and self._identity_pool
+                        and self._active_identity
+                    ):
                         self._identity_pool.record_rate_limited(self._active_identity.session_id)
                     elif exc.error_code in {"forbidden", "unauthorized", "redirect_login"}:
                         self.last_retrieval_meta["session_block_reason"] = exc.error_code
@@ -2430,7 +2579,11 @@ class InstagramScraper:
                     saw_request_error = True
                     status_code = getattr(getattr(e, "response", None), "status_code", None)
                     if cursor and status_code in (401, 403):
-                        logger.warning("GraphQL auth error %s for doc_id %s — skipping remaining doc_ids", status_code, doc_id)
+                        logger.warning(
+                            "GraphQL auth error %s for doc_id %s — skipping remaining doc_ids",
+                            status_code,
+                            doc_id,
+                        )
                         break
                     logger.warning("GraphQL request failed for doc_id %s: %s", doc_id, e)
                     continue
@@ -2468,34 +2621,19 @@ class InstagramScraper:
         elif self.last_retrieval_meta.get("request_error_code"):
             self.last_retrieval_meta["transport"] = "requests_enriched"
             self.last_retrieval_meta["retrieval_transport"] = "requests_enriched"
-        auth_recoverable_errors = {
-            "instagram_graphql_checkpoint_required",
-            "instagram_graphql_cursor_unauthorized",
-            "instagram_graphql_cursor_forbidden",
-            "checkpoint_required",
-            "challenge_required",
-            "feedback_required",
-            "login_required",
-            "redirect_login",
-            "unauthorized",
-            "forbidden",
-        }
-        unrecoverable_fallback_errors = {
-            "instagram_graphql_cursor_rate_limited",
-            "instagram_graphql_checkpoint_required",
-            "instagram_graphql_cursor_unauthorized",
-            "instagram_graphql_cursor_forbidden",
-        }
+        error_code = str(self.last_retrieval_meta.get("error_code") or "").strip() or None
+        auth_recoverable_errors = self._graphql_auth_recoverable_errors()
+        recovery_policy = self._graphql_recovery_policy(error_code)
         # ── Lightweight session rotation before escalating to interactive login ──
         _auto_rotation_attempted = getattr(self, "_auto_rotation_attempted_this_scrape", False)
         if (
-            self.last_retrieval_meta.get("error_code") in auth_recoverable_errors
+            error_code in auth_recoverable_errors
             and not _auto_rotation_attempted
         ):
             logger.warning(
                 "GraphQL auth error for @%s (%s) — attempting auto cookie refresh before interactive login",
                 username,
-                self.last_retrieval_meta.get("error_code"),
+                error_code,
             )
             self._auto_rotation_attempted_this_scrape = True
             refresh_result = self._try_auto_refresh_cookies()
@@ -2513,19 +2651,20 @@ class InstagramScraper:
                 )
                 if retry_payload is not None:
                     self._auto_rotation_attempted_this_scrape = False
+                    self._annotate_identity_meta()
                     return retry_payload
 
         # If auth failed and we're running locally, open Chrome for manual re-auth (once per scrape)
         _interactive_already_attempted = getattr(self, "_interactive_login_attempted_this_scrape", False)
         if (
-            self.last_retrieval_meta.get("error_code") in auth_recoverable_errors
+            error_code in auth_recoverable_errors
             and self._is_local_environment()
             and not _interactive_already_attempted
         ):
             logger.warning(
                 "Instagram auth failed for @%s (%s) — attempting interactive Chrome login",
                 username,
-                self.last_retrieval_meta.get("error_code"),
+                error_code,
             )
             self._interactive_login_attempted_this_scrape = True
             interactive_result = self._try_interactive_login()
@@ -2545,19 +2684,23 @@ class InstagramScraper:
                 if retry_payload is not None:
                     # Reset the guard on success — cookies are working again
                     self._interactive_login_attempted_this_scrape = False
+                    self._annotate_identity_meta()
                     return retry_payload
                 logger.warning(
-                    "Instagram GraphQL still failing for @%s after interactive login — falling through to browser fallback",
+                    (
+                        "Instagram GraphQL still failing for @%s after interactive login "
+                        "— falling through to browser fallback"
+                    ),
                     username,
                 )
-        elif _interactive_already_attempted and self.last_retrieval_meta.get("error_code") in auth_recoverable_errors:
+        elif _interactive_already_attempted and error_code in auth_recoverable_errors:
             logger.warning(
                 "Instagram GraphQL 403 for @%s persists after interactive login — falling through to browser fallback",
                 username,
             )
         rotated_payload = self._maybe_rotate_identity_after_failure(
             username=username,
-            error_code=self.last_retrieval_meta.get("error_code"),
+            error_code=error_code,
             error=last_error,
             cursor=cursor,
             delay=delay,
@@ -2568,22 +2711,33 @@ class InstagramScraper:
         )
         if rotated_payload is not None:
             self._identity_rotation_attempted_this_scrape = False
+            self._annotate_identity_meta()
             return rotated_payload
-        if self.last_retrieval_meta.get("error_code") in unrecoverable_fallback_errors:
+        if recovery_policy == "never_browser_fallback":
             logger.warning(
                 "Skipping Instagram GraphQL Playwright fallback for @%s because %s is not browser-recoverable",
                 username,
-                self.last_retrieval_meta.get("error_code"),
+                error_code,
             )
+            self._annotate_identity_meta()
+            return None
+        if recovery_policy == "retry_only":
+            logger.warning(
+                "Skipping Instagram GraphQL Playwright fallback for @%s because %s is retry-only",
+                username,
+                error_code,
+            )
+            self._annotate_identity_meta()
             return None
         if allow_browser_fallback and self._playwright_graphql_fallback_enabled():
-            self._fallback_chain.append("browser_intercept")
+            self._append_fallback_stage("browser_intercept")
             fallback_payload = self._fetch_posts_graphql_with_browser(
                 username,
                 cursor,
                 request_timeout=timeout,
             )
             if fallback_payload is not None:
+                self._annotate_identity_meta()
                 return fallback_payload
         self._annotate_identity_meta()
         return None
