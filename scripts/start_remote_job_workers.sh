@@ -25,6 +25,12 @@ GOOGLE_NEWS_LEASE_SECONDS="${TRR_GOOGLE_NEWS_WORKER_LEASE_SECONDS:-300}"
 SOCIAL_POLL_SECONDS="${TRR_SOCIAL_INGEST_WORKER_POLL_SECONDS:-3}"
 SOCIAL_POSTS_WORKERS="${TRR_SOCIAL_INGEST_WORKER_POSTS:-2}"
 SOCIAL_COMMENTS_WORKERS="${TRR_SOCIAL_INGEST_WORKER_COMMENTS:-2}"
+# P0-2: Dedicated Instagram comments Scrapling lane. Opt-in via env (default 0)
+# because Scrapling + residential-proxy setup may not be present in every env.
+# Set TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING>=1 in the deployed environment
+# to heartbeat the `instagram_comments_scrapling` worker lane required by the
+# queue-mode comments scrape route.
+SOCIAL_COMMENTS_SCRAPLING_WORKERS="${TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING:-0}"
 SOCIAL_MEDIA_MIRROR_WORKERS="${TRR_SOCIAL_INGEST_WORKER_MEDIA_MIRROR:-1}"
 SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS="${TRR_SOCIAL_INGEST_WORKER_COMMENT_MEDIA_MIRROR:-1}"
 
@@ -130,6 +136,7 @@ fi
 if flag_is_enabled "$SOCIAL_INGEST_ENABLED"; then
   SOCIAL_POSTS_WORKERS="$(normalize_optional_count "$SOCIAL_POSTS_WORKERS" "TRR_SOCIAL_INGEST_WORKER_POSTS")"
   SOCIAL_COMMENTS_WORKERS="$(normalize_optional_count "$SOCIAL_COMMENTS_WORKERS" "TRR_SOCIAL_INGEST_WORKER_COMMENTS")"
+  SOCIAL_COMMENTS_SCRAPLING_WORKERS="$(normalize_optional_count "$SOCIAL_COMMENTS_SCRAPLING_WORKERS" "TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING")"
   SOCIAL_MEDIA_MIRROR_WORKERS="$(normalize_optional_count "$SOCIAL_MEDIA_MIRROR_WORKERS" "TRR_SOCIAL_INGEST_WORKER_MEDIA_MIRROR")"
   SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS="$(normalize_optional_count "$SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS" "TRR_SOCIAL_INGEST_WORKER_COMMENT_MEDIA_MIRROR")"
   if [[ "$SOCIAL_POSTS_WORKERS" -gt 0 ]]; then
@@ -137,6 +144,12 @@ if flag_is_enabled "$SOCIAL_INGEST_ENABLED"; then
   fi
   if [[ "$SOCIAL_COMMENTS_WORKERS" -gt 0 ]]; then
     start_worker "social-ingest:comments" python -m scripts.socials.worker --stage comments --parallel "$SOCIAL_COMMENTS_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
+  fi
+  if [[ "$SOCIAL_COMMENTS_SCRAPLING_WORKERS" -gt 0 ]]; then
+    # P0-2: Dedicated lane. The wrapper sets SOCIAL_WORKER_LANE and prepends
+    # `--stage comments_scrapling --platform instagram` so this process only
+    # claims jobs that require the `instagram_comments_scrapling` lane.
+    start_worker "social-ingest:comments-scrapling" python -m scripts.socials.instagram.comments_worker --parallel "$SOCIAL_COMMENTS_SCRAPLING_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
   fi
   if [[ "$SOCIAL_MEDIA_MIRROR_WORKERS" -gt 0 ]]; then
     start_worker "social-ingest:media-mirror" python -m scripts.socials.worker --stage media_mirror --parallel "$SOCIAL_MEDIA_MIRROR_WORKERS" --interval "$SOCIAL_POLL_SECONDS"

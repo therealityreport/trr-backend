@@ -9,6 +9,7 @@ Usage:
     python scripts/socials/instagram/local_backfill.py --account bravotv
     python scripts/socials/instagram/local_backfill.py --account bravotv --source-scope bravo
 """
+
 from __future__ import annotations
 
 import argparse

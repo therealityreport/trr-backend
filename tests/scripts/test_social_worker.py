@@ -16,6 +16,10 @@ def test_requires_media_mirror_s3_preflight() -> None:
     assert worker._requires_media_mirror_s3_preflight(stage="comments", platform="instagram") is False  # noqa: SLF001
 
 
+def test_claim_stage_candidates_supports_comments_scrapling() -> None:
+    assert worker._claim_stage_candidates("comments_scrapling") == ("comments_scrapling",)  # noqa: SLF001
+
+
 def test_worker_heartbeat_seeds_auth_capabilities(monkeypatch) -> None:
     monkeypatch.setattr(
         worker,

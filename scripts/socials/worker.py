@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
+from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
 from trr_backend.socials.control_plane import (
     cancel_claimed_job_before_processing,
     claim_next_queued_jobs,
@@ -26,12 +27,20 @@ from trr_backend.socials.control_plane import (
     recover_stale_running_jobs,
     update_worker_heartbeat,
 )
-from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.utils.env import load_env
 
 logger = logging.getLogger("socials.worker")
 _UNSET = object()
+
+
+def _worker_lane_from_env() -> str | None:
+    value = str(os.getenv("SOCIAL_WORKER_LANE") or "").strip().lower()
+    return value or None
+
+
+def _worker_script_label() -> str:
+    return str(os.getenv("SOCIAL_WORKER_SCRIPT") or "scripts.socials.worker").strip() or "scripts.socials.worker"
 
 
 class WorkerHeartbeat:
@@ -58,7 +67,8 @@ class WorkerHeartbeat:
                 "auth_capabilities": get_worker_auth_capabilities(),
                 "hostname": socket.gethostname(),
                 "pid": os.getpid(),
-                "worker_script": "scripts.socials.worker",
+                "worker_lane": _worker_lane_from_env(),
+                "worker_script": _worker_script_label(),
             },
         }
         self._last_written_status: str | None = None
@@ -178,6 +188,8 @@ def _claim_stage_candidates(stage: str | None) -> tuple[str | None, ...]:
         # Keep comments draining first, but let otherwise-idle comments workers
         # borrow post shards once the comment queue is empty.
         return ("comments", "posts")
+    if normalized_stage == "comments_scrapling":
+        return ("comments_scrapling",)
     return (stage,)
 
 
@@ -223,6 +235,7 @@ def parse_args() -> argparse.Namespace:
             "any",
             "posts",
             "comments",
+            "comments_scrapling",
             "media_mirror",
             "comment_media_mirror",
             "shared_account_discovery",
