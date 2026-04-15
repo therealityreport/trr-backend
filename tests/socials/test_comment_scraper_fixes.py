@@ -3346,6 +3346,8 @@ def test_instagram_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatc
     scraper = InstagramScraper(cookies={})
     config = InstagramScrapeConfig(username="bravotv")
     events: list[dict[str, int | str]] = []
+    monkeypatch.setattr(scraper, "_try_auto_refresh_cookies", lambda: {"refreshed": False})
+    monkeypatch.setattr(scraper, "_try_interactive_login", lambda: {"refreshed": False})
 
     monkeypatch.setattr(
         scraper,
