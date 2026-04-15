@@ -19,10 +19,11 @@ _STREAM_HANDLER_NAME = "trr-stream"
 _BETTER_STACK_HANDLER_NAME = "trr-better-stack"
 
 try:  # pragma: no cover - optional dependency in local/test envs
-    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 except Exception:  # pragma: no cover - dependency may be absent
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
     Counter = None
+    Gauge = None
     Histogram = None
     generate_latest = None
 
@@ -44,10 +45,36 @@ if Counter is not None:
         "Count of formerly-suppressed failures now surfaced as explicit logs/guards",
         ("service", "component", "reason"),
     )
+    _POSTGRES_POOL_IN_USE = Gauge(
+        "trr_api_postgres_pool_in_use",
+        "Number of Postgres connections currently checked out of the pool",
+        ("service",),
+    )
+    _POSTGRES_POOL_AVAILABLE = Gauge(
+        "trr_api_postgres_pool_available",
+        "Number of Postgres connections currently idle and available in the pool",
+        ("service",),
+    )
+    _POSTGRES_POOL_EXHAUSTED = Counter(
+        "trr_api_postgres_pool_exhausted_total",
+        "Count of pool-exhaustion events (checkout refused because the pool is full)",
+        ("service", "reason"),
+    )
+    _POSTGRES_POOL_ACQUIRE_DURATION = Histogram(
+        "trr_api_postgres_pool_acquire_duration_seconds",
+        "Time spent waiting to acquire a pooled Postgres connection",
+        ("service", "label"),
+        # Buckets span instant-acquire (sub-ms) through multi-second queueing.
+        buckets=(0.001, 0.005, 0.025, 0.1, 0.25, 1, 5, 15),
+    )
 else:  # pragma: no cover - metrics disabled path
     _REQUEST_TOTAL = None
     _REQUEST_LATENCY = None
     _SUPPRESSED_PATH_CONVERSIONS = None
+    _POSTGRES_POOL_IN_USE = None
+    _POSTGRES_POOL_AVAILABLE = None
+    _POSTGRES_POOL_EXHAUSTED = None
+    _POSTGRES_POOL_ACQUIRE_DURATION = None
 
 
 def _env_bool(name: str, *, default: bool = False) -> bool:
@@ -241,6 +268,36 @@ def inc_suppressed_path_conversion(component: str, reason: str) -> None:
         (component or "unknown").strip() or "unknown",
         (reason or "unspecified").strip() or "unspecified",
     ).inc()
+
+
+def record_postgres_pool_state(*, in_use: int | None, available: int | None) -> None:
+    """Emit current Postgres pool in-use/available counts as Prometheus gauges."""
+    if _POSTGRES_POOL_IN_USE is None or _POSTGRES_POOL_AVAILABLE is None:
+        return
+    if in_use is not None:
+        _POSTGRES_POOL_IN_USE.labels(_SERVICE_NAME).set(float(in_use))
+    if available is not None:
+        _POSTGRES_POOL_AVAILABLE.labels(_SERVICE_NAME).set(float(available))
+
+
+def record_postgres_pool_exhausted(reason: str) -> None:
+    """Increment the pool-exhaustion counter, labelled by classifier reason."""
+    if _POSTGRES_POOL_EXHAUSTED is None:
+        return
+    _POSTGRES_POOL_EXHAUSTED.labels(
+        _SERVICE_NAME,
+        (reason or "unspecified").strip() or "unspecified",
+    ).inc()
+
+
+def record_postgres_pool_acquire_duration(label: str, duration_seconds: float) -> None:
+    """Record a histogram observation for the time taken to acquire a pooled connection."""
+    if _POSTGRES_POOL_ACQUIRE_DURATION is None:
+        return
+    _POSTGRES_POOL_ACQUIRE_DURATION.labels(
+        _SERVICE_NAME,
+        (label or "unknown").strip() or "unknown",
+    ).observe(max(0.0, float(duration_seconds)))
 
 
 def metrics_available() -> bool:

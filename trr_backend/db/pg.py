@@ -24,6 +24,11 @@ from psycopg2.pool import PoolError, ThreadedConnectionPool
 from trr_backend.db.connection import (
     resolve_database_url_candidate_details,
 )
+from trr_backend.observability import (
+    record_postgres_pool_acquire_duration,
+    record_postgres_pool_exhausted,
+    record_postgres_pool_state,
+)
 
 if TYPE_CHECKING:
     from psycopg2.extensions import connection as connection_type
@@ -40,6 +45,11 @@ DEFAULT_IDLE_IN_TX_TIMEOUT_MS = 60000
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_STATEMENT_TIMEOUT_MS = 30000
 DEFAULT_DB_APPLICATION_NAME = "trr-backend"
+# Transaction-local search_path applied to every write checkout. Pinning prevents
+# a prior caller's `SET search_path` from leaking through the pooled connection.
+# Read checkouts run under autocommit and therefore cannot use SET LOCAL; reads
+# in this codebase are schema-qualified, so the server default is acceptable.
+DEFAULT_WRITE_SEARCH_PATH = "public, core, firebase_surveys"
 
 _pool: ThreadedConnectionPool | None = None
 _active_pool_dsn: str | None = None
@@ -339,16 +349,19 @@ def _log_checkout(
             "pool_id": id(pool),
         }
     in_use, available = _pool_counts(pool)
+    acquire_duration_seconds = max(0.0, time.perf_counter() - acquire_started_at)
     logger.info(
         "[db-pool] checkout id=%s label=%s acquire_ms=%.1f backend_pid=%s tx_status=%s in_use=%s available=%s",
         checkout_id,
         label,
-        (time.perf_counter() - acquire_started_at) * 1000.0,
+        acquire_duration_seconds * 1000.0,
         getattr(conn, "get_backend_pid", lambda: None)(),
         _transaction_status_name(conn),
         in_use,
         available,
     )
+    record_postgres_pool_state(in_use=in_use, available=available)
+    record_postgres_pool_acquire_duration(label, acquire_duration_seconds)
     return checkout_id
 
 
@@ -376,6 +389,7 @@ def _log_return(
         in_use,
         available,
     )
+    record_postgres_pool_state(in_use=in_use, available=available)
 
 
 def _ensure_connection_idle(conn: connection_type, *, label: str, phase: str) -> bool:
@@ -688,6 +702,10 @@ def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, c
                     type(error).__name__,
                     *_pool_counts(pool),
                 )
+                if _is_pool_exhausted_error(error):
+                    record_postgres_pool_exhausted(
+                        _database_service_unavailable_reason(_error_message(error)),
+                    )
                 if _is_pool_exhausted_error(error) and acquire_attempt < (acquire_attempts - 1):
                     time.sleep(acquire_sleep_seconds)
                     continue
@@ -707,6 +725,11 @@ def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, c
 def db_connection(*, label: str = "write"):
     pool, conn, checkout_id = _get_connection_with_retry(label=label)
     try:
+        # Pin search_path for the duration of this transaction so pooled connections
+        # cannot inherit a prior caller's SET search_path. psycopg2 starts the
+        # transaction implicitly with this first statement.
+        with conn.cursor() as _cur:
+            _cur.execute(f"SET LOCAL search_path = {DEFAULT_WRITE_SEARCH_PATH}")
         yield conn
         conn.commit()
     except Exception as error:
