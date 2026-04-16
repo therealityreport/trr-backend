@@ -167,8 +167,10 @@ class TikTokPostsScraplingFetcher:
         self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
         self._sec_uid: str | None = None
 
-        from scrapling.fetchers import StealthyFetcher
-
+        try:
+            from scrapling.fetchers import StealthyFetcher
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("Scrapling StealthyFetcher is unavailable. Install scrapling[fetchers].") from exc
         self._fetcher = StealthyFetcher()
         self._http_client: httpx.AsyncClient | None = None
 
