@@ -78,5 +78,15 @@ Before choosing, resolve:
 
 ## Tracking
 
-- Phase E task: make final decision and act on it
+- Phase E task: make final TikTok signature-gap decision and act on it
 - Related: if we stay with Option A, prioritize a `test_signature_generation_matches_browser` integration test that cross-checks our Python hash against a live Patchright page.eval response
+
+## Other Phase E follow-ups (unrelated to TikTok signature gap)
+
+These items surfaced during Phase D cross-task review but were out of scope. Tracked here so a Phase E starter can find them in one place:
+
+- **Migrate comments_scrapling fetcher to use `trr_backend/socials/_scrapling_http_utils.py`.** Phase D Task 1 extracted 5 shared helpers (`env_truthy`, `response_text`, `status_code`, `safe_location`, `extract_response_cookies`) and migrated both posts_scrapling fetchers, but the comments_scrapling fetcher still inlines its own copies at `trr_backend/socials/instagram/comments_scrapling/fetcher.py` lines 45, 57, 67, 76, 93. The migration is mechanical (same aliased-import pattern Task 1 used) but should land with a regression run of the comments retry suite.
+
+- **Scrub raw cookie values from `comments_scrapling.fetcher.runtime_metadata`.** Phase D Task 2 fixed the cookie-value leak in both posts_scrapling fetchers (now exposes only `warmup_cookie_names` + `warmup_cookie_count`), but the comments_scrapling fetcher at `trr_backend/socials/instagram/comments_scrapling/fetcher.py` line 183 still serializes the full `warmup_cookie_delta: dict[str, str]` into `social.scrape_jobs.metadata.fetcher_runtime`. This persists session cookies (sessionid, csrftoken, etc.) in plaintext where any operator with read access to the metadata column can see them. Apply the same fix as Task 2.
+
+- **Orphaned-run cleanup pattern.** Phase D `start_instagram_posts_scrapling_scrape` and `start_tiktok_posts_scrapling_scrape` (and the comments-lane equivalent they were modeled on) leave a `scrape_runs` row in status `queued` if `_create_job` fails after `_create_run` succeeds. The advisory lock prevents double-starts, but the orphan blocks future enqueues for that account until manually cleared. Either wrap both calls in a single transaction or add a finally-block cleanup.

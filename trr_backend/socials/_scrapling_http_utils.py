@@ -1,8 +1,12 @@
 """Shared pure helpers for Scrapling-based fetchers.
 
-Extracted from byte-identical copies in comments_scrapling + posts_scrapling
-fetchers. These helpers handle the tiny response-shape differences between
-httpx (the post-warmup transport) and Scrapling (the warmup transport).
+Extracted from byte-identical copies in the Instagram and TikTok
+posts_scrapling fetchers. The comments_scrapling fetcher still inlines
+its own copies of these helpers; migrating it to import from this module
+is tracked for Phase E.
+
+These helpers handle the tiny response-shape differences between httpx
+(the post-warmup transport) and Scrapling (the warmup transport).
 
 Kept small and side-effect-free so they can be imported into any lane
 without triggering scrapling/httpx module-level costs.
