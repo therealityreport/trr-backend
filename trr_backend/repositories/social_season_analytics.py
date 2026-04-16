@@ -50567,6 +50567,109 @@ def start_instagram_posts_scrapling_scrape(
                 )
 
 
+def start_tiktok_posts_scrapling_scrape(
+    *,
+    account_handle: str,
+    max_pages: int | None = None,
+    source_scope: str = "bravo",
+    season_id: str | None = None,
+    initiated_by: str | None = None,
+    inline_worker_id: str | None = None,
+) -> dict[str, Any]:
+    """Enqueue a manual posts_scrapling scrape run for one TikTok account.
+
+    Returns: {run_id, job_id, status, platform, account_handle, required_worker_lane}
+    Raises: SocialIngestValidationError on bad args, SocialIngestConflictError on concurrent run.
+    """
+    normalized_platform = "tiktok"
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if not normalized_account:
+        raise SocialIngestValidationError(
+            "SOCIAL_POSTS_SCRAPLING_ACCOUNT_REQUIRED",
+            "A TikTok account handle is required.",
+        )
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+
+    lock_key = _social_account_posts_scrapling_start_lock_key(normalized_platform, normalized_account)
+    lock_label = f"posts-scrapling-start-lock:tiktok:{normalized_account[:48]}"
+    with pg.db_connection(label=lock_label) as lock_conn:
+        with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+            lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
+        if not bool(lock_row.get("locked")):
+            active_run = get_active_social_account_posts_scrapling_run(normalized_platform, normalized_account)
+            raise SocialIngestConflictError(
+                "SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE",
+                f"Posts_scrapling run already active for @{normalized_account}.",
+                detail=active_run or {"platform": normalized_platform, "account_handle": normalized_account},
+            )
+        try:
+            active_run = get_active_social_account_posts_scrapling_run(normalized_platform, normalized_account)
+            if active_run:
+                raise SocialIngestConflictError(
+                    "SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE",
+                    f"Posts_scrapling run {active_run.get('run_id')} already active for @{normalized_account}.",
+                    detail=active_run,
+                )
+            if is_queue_enabled():
+                assert_worker_available_when_queue_enabled(
+                    required_worker_lane=TIKTOK_POSTS_SCRAPLING_WORKER_LANE,
+                    platform=normalized_platform,
+                )
+
+            run_status = "queued" if is_queue_enabled() else "pending"
+            run_config = {
+                "platform": normalized_platform,
+                "account": normalized_account,
+                "source_scope": source_scope,
+                "stage": TIKTOK_POSTS_SCRAPLING_STAGE,
+                "max_pages": max_pages,
+                "season_id": season_id,
+                "required_worker_lane": TIKTOK_POSTS_SCRAPLING_WORKER_LANE,
+                "ingest_mode": "posts_only",
+            }
+            run_id = _create_run(
+                None,
+                source_scope=source_scope,
+                initiated_by=initiated_by,
+                config=run_config,
+                status=run_status,
+            )
+            job_id = _create_job(
+                None,
+                run_id=run_id,
+                platform=normalized_platform,
+                source_scope=source_scope,
+                job_type="posts",
+                stage=TIKTOK_POSTS_SCRAPLING_STAGE,
+                config={**run_config, "account": normalized_account},
+                initiated_by=initiated_by,
+                status=run_status,
+                priority=105,
+                worker_id=inline_worker_id,
+                preclaim=bool(inline_worker_id),
+            )
+            if is_queue_enabled():
+                dispatch_due_social_jobs(run_id=run_id)
+            return {
+                "run_id": run_id,
+                "job_id": job_id,
+                "status": run_status,
+                "platform": normalized_platform,
+                "account_handle": normalized_account,
+                "required_worker_lane": TIKTOK_POSTS_SCRAPLING_WORKER_LANE,
+            }
+        finally:
+            try:
+                with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                    pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[posts-scrapling-start-lock] advisory unlock failed for tiktok/%s",
+                    normalized_account,
+                    exc_info=True,
+                )
+
+
 def get_social_account_comments_scrape_run_progress(
     platform: str,
     account_handle: str,
