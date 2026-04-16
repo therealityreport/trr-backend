@@ -171,6 +171,7 @@ COMMENT_MEDIA_MIRROR_STAGE = "comment_media_mirror"
 INSTAGRAM_COMMENTS_SCRAPLING_STAGE = "comments_scrapling"
 INSTAGRAM_POSTS_SCRAPLING_STAGE = "posts_scrapling"
 TIKTOK_POSTS_SCRAPLING_STAGE = "tiktok_posts_scrapling"
+THREADS_POSTS_SCRAPLING_STAGE = "threads_posts_scrapling"
 SHARED_ACCOUNT_POSTS_STAGE = "shared_account_posts"
 SHARED_ACCOUNT_DISCOVERY_STAGE = "shared_account_discovery"
 POST_CLASSIFY_STAGE = "post_classify"
@@ -20375,6 +20376,7 @@ def _ingest_youtube(
         scraped_comment_count,
         comment_errors,
     )
+    retrieval_meta = _merge_source_runtime(retrieval_meta, scraper)
     return scraped_video_count, scraped_comment_count, retrieval_meta
 
 
@@ -21413,6 +21415,7 @@ def _ingest_twitter(
     )
     retrieval_meta["hydrated_replies"] = hydrated_replies
     retrieval_meta["hydrated_quotes"] = hydrated_quotes
+    retrieval_meta = _merge_source_runtime(retrieval_meta, scraper)
     return scraped_post_count, scraped_reply_count, retrieval_meta
 
 
@@ -21755,6 +21758,7 @@ def _ingest_facebook(
     retrieval_meta["media_mirror_jobs_enqueued"] = mirror_jobs_enqueued
     retrieval_meta["scrape_counters"] = {"posts": post_count, "comments": comment_count}
     retrieval_meta["persist_counters"] = {"posts_upserted": matched_posts, "comments_upserted": comment_count}
+    retrieval_meta = _merge_source_runtime(retrieval_meta, scraper)
     return post_count, comment_count, retrieval_meta
 
 
@@ -22154,6 +22158,7 @@ def _ingest_threads(
         "saved_replies_count": saved_replies_count,
         "saved_quotes_count": saved_quotes_count,
     }
+    retrieval_meta = _merge_source_runtime(retrieval_meta, scraper)
     return post_count, comment_count, retrieval_meta
 
 
@@ -23842,6 +23847,17 @@ def _run_platform_stage(
             return posts, comments, meta
 
     raise RuntimeError(f"Platform {normalized_platform} ingest is not supported")
+
+
+def _merge_source_runtime(
+    retrieval_meta: dict[str, Any],
+    scraper: Any | None,
+) -> dict[str, Any]:
+    merged = dict(retrieval_meta or {})
+    runtime_meta = dict(getattr(scraper, "runtime_metadata", {}) or {})
+    if runtime_meta:
+        merged["source_runtime"] = runtime_meta
+    return merged
 
 
 def _run_platform_stage_via_crawlee(
@@ -32026,6 +32042,10 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             from trr_backend.socials.tiktok.posts_scrapling.job_runner import run_tiktok_posts_scrapling_job
 
             return run_tiktok_posts_scrapling_job(job, worker_id=worker_id)
+        if platform == "threads" and stage == THREADS_POSTS_SCRAPLING_STAGE:
+            from trr_backend.socials.threads.posts_scrapling.job_runner import run_threads_posts_scrapling_job
+
+            return run_threads_posts_scrapling_job(job, worker_id=worker_id)
         if stage in {
             SHARED_ACCOUNT_DISCOVERY_STAGE,
             SHARED_ACCOUNT_POSTS_STAGE,
@@ -32239,6 +32259,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         fetch_counters = _comment_stats_payload(dict(retrieval_meta.get("comment_stats") or {}))
         crawler_runtime = dict(retrieval_meta.get("crawler_runtime") or {})
         auth_context = dict(retrieval_meta.get("auth_context") or {})
+        source_runtime = dict(retrieval_meta.get("source_runtime") or {})
         base_metadata = {
             "stage": stage,
             "stage_counters": {"posts": posts_count, "comments": comments_count},
@@ -32249,6 +32270,7 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             "account": account,
             "crawler_runtime": crawler_runtime,
             "auth_context": auth_context,
+            "source_runtime": source_runtime,
             "retrieval_meta": retrieval_meta,
         }
         run_is_cancelled = False
@@ -50402,6 +50424,144 @@ def start_social_account_comments_scrape(
                 logger.debug(
                     "[comments-scrape-lock] advisory unlock failed for %s/%s",
                     normalized_platform,
+                    normalized_account,
+                    exc_info=True,
+                )
+
+
+def _social_account_posts_scrapling_start_lock_key(platform: str, account_handle: str) -> int:
+    """Per-(platform, account) advisory lock key preventing concurrent posts_scrapling starts."""
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    return int(
+        hashlib.md5(f"posts-scrapling-start:{normalized_platform}:{normalized_account}".encode()).hexdigest()[:15],
+        16,
+    ) % (2**31)
+
+
+def get_active_social_account_posts_scrapling_run(platform: str, account_handle: str) -> dict[str, Any] | None:
+    """Return an active (queued/running) posts_scrapling run for this account, if any."""
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    expected_stage = (
+        INSTAGRAM_POSTS_SCRAPLING_STAGE if normalized_platform == "instagram" else TIKTOK_POSTS_SCRAPLING_STAGE
+    )
+    row = pg.fetch_one(
+        """
+        select id::text as run_id, status
+        from social.scrape_runs
+        where status in ('queued', 'running')
+          and config ->> 'platform' = %s
+          and lower(config ->> 'account') = lower(%s)
+          and config ->> 'stage' = %s
+        order by created_at desc
+        limit 1
+        """,
+        [normalized_platform, normalized_account, expected_stage],
+    )
+    return row
+
+
+def start_instagram_posts_scrapling_scrape(
+    *,
+    account_handle: str,
+    max_pages: int | None = None,
+    fast_mode: bool = False,
+    source_scope: str = "bravo",
+    season_id: str | None = None,
+    initiated_by: str | None = None,
+    inline_worker_id: str | None = None,
+) -> dict[str, Any]:
+    """Enqueue a manual posts_scrapling scrape run for one Instagram account.
+
+    Returns: {run_id, job_id, status, platform, account_handle, required_worker_lane}
+    Raises: SocialIngestValidationError on bad args, SocialIngestConflictError on concurrent run.
+    """
+    normalized_platform = "instagram"
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if not normalized_account:
+        raise SocialIngestValidationError(
+            "SOCIAL_POSTS_SCRAPLING_ACCOUNT_REQUIRED",
+            "An Instagram account handle is required.",
+        )
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+
+    lock_key = _social_account_posts_scrapling_start_lock_key(normalized_platform, normalized_account)
+    lock_label = f"posts-scrapling-start-lock:instagram:{normalized_account[:48]}"
+    with pg.db_connection(label=lock_label) as lock_conn:
+        with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+            lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
+        if not bool(lock_row.get("locked")):
+            active_run = get_active_social_account_posts_scrapling_run(normalized_platform, normalized_account)
+            raise SocialIngestConflictError(
+                "SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE",
+                f"Posts_scrapling run already active for @{normalized_account}.",
+                detail=active_run or {"platform": normalized_platform, "account_handle": normalized_account},
+            )
+        try:
+            active_run = get_active_social_account_posts_scrapling_run(normalized_platform, normalized_account)
+            if active_run:
+                raise SocialIngestConflictError(
+                    "SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE",
+                    f"Posts_scrapling run {active_run.get('run_id')} already active for @{normalized_account}.",
+                    detail=active_run,
+                )
+            if is_queue_enabled():
+                assert_worker_available_when_queue_enabled(
+                    required_worker_lane=INSTAGRAM_POSTS_SCRAPLING_WORKER_LANE,
+                    platform=normalized_platform,
+                )
+
+            run_status = "queued" if is_queue_enabled() else "pending"
+            run_config = {
+                "platform": normalized_platform,
+                "account": normalized_account,
+                "source_scope": source_scope,
+                "stage": INSTAGRAM_POSTS_SCRAPLING_STAGE,
+                "max_pages": max_pages,
+                "fast_mode": fast_mode,
+                "season_id": season_id,
+                "required_worker_lane": INSTAGRAM_POSTS_SCRAPLING_WORKER_LANE,
+                "ingest_mode": "posts_only",
+            }
+            run_id = _create_run(
+                None,
+                source_scope=source_scope,
+                initiated_by=initiated_by,
+                config=run_config,
+                status=run_status,
+            )
+            job_id = _create_job(
+                None,
+                run_id=run_id,
+                platform=normalized_platform,
+                source_scope=source_scope,
+                job_type="posts",
+                stage=INSTAGRAM_POSTS_SCRAPLING_STAGE,
+                config={**run_config, "account": normalized_account},
+                initiated_by=initiated_by,
+                status=run_status,
+                priority=105,
+                worker_id=inline_worker_id,
+                preclaim=bool(inline_worker_id),
+            )
+            if is_queue_enabled():
+                dispatch_due_social_jobs(run_id=run_id)
+            return {
+                "run_id": run_id,
+                "job_id": job_id,
+                "status": run_status,
+                "platform": normalized_platform,
+                "account_handle": normalized_account,
+                "required_worker_lane": INSTAGRAM_POSTS_SCRAPLING_WORKER_LANE,
+            }
+        finally:
+            try:
+                with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                    pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[posts-scrapling-start-lock] advisory unlock failed for instagram/%s",
                     normalized_account,
                     exc_info=True,
                 )
