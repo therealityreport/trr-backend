@@ -18,6 +18,7 @@ Usage:
     # Resume from a specific cursor (printed when interrupted):
     python scripts/socials/instagram/direct_catalog_backfill.py --account bravotv --resume-cursor 'QVF...'
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(REPO_ROOT / ".env", override=True)
 
 logging.basicConfig(
@@ -61,6 +63,7 @@ def main() -> int:
         return 1
 
     from trr_backend.socials.instagram.scraper import InstagramScraper, ScrapeConfig
+
     if not args.dry_run:
         from trr_backend.socials.control_plane import (
             _batch_upsert_shared_catalog_instagram_posts,
@@ -85,7 +88,11 @@ def main() -> int:
     mode = "DRY RUN" if args.dry_run else "LIVE (saving to DB)"
     logger.info(
         "Starting direct catalog backfill for @%s [%s] (max_pages=%d, page_size=%d, delay=%.1fs)",
-        account_handle, mode, args.max_pages, args.page_size, args.delay,
+        account_handle,
+        mode,
+        args.max_pages,
+        args.page_size,
+        args.delay,
     )
     if cursor:
         logger.info("Resuming from cursor: %s", cursor[:40])
@@ -134,7 +141,13 @@ def main() -> int:
 
         logger.info(
             "Page %d: %d posts (total=%d, %.1f posts/s), transport=%s, has_next=%s, preview='%s'",
-            page, post_count, total_posts, rate, transport, has_next, first_preview,
+            page,
+            post_count,
+            total_posts,
+            rate,
+            transport,
+            has_next,
+            first_preview,
         )
 
         # Save to database using batch upsert (single INSERT for the whole page)
@@ -147,7 +160,9 @@ def main() -> int:
                 )
                 saved_count = len(saved_rows)
                 total_saved += saved_count
-                logger.info("Page %d: saved %d/%d posts to DB (total saved=%d)", page, saved_count, post_count, total_saved)
+                logger.info(
+                    "Page %d: saved %d/%d posts to DB (total saved=%d)", page, saved_count, post_count, total_saved
+                )
             except Exception:
                 logger.exception("Page %d: DB upsert failed — continuing to next page", page)
 
@@ -161,7 +176,10 @@ def main() -> int:
     elapsed = time.monotonic() - start_time
     logger.info(
         "=== DONE: %d pages, %d total posts scraped, %d saved to DB (%.0fs elapsed) ===",
-        page, total_posts, total_saved, elapsed,
+        page,
+        total_posts,
+        total_saved,
+        elapsed,
     )
     if cursor and page >= args.max_pages:
         logger.info("Hit max-pages limit. To continue: --resume-cursor '%s'", cursor)

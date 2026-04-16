@@ -5644,6 +5644,122 @@ def test_get_social_account_profile_summary_includes_catalog_fields(monkeypatch:
     assert payload["live_catalog_unique_hashtags"] == 1
 
 
+def test_get_social_account_profile_summary_uses_instagram_live_total_posts_with_source_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "_assert_social_account_profile_exists",
+        lambda *_args, **_kwargs: [
+            {
+                "metadata": {
+                    "profile_snapshot": {
+                        "display_name": "Bravo TV",
+                        "profile_url": "https://www.instagram.com/bravotv/",
+                    }
+                }
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo, "_social_account_profile_analysis_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_summary_totals",
+        lambda *_args, **_kwargs: {
+            "total_posts": 1099,
+            "total_engagement": 20,
+            "total_views": 200,
+            "first_post_at": None,
+            "last_post_at": None,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_catalog_summary_totals",
+        lambda *_args, **_kwargs: {
+            "catalog_total_posts": 1099,
+            "catalog_assigned_posts": 700,
+            "catalog_pending_review_posts": 99,
+            "catalog_unassigned_posts": 300,
+            "catalog_total_engagement": 345,
+            "catalog_total_views": 6789,
+            "catalog_first_post_at": None,
+            "catalog_last_post_at": None,
+            "caption_rows": 1099,
+            "stored_hashtag_instances": 19,
+        },
+    )
+    monkeypatch.setattr(social_repo, "_catalog_recent_runs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_comments_target_counts",
+        lambda *_args, **_kwargs: {
+            "available_posts": 1099,
+            "eligible_posts": 1099,
+            "missing_posts": 0,
+            "stale_posts": 0,
+        },
+    )
+    monkeypatch.setattr(social_repo, "_social_account_comments_recent_runs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_social_account_profile_hashtag_items", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_build_social_account_profile_entity_aggregates",
+        lambda *_args, **_kwargs: {"collaborators": [], "tags": []},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_serialize_social_account_profile_post_buckets",
+        lambda *_args, **_kwargs: ([], []),
+    )
+    monkeypatch.setattr(social_repo, "_avatar_registry_lookup_any", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        social_repo,
+        "_cached_live_profile_total_posts",
+        lambda *_args, **_kwargs: 16200,
+    )
+
+    payload = social_repo.get_social_account_profile_summary("instagram", "bravotv")
+
+    assert payload["display_name"] == "Bravo TV"
+    assert payload["live_total_posts"] == 16200
+    assert payload["total_posts"] == 16200
+
+
+def test_instagram_social_account_comments_target_counts_returns_available_and_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(social_repo, "_social_account_profile_owner_match_sql", lambda *_args, **_kwargs: "1 = 1")
+    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
+
+    def _fake_fetch_one(sql: str, params: list[Any] | None = None):  # noqa: ANN001
+        captured["sql"] = " ".join(sql.split()).lower()
+        captured["params"] = params
+        return {
+            "available_posts": 16200,
+            "eligible_posts": 1099,
+            "missing_posts": 203,
+            "stale_posts": 411,
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    payload = social_repo._instagram_social_account_comments_target_counts("bravotv")
+
+    assert payload == {
+        "available_posts": 16200,
+        "eligible_posts": 1099,
+        "missing_posts": 203,
+        "stale_posts": 411,
+    }
+    assert "count(*)::int as available_posts" in captured["sql"]
+    assert "as eligible_posts" in captured["sql"]
+    assert "and greatest(0, coalesce(p.comments_count, 0)) > 0" not in captured["sql"]
+
+
 def test_shared_catalog_summary_totals_aliases_catalog_table(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -19277,7 +19393,9 @@ def test_resolve_instagram_media_for_shortcode_routes_shortcode_to_caller_contex
         lambda shortcode, **kwargs: SimpleNamespace(
             source="graphql_shortcode",
             media_type="video",
-            metadata=SimpleNamespace(media_urls=["https://cdn.test/video.mp4"], thumbnail_url="https://cdn.test/thumb.jpg"),
+            metadata=SimpleNamespace(
+                media_urls=["https://cdn.test/video.mp4"], thumbnail_url="https://cdn.test/thumb.jpg"
+            ),
             attempts=[{"source": "graphql_shortcode", "success": True}],
         ),
     )

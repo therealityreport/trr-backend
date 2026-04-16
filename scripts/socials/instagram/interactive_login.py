@@ -10,6 +10,7 @@ Usage:
     python scripts/socials/instagram/interactive_login.py --push-to-modal
     python scripts/socials/instagram/interactive_login.py --chrome-profile "entertainmentdatagroup@gmail.com"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -75,7 +76,8 @@ def main() -> int:
         cmd = [
             sys.executable,
             str(REPO_ROOT / "scripts" / "modal" / "prepare_named_secrets.py"),
-            "--source-env", str(source_env),
+            "--source-env",
+            str(source_env),
             "--apply",
         ]
         try:

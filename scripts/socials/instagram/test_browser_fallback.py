@@ -4,6 +4,7 @@
 Usage:
     python scripts/socials/instagram/test_browser_fallback.py
 """
+
 from __future__ import annotations
 
 import json
@@ -15,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(REPO_ROOT / ".env", override=True)
 
 logging.basicConfig(

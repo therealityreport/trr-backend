@@ -148,7 +148,15 @@ _SOCIAL_BROWSER_APT_PACKAGES: Final[tuple[str, ...]] = (
     "libasound2",
     "libatspi2.0-0",
 )
-_SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = ("playwright install chromium",)
+_SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = (
+    "playwright install chromium",
+    # P0-2/P0-3: The Scrapling comments lane uses StealthyFetcher (Patchright-
+    # backed in v0.4+). `scrapling install` resolves whatever browser bits the
+    # installed Scrapling version needs and is a no-op when the binaries are
+    # already present via `playwright install chromium`. Belt and suspenders
+    # so the Modal image stays intact if Scrapling changes its install flow.
+    "scrapling install",
+)
 _SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ("yt-dlp",)
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_JOB_PLANE_MODE": "remote",

@@ -311,13 +311,29 @@ def _social_execution_mode_deprecation_payload() -> dict[str, Any]:
     }
 
 
-def _start_runs_in_background(run_ids: list[str], background_tasks: BackgroundTasks, *, worker_prefix: str) -> None:
+def _start_runs_in_background(
+    run_ids: list[str],
+    background_tasks: BackgroundTasks,
+    *,
+    worker_prefix: str,
+    stage: str | None = None,
+    platform: str | None = None,
+    supported_platforms: list[str] | None = None,
+    metadata_updates: Mapping[str, Any] | None = None,
+) -> None:
     from trr_backend.repositories.social_season_analytics import execute_run_with_inline_worker_registration
 
     def _runner() -> None:
         for index, run_id in enumerate(run_ids, start=1):
             worker_id = f"{worker_prefix}:{index}"
-            execute_run_with_inline_worker_registration(run_id, worker_id=worker_id)
+            execute_run_with_inline_worker_registration(
+                run_id,
+                worker_id=worker_id,
+                stage=stage,
+                platform=platform,
+                supported_platforms=supported_platforms,
+                metadata_updates=metadata_updates,
+            )
 
     if not run_ids:
         return
@@ -2818,6 +2834,22 @@ class PostCommentRefreshRequest(BaseModel):
     fetch_replies: bool = Field(default=True)
 
 
+class SocialAccountCommentsScrapeRequest(BaseModel):
+    mode: Literal["profile", "single_post"] = Field(default="profile")
+    source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
+    source_id: str | None = Field(default=None, min_length=1, max_length=64)
+    max_posts: int = Field(default=50, ge=1, le=500)
+    max_comments_per_post: int = Field(default=200, ge=1, le=1000000)
+    refresh_policy: Literal["stale_or_missing"] = Field(default="stale_or_missing")
+    allow_inline_dev_fallback: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> SocialAccountCommentsScrapeRequest:
+        if self.mode == "single_post" and not str(self.source_id or "").strip():
+            raise ValueError("source_id is required for single_post comment scrapes")
+        return self
+
+
 class CancelStuckJobsRequest(BaseModel):
     job_ids: list[UUID] | None = Field(default=None, max_length=500)
 
@@ -4056,6 +4088,149 @@ def get_social_account_profile_posts_route(
             max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
         )
         return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/comments")
+def get_social_account_profile_comments_route(
+    platform: str,
+    account_handle: str,
+    page: int = Query(default=1, ge=1, le=10_000),
+    page_size: int = Query(default=25, ge=1, le=100),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_profile_comments
+
+    cache_key = _account_profile_cache_key(
+        surface="comments",
+        platform=platform,
+        account_handle=account_handle,
+        page=page,
+        page_size=page_size,
+    )
+    cached_payload = _get_ttl_cached_payload(
+        _ACCOUNT_PROFILE_POSTS_CACHE,
+        _ACCOUNT_PROFILE_POSTS_CACHE_LOCK,
+        cache_key,
+    )
+    if cached_payload is not None:
+        return cached_payload
+    try:
+        payload = get_social_account_profile_comments(
+            platform=platform,
+            account_handle=account_handle,
+            page=page,
+            page_size=page_size,
+        )
+        _set_ttl_cached_payload(
+            _ACCOUNT_PROFILE_POSTS_CACHE,
+            _ACCOUNT_PROFILE_POSTS_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
+        )
+        return payload
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/scrape")
+async def post_social_account_comments_scrape_route(
+    platform: str,
+    account_handle: str,
+    payload: SocialAccountCommentsScrapeRequest,
+    background_tasks: BackgroundTasks,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+        INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+        SocialIngestConflictError,
+        SocialIngestValidationError,
+        SocialWorkerUnavailableError,
+        is_queue_enabled,
+        start_social_account_comments_scrape,
+    )
+
+    queue_enabled = is_queue_enabled()
+    used_inline_fallback = bool(payload.allow_inline_dev_fallback) and not queue_enabled
+    try:
+        result = start_social_account_comments_scrape(
+            platform=platform,
+            account_handle=account_handle,
+            mode=payload.mode,
+            source_scope=payload.source_scope,
+            source_id=payload.source_id,
+            max_posts=payload.max_posts,
+            max_comments_per_post=payload.max_comments_per_post,
+            refresh_policy=payload.refresh_policy,
+            initiated_by=(user or {}).get("email"),
+            inline_worker_id=None if queue_enabled else f"api-background:comments:{platform}",
+            allow_local_dev_inline_bypass=used_inline_fallback,
+        )
+        _clear_account_profile_caches()
+        if not queue_enabled and result.get("run_id"):
+            _start_runs_in_background(
+                [str(result["run_id"])],
+                background_tasks,
+                worker_prefix=f"api-background:comments:{platform}",
+                stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                platform="instagram",
+                supported_platforms=["instagram"],
+                metadata_updates={"worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE},
+            )
+        return result
+    except SocialIngestConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc), **exc.detail},
+        ) from exc
+    except SocialIngestValidationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+    except SocialWorkerUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SOCIAL_WORKER_UNAVAILABLE",
+                "message": str(exc),
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+                "worker_health": _worker_health_detail(exc.worker_health),
+                "required_worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+            },
+        ) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/progress")
+def get_social_account_comments_scrape_progress_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_comments_scrape_run_progress
+
+    cache_key = _account_profile_cache_key(
+        surface="comments-run-progress",
+        platform=platform,
+        account_handle=account_handle,
+        extra=str(run_id),
+    )
+    try:
+        return _resolve_account_profile_singleflight(
+            cache_key,
+            lambda: get_social_account_comments_scrape_run_progress(
+                platform=platform,
+                account_handle=account_handle,
+                run_id=str(run_id),
+            ),
+        )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:

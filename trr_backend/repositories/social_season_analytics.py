@@ -168,6 +168,7 @@ SOCIAL_MEDIA_MIRROR_DOWNLOAD_RETRY_BACKOFF_SECONDS_DEFAULT = 1
 SOCIAL_YOUTUBE_TRANSCRIPT_INGEST_ENABLED_DEFAULT = True
 INSTAGRAM_MEDIA_MIRROR_STAGE = "media_mirror"
 COMMENT_MEDIA_MIRROR_STAGE = "comment_media_mirror"
+INSTAGRAM_COMMENTS_SCRAPLING_STAGE = "comments_scrapling"
 SHARED_ACCOUNT_POSTS_STAGE = "shared_account_posts"
 SHARED_ACCOUNT_DISCOVERY_STAGE = "shared_account_discovery"
 POST_CLASSIFY_STAGE = "post_classify"
@@ -184,6 +185,7 @@ LEGACY_SEASON_TARGETED_INGEST_MODE = "legacy_season_targeted"
 SHARED_ACCOUNT_ASYNC_INGEST_MODE = "shared_account_async"
 SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE = "shared_account_catalog_backfill"
 TRUSTED_LOCAL_WORKER_LANE = "trusted_local"
+INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE = "instagram_comments_scrapling"
 INSTAGRAM_REMOTE_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_remote_executor_blocked"
 INSTAGRAM_LOCAL_EXECUTOR_BLOCKED_ERROR_CODE = "instagram_local_executor_blocked"
 SHARED_ACCOUNT_FRONTIER_LEASE_UNAVAILABLE_ERROR_CODE = "shared_account_frontier_lease_unavailable"
@@ -1657,10 +1659,31 @@ def _job_requires_modal_executor(job_config: Mapping[str, Any] | None, *, platfo
     return _job_required_execution_backend(job_config, platform=platform) == "modal"
 
 
-def _job_requires_trusted_local_worker_lane(job_config: Mapping[str, Any] | None, *, platform: Any = None) -> bool:
+def _normalize_required_worker_lane(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return normalized or None
+
+
+def _job_required_worker_lane(job_config: Mapping[str, Any] | None) -> str | None:
     if not isinstance(job_config, Mapping):
-        return False
-    required_lane = str(job_config.get("required_worker_lane") or "").strip().lower()
+        return None
+    return _normalize_required_worker_lane(job_config.get("required_worker_lane"))
+
+
+def _job_requires_dedicated_worker_lane(job_config: Mapping[str, Any] | None, *, platform: Any = None) -> bool:
+    required_lane = _job_required_worker_lane(job_config)
+    if required_lane:
+        return True
+    return _shared_account_catalog_requires_trusted_local_worker_lane(
+        platform=platform or (job_config or {}).get("platform"),
+        pipeline_ingest_mode=str((job_config or {}).get("pipeline_ingest_mode") or SHARED_ACCOUNT_ASYNC_INGEST_MODE),
+        date_start=_coerce_dt((job_config or {}).get("date_start")),
+        date_end=_coerce_dt((job_config or {}).get("date_end")),
+    )
+
+
+def _job_requires_trusted_local_worker_lane(job_config: Mapping[str, Any] | None, *, platform: Any = None) -> bool:
+    required_lane = _job_required_worker_lane(job_config)
     if required_lane == TRUSTED_LOCAL_WORKER_LANE:
         return True
     return _shared_account_catalog_requires_trusted_local_worker_lane(
@@ -2817,6 +2840,61 @@ def get_trusted_local_worker_health(
     return payload
 
 
+def get_worker_health_for_lane(
+    *,
+    required_worker_lane: str,
+    platform: str | None = None,
+    stale_after_seconds: int | None = None,
+) -> dict[str, Any]:
+    normalized_lane = _normalize_required_worker_lane(required_worker_lane)
+    if not normalized_lane:
+        return get_worker_health(stale_after_seconds=stale_after_seconds)
+    if normalized_lane == TRUSTED_LOCAL_WORKER_LANE:
+        return get_trusted_local_worker_health(platform=platform, stale_after_seconds=stale_after_seconds)
+
+    normalized_platform = _normalize_platform_name(platform) if platform else None
+    base_payload = _query_worker_health(stale_after_seconds=stale_after_seconds)
+    workers = []
+    for worker in list(base_payload.get("workers") or []):
+        metadata = _metadata_dict(worker.get("metadata"))
+        worker_lane = _normalize_required_worker_lane(metadata.get("worker_lane"))
+        if worker_lane != normalized_lane:
+            continue
+        supported_platforms = {
+            _normalize_platform_name(item)
+            for item in (worker.get("supported_platforms") or [])
+            if _normalize_platform_name(item)
+        }
+        if normalized_platform is not None and normalized_platform not in supported_platforms:
+            continue
+        workers.append(worker)
+
+    healthy_workers = sum(1 for worker in workers if bool(worker.get("is_healthy")))
+    fresh_workers = sum(1 for worker in workers if bool(worker.get("is_fresh")))
+    active_workers = sum(1 for worker in workers if str(worker.get("status") or "").strip().lower() == "working")
+    payload = {
+        **base_payload,
+        "healthy": healthy_workers > 0,
+        "healthy_workers": healthy_workers,
+        "fresh_workers": fresh_workers,
+        "stale_workers": max(0, len(workers) - fresh_workers),
+        "stale_hidden_count": 0,
+        "active_workers": active_workers,
+        "total_workers": len(workers),
+        "workers": workers,
+        "executor_backend": "local",
+        "required_worker_lane": normalized_lane,
+        "platform_filter": normalized_platform,
+    }
+    if len(workers) <= 0:
+        payload["reason"] = "no_lane_workers"
+    elif healthy_workers <= 0:
+        payload["reason"] = "no_healthy_lane_workers"
+    else:
+        payload["reason"] = None
+    return payload
+
+
 def _metadata_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -3079,6 +3157,7 @@ def assert_worker_available_when_queue_enabled(
     required_execution_backend: str | None = None,
     platform: str | None = None,
 ) -> dict[str, Any]:
+    normalized_required_lane = _normalize_required_worker_lane(required_worker_lane)
     if not is_queue_enabled():
         return {
             "healthy": True,
@@ -3089,12 +3168,19 @@ def assert_worker_available_when_queue_enabled(
             "reason": "queue_disabled",
         }
 
-    if str(required_worker_lane or "").strip().lower() == TRUSTED_LOCAL_WORKER_LANE:
-        health = get_trusted_local_worker_health(platform=platform)
+    if normalized_required_lane:
+        health = get_worker_health_for_lane(
+            required_worker_lane=normalized_required_lane,
+            platform=platform,
+        )
         if bool(health.get("healthy")):
             return health
         raise SocialWorkerUnavailableError(
-            "No healthy trusted-local social ingest workers are reporting heartbeats.",
+            (
+                "No healthy trusted-local social ingest workers are reporting heartbeats."
+                if normalized_required_lane == TRUSTED_LOCAL_WORKER_LANE
+                else f"No healthy {normalized_required_lane} social ingest workers are reporting heartbeats."
+            ),
             worker_health=health,
         )
 
@@ -6300,11 +6386,14 @@ def _build_legacy_instagram_auth_session(
         else "shadow_mode"
     )
     stale_ok = bool(getattr(shadow_session, "stale_ok", False)) if parity_match else False
-    session_account_id = str(
-        getattr(shadow_session, "session_account_id", "")
-        or browser_account_id
-        or _instagram_cookie_validation_username()
-    ).strip() or None
+    session_account_id = (
+        str(
+            getattr(shadow_session, "session_account_id", "")
+            or browser_account_id
+            or _instagram_cookie_validation_username()
+        ).strip()
+        or None
+    )
     caller_context = str(getattr(shadow_session, "caller_context", "") or "legacy_loader").strip() or "legacy_loader"
     cookie_file_path = getattr(shadow_session, "cookie_file_path", None)
     storage_state_path = getattr(shadow_session, "storage_state_path", None)
@@ -10120,6 +10209,7 @@ def _normalize_social_job_stage_for_stale(stage: Any) -> str:
     if normalized in {
         "posts",
         "comments",
+        INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
         "media_mirror",
         "comment_media_mirror",
         SHARED_ACCOUNT_DISCOVERY_STAGE,
@@ -28866,9 +28956,7 @@ def _scrape_shared_twitter_posts(
     date_start = requested_date_start or (
         datetime(2006, 1, 1, tzinfo=UTC) if full_history_requested else (_now_utc() - timedelta(days=30))
     )
-    date_end = requested_date_end or (
-        (_now_utc() - timedelta(days=1)) if full_history_requested else _now_utc()
-    )
+    date_end = requested_date_end or ((_now_utc() - timedelta(days=1)) if full_history_requested else _now_utc())
     if full_history_requested and config.get("max_posts_per_target") is None:
         max_pages = None
     elif full_history_requested:
@@ -31456,7 +31544,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         job_config = _metadata_dict(job.get("config"))
         job_dispatch = _job_dispatch_metadata(job)
         job_ingest_mode = _resolve_pipeline_ingest_mode(job_config.get("pipeline_ingest_mode"))
-        if _job_requires_trusted_local_worker_lane(job_config, platform=platform):
+        if _job_requires_dedicated_worker_lane(job_config, platform=platform):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
         if existing_remote_invocation_id:
@@ -31723,6 +31811,7 @@ def _claim_next_jobs(
               supported_platforms,
               array['instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads']
             ) as platforms,
+            nullif(lower(coalesce(metadata->>'worker_lane', '')), '') as worker_lane,
             coalesce((metadata->'auth_capabilities'->>'instagram_authenticated')::boolean, false)
               as instagram_authenticated,
             coalesce(
@@ -31790,6 +31879,14 @@ def _claim_next_jobs(
               select 1
               from worker_caps wc
               where j.platform = any(wc.platforms)
+            )
+            and (
+              nullif(lower(coalesce(j.config->>'required_worker_lane', '')), '') is null
+              or exists (
+                select 1
+                from worker_caps wc
+                where wc.worker_lane = nullif(lower(coalesce(j.config->>'required_worker_lane', '')), '')
+              )
             )
             and (
               lower(coalesce(j.config->>'required_execution_backend', '')) <> 'modal'
@@ -31913,6 +32010,10 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
         config["_max_attempts"] = max(1, int(job.get("max_attempts") or 1))
         config["_last_error_code"] = str(job.get("last_error_code") or "").strip().lower() or None
         stage = str(config.get("stage") or ((job.get("metadata") or {}).get("stage")) or "posts")
+        if platform == "instagram" and stage == INSTAGRAM_COMMENTS_SCRAPLING_STAGE:
+            from trr_backend.socials.instagram.comments_scrapling.job_runner import run_instagram_comments_scrapling_job
+
+            return run_instagram_comments_scrapling_job(job, worker_id=worker_id)
         if stage in {
             SHARED_ACCOUNT_DISCOVERY_STAGE,
             SHARED_ACCOUNT_POSTS_STAGE,
@@ -35839,7 +35940,15 @@ def _social_account_profile_optional_identity_fields(
         for row in source_rows
         if isinstance(row, Mapping)
     ]
-    if normalized_platform == "tiktok":
+    if normalized_platform == "instagram":
+        snapshot = _merge_social_profile_snapshots(*source_snapshots)
+        live_total_posts = _cached_live_profile_total_posts(normalized_platform, normalized_account)
+        if live_total_posts > 0:
+            snapshot = {
+                **snapshot,
+                "total_posts": max(_normalize_non_negative_int(snapshot.get("total_posts")), live_total_posts),
+            }
+    elif normalized_platform == "tiktok":
         snapshot = _merge_tiktok_profile_snapshots(
             *source_snapshots,
             _tiktok_profile_snapshot_from_analysis_rows(analysis_rows, normalized_account),
@@ -49724,7 +49833,6 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
             if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS)
             else {}
         )
-        catalog_totals_available = True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Social account profile catalog totals query failed for %s/%s; continuing without catalog totals: %s",
@@ -49733,7 +49841,6 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
             exc,
         )
         catalog_totals = {}
-        catalog_totals_available = False
     try:
         recent_catalog_runs = (
             _catalog_recent_runs(normalized_platform, normalized_account, limit=3)
@@ -49749,6 +49856,32 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
         )
         recent_catalog_runs = []
     latest_catalog_run = recent_catalog_runs[0] if recent_catalog_runs else {}
+    comments_coverage: dict[str, Any] | None = None
+    if normalized_platform == "instagram":
+        try:
+            comment_counts = _instagram_social_account_comments_target_counts(normalized_account)
+            recent_comments_runs = _social_account_comments_recent_runs(
+                normalized_platform,
+                normalized_account,
+                limit=1,
+            )
+            latest_comments_run = recent_comments_runs[0] if recent_comments_runs else {}
+            comments_coverage = {
+                **comment_counts,
+                "last_comments_run_at": latest_comments_run.get("created_at"),
+                "last_comments_run_status": latest_comments_run.get("status"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                (
+                    "Social account profile comments coverage query failed for %s/%s; "
+                    "continuing without comments coverage: %s"
+                ),
+                normalized_platform,
+                normalized_account,
+                exc,
+            )
+            comments_coverage = None
     if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS) and normalized_platform != "instagram":
         hashtag_items = _build_social_account_profile_hashtag_items(
             analysis_rows,
@@ -49833,12 +49966,9 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
         _normalize_non_negative_int(catalog_totals.get("catalog_total_posts")),
         _historical_catalog_expected_total_posts(normalized_platform, normalized_account),
     )
-    source_snapshot_present = isinstance(primary_source_metadata.get("profile_snapshot"), Mapping)
     resolved_total_posts = max(
         persisted_total_posts,
-        0
-        if source_snapshot_present or not catalog_totals_available
-        else _normalize_non_negative_int(identity_fields.get("live_total_posts")),
+        _normalize_non_negative_int(identity_fields.get("live_total_posts")),
     )
     return {
         "platform": normalized_platform,
@@ -49874,6 +50004,7 @@ def get_social_account_profile_summary(platform: str, account_handle: str) -> di
         "top_collaborators": entity_payload.get("collaborators", [])[:10],
         "top_tags": entity_payload.get("tags", [])[:10],
         "source_status": source_status_rows,
+        "comments_coverage": comments_coverage,
         **identity_fields,
     }
 
@@ -49922,6 +50053,508 @@ def get_social_account_profile_posts(
         }
         for row in rows
     ]
+    return {
+        "items": items,
+        "pagination": {
+            "page": safe_page,
+            "page_size": safe_page_size,
+            "total": total,
+            "total_pages": max(1, (total + safe_page_size - 1) // safe_page_size) if safe_page_size else 1,
+        },
+    }
+
+
+def _instagram_comments_stale_after_hours() -> int:
+    return _resolve_positive_int_env(
+        "SOCIAL_INSTAGRAM_COMMENTS_STALE_AFTER_HOURS",
+        72,
+        minimum=1,
+    )
+
+
+def _instagram_social_account_comments_target_counts(account_handle: str) -> dict[str, int]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    active_count_expr = (
+        "(count(c.id) filter (where c.is_missing = false))::bigint"
+        if _comment_lifecycle_supported("instagram_comments")
+        else "count(c.id)::bigint"
+    )
+    row = (
+        pg.fetch_one(
+            f"""
+            with posts as (
+              select
+                p.id,
+                greatest(0, coalesce(p.comments_count, 0))::bigint as reported_comments,
+                {active_count_expr} as saved_comments,
+                max(coalesce(c.last_seen_at, c.scraped_at)) as last_seen_at
+              from social.instagram_posts p
+              left join social.instagram_comments c on c.post_id = p.id
+              where {owner_match_clause}
+                and nullif(p.shortcode, '') is not null
+              group by p.id
+            )
+            select
+              count(*)::int as available_posts,
+              coalesce(
+                sum(
+                  case
+                    when reported_comments > 0 then 1
+                    else 0
+                  end
+                ),
+                0
+              )::int as eligible_posts,
+              coalesce(
+                sum(
+                  case
+                    when reported_comments > 0 and saved_comments = 0 then 1
+                    else 0
+                  end
+                ),
+                0
+              )::int as missing_posts,
+              coalesce(
+                sum(
+                  case
+                    when reported_comments > 0
+                      and saved_comments > 0
+                      and (
+                        saved_comments < reported_comments
+                        or coalesce(last_seen_at, to_timestamp(0)) < now() - make_interval(hours => %s)
+                      )
+                    then 1
+                    else 0
+                  end
+                ),
+                0
+              )::int as stale_posts
+            from posts
+            """,
+            [normalized_account, _instagram_comments_stale_after_hours()],
+        )
+        or {}
+    )
+    return {
+        "available_posts": _normalize_non_negative_int(row.get("available_posts")),
+        "eligible_posts": _normalize_non_negative_int(row.get("eligible_posts")),
+        "missing_posts": _normalize_non_negative_int(row.get("missing_posts")),
+        "stale_posts": _normalize_non_negative_int(row.get("stale_posts")),
+    }
+
+
+def _instagram_social_account_comment_target_shortcodes(account_handle: str, *, limit: int) -> list[str]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    safe_limit = max(1, min(int(limit), 500))
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    active_count_expr = (
+        "(count(c.id) filter (where c.is_missing = false))::bigint"
+        if _comment_lifecycle_supported("instagram_comments")
+        else "count(c.id)::bigint"
+    )
+    rows = pg.fetch_all(
+        f"""
+        with posts as (
+          select
+            p.shortcode,
+            p.posted_at,
+            greatest(0, coalesce(p.comments_count, 0))::bigint as reported_comments,
+            {active_count_expr} as saved_comments,
+            max(coalesce(c.last_seen_at, c.scraped_at)) as last_seen_at
+          from social.instagram_posts p
+          left join social.instagram_comments c on c.post_id = p.id
+          where {owner_match_clause}
+            and nullif(p.shortcode, '') is not null
+            and greatest(0, coalesce(p.comments_count, 0)) > 0
+          group by p.shortcode, p.posted_at, p.comments_count
+        )
+        select shortcode
+        from posts
+        where reported_comments > 0
+          and (
+            saved_comments = 0
+            or saved_comments < reported_comments
+            or coalesce(last_seen_at, to_timestamp(0)) < now() - make_interval(hours => %s)
+          )
+        order by
+          case when saved_comments = 0 then 0 else 1 end asc,
+          posted_at desc nulls last,
+          shortcode desc
+        limit %s
+        """,
+        [normalized_account, _instagram_comments_stale_after_hours(), safe_limit],
+    )
+    return [str(row.get("shortcode") or "").strip() for row in rows if str(row.get("shortcode") or "").strip()]
+
+
+def _social_account_comments_recent_runs(
+    platform: str,
+    account_handle: str,
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    rows = pg.fetch_all(
+        """
+        select
+          r.id::text as run_id,
+          r.status,
+          r.created_at,
+          r.started_at,
+          r.completed_at,
+          j.id::text as job_id,
+          j.error_message,
+          j.metadata
+        from social.scrape_runs r
+        join social.scrape_jobs j on j.run_id = r.id
+        where j.platform = %s
+          and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+          and ltrim(lower(coalesce(j.config->>'account', j.metadata->>'account', '')), '@') = %s
+        order by coalesce(r.started_at, r.created_at) desc, r.id desc
+        limit %s
+        """,
+        [normalized_platform, INSTAGRAM_COMMENTS_SCRAPLING_STAGE, normalized_account, max(1, int(limit))],
+    )
+    return [
+        {
+            "run_id": str(row.get("run_id") or "").strip(),
+            "job_id": str(row.get("job_id") or "").strip(),
+            "status": str(row.get("status") or "").strip().lower() or None,
+            "created_at": row.get("created_at"),
+            "started_at": row.get("started_at"),
+            "completed_at": row.get("completed_at"),
+            "error_message": row.get("error_message"),
+        }
+        for row in rows
+        if str(row.get("run_id") or "").strip()
+    ]
+
+
+def get_active_social_account_comments_run(platform: str, account_handle: str) -> dict[str, Any] | None:
+    for row in _social_account_comments_recent_runs(platform, account_handle, limit=10):
+        if _status_is_active(str(row.get("status") or "").strip().lower() or None):
+            return row
+    return None
+
+
+def _social_account_comments_start_lock_key(platform: str, account_handle: str) -> int:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    return int(
+        hashlib.md5(f"comments-scrape-start:{normalized_platform}:{normalized_account}".encode()).hexdigest()[:15],
+        16,
+    ) % (2**31)
+
+
+def start_social_account_comments_scrape(
+    platform: str,
+    account_handle: str,
+    *,
+    mode: str,
+    source_scope: str = "bravo",
+    source_id: str | None = None,
+    max_posts: int = 50,
+    max_comments_per_post: int = 200,
+    refresh_policy: str = "stale_or_missing",
+    initiated_by: str | None = None,
+    inline_worker_id: str | None = None,
+    allow_local_dev_inline_bypass: bool = False,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_mode = str(mode or "").strip().lower()
+    normalized_refresh_policy = str(refresh_policy or "stale_or_missing").strip().lower()
+    if normalized_platform != "instagram":
+        raise SocialIngestValidationError(
+            "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
+            "Standalone comments scraping is currently only supported for Instagram.",
+        )
+    if normalized_mode not in {"profile", "single_post"}:
+        raise SocialIngestValidationError("SOCIAL_ACCOUNT_COMMENTS_INVALID_MODE", "Unsupported comments scrape mode.")
+    if normalized_mode == "profile" and normalized_refresh_policy != "stale_or_missing":
+        raise SocialIngestValidationError(
+            "SOCIAL_ACCOUNT_COMMENTS_INVALID_REFRESH_POLICY",
+            "Profile comments scraping currently supports only stale_or_missing refreshes.",
+        )
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+
+    lock_key = _social_account_comments_start_lock_key(normalized_platform, normalized_account)
+    lock_label = f"comments-scrape-lock:{normalized_platform}:{normalized_account[:48]}"
+    with pg.db_connection(label=lock_label) as lock_conn:
+        with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+            lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
+        if not bool(lock_row.get("locked")):
+            active_run = get_active_social_account_comments_run(normalized_platform, normalized_account)
+            raise SocialIngestConflictError(
+                "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE",
+                (
+                    f"Comments scrape run {(active_run or {}).get('run_id') or 'unknown'} "
+                    f"is already active for @{normalized_account}."
+                ),
+                detail=active_run or {"platform": normalized_platform, "account_handle": normalized_account},
+            )
+        try:
+            active_run = get_active_social_account_comments_run(normalized_platform, normalized_account)
+            if active_run:
+                raise SocialIngestConflictError(
+                    "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE",
+                    (
+                        f"Comments scrape run {active_run.get('run_id') or 'unknown'} "
+                        f"is already active for @{normalized_account}."
+                    ),
+                    detail=active_run,
+                )
+            if is_queue_enabled() and not allow_local_dev_inline_bypass:
+                assert_worker_available_when_queue_enabled(
+                    required_worker_lane=INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+                    platform=normalized_platform,
+                )
+            target_source_ids: list[str]
+            if normalized_mode == "single_post":
+                normalized_source_id = str(source_id or "").strip()
+                if not normalized_source_id:
+                    raise SocialIngestValidationError(
+                        "SOCIAL_ACCOUNT_COMMENTS_SOURCE_ID_REQUIRED",
+                        "source_id is required for single-post comment scrapes.",
+                    )
+                target_source_ids = [normalized_source_id]
+            else:
+                target_source_ids = _instagram_social_account_comment_target_shortcodes(
+                    normalized_account,
+                    limit=max(1, min(int(max_posts), 500)),
+                )
+                if not target_source_ids:
+                    raise SocialIngestValidationError(
+                        "SOCIAL_ACCOUNT_COMMENTS_NOTHING_TO_REFRESH",
+                        f"No stale or missing Instagram comments were found for @{normalized_account}.",
+                    )
+
+            run_status = "queued" if is_queue_enabled() else "pending"
+            run_config = {
+                "platform": normalized_platform,
+                "account": normalized_account,
+                "source_scope": source_scope,
+                "mode": normalized_mode,
+                "stage": INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                "refresh_policy": normalized_refresh_policy,
+                "max_posts": max_posts if normalized_mode == "profile" else None,
+                "max_comments_per_post": max_comments_per_post,
+                "required_worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+                "ingest_mode": "comments_only",
+            }
+            run_id = _create_run(
+                None,
+                source_scope=source_scope,
+                initiated_by=initiated_by,
+                config=run_config,
+                status=run_status,
+            )
+            _create_job(
+                None,
+                run_id=run_id,
+                platform=normalized_platform,
+                source_scope=source_scope,
+                job_type="comments",
+                stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                config={
+                    **run_config,
+                    "source_id": source_id if normalized_mode == "single_post" else None,
+                    "target_source_ids": target_source_ids,
+                    "account": normalized_account,
+                    "required_worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+                },
+                initiated_by=initiated_by,
+                status=run_status,
+                priority=105,
+                worker_id=inline_worker_id,
+                preclaim=bool(inline_worker_id),
+            )
+            if is_queue_enabled():
+                dispatch_due_social_jobs(run_id=run_id)
+            return {
+                "run_id": run_id,
+                "status": run_status,
+                "mode": normalized_mode,
+                "platform": normalized_platform,
+                "account_handle": normalized_account,
+                "target_source_ids": target_source_ids,
+                "required_worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+            }
+        finally:
+            try:
+                with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                    pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[comments-scrape-lock] advisory unlock failed for %s/%s",
+                    normalized_platform,
+                    normalized_account,
+                    exc_info=True,
+                )
+
+
+def get_social_account_comments_scrape_run_progress(
+    platform: str,
+    account_handle: str,
+    run_id: str,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    rows = pg.fetch_all(
+        """
+        select
+          r.id::text as run_id,
+          r.status as run_status,
+          r.created_at,
+          r.started_at,
+          r.completed_at,
+          r.summary,
+          j.id::text as job_id,
+          j.status as job_status,
+          j.items_found,
+          j.error_message,
+          j.metadata,
+          j.config
+        from social.scrape_runs r
+        join social.scrape_jobs j on j.run_id = r.id
+        where r.id = %s::uuid
+          and j.platform = %s
+          and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+          and ltrim(lower(coalesce(j.config->>'account', j.metadata->>'account', '')), '@') = %s
+        order by j.created_at asc, j.id asc
+        """,
+        [run_id, normalized_platform, INSTAGRAM_COMMENTS_SCRAPLING_STAGE, normalized_account],
+    )
+    if not rows:
+        raise LookupError("Comments scrape run not found.")
+    raw_summary = dict((rows[0] or {}).get("summary") or {})
+    summary = {
+        "total_jobs": _normalize_non_negative_int(raw_summary.get("total_jobs")),
+        "completed_jobs": _normalize_non_negative_int(raw_summary.get("completed_jobs")),
+        "failed_jobs": _normalize_non_negative_int(raw_summary.get("failed_jobs")),
+        "active_jobs": _normalize_non_negative_int(raw_summary.get("active_jobs")),
+        "items_found_total": _normalize_non_negative_int(raw_summary.get("items_found_total")),
+    }
+    active_jobs = 0
+    completed_jobs = 0
+    failed_jobs = 0
+    items_found_total = 0
+    latest_job_metadata: dict[str, Any] = {}
+    latest_job_status = None
+    latest_error = None
+    for row in rows:
+        status = str(row.get("job_status") or "").strip().lower()
+        items_found_total += _normalize_non_negative_int(row.get("items_found"))
+        latest_job_status = status
+        latest_job_metadata = _metadata_dict(row.get("metadata"))
+        latest_error = row.get("error_message") or latest_error
+        if status in {"running", "queued", "pending", "retrying", "cancelling"}:
+            active_jobs += 1
+        elif status == "completed":
+            completed_jobs += 1
+        elif status in {"failed", "cancelled"}:
+            failed_jobs += 1
+    if not summary:
+        summary = {
+            "total_jobs": len(rows),
+            "completed_jobs": completed_jobs,
+            "failed_jobs": failed_jobs,
+            "active_jobs": active_jobs,
+            "items_found_total": items_found_total,
+        }
+    return {
+        "run_id": str((rows[0] or {}).get("run_id") or "").strip(),
+        "platform": normalized_platform,
+        "account_handle": normalized_account,
+        "run_status": str((rows[0] or {}).get("run_status") or "").strip().lower() or None,
+        "created_at": (rows[0] or {}).get("created_at"),
+        "started_at": (rows[0] or {}).get("started_at"),
+        "completed_at": (rows[0] or {}).get("completed_at"),
+        "summary": summary,
+        "job_status": latest_job_status,
+        "job_metadata": latest_job_metadata,
+        "error_message": latest_error,
+        "target_source_ids": list(_metadata_dict((rows[0] or {}).get("config")).get("target_source_ids") or []),
+    }
+
+
+def get_social_account_profile_comments(
+    platform: str,
+    account_handle: str,
+    *,
+    page: int = 1,
+    page_size: int = _SOCIAL_ACCOUNT_PROFILE_DEFAULT_PAGE_SIZE,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    if normalized_platform != "instagram":
+        raise ValueError("Account-profile comments are currently only supported for Instagram.")
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    safe_page = max(1, int(page))
+    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    active_filter = "and c.is_missing = false" if _comment_lifecycle_supported("instagram_comments") else ""
+    total_row = (
+        pg.fetch_one(
+            f"""
+            select count(*)::int as total
+            from social.instagram_comments c
+            join social.instagram_posts p on p.id = c.post_id
+            where {owner_match_clause}
+              {active_filter}
+            """,
+            [normalized_account],
+        )
+        or {}
+    )
+    rows = pg.fetch_all(
+        f"""
+        select
+          c.id::text as id,
+          c.comment_id,
+          c.post_id::text as post_id,
+          p.shortcode as post_source_id,
+          p.url as post_url,
+          c.username,
+          c.text,
+          c.likes,
+          c.is_reply,
+          c.created_at,
+          c.parent_comment_id::text as parent_comment_id
+        from social.instagram_comments c
+        join social.instagram_posts p on p.id = c.post_id
+        where {owner_match_clause}
+          {active_filter}
+        order by c.created_at desc nulls last, c.id desc
+        limit %s
+        offset %s
+        """,
+        [normalized_account, safe_page_size, (safe_page - 1) * safe_page_size],
+    )
+    items = [
+        {
+            "id": str(row.get("id") or "").strip(),
+            "comment_id": str(row.get("comment_id") or "").strip(),
+            "post_id": str(row.get("post_id") or "").strip(),
+            "post_source_id": str(row.get("post_source_id") or "").strip() or None,
+            "post_url": row.get("post_url")
+            or (
+                f"https://www.instagram.com/p/{str(row.get('post_source_id') or '').strip()}/"
+                if str(row.get("post_source_id") or "").strip()
+                else None
+            ),
+            "username": str(row.get("username") or "").strip() or None,
+            "text": str(row.get("text") or ""),
+            "likes": _normalize_non_negative_int(row.get("likes")),
+            "is_reply": bool(row.get("is_reply")),
+            "created_at": row.get("created_at"),
+            "parent_comment_id": str(row.get("parent_comment_id") or "").strip() or None,
+        }
+        for row in rows
+    ]
+    total = _normalize_non_negative_int(total_row.get("total"))
     return {
         "items": items,
         "pagination": {

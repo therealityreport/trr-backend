@@ -23,11 +23,16 @@ anyio==4.13.0
     #   anthropic
     #   google-genai
     #   httpx
+    #   scrapling
     #   sse-starlette
     #   starlette
     #   watchfiles
 apify-client==2.5.0
     # via -r requirements.in
+apify-fingerprint-datapoints==0.12.0
+    # via
+    #   browserforge
+    #   scrapling
 apify-shared==2.2.0
     # via apify-client
 astunparse==1.6.3
@@ -48,6 +53,8 @@ botocore==1.42.76
     # via
     #   boto3
     #   s3transfer
+browserforge==1.2.4
+    # via scrapling
 cachecontrol==0.14.4
     # via firebase-admin
 cachetools==6.2.6
@@ -78,9 +85,11 @@ charset-normalizer==3.4.6
     #   requests
 click==8.3.1
     # via
+    #   browserforge
     #   flask
     #   modal
     #   pyiceberg
+    #   scrapling
     #   typer
     #   uvicorn
 colorama==0.4.6
@@ -93,10 +102,14 @@ cryptography==46.0.6
     # via
     #   google-auth
     #   pyjwt
+cssselect==1.4.0
+    # via scrapling
 cssselect2==0.9.0
     # via cairosvg
 curl-cffi==0.15.0
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   scrapling
 deepface==0.0.99
     # via -r requirements.in
 defusedxml==0.7.1
@@ -184,7 +197,9 @@ googleapis-common-protos==1.73.0
     #   google-api-core
     #   grpcio-status
 greenlet==3.3.2
-    # via playwright
+    # via
+    #   patchright
+    #   playwright
 grpcio==1.78.0
     # via
     #   google-api-core
@@ -271,6 +286,8 @@ lightecc==0.0.5
     #   lightphe
 lightphe==0.0.21
     # via deepface
+lxml==6.0.4
+    # via scrapling
 lz4==4.4.5
     # via mtcnn
 markdown-it-py==4.0.0
@@ -298,6 +315,8 @@ mpmath==1.3.0
     # via sympy
 msgpack==1.1.2
     # via cachecontrol
+msgspec==0.21.1
+    # via scrapling
 mtcnn==1.0.0
     # via deepface
 multidict==6.7.1
@@ -328,6 +347,8 @@ opt-einsum==3.4.0
     # via tensorflow
 optree==0.19.0
     # via keras
+orjson==3.11.8
+    # via scrapling
 packaging==26.0
     # via
     #   deprecation
@@ -338,6 +359,8 @@ packaging==26.0
     #   wheel
 pandas==3.0.2
     # via deepface
+patchright==1.58.2
+    # via scrapling
 pillow==12.1.1
     # via
     #   -r requirements.in
@@ -346,7 +369,9 @@ pillow==12.1.1
     #   reportlab
     #   retina-face
 playwright==1.58.0
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   scrapling
 pluggy==1.6.0
     # via pytest
 postgrest==2.28.3
@@ -358,7 +383,9 @@ propcache==0.4.1
     #   aiohttp
     #   yarl
 protego==0.6.0
-    # via crawlee
+    # via
+    #   crawlee
+    #   scrapling
 proto-plus==1.27.1
     # via
     #   google-api-core
@@ -402,6 +429,7 @@ pydantic-settings==2.13.1
 pyee==13.0.1
     # via
     #   crawlee
+    #   patchright
     #   playwright
 pygments==2.19.2
     # via
@@ -471,6 +499,8 @@ rich==14.3.3
     #   typer
 s3transfer==0.16.0
     # via boto3
+scrapling==0.4.6
+    # via -r requirements.in
 setuptools==82.0.1
     # via tensorflow
 shellingham==1.5.4
@@ -528,6 +558,8 @@ tinycss2==1.5.1
     # via
     #   cairosvg
     #   cssselect2
+tld==0.13.2
+    # via scrapling
 tldextract==5.3.1
     # via crawlee
 toml==0.10.2
@@ -567,6 +599,7 @@ typing-extensions==4.15.0
     #   pydantic-core
     #   pyee
     #   realtime
+    #   scrapling
     #   starlette
     #   synchronicity
     #   tensorflow
@@ -584,6 +617,8 @@ uvicorn==0.42.0
     # via -r requirements.in
 uvloop==0.22.1
     # via uvicorn
+w3lib==2.4.1
+    # via scrapling
 watchfiles==1.1.1
     # via
     #   modal
