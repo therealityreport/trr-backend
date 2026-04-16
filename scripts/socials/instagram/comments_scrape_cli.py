@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Local debug entrypoint for the Instagram Scrapling comments lane."""
+"""Local debug entrypoint for the Instagram Scrapling comments lane.
+
+Single asyncio.run() — fetcher is created, warmed up, used, and closed
+within one event loop (same lifetime model as job_runner).
+"""
 
 from __future__ import annotations
 
@@ -20,36 +24,42 @@ def parse_args() -> argparse.Namespace:
 
 async def _run(args: argparse.Namespace) -> int:
     from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsScraplingFetcher
-    from trr_backend.socials.instagram.comments_scrapling.proxy import build_proxy_rotator_from_env
+    from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
     from trr_backend.socials.instagram.comments_scrapling.session import resolve_comments_scrapling_session
 
     session = resolve_comments_scrapling_session(
         browser_account_id=args.account,
         caller_context=f"comments_scrape_cli:{args.account}",
     )
+    proxy_config = select_comments_proxy()
     fetcher = InstagramCommentsScraplingFetcher(
         cookies=session.cookies,
         raw_cookies=session.auth_session.cookies,
         browser_account_id=session.browser_account_id,
-        proxy_rotator=build_proxy_rotator_from_env(),
+        proxy_config=proxy_config,
     )
-    await fetcher.warmup()
-    result = await fetcher.fetch_comments_for_shortcode(
-        args.shortcode,
-        max_comments=max(1, int(args.max_comments)),
-        fetch_replies=not args.no_replies,
-    )
-    print(
-        {
-            "shortcode": args.shortcode,
-            "comments_fetched": len(result.comments),
-            "fetch_failed": result.fetch_failed,
-            "auth_failed": result.auth_failed,
-            "fetch_reason": result.fetch_reason,
-            "request_count": result.request_count,
-        }
-    )
-    return 0 if not result.auth_failed else 1
+    try:
+        await fetcher.warmup()
+        result = await fetcher.fetch_comments_for_shortcode(
+            args.shortcode,
+            max_comments=max(1, int(args.max_comments)),
+            fetch_replies=not args.no_replies,
+        )
+        print(
+            {
+                "shortcode": args.shortcode,
+                "comments_fetched": len(result.comments),
+                "fetch_failed": result.fetch_failed,
+                "auth_failed": result.auth_failed,
+                "fetch_reason": result.fetch_reason,
+                "request_count": result.request_count,
+                "retryable": result.retryable,
+                "runtime_metadata": fetcher.runtime_metadata,
+            }
+        )
+        return 0 if not result.auth_failed else 1
+    finally:
+        await fetcher.aclose()
 
 
 def main() -> int:

@@ -1,15 +1,45 @@
+"""Hybrid fetcher for the Instagram comments Scrapling lane.
+
+Architecture:
+  warmup()  →  _fetch_page()  →  StealthyFetcher (Patchright browser)
+  comments  →  _fetch_api()   →  httpx.AsyncClient (plain HTTP + XHR headers)
+
+The browser handles session establishment and challenge solving. All JSON
+API calls go through httpx with the cookies bridged from warmup.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlparse
 
+import httpx
+
+from trr_backend.socials.instagram.comments_scrapling.proxy import CommentsProxyConfig
 from trr_backend.socials.instagram.constants import COMMENT_REPLIES_URL, COMMENTS_URL
 from trr_backend.socials.instagram.permalink_metadata import _shortcode_to_media_id
 from trr_backend.socials.instagram.scraper import InstagramComment, InstagramScraper
+
+logger = logging.getLogger("socials.instagram.comments_scrapling.fetcher")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_API_HEADER_KEYS_TO_STRIP = frozenset(
+    {
+        "x-requested-with",
+        "x-ig-app-id",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+    }
+)
 
 
 def _env_truthy(name: str, default: bool) -> bool:
@@ -35,10 +65,55 @@ def _response_text(response: Any) -> str:
 
 
 def _status_code(response: Any) -> int:
+    """Read status from both httpx (.status_code) and Scrapling (.status)."""
+    raw = getattr(response, "status_code", getattr(response, "status", 0))
     try:
-        return int(getattr(response, "status", 0) or 0)
+        return int(raw or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_location(response: Any) -> str:
+    """Extract sanitized Location header path (no query string, no credentials)."""
+    headers = getattr(response, "headers", None) or {}
+    raw = ""
+    try:
+        raw = str(headers.get("location") or headers.get("Location") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+        return str(parsed.path or "/").lower()
+    except Exception:  # noqa: BLE001
+        return raw.split("?")[0].lower()
+
+
+def _extract_response_cookies(response: Any) -> dict[str, str]:
+    """Pull cookies from a Scrapling/httpx response object."""
+    cookies_attr = getattr(response, "cookies", None)
+    if cookies_attr is None:
+        return {}
+    result: dict[str, str] = {}
+    try:
+        if isinstance(cookies_attr, dict):
+            for k, v in cookies_attr.items():
+                result[str(k)] = str(v)
+        elif hasattr(cookies_attr, "items"):
+            for k, v in cookies_attr.items():
+                result[str(k)] = str(v)
+        elif hasattr(cookies_attr, "jar"):
+            for cookie in cookies_attr.jar:
+                result[str(cookie.name)] = str(cookie.value)
+    except Exception:  # noqa: BLE001
+        pass
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -48,48 +123,80 @@ class InstagramCommentsFetchResult:
     auth_failed: bool = False
     fetch_reason: str | None = None
     request_count: int = 0
-    # P1-5: True when the last failure was transient (429 / 5xx / transport
-    # timeout). The job runner maps this into CommentsScraplingRuntimeError's
-    # retryable flag so the queue requeues the job rather than marking it
-    # terminally failed. False when the failure is permanent (auth, 4xx
-    # validation, parse error).
     retryable: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Fetcher
+# ---------------------------------------------------------------------------
+
+
 class InstagramCommentsScraplingFetcher:
+    """Hybrid fetcher: Patchright for warmup, httpx for API calls."""
+
+    # Retry policy for transient errors (429 / 5xx / transport timeout).
+    _MAX_TRANSIENT_RETRIES: int = 3
+    _BASE_BACKOFF_SECONDS: float = 1.0
+
     def __init__(
         self,
         *,
         cookies: list[dict[str, Any]],
         raw_cookies: dict[str, str],
         browser_account_id: str | None,
-        proxy_rotator: Any | None = None,
+        proxy_config: CommentsProxyConfig | None = None,
         headless: bool | None = None,
         timeout_ms: int = 45_000,
     ) -> None:
         self._cookies = list(cookies or [])
-        self._raw_cookies = dict(raw_cookies or {})
+        self._raw_cookies = raw_cookies if isinstance(raw_cookies, dict) else dict(raw_cookies or {})
         self._browser_account_id = str(browser_account_id or "").strip() or None
-        self._proxy_rotator = proxy_rotator
+        self._proxy_config = proxy_config
+        self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
+        self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._headless = headless if headless is not None else _env_truthy("SOCIAL_INSTAGRAM_COMMENTS_HEADLESS", True)
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._parser = InstagramScraper(cookies=self._raw_cookies, browser_account_id=self._browser_account_id)
         self._request_count = 0
+        self._warmup_cookie_delta: dict[str, str] = {}
+        self._selected_proxy_fingerprint: str = proxy_config.fingerprint if proxy_config else "none"
+
+        # Browser fetcher (for warmup only).
         try:
             from scrapling.fetchers import StealthyFetcher
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("Scrapling StealthyFetcher is unavailable. Install scrapling[fetchers].") from exc
         self._fetcher = StealthyFetcher()
 
+        # httpx client (for API calls). Created lazily after warmup bridges cookies.
+        self._http_client: httpx.AsyncClient | None = None
+
+    # -------------------------------------------------------------------
+    # Public API
+    # -------------------------------------------------------------------
+
+    @property
+    def runtime_metadata(self) -> dict[str, Any]:
+        """Postmortem data for job metadata. The only way job_runner should
+        read internal fetcher state."""
+        return {
+            "warmup_cookie_delta": dict(self._warmup_cookie_delta),
+            "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
+            "transport": "httpx_after_browser_warmup",
+        }
+
     async def warmup(self) -> None:
-        response = await self._fetch(
+        """Navigate to instagram.com via Patchright to establish the session,
+        solve challenges, and bridge cookies into the httpx client."""
+        response = await self._fetch_page(
             "https://www.instagram.com/",
             referer="https://www.instagram.com/",
-            capture_xhr=False,
         )
         text = _response_text(response)
         if _status_code(response) in {401, 403} or _auth_failure_text(text):
             raise RuntimeError("Instagram auth warm-up failed; session appears logged out or challenged.")
+        self._merge_warmup_cookies(response)
+        self._rebuild_http_client()
 
     async def fetch_comments_for_shortcode(
         self,
@@ -116,7 +223,7 @@ class InstagramCommentsScraplingFetcher:
         fetch_failed = False
         auth_failed = False
         fetch_reason: str | None = None
-        retryable = False  # P1-5: propagate transient-failure signal.
+        retryable = False
 
         while True:
             response = await self._fetch_json_response(
@@ -178,6 +285,19 @@ class InstagramCommentsScraplingFetcher:
             retryable=retryable,
         )
 
+    async def aclose(self) -> None:
+        """Close the httpx client. Called by job_runner in finally."""
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            self._http_client = None
+
+    # -------------------------------------------------------------------
+    # Reply fetching
+    # -------------------------------------------------------------------
+
     async def _fetch_comment_replies(
         self,
         *,
@@ -191,7 +311,7 @@ class InstagramCommentsScraplingFetcher:
         fetch_failed = False
         auth_failed = False
         fetch_reason: str | None = None
-        retryable = False  # P1-5
+        retryable = False
 
         while True:
             response = await self._fetch_json_response(
@@ -242,18 +362,101 @@ class InstagramCommentsScraplingFetcher:
             retryable=retryable,
         )
 
-    # P1-5: transient-error retry policy.
-    _MAX_TRANSIENT_RETRIES: int = 3
-    _BASE_BACKOFF_SECONDS: float = 1.0
+    # -------------------------------------------------------------------
+    # Cookie bridge
+    # -------------------------------------------------------------------
+
+    def _merge_warmup_cookies(self, response: Any) -> None:
+        """In-place mutation of self._raw_cookies + parser sync.
+
+        Critical: must NOT rebind self._raw_cookies — the parser holds a
+        shared reference from __init__. In-place update ensures the parser
+        sees updated csrftoken when _get_headers() runs for API calls.
+        """
+        new_cookies = _extract_response_cookies(response)
+        self._warmup_cookie_delta = dict(new_cookies)
+        for name, value in new_cookies.items():
+            self._raw_cookies[name] = value
+            if hasattr(self._parser, "cookies") and isinstance(self._parser.cookies, dict):
+                self._parser.cookies[name] = value
+            if hasattr(self._parser, "session") and hasattr(self._parser.session, "cookies"):
+                try:
+                    self._parser.session.cookies.set(name, value)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _rebuild_http_client(self) -> None:
+        """Create or recreate the httpx client with current cookies and proxy."""
+        if self._http_client is not None:
+            # Can't await aclose in a sync context; let GC handle it.
+            self._http_client = None
+        self._http_client = httpx.AsyncClient(
+            cookies=dict(self._raw_cookies),
+            timeout=httpx.Timeout(self._timeout_ms / 1000),
+            proxy=self._api_proxy_url,
+            follow_redirects=False,
+            trust_env=False,
+        )
+
+    # -------------------------------------------------------------------
+    # Transport: browser (warmup only)
+    # -------------------------------------------------------------------
+
+    async def _fetch_page(
+        self,
+        url: str,
+        *,
+        referer: str,
+    ) -> Any:
+        """Full page navigation via Patchright. Used ONLY by warmup().
+        Strips API-specific headers (x-ig-app-id, x-requested-with, sec-fetch-*)
+        that don't belong on document navigation.
+        """
+        self._request_count += 1
+        all_headers = self._parser._get_headers(referer)
+        nav_headers = {k: v for k, v in all_headers.items() if k.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        return await self._fetcher.async_fetch(
+            url,
+            headless=self._headless,
+            network_idle=False,
+            load_dom=False,
+            cookies=self._cookies,
+            proxy_rotator=self._proxy_rotator,
+            extra_headers=nav_headers,
+            timeout=self._timeout_ms,
+            retries=1,
+            retry_delay=1.0,
+        )
+
+    # -------------------------------------------------------------------
+    # Transport: httpx (API calls)
+    # -------------------------------------------------------------------
+
+    async def _fetch_api(
+        self,
+        url: str,
+        *,
+        referer: str,
+        params: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Plain HTTP GET via httpx. Used for comments/replies JSON API calls."""
+        if self._http_client is None:
+            self._rebuild_http_client()
+        self._request_count += 1
+        headers = self._parser._get_headers(referer)
+        clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None
+        return await self._http_client.get(url, params=clean_params, headers=headers)  # type: ignore[union-attr]
+
+    # -------------------------------------------------------------------
+    # JSON response handling with retry/backoff
+    # -------------------------------------------------------------------
 
     @staticmethod
     def _is_transient_status(status_code: int) -> bool:
-        """HTTP status codes that warrant retry with backoff."""
         return status_code == 429 or (500 <= status_code < 600)
 
     @staticmethod
     def _retry_after_seconds(response: Any) -> float | None:
-        """Honor Retry-After when Instagram returns one. Falls back to None."""
         headers = getattr(response, "headers", None) or {}
         raw = None
         try:
@@ -274,26 +477,16 @@ class InstagramCommentsScraplingFetcher:
         referer: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Perform a JSON fetch with bounded exponential backoff on transient
-        failures (429 / 5xx / transport timeout). Returns a result dict with
-        a `retryable` flag so callers can surface the right queue semantics.
+        """JSON fetch via httpx with bounded exponential backoff on transient
+        failures (429 / 5xx / transport timeout).
         """
-        request_url = url
-        if params:
-            request_url = f"{url}?{urlencode({key: value for key, value in params.items() if value is not None})}"
-
         attempt = 0
         last_transient_reason: str | None = None
         while True:
             attempt += 1
             try:
-                response = await self._fetch(
-                    request_url,
-                    referer=referer,
-                    capture_xhr=False,
-                )
-            except TimeoutError:
-                # Transport timeout — retry with backoff.
+                response = await self._fetch_api(url, referer=referer, params=params)
+            except (TimeoutError, httpx.TimeoutException):
                 last_transient_reason = "transport_timeout"
                 if attempt > self._MAX_TRANSIENT_RETRIES:
                     return {
@@ -310,9 +503,32 @@ class InstagramCommentsScraplingFetcher:
             text = _response_text(response)
             auth_failed = status_code in {401, 403} or _auth_failure_text(text)
 
+            # 3xx: explicit redirect handling.
+            if 300 <= status_code < 400:
+                location = _safe_location(response)
+                reason = (
+                    "redirect_to_login"
+                    if "/accounts/login" in location
+                    else "redirect_to_checkpoint"
+                    if ("/challenge" in location or "/checkpoint" in location)
+                    else "redirect_to_homepage"
+                )
+                logger.warning(
+                    "Instagram API redirected (%d) to %s — reason=%s",
+                    status_code,
+                    location,
+                    reason,
+                )
+                return {
+                    "failed": True,
+                    "auth_failed": any(token in location for token in ("login", "challenge", "checkpoint")),
+                    "reason": reason,
+                    "retryable": False,
+                    "payload": None,
+                }
+
+            # Transient 429 / 5xx: retry with backoff.
             if self._is_transient_status(status_code):
-                # Transient HTTP status: 429 or 5xx. Retry with exponential
-                # backoff, respecting Retry-After if present.
                 last_transient_reason = f"http_{status_code}"
                 if attempt > self._MAX_TRANSIENT_RETRIES:
                     return {
@@ -329,10 +545,8 @@ class InstagramCommentsScraplingFetcher:
                 await asyncio.sleep(sleep_seconds)
                 continue
 
+            # Permanent 4xx.
             if status_code >= 400:
-                # Permanent 4xx (not 429): auth failure or validation error.
-                # Never retryable — retrying would burn proxy budget and
-                # likely get us further flagged.
                 return {
                     "failed": True,
                     "auth_failed": auth_failed,
@@ -340,6 +554,8 @@ class InstagramCommentsScraplingFetcher:
                     "retryable": False,
                     "payload": None,
                 }
+
+            # HTML response (challenge page, not JSON).
             if text and text.lstrip().startswith("<"):
                 return {
                     "failed": True,
@@ -348,6 +564,8 @@ class InstagramCommentsScraplingFetcher:
                     "retryable": False,
                     "payload": None,
                 }
+
+            # Parse JSON.
             try:
                 payload = response.json()
             except Exception:  # noqa: BLE001
@@ -361,6 +579,8 @@ class InstagramCommentsScraplingFetcher:
                         "retryable": False,
                         "payload": None,
                     }
+
+            # Check IG API-level status.
             if isinstance(payload, dict):
                 status_value = str(payload.get("status") or "").strip().lower()
                 message = str(payload.get("message") or payload.get("error_message") or "").strip().lower()
@@ -376,6 +596,7 @@ class InstagramCommentsScraplingFetcher:
                         "retryable": False,
                         "payload": payload,
                     }
+
             return {
                 "failed": False,
                 "auth_failed": auth_failed,
@@ -383,41 +604,3 @@ class InstagramCommentsScraplingFetcher:
                 "retryable": False,
                 "payload": payload,
             }
-
-    async def _fetch(
-        self,
-        url: str,
-        *,
-        referer: str,
-        capture_xhr: bool,
-    ) -> Any:
-        self._request_count += 1
-        return await self._fetcher.async_fetch(
-            url,
-            headless=self._headless,
-            network_idle=False,
-            load_dom=False,
-            cookies=self._cookies,
-            proxy_rotator=self._proxy_rotator,
-            extra_headers=self._parser._get_headers(referer),
-            timeout=self._timeout_ms,
-            retries=1,
-            retry_delay=1.0,
-            capture_xhr=capture_xhr,
-        )
-
-
-def fetch_comments_for_shortcode_sync(
-    *,
-    fetcher: InstagramCommentsScraplingFetcher,
-    shortcode: str,
-    max_comments: int,
-    fetch_replies: bool,
-) -> InstagramCommentsFetchResult:
-    return asyncio.run(
-        fetcher.fetch_comments_for_shortcode(
-            shortcode,
-            max_comments=max_comments,
-            fetch_replies=fetch_replies,
-        )
-    )

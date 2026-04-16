@@ -51,7 +51,9 @@ def test_stealth_session_contains_all_kwargs_we_use() -> None:
         "retries",
         "retry_delay",
         "timeout",
-        "capture_xhr",
+        # capture_xhr removed — Scrapling 0.4.6 types it as `str | None`
+        # (XHR URL pattern), not bool. We don't need XHR capture for
+        # comments so we dropped it from the _fetch call entirely.
     }
     actual = set(StealthSession.__annotations__.keys())
     missing = expected_kwargs - actual

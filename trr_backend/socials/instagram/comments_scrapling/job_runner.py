@@ -8,7 +8,7 @@ from typing import Any
 from trr_backend.db import pg
 from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsScraplingFetcher
 from trr_backend.socials.instagram.comments_scrapling.persistence import persist_instagram_comments_for_post
-from trr_backend.socials.instagram.comments_scrapling.proxy import build_proxy_rotator_from_env
+from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
 from trr_backend.socials.instagram.comments_scrapling.session import resolve_comments_scrapling_session
 
 
@@ -67,102 +67,110 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         "saved_posts": 0,
         "total_posts": len(target_source_ids),
     }
+    fetcher_metadata: dict[str, Any] = {}
 
-    async def _run() -> tuple[dict[str, Any], InstagramCommentsScraplingFetcher]:
+    # Single event loop: fetcher is created, warmed up, used for all
+    # shortcodes, and closed within one asyncio.run(). The httpx client
+    # and Patchright browser share the same loop lifetime.
+    async def _run_job() -> tuple[dict[str, Any], dict[str, Any]]:
+        nonlocal processed_posts, comments_upserted, comments_fetched
+        nonlocal comments_marked_missing, mirror_jobs_enqueued, mirror_job_enqueue_errors
+        nonlocal activity, fetcher_metadata
+
         session = resolve_comments_scrapling_session(
             browser_account_id=account_handle,
             caller_context=f"comments_scrapling:{mode}:{account_handle}",
         )
+        proxy_config = select_comments_proxy()
         fetcher = InstagramCommentsScraplingFetcher(
             cookies=session.cookies,
             raw_cookies=session.auth_session.cookies,
             browser_account_id=session.browser_account_id,
-            proxy_rotator=build_proxy_rotator_from_env(),
+            proxy_config=proxy_config,
         )
-        await fetcher.warmup()
-        return session.auth_session.metadata, fetcher
+        try:
+            await fetcher.warmup()
+            auth_metadata = dict(session.auth_session.metadata or {})
+            fetcher_metadata = dict(fetcher.runtime_metadata)
 
-    auth_metadata, fetcher = asyncio.run(_run())
-    repo._touch_job_heartbeat(job_id, worker_id=worker_id)
-    repo._emit_job_progress(
-        job_id=job_id,
-        stage=stage,
-        platform="instagram",
-        account=account_handle,
-        scraped_posts=0,
-        scraped_comments=0,
-        posts_upserted=0,
-        comments_upserted=0,
-        activity=activity,
-        progress_state=progress_state,
-        force=True,
-    )
-
-    try:
-        for index, shortcode in enumerate(target_source_ids, start=1):
             repo._touch_job_heartbeat(job_id, worker_id=worker_id)
-            result = asyncio.run(
-                fetcher.fetch_comments_for_shortcode(
-                    shortcode,
-                    max_comments=max_comments_per_post,
-                    fetch_replies=fetch_replies,
-                )
-            )
-            if result.auth_failed:
-                # Permanent failure — retrying with the same stale cookies
-                # would just burn proxy budget.
-                raise CommentsScraplingRuntimeError(
-                    f"Instagram auth failed while fetching comments for {shortcode}.",
-                    error_code="instagram_comments_auth_failed",
-                    retryable=False,
-                    runtime_metadata={"shortcode": shortcode, "fetch_reason": result.fetch_reason},
-                )
-            if result.fetch_failed and not result.comments:
-                # P1-5: Transient failures (429 / 5xx / transport timeout) are
-                # signalled by result.retryable=True. The queue will requeue
-                # the job; already-persisted earlier posts stay put (P1-6).
-                raise CommentsScraplingRuntimeError(
-                    f"Instagram comments fetch failed for {shortcode}.",
-                    error_code=str(result.fetch_reason or "instagram_comments_fetch_failed"),
-                    retryable=bool(result.retryable),
-                    runtime_metadata={"shortcode": shortcode, "fetch_reason": result.fetch_reason},
-                )
-            persisted = persist_instagram_comments_for_post(
-                account_handle=account_handle,
-                shortcode=shortcode,
-                comments=result.comments,
-                run_id=run_id or None,
-                job_id=job_id,
-                is_complete=not result.fetch_failed and not result.auth_failed and max_comments_per_post > 0,
-                source_scope=source_scope,
-            )
-            processed_posts += 1
-            comments_fetched += len(result.comments)
-            comments_upserted += persisted.comments_upserted
-            comments_marked_missing += persisted.comments_marked_missing
-            mirror_jobs_enqueued += persisted.comment_media_mirror_jobs_enqueued
-            mirror_job_enqueue_errors += persisted.comment_media_mirror_job_enqueue_errors
-            activity = {
-                "phase": "comments_scrapling_running",
-                "posts_checked": len(target_source_ids),
-                "matched_posts": index,
-                "saved_posts": processed_posts,
-                "total_posts": len(target_source_ids),
-            }
             repo._emit_job_progress(
                 job_id=job_id,
                 stage=stage,
                 platform="instagram",
                 account=account_handle,
-                scraped_posts=processed_posts,
-                scraped_comments=comments_fetched,
-                posts_upserted=processed_posts,
-                comments_upserted=comments_upserted,
+                scraped_posts=0,
+                scraped_comments=0,
+                posts_upserted=0,
+                comments_upserted=0,
                 activity=activity,
                 progress_state=progress_state,
-                force=index == len(target_source_ids),
+                force=True,
             )
 
+            for index, shortcode in enumerate(target_source_ids, start=1):
+                repo._touch_job_heartbeat(job_id, worker_id=worker_id)
+                result = await fetcher.fetch_comments_for_shortcode(
+                    shortcode,
+                    max_comments=max_comments_per_post,
+                    fetch_replies=fetch_replies,
+                )
+                if result.auth_failed:
+                    raise CommentsScraplingRuntimeError(
+                        f"Instagram auth failed while fetching comments for {shortcode}.",
+                        error_code="instagram_comments_auth_failed",
+                        retryable=False,
+                        runtime_metadata={"shortcode": shortcode, "fetch_reason": result.fetch_reason},
+                    )
+                if result.fetch_failed and not result.comments:
+                    raise CommentsScraplingRuntimeError(
+                        f"Instagram comments fetch failed for {shortcode}.",
+                        error_code=str(result.fetch_reason or "instagram_comments_fetch_failed"),
+                        retryable=bool(result.retryable),
+                        runtime_metadata={"shortcode": shortcode, "fetch_reason": result.fetch_reason},
+                    )
+                persisted = persist_instagram_comments_for_post(
+                    account_handle=account_handle,
+                    shortcode=shortcode,
+                    comments=result.comments,
+                    run_id=run_id or None,
+                    job_id=job_id,
+                    is_complete=not result.fetch_failed and not result.auth_failed and max_comments_per_post > 0,
+                    source_scope=source_scope,
+                )
+                processed_posts += 1
+                comments_fetched += len(result.comments)
+                comments_upserted += persisted.comments_upserted
+                comments_marked_missing += persisted.comments_marked_missing
+                mirror_jobs_enqueued += persisted.comment_media_mirror_jobs_enqueued
+                mirror_job_enqueue_errors += persisted.comment_media_mirror_job_enqueue_errors
+                activity = {
+                    "phase": "comments_scrapling_running",
+                    "posts_checked": len(target_source_ids),
+                    "matched_posts": index,
+                    "saved_posts": processed_posts,
+                    "total_posts": len(target_source_ids),
+                }
+                repo._emit_job_progress(
+                    job_id=job_id,
+                    stage=stage,
+                    platform="instagram",
+                    account=account_handle,
+                    scraped_posts=processed_posts,
+                    scraped_comments=comments_fetched,
+                    posts_upserted=processed_posts,
+                    comments_upserted=comments_upserted,
+                    activity=activity,
+                    progress_state=progress_state,
+                    force=index == len(target_source_ids),
+                )
+
+            return auth_metadata, fetcher_metadata
+        finally:
+            await fetcher.aclose()
+
+    try:
+        auth_metadata, fetcher_metadata = asyncio.run(_run_job())
         metadata = {
             "stage": stage,
             "platform": "instagram",
@@ -180,7 +188,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             },
             "activity": {"phase": "comments_scrapling_end", "last_progress_at": repo._iso(repo._now_utc())},
             "fetch_counters": {
-                "request_count": fetcher._request_count,
+                "request_count": fetcher_metadata.get("request_count", 0),
                 "target_posts": len(target_source_ids),
             },
             "auth_context": {
@@ -188,6 +196,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "browser_account_id": auth_metadata.get("browser_account_id"),
                 "validation_category": auth_metadata.get("validation_category"),
             },
+            "fetcher_runtime": fetcher_metadata,
         }
         repo._finish_job(
             job_id,
@@ -226,6 +235,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     "comments_upserted": comments_upserted,
                 },
                 "runtime_metadata": getattr(exc, "runtime_metadata", None),
+                "fetcher_runtime": fetcher_metadata,
             },
             last_error_code=error_code,
             last_error_class=error_class,

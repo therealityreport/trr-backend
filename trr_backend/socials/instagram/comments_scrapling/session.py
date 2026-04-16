@@ -39,7 +39,6 @@ def resolve_comments_scrapling_session(
     auth_session = resolve_instagram_auth_session(
         browser_account_id=browser_account_id,
         caller_context=caller_context,
-        allow_stale_browser_session=False,
     )
     return InstagramCommentsScraplingSession(
         auth_session=auth_session,
