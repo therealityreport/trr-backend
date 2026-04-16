@@ -46,3 +46,22 @@ def test_tiktok_challenge_detection():
 
     assert _is_challenge_response("<html><body>captcha verify</body></html>") is True
     assert _is_challenge_response('{"statusCode": 0}') is False
+
+
+def test_tiktok_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    fetcher = TikTokPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing"},
+    )
+    fetcher._warmup_cookie_delta = {"sessionid": "new-tiktok-value", "msToken": "signed-token"}
+
+    meta = fetcher.runtime_metadata
+    serialized = repr(meta)
+    assert "new-tiktok-value" not in serialized
+    assert "signed-token" not in serialized
+    # sorted alphabetically: msToken comes before sessionid (capital M sorts before lowercase s)
+    assert meta.get("warmup_cookie_names") == ["msToken", "sessionid"]
+    assert meta.get("warmup_cookie_count") == 2
+    assert "warmup_cookie_delta" not in meta
