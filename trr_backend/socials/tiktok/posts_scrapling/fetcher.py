@@ -148,6 +148,15 @@ class TikTokPostsScraplingFetcher:
             raise RuntimeError("TikTok warmup hit challenge page or auth failure; cookies may be invalid.")
         self._merge_warmup_cookies(response)
         self._rebuild_http_client()
+        logger.info(
+            "tiktok_posts_scrapling warmup_success",
+            extra={
+                "event": "warmup_success",
+                "account": username,
+                "cookie_count": len(self._warmup_cookie_delta),
+                "proxy_fingerprint": self._selected_proxy_fingerprint,
+            },
+        )
 
     async def resolve_sec_uid(self, username: str) -> str:
         """Fetch secUid via user detail API. Required for post pagination."""

@@ -335,6 +335,16 @@ class InstagramPostsScraplingFetcher:
         self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(response)
         self._rebuild_http_client()
+        logger.info(
+            "instagram_posts_scrapling warmup_success",
+            extra={
+                "event": "warmup_success",
+                "account": username,
+                "cookie_count": len(self._warmup_cookie_delta),
+                "page_tokens_count": len(self._page_tokens),
+                "proxy_fingerprint": self._selected_proxy_fingerprint,
+            },
+        )
 
     async def fetch_posts_page(
         self,

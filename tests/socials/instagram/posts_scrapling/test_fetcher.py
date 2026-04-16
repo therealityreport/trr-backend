@@ -124,3 +124,32 @@ def test_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
     assert meta.get("warmup_cookie_count") == 2
     # The old field must not exist
     assert "warmup_cookie_delta" not in meta
+
+
+def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
+    """After a successful warmup, an info log with event=warmup_success should fire."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "x"},
+        browser_account_id="t",
+    )
+
+    # Mock the browser navigation to return a fake response with status 200
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = "<html>LSD token stuff</html>"
+    fake_resp.cookies = {"fresh_cookie": "v"}
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+
+    with caplog.at_level("INFO", logger="socials.instagram.posts_scrapling.fetcher"):
+        asyncio.run(fetcher.warmup("bravotv"))
+
+    events = [r for r in caplog.records if getattr(r, "event", None) == "warmup_success"]
+    assert len(events) == 1
+    assert events[0].account == "bravotv"
+    assert events[0].cookie_count >= 1
