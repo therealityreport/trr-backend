@@ -99,3 +99,57 @@ def test_result_dataclass():
     assert len(result.posts) == 1
     assert result.fetch_failed is False
     assert result.has_next_page is False
+
+
+def test_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
+    """warmup_cookie_delta previously leaked {name: value} into scrape_jobs.metadata.
+    Must now only expose names and counts."""
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing"},
+        browser_account_id="test",
+    )
+    # Simulate warmup having merged new cookies
+    fetcher._warmup_cookie_delta = {"sessionid": "new-sensitive-value", "csrftoken": "secret-token"}
+
+    meta = fetcher.runtime_metadata
+    # Cookie values must not appear in the metadata dict, anywhere
+    serialized = repr(meta)
+    assert "new-sensitive-value" not in serialized
+    assert "secret-token" not in serialized
+    # Names and count should be reported (sorted alphabetically for deterministic order)
+    assert meta.get("warmup_cookie_names") == ["csrftoken", "sessionid"]
+    assert meta.get("warmup_cookie_count") == 2
+    # The old field must not exist
+    assert "warmup_cookie_delta" not in meta
+
+
+def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
+    """After a successful warmup, an info log with event=warmup_success should fire."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "x"},
+        browser_account_id="t",
+    )
+
+    # Mock the browser navigation to return a fake response with status 200
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = "<html>LSD token stuff</html>"
+    fake_resp.cookies = {"fresh_cookie": "v"}
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+
+    with caplog.at_level("INFO", logger="socials.instagram.posts_scrapling.fetcher"):
+        asyncio.run(fetcher.warmup("bravotv"))
+
+    events = [r for r in caplog.records if getattr(r, "event", None) == "warmup_success"]
+    assert len(events) == 1
+    assert events[0].account == "bravotv"
+    assert events[0].cookie_count >= 1

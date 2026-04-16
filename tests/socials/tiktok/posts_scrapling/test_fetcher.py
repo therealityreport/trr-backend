@@ -46,3 +46,44 @@ def test_tiktok_challenge_detection():
 
     assert _is_challenge_response("<html><body>captcha verify</body></html>") is True
     assert _is_challenge_response('{"statusCode": 0}') is False
+
+
+def test_tiktok_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    fetcher = TikTokPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing"},
+    )
+    fetcher._warmup_cookie_delta = {"sessionid": "new-tiktok-value", "msToken": "signed-token"}
+
+    meta = fetcher.runtime_metadata
+    serialized = repr(meta)
+    assert "new-tiktok-value" not in serialized
+    assert "signed-token" not in serialized
+    # sorted alphabetically: msToken comes before sessionid (capital M sorts before lowercase s)
+    assert meta.get("warmup_cookie_names") == ["msToken", "sessionid"]
+    assert meta.get("warmup_cookie_count") == 2
+    assert "warmup_cookie_delta" not in meta
+
+
+def test_tiktok_warmup_emits_structured_log_success(_mock_scrapling, caplog):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    fetcher = TikTokPostsScraplingFetcher(cookies=[], raw_cookies={"sessionid": "x"})
+
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = "<html>not challenge</html>"
+    fake_resp.cookies = {"ttwid": "y"}
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+
+    with caplog.at_level("INFO", logger="socials.tiktok.posts_scrapling.fetcher"):
+        asyncio.run(fetcher.warmup("someone"))
+
+    events = [r for r in caplog.records if getattr(r, "event", None) == "warmup_success"]
+    assert len(events) == 1
+    assert events[0].account == "someone"
