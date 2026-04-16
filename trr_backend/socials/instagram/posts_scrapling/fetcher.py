@@ -22,10 +22,24 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
+from trr_backend.socials._scrapling_http_utils import (
+    env_truthy as _env_truthy,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    extract_response_cookies as _extract_response_cookies,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    response_text as _response_text,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    safe_location as _safe_location,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    status_code as _status_code,
+)
 from trr_backend.socials.instagram.constants import (
     GRAPHQL_URL,
     PROFILE_POSTS_DOC_IDS,
@@ -63,73 +77,9 @@ _HSI_RE = re.compile(r'"hsi":"?(?P<token>\d+)"?')
 # ---------------------------------------------------------------------------
 
 
-def _env_truthy(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on"}
-
-
 def _auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
-
-
-def _response_text(response: Any) -> str:
-    text = getattr(response, "text", "")
-    if callable(text):
-        try:
-            return str(text() or "")
-        except Exception:  # noqa: BLE001
-            return ""
-    return str(text or "")
-
-
-def _status_code(response: Any) -> int:
-    """Read status from both httpx (.status_code) and Scrapling (.status)."""
-    raw = getattr(response, "status_code", getattr(response, "status", 0))
-    try:
-        return int(raw or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _safe_location(response: Any) -> str:
-    """Extract sanitized Location header path (no query string, no credentials)."""
-    headers = getattr(response, "headers", None) or {}
-    raw = ""
-    try:
-        raw = str(headers.get("location") or headers.get("Location") or "")
-    except Exception:  # noqa: BLE001
-        return ""
-    if not raw:
-        return ""
-    try:
-        parsed = urlparse(raw)
-        return str(parsed.path or "/").lower()
-    except Exception:  # noqa: BLE001
-        return raw.split("?")[0].lower()
-
-
-def _extract_response_cookies(response: Any) -> dict[str, str]:
-    """Pull cookies from a Scrapling/httpx response object."""
-    cookies_attr = getattr(response, "cookies", None)
-    if cookies_attr is None:
-        return {}
-    result: dict[str, str] = {}
-    try:
-        if isinstance(cookies_attr, dict):
-            for k, v in cookies_attr.items():
-                result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "items"):
-            for k, v in cookies_attr.items():
-                result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "jar"):
-            for cookie in cookies_attr.jar:
-                result[str(cookie.name)] = str(cookie.value)
-    except Exception:  # noqa: BLE001
-        pass
-    return result
 
 
 def _extract_page_tokens(html: str) -> dict[str, str]:

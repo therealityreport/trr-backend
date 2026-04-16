@@ -18,13 +18,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
+from trr_backend.socials._scrapling_http_utils import (
+    env_truthy as _env_truthy,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    extract_response_cookies as _extract_response_cookies,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    response_text as _response_text,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    safe_location as _safe_location,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    status_code as _status_code,
+)
 from trr_backend.socials.tiktok.posts_scrapling.proxy import TikTokPostsProxyConfig
 
 logger = logging.getLogger("socials.tiktok.posts_scrapling.fetcher")
@@ -37,13 +50,6 @@ TIKTOK_POST_PAGE_SIZE = 30
 # ---------------------------------------------------------------------------
 # Pure helpers (copy pattern from Instagram fetcher)
 # ---------------------------------------------------------------------------
-
-
-def _env_truthy(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on"}
 
 
 def _build_tiktok_headers(referer: str) -> dict[str, str]:
@@ -63,59 +69,6 @@ def _build_tiktok_headers(referer: str) -> dict[str, str]:
 def _is_challenge_response(text: str) -> bool:
     body = str(text or "").strip().lower()[:512]
     return any(token in body for token in ("<html", "captcha", "verify", "challenge"))
-
-
-def _response_text(response: Any) -> str:
-    text = getattr(response, "text", "")
-    if callable(text):
-        try:
-            return str(text() or "")
-        except Exception:  # noqa: BLE001
-            return ""
-    return str(text or "")
-
-
-def _status_code(response: Any) -> int:
-    raw = getattr(response, "status_code", getattr(response, "status", 0))
-    try:
-        return int(raw or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _safe_location(response: Any) -> str:
-    headers = getattr(response, "headers", None) or {}
-    try:
-        raw = str(headers.get("location") or headers.get("Location") or "")
-    except Exception:  # noqa: BLE001
-        return ""
-    if not raw:
-        return ""
-    try:
-        parsed = urlparse(raw)
-        return str(parsed.path or "/").lower()
-    except Exception:  # noqa: BLE001
-        return raw.split("?")[0].lower()
-
-
-def _extract_response_cookies(response: Any) -> dict[str, str]:
-    cookies_attr = getattr(response, "cookies", None)
-    if cookies_attr is None:
-        return {}
-    result: dict[str, str] = {}
-    try:
-        if isinstance(cookies_attr, dict):
-            for k, v in cookies_attr.items():
-                result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "items"):
-            for k, v in cookies_attr.items():
-                result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "jar"):
-            for cookie in cookies_attr.jar:
-                result[str(cookie.name)] = str(cookie.value)
-    except Exception:  # noqa: BLE001
-        pass
-    return result
 
 
 # ---------------------------------------------------------------------------
