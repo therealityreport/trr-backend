@@ -38,12 +38,16 @@ def main() -> int:
         "stage": repo.TIKTOK_POSTS_SCRAPLING_STAGE,
         "account": account,
     }
+    # scrape_runs.status check constraint allows only:
+    # queued | running | completed | failed | cancelled
+    # For manual smoke tests we use 'queued' to seed the row, then the runner
+    # updates it to 'running' when it claims work and 'completed'/'failed' at the end.
     run_id = repo._create_run(
         None,
         source_scope="bravo",
         initiated_by="manual_smoke",
         config=run_config,
-        status="pending",
+        status="queued",
     )
     job_id = repo._create_job(
         None,
@@ -57,7 +61,7 @@ def main() -> int:
             "max_pages": args.max_pages,
         },
         initiated_by="manual_smoke",
-        status="pending",
+        status="queued",
     )
     job = pg.fetch_one("select * from social.scrape_jobs where id = %s::uuid", [job_id])
     if not job:
