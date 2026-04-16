@@ -169,6 +169,8 @@ SOCIAL_YOUTUBE_TRANSCRIPT_INGEST_ENABLED_DEFAULT = True
 INSTAGRAM_MEDIA_MIRROR_STAGE = "media_mirror"
 COMMENT_MEDIA_MIRROR_STAGE = "comment_media_mirror"
 INSTAGRAM_COMMENTS_SCRAPLING_STAGE = "comments_scrapling"
+INSTAGRAM_POSTS_SCRAPLING_STAGE = "posts_scrapling"
+TIKTOK_POSTS_SCRAPLING_STAGE = "tiktok_posts_scrapling"
 SHARED_ACCOUNT_POSTS_STAGE = "shared_account_posts"
 SHARED_ACCOUNT_DISCOVERY_STAGE = "shared_account_discovery"
 POST_CLASSIFY_STAGE = "post_classify"
@@ -32014,6 +32016,14 @@ def _execute_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -
             from trr_backend.socials.instagram.comments_scrapling.job_runner import run_instagram_comments_scrapling_job
 
             return run_instagram_comments_scrapling_job(job, worker_id=worker_id)
+        if platform == "instagram" and stage == INSTAGRAM_POSTS_SCRAPLING_STAGE:
+            from trr_backend.socials.instagram.posts_scrapling.job_runner import run_instagram_posts_scrapling_job
+
+            return run_instagram_posts_scrapling_job(job, worker_id=worker_id)
+        if platform == "tiktok" and stage == TIKTOK_POSTS_SCRAPLING_STAGE:
+            from trr_backend.socials.tiktok.posts_scrapling.job_runner import run_tiktok_posts_scrapling_job
+
+            return run_tiktok_posts_scrapling_job(job, worker_id=worker_id)
         if stage in {
             SHARED_ACCOUNT_DISCOVERY_STAGE,
             SHARED_ACCOUNT_POSTS_STAGE,
