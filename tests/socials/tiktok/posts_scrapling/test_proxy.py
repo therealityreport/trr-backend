@@ -30,3 +30,32 @@ def test_select_tiktok_proxy_decodo(monkeypatch):
     assert result is not None
     assert isinstance(result.browser_proxy, dict)
     assert result.fingerprint == "gate.decodo.com:7000:decodo"
+
+
+def test_resolve_tiktok_session_uses_canonical_loader(monkeypatch):
+    """Session adapter delegates to the canonical _load_tiktok_cookies()."""
+    monkeypatch.setattr(
+        "trr_backend.socials.tiktok.posts_scrapling.session._load_tiktok_cookies",
+        lambda: {"sessionid": "abc123", "tt_csrf_token": "xyz"},
+    )
+    from trr_backend.socials.tiktok.posts_scrapling.session import resolve_tiktok_posts_session
+
+    result = resolve_tiktok_posts_session()
+    assert result.raw_cookies["sessionid"] == "abc123"
+    assert len(result.cookies) == 2
+    assert result.cookies[0]["domain"] == ".tiktok.com"
+    assert result.cookie_source == "canonical"
+
+
+def test_resolve_tiktok_session_raises_on_empty(monkeypatch):
+    """Raises if canonical loader returns no cookies."""
+    import pytest
+
+    monkeypatch.setattr(
+        "trr_backend.socials.tiktok.posts_scrapling.session._load_tiktok_cookies",
+        lambda: {},
+    )
+    from trr_backend.socials.tiktok.posts_scrapling.session import resolve_tiktok_posts_session
+
+    with pytest.raises(RuntimeError, match="No TikTok cookies"):
+        resolve_tiktok_posts_session()
