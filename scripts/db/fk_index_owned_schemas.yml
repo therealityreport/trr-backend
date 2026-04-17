@@ -1,0 +1,10 @@
+owned_schemas:
+  - core
+  - admin
+  - social
+  - surveys
+  - firebase_surveys
+  - public
+  - screenalytics
+  - ml
+  - pipeline
