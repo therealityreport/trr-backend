@@ -140,7 +140,7 @@ def _render_status_md(
     for entry in deferred:
         deferred_by_schema[entry["schema"]] = deferred_by_schema.get(entry["schema"], 0) + 1
 
-    representative_query_path = str(REPO_ROOT / QUERY_CHECK_ARTIFACTS[wave_name])
+    representative_query_path = f"../../{QUERY_CHECK_ARTIFACTS[wave_name]}"
     inventory_mode = metadata.get("connection_mode")
     inventory_host = metadata.get("resolved_db_host")
 
