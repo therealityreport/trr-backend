@@ -1,6 +1,6 @@
 # Wave-1 FK Index Hardening Status
 
-- generated_at: `2026-04-17T19:09:04Z`
+- generated_at: `2026-04-17T19:10:58Z`
 - inventory_source: [`wave-1-inventory.yml`](./wave-1-inventory.yml)
 - representative_query_checks: [`scripts/db/fk_index_wave1_explain.sql`](/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/db/fk_index_wave1_explain.sql)
 - connection_mode_used_for_inventory: `runtime`
@@ -8,7 +8,7 @@
 
 ## Pre-flight Checks
 
-- Inventory regenerated from the live database on `2026-04-17T19:09:04Z`.
+- Inventory regenerated from the live database on `2026-04-17T19:10:58Z`.
 - Inventory ran on `runtime` because direct-host connectivity is currently blocked from this workstation.
 - Direct apply / observer lane remains blocked until `db.<project>.supabase.co:5432` is reachable from this machine.
 - Query-check gate applied before generating forward SQL; candidates without a committed representative query artifact are deferred.
@@ -26,7 +26,7 @@
 - `social.tiktok_comments` — estimated_row_count: 75275
 - `social.youtube_comments` — estimated_row_count: 30529
 - `social.instagram_account_catalog_posts` — estimated_row_count: 29342
-- `social.instagram_account_catalog_posts` — estimated_row_count: 29342
+- `social.scrape_jobs` — estimated_row_count: 24296
 
 ## Rollout Files
 

@@ -1,6 +1,6 @@
 # Wave-2 FK Index Hardening Status
 
-- generated_at: `2026-04-17T19:09:05Z`
+- generated_at: `2026-04-17T19:10:59Z`
 - inventory_source: [`wave-2-inventory.yml`](./wave-2-inventory.yml)
 - representative_query_checks: [`scripts/db/fk_index_wave2_explain.sql`](/Users/thomashulihan/Projects/TRR/TRR-Backend/scripts/db/fk_index_wave2_explain.sql)
 - connection_mode_used_for_inventory: `runtime`
@@ -8,7 +8,7 @@
 
 ## Pre-flight Checks
 
-- Inventory regenerated from the live database on `2026-04-17T19:09:05Z`.
+- Inventory regenerated from the live database on `2026-04-17T19:10:59Z`.
 - Inventory ran on `runtime` because direct-host connectivity is currently blocked from this workstation.
 - Direct apply / observer lane remains blocked until `db.<project>.supabase.co:5432` is reachable from this machine.
 - Query-check gate applied before generating forward SQL; candidates without a committed representative query artifact are deferred.
@@ -23,10 +23,9 @@
 ## Pre-Flight Disk Targets
 
 - `screenalytics.media_upload_sessions` — estimated_row_count: 29
-- `screenalytics.media_upload_sessions` — estimated_row_count: 29
-- `screenalytics.media_upload_sessions` — estimated_row_count: 29
 - `ml.analysis_media_assets` — estimated_row_count: 28
-- `ml.analysis_media_assets` — estimated_row_count: 28
+- `screenalytics.video_assets` — estimated_row_count: 26
+- `ml.analysis_media_upload_sessions` — estimated_row_count: 2
 
 ## Rollout Files
 

@@ -179,19 +179,22 @@ def _render_status_md(
         "## Pre-Flight Disk Targets",
         "",
     ]
-    large_targets = sorted(
-        (entry for entry in rollout_ready if (entry.get("estimated_row_count") or 0) > 0),
-        key=lambda entry: (
-            -(entry.get("estimated_row_count") or 0),
-            str(entry.get("schema") or ""),
-            str(entry.get("table") or ""),
-        ),
+    # Dedupe by (schema, table) — multiple FK indexes on the same target table
+    # should only count once for operator disk-headroom planning.
+    unique_by_table: dict[tuple[str, str], int] = {}
+    for entry in rollout_ready:
+        key = (str(entry.get("schema") or ""), str(entry.get("table") or ""))
+        count = int(entry.get("estimated_row_count") or 0)
+        if count > unique_by_table.get(key, 0):
+            unique_by_table[key] = count
+
+    disk_targets_sorted = sorted(
+        ((schema, table, count) for (schema, table), count in unique_by_table.items() if count > 0),
+        key=lambda item: (-item[2], item[0], item[1]),
     )[:5]
-    if large_targets:
-        for entry in large_targets:
-            lines.append(
-                f"- `{entry['schema']}.{entry['table']}` — estimated_row_count: {entry.get('estimated_row_count') or 0}"
-            )
+    if disk_targets_sorted:
+        for schema, table, count in disk_targets_sorted:
+            lines.append(f"- `{schema}.{table}` — estimated_row_count: {count}")
     else:
         lines.append("- (no large tables in this wave)")
     lines.extend(
