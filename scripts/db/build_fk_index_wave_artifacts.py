@@ -52,14 +52,30 @@ def _render_forward_sql(wave_name: str, entries: list[dict[str, Any]]) -> str:
         f"-- generated_at: {generated_at}",
         "-- apply with direct Postgres connectivity only",
         "",
+        "-- Operator contract: set PGAPPNAME=fk-index-<wave>-apply before invoking psql.",
+        "-- This guard refuses to apply if the session is not running with that exact",
+        "-- application_name, which would indicate either an operator misconfiguration",
+        "-- or a pooler rewriting the connection.",
+        "DO $pre$",
+        "DECLARE",
+        "  app_name text;",
+        "BEGIN",
+        "  SELECT current_setting('application_name', true) INTO app_name;",
+        "  IF app_name IS NULL OR app_name NOT LIKE 'fk-index-%-apply' THEN",
+        (
+            "    RAISE EXCEPTION 'Refusing apply: application_name is %, "
+            "expected fk-index-<wave>-apply. Set PGAPPNAME before running psql.',"
+        ),
+        "      COALESCE(app_name, '<null>');",
+        "  END IF;",
+        "END",
+        "$pre$;",
+        "",
     ]
     for entry in entries:
         lines.extend(
             [
-                (
-                    f"-- {entry['schema']}.{entry['table']} "
-                    f"{entry['constraint_name']} -> {entry['proposed_index_name']}"
-                ),
+                (f"-- {entry['schema']}.{entry['table']} {entry['constraint_name']} -> {entry['proposed_index_name']}"),
                 "SET lock_timeout = '5s';",
                 f"SET statement_timeout = '{entry['statement_timeout_tier']}';",
                 (
@@ -74,9 +90,11 @@ def _render_forward_sql(wave_name: str, entries: list[dict[str, Any]]) -> str:
                     )
                     + ";"
                 ),
-                "",
             ]
         )
+        if (entry.get("estimated_row_count") or 0) > 1_000_000:
+            lines.append(f"ANALYZE {quote_ident(entry['schema'])}.{quote_ident(entry['table'])};")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -91,10 +109,7 @@ def _render_rollback_sql(wave_name: str, entries: list[dict[str, Any]]) -> str:
     for entry in entries:
         lines.extend(
             [
-                (
-                    f"-- rollback {entry['schema']}.{entry['table']} "
-                    f"{entry['proposed_index_name']}"
-                ),
+                (f"-- rollback {entry['schema']}.{entry['table']} {entry['proposed_index_name']}"),
                 "SET lock_timeout = '5s';",
                 "SET statement_timeout = '3h';",
                 (
@@ -161,42 +176,64 @@ def _render_status_md(
         f"- Rollout-ready by schema: `{ready_by_schema}`",
         f"- Deferred by schema: `{deferred_by_schema}`",
         "",
-        "## Rollout Files",
+        "## Pre-Flight Disk Targets",
         "",
-        f"- Forward SQL: [`{wave_name}-forward.sql`](./{wave_name}-forward.sql)",
-        f"- Rollback SQL: [`{wave_name}-rollback.sql`](./{wave_name}-rollback.sql)",
-        "",
-        "## Baseline Snapshot",
-        "",
-        "- Pending. Capture with `scripts/db/run_fk_index_observer.py baseline` once direct connectivity is fixed.",
-        "",
-        "## Per-Candidate Apply Outcome",
-        "",
-        "- Pending direct-lane rollout.",
-        "",
-        "## Invalid-Index Cleanup",
-        "",
-        "- Pending direct-lane rollout.",
-        "",
-        "## Aborts and Rollbacks",
-        "",
-        "- None yet.",
-        "",
-        "## Schema-Doc Diffs",
-        "",
-        (
-            "- Pending. Run `make schema-docs-check` after direct apply on the "
-            "validation target and commit any resulting `supabase/schema_docs/*` drift."
-        ),
-        "",
-        "## Soak Results",
-        "",
-        "- Pending. Respect `24h` soak between Wave 1 apply completion and Wave 2 apply start.",
-        "",
-        "## Next Checkpoint",
-        "",
-        "- Do not start apply until direct-connectivity is repaired and baseline snapshots are captured.",
     ]
+    large_targets = sorted(
+        (entry for entry in rollout_ready if (entry.get("estimated_row_count") or 0) > 0),
+        key=lambda entry: (
+            -(entry.get("estimated_row_count") or 0),
+            str(entry.get("schema") or ""),
+            str(entry.get("table") or ""),
+        ),
+    )[:5]
+    if large_targets:
+        for entry in large_targets:
+            lines.append(
+                f"- `{entry['schema']}.{entry['table']}` — estimated_row_count: {entry.get('estimated_row_count') or 0}"
+            )
+    else:
+        lines.append("- (no large tables in this wave)")
+    lines.extend(
+        [
+            "",
+            "## Rollout Files",
+            "",
+            f"- Forward SQL: [`{wave_name}-forward.sql`](./{wave_name}-forward.sql)",
+            f"- Rollback SQL: [`{wave_name}-rollback.sql`](./{wave_name}-rollback.sql)",
+            "",
+            "## Baseline Snapshot",
+            "",
+            "- Pending. Capture with `scripts/db/run_fk_index_observer.py baseline` once direct connectivity is fixed.",
+            "",
+            "## Per-Candidate Apply Outcome",
+            "",
+            "- Pending direct-lane rollout.",
+            "",
+            "## Invalid-Index Cleanup",
+            "",
+            "- Pending direct-lane rollout.",
+            "",
+            "## Aborts and Rollbacks",
+            "",
+            "- None yet.",
+            "",
+            "## Schema-Doc Diffs",
+            "",
+            (
+                "- Pending. Run `make schema-docs-check` after direct apply on the "
+                "validation target and commit any resulting `supabase/schema_docs/*` drift."
+            ),
+            "",
+            "## Soak Results",
+            "",
+            "- Pending. Respect `24h` soak between Wave 1 apply completion and Wave 2 apply start.",
+            "",
+            "## Next Checkpoint",
+            "",
+            "- Do not start apply until direct-connectivity is repaired and baseline snapshots are captured.",
+        ]
+    )
     if deferred:
         lines.extend(
             [
