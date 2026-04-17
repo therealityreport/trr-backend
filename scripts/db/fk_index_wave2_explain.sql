@@ -138,7 +138,7 @@ select fbi.image_id, fbi.media_asset_id
  where fbi.media_asset_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_fbi_media_asset_id (
-  (select id from core.media_assets order by id limit 1)
+  (select id from core.media_assets order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_fbi_media_asset_id;
 
@@ -151,14 +151,14 @@ deallocate wave2_sa_fbi_media_asset_id;
 --    run is purged)
 -- ============================================================================
 \echo 'Wave 2 screenalytics.identity_locks.run_id deferred query-check'
-prepare wave2_sa_identity_locks_run_id (uuid) as
-select il.id, il.run_id
+prepare wave2_sa_identity_locks_run_id (text) as
+select il.ep_id, il.run_id, il.identity_id
   from screenalytics.identity_locks il
-  join screenalytics.runs r on r.id = il.run_id
+  join screenalytics.runs r on r.run_id = il.run_id
  where il.run_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_identity_locks_run_id (
-  (select id from screenalytics.runs order by id limit 1)
+  (select run_id from screenalytics.runs order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_identity_locks_run_id;
 
@@ -178,7 +178,7 @@ select mus.id, mus.episode_id
  where mus.episode_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_mus_episode_id (
-  (select id from core.episodes order by id limit 1)
+  (select id from core.episodes order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_mus_episode_id;
 
@@ -200,7 +200,7 @@ select mus.id, mus.promoted_video_asset_id
  where mus.promoted_video_asset_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_mus_promoted_va_id (
-  (select id from screenalytics.video_assets order by id limit 1)
+  (select id from screenalytics.video_assets order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_mus_promoted_va_id;
 
@@ -220,7 +220,7 @@ select mus.id, mus.season_id
  where mus.season_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_mus_season_id (
-  (select id from core.seasons order by id limit 1)
+  (select id from core.seasons order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_mus_season_id;
 
@@ -233,13 +233,13 @@ deallocate wave2_sa_mus_season_id;
 -- ============================================================================
 \echo 'Wave 2 screenalytics.suggestion_applies.suggestion_id deferred query-check'
 prepare wave2_sa_sa_suggestion_id (uuid) as
-select sa.id, sa.suggestion_id
+select sa.apply_id, sa.suggestion_id
   from screenalytics.suggestion_applies sa
-  join screenalytics.suggestions s on s.id = sa.suggestion_id
+  join screenalytics.suggestions s on s.suggestion_id = sa.suggestion_id
  where sa.suggestion_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_sa_suggestion_id (
-  (select id from screenalytics.suggestions order by id limit 1)
+  (select suggestion_id from screenalytics.suggestions order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_sa_suggestion_id;
 
@@ -251,14 +251,14 @@ deallocate wave2_sa_sa_suggestion_id;
 --    DELETE/UPDATE scan support on screenalytics.runs)
 -- ============================================================================
 \echo 'Wave 2 screenalytics.suggestion_batches.run_id deferred query-check'
-prepare wave2_sa_sb_run_id (uuid) as
-select sb.id, sb.run_id
+prepare wave2_sa_sb_run_id (text) as
+select sb.batch_id, sb.run_id
   from screenalytics.suggestion_batches sb
-  join screenalytics.runs r on r.id = sb.run_id
+  join screenalytics.runs r on r.run_id = sb.run_id
  where sb.run_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_sb_run_id (
-  (select id from screenalytics.runs order by id limit 1)
+  (select run_id from screenalytics.runs order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_sb_run_id;
 
@@ -279,7 +279,7 @@ select uc.id, uc.assigned_person_id
  where uc.assigned_person_id = $1;
 explain (analyze, buffers)
 execute wave2_sa_uc_assigned_person_id (
-  (select id from core.people order by id limit 1)
+  (select id from core.people order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_uc_assigned_person_id;
 
@@ -303,6 +303,6 @@ select va.id, va.media_asset_id
    and va.media_asset_id is not null;
 explain (analyze, buffers)
 execute wave2_sa_va_media_asset_id (
-  (select id from core.media_assets order by id limit 1)
+  (select id from core.media_assets order by created_at desc nulls last limit 1)
 );
 deallocate wave2_sa_va_media_asset_id;
