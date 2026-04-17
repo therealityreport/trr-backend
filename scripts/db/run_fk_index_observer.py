@@ -57,7 +57,13 @@ def _query_patterns_for_wave(wave_name: str) -> list[dict[str, str]]:
             {"label": "ml", "pattern": "%from ml.screentime_runs r%"},
             {"label": "pipeline", "pattern": "%from pipeline.socialblade_growth_data%"},
             {"label": "firebase_surveys", "pattern": "%from firebase_surveys.answers%"},
-            {"label": "screenalytics", "pattern": "%from screenalytics.%"},
+            {"label": "screenalytics_face_bank_images", "pattern": "%from screenalytics.face_bank_images%"},
+            {"label": "screenalytics_identity_locks", "pattern": "%from screenalytics.identity_locks%"},
+            {"label": "screenalytics_media_upload_sessions", "pattern": "%from screenalytics.media_upload_sessions%"},
+            {"label": "screenalytics_suggestion_applies", "pattern": "%from screenalytics.suggestion_applies%"},
+            {"label": "screenalytics_suggestion_batches", "pattern": "%from screenalytics.suggestion_batches%"},
+            {"label": "screenalytics_unknown_clusters", "pattern": "%from screenalytics.unknown_clusters%"},
+            {"label": "screenalytics_video_assets", "pattern": "%from screenalytics.video_assets%"},
         ]
     raise RuntimeError(f"Unsupported wave name {wave_name!r}.")
 
