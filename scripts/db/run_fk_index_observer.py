@@ -56,7 +56,15 @@ def _query_patterns_for_wave(wave_name: str) -> list[dict[str, str]]:
     if wave_name == "wave-2":
         return [
             {"label": "surveys", "pattern": "%from surveys.answers as a%"},
-            {"label": "ml", "pattern": "%from ml.screentime_runs r%"},
+            {"label": "ml_analysis_media_assets", "pattern": "%from ml.analysis_media_assets%"},
+            {"label": "ml_analysis_media_cast_candidates", "pattern": "%from ml.analysis_media_cast_candidates%"},
+            {"label": "ml_analysis_media_upload_sessions", "pattern": "%from ml.analysis_media_upload_sessions%"},
+            {"label": "ml_face_reference_images", "pattern": "%from ml.face_reference_images%"},
+            {"label": "ml_screentime_person_metrics", "pattern": "%from ml.screentime_person_metrics%"},
+            {"label": "ml_screentime_reference_fingerprints", "pattern": "%from ml.screentime_reference_fingerprints%"},
+            {"label": "ml_screentime_review_state", "pattern": "%from ml.screentime_review_state%"},
+            {"label": "ml_screentime_segments", "pattern": "%from ml.screentime_segments%"},
+            {"label": "ml_screentime_unknown_clusters", "pattern": "%from ml.screentime_unknown_clusters%"},
             {"label": "pipeline", "pattern": "%from pipeline.socialblade_growth_data%"},
             {"label": "firebase_surveys", "pattern": "%from firebase_surveys.answers%"},
             {"label": "screenalytics_face_bank_images", "pattern": "%from screenalytics.face_bank_images%"},
