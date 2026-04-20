@@ -107,9 +107,7 @@ def _rows_to_inventory(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "nullable_columns": row["nullable_columns"] or [],
             "estimated_row_count": int(row["estimated_row_count"] or 0),
             "single_column_null_frac": (
-                float(row["single_column_null_frac"])
-                if row.get("single_column_null_frac") is not None
-                else None
+                float(row["single_column_null_frac"]) if row.get("single_column_null_frac") is not None else None
             ),
             "hot_table": bool(row["hot_table"]),
             "covered_by_existing_index": bool(row["covered_by_existing_index"]),
