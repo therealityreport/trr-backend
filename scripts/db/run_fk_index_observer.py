@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 import time
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -266,17 +268,39 @@ def main() -> int:
         return 0
     if args.command == "loop":
         iteration = 0
+        consecutive_failures = 0
         while True:
-            snapshot(
-                wave_name=args.wave,
-                inventory_path=Path(args.inventory),
-                output_dir=Path(args.output_dir),
-                known_pids=list(args.known_pid),
-            )
-            iteration += 1
-            if args.iterations and iteration >= args.iterations:
-                return 0
-            time.sleep(max(1, int(args.interval_sec)))
+            try:
+                snapshot(
+                    wave_name=args.wave,
+                    inventory_path=Path(args.inventory),
+                    output_dir=Path(args.output_dir),
+                    known_pids=list(args.known_pid),
+                )
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                print(
+                    f"[observer loop] snapshot iteration {iteration + 1} failed "
+                    f"({consecutive_failures} consecutive): {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
+                if consecutive_failures >= 3:
+                    print(
+                        "[observer loop] aborting: 3 consecutive snapshot failures",
+                        file=sys.stderr,
+                    )
+                    raise
+                time.sleep(max(1, int(args.interval_sec)))
+                continue
+            else:
+                consecutive_failures = 0
+                iteration += 1
+                if args.iterations and iteration >= args.iterations:
+                    return 0
+                time.sleep(max(1, int(args.interval_sec)))
     return 0
 
 

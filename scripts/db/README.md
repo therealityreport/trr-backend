@@ -19,6 +19,9 @@ This directory contains scripts for database maintenance, verification, and migr
 | `run_sql.sh` | Safe SQL runner with auto DB URL resolution |
 | `guard_core_schema.sql` | Abort script if `core` schema missing |
 | `verify_pre_0033_cleanup.sql` | Pre-migration duplicate checks |
+| `run_fk_index_inventory.py` | Freeze wave inventory YAML from live FK metadata |
+| `run_fk_index_observer.py` | Capture baseline / snapshot CSVs for concurrent index rollout |
+| `build_fk_index_wave_artifacts.py` | Generate forward SQL, rollback SQL, and wave status notes from frozen inventory |
 
 ---
 
@@ -32,6 +35,41 @@ The tools in this directory resolve the database URL in this order:
 2. **`TRR_DB_FALLBACK_URL`** - Explicit break-glass fallback
 3. **`SUPABASE_DB_URL` / `DATABASE_URL`** - Deprecated compatibility inputs only
 4. **`supabase status`** - Falls back to local Supabase instance (dev only)
+
+### Shared-Schema Ownership
+
+Backend owns shared-schema SQL in this workspace.
+
+- Canonical migrations for shared database surfaces belong in `TRR-Backend`, especially `firebase_surveys.*`, `admin.*`, grants, RLS, and anything that depends on backend-owned schemas such as `core.*`.
+- `TRR-APP/apps/web/scripts/run-migrations.mjs` now defaults to app-local migrations only.
+- The app runner still exposes a transitional opt-in for older environments that have not finished porting shared-schema SQL out of `TRR-APP`, but that path is compatibility-only and should not be treated as the long-term owner.
+
+### FK Index Hardening Workflow
+
+- Freeze wave inventory:
+  - `PYTHONPATH=. ./.venv/bin/python -m scripts.db.run_fk_index_inventory --wave wave-1 --output docs/db/fk-index-hardening/wave-1-inventory.yml`
+  - `PYTHONPATH=. ./.venv/bin/python -m scripts.db.run_fk_index_inventory --wave wave-2 --output docs/db/fk-index-hardening/wave-2-inventory.yml`
+- Build wave artifacts from the frozen inventory:
+  - `PYTHONPATH=. ./.venv/bin/python -m scripts.db.build_fk_index_wave_artifacts --wave wave-1`
+  - `PYTHONPATH=. ./.venv/bin/python -m scripts.db.build_fk_index_wave_artifacts --wave wave-2`
+- Capture observer baseline once direct connectivity is fixed:
+  - `PYTHONPATH=. ./.venv/bin/python -m scripts.db.run_fk_index_observer baseline --wave wave-1 --output docs/db/fk-index-hardening/evidence/wave-1/baseline.csv`
+  - `PYTHONPATH=. ./.venv/bin/python -m scripts.db.run_fk_index_observer baseline --wave wave-2 --output docs/db/fk-index-hardening/evidence/wave-2/baseline.csv`
+
+#### Apply-session PGAPPNAME contract
+
+Forward SQL files (`docs/db/fk-index-hardening/wave-{1,2}-forward.sql`) begin with a `DO $pre$` guard that raises an exception unless the session's `application_name` matches `fk-index-<wave>-apply`.
+
+Before running the apply, set `PGAPPNAME`:
+
+```bash
+export PGAPPNAME=fk-index-wave-1-apply
+psql "$TRR_DB_URL" -f docs/db/fk-index-hardening/wave-1-forward.sql
+```
+
+(Substitute `fk-index-wave-2-apply` for Wave 2.)
+
+This contract enables observer attribution via `pg_stat_activity.application_name` (captured by `fk_index_observer_snapshot.sql`) and acts as a fail-safe against pooler-rewritten connections. The guard is intentionally absent from rollback SQL so incident-response sessions aren't blocked.
 
 ### For Local Development
 
