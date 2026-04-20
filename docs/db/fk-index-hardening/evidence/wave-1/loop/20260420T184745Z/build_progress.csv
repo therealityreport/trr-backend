@@ -1,0 +1,2 @@
+blocks_done,blocks_total,command,current_locker_pid,datid,datname,index_relid,lockers_done,lockers_total,partitions_done,partitions_total,phase,pid,relid,tuples_done,tuples_total
+0,2,CREATE INDEX CONCURRENTLY,0,5,postgres,669265,0,0,0,0,index validation: scanning index,2020059,126407,0,0
