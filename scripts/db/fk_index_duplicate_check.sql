@@ -13,7 +13,7 @@ existing_indexes as (
     ns.nspname as schema_name,
     tbl.relname as table_name,
     idx.relname as index_name,
-    array_agg(att.attname order by ordinality) as index_columns
+    array_agg(att.attname::text order by ordinality) as index_columns
   from pg_class idx
   join pg_index pgidx on pgidx.indexrelid = idx.oid
   join pg_class tbl on tbl.oid = pgidx.indrelid

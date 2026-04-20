@@ -15,7 +15,7 @@ actual_indexes as (
     tbl.relname as table_name,
     idx.relname as index_name,
     pgidx.indisvalid,
-    array_agg(att.attname order by ordinality) as actual_columns,
+    array_agg(att.attname::text order by ordinality) as actual_columns,
     pg_get_expr(pgidx.indpred, pgidx.indrelid) as actual_predicate
   from pg_class idx
   join pg_index pgidx on pgidx.indexrelid = idx.oid

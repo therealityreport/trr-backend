@@ -12,7 +12,7 @@ select
   planned.table_name,
   planned.index_name,
   idx.indisvalid,
-  format('drop index concurrently if exists %I.%I;', ns.nspname, cls.relname) as cleanup_sql
+  format('drop index concurrently if exists %%I.%%I;', ns.nspname, cls.relname) as cleanup_sql
 from planned_indexes planned
 join pg_namespace ns on ns.nspname = planned.schema_name
 join pg_class cls on cls.relname = planned.index_name and cls.relnamespace = ns.oid
