@@ -540,3 +540,105 @@ def test_prefetch_full_mode_grouped_events_match_live_params(monkeypatch) -> Non
     assert broad_call["minimum_grouped_image_count"] == 2
     assert broad_call["query_params"]["sort"] == "best"
     assert "numberofpeople" in broad_call["query_params"]
+
+
+def test_fetch_person_getty_prefetch_payload_auto_mode_falls_back_to_local_browser(monkeypatch) -> None:
+    @contextmanager
+    def _fake_bridge():
+        yield getty_local_prefetch.LocalGettyBridge(
+            session=object(),  # type: ignore[arg-type]
+            auth_details={"auth_mode": "chrome_profile_browser_session", "auth_warning": None},
+            search_page_fetcher=lambda url: ("<html></html>", url, 200),
+        )
+
+    def _fake_search_editorial_assets(phrase: str, **kwargs):
+        return [
+            {
+                "editorial_id": phrase.lower().replace(" ", "-"),
+                "detail_url": f"https://www.gettyimages.com/detail/news-photo/{phrase}/1",
+            }
+        ]
+
+    monkeypatch.setattr(getty_local_prefetch, "_getty_remote_transport_enabled", lambda: True)
+    monkeypatch.setattr(
+        getty_local_prefetch,
+        "probe_getty_remote_access",
+        lambda **_kwargs: {
+            "platform": "getty",
+            "ready": False,
+            "reason": "challenge_page",
+            "proxy_fingerprint": "gate.decodo.com:7000:decodo",
+        },
+    )
+    monkeypatch.setattr(getty_local_prefetch, "local_getty_bridge", _fake_bridge)
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_editorial_assets",
+        _fake_search_editorial_assets,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_grouped_events",
+        lambda *args, **kwargs: [],
+    )
+
+    payload = getty_local_prefetch.fetch_person_getty_prefetch_payload(
+        "Brandi Glanville",
+        mode="discovery",
+        transport_mode="auto",
+    )
+
+    assert payload["getty_transport_mode"] == "local_browser"
+    assert payload["getty_runtime_probe_status"] == "blocked"
+    assert payload["getty_runtime_probe_reason"] == "challenge_page"
+    assert payload["getty_fallback_invoked"] is True
+    assert payload["getty_primary_failure_reason"] == "challenge_page"
+
+
+def test_fetch_person_getty_prefetch_payload_decodo_remote_carries_transport_metadata(monkeypatch) -> None:
+    remote_bridge = getty_local_prefetch.LocalGettyBridge(
+        session=object(),  # type: ignore[arg-type]
+        auth_details={
+            "auth_mode": "decodo_remote",
+            "auth_warning": None,
+            "getty_proxy_fingerprint": "gate.decodo.com:7000:decodo",
+        },
+        search_page_fetcher=None,
+    )
+
+    def _fake_search_editorial_assets(phrase: str, **kwargs):
+        summary = kwargs.get("query_summary_out")
+        if isinstance(summary, dict):
+            summary.update(
+                {
+                    "query_url": f"https://www.gettyimages.com/search?q={phrase}",
+                    "fetched_candidates_total": 1,
+                    "termination_reason": "natural_exhaustion",
+                    "current_page": 1,
+                    "expected_page": 1,
+                }
+            )
+        return [{"editorial_id": phrase.lower().replace(" ", "-"), "detail_url": "https://example.com/1"}]
+
+    monkeypatch.setattr(getty_local_prefetch, "_build_remote_getty_bridge", lambda: remote_bridge)
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_editorial_assets",
+        _fake_search_editorial_assets,
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_grouped_events",
+        lambda *args, **kwargs: [],
+    )
+
+    payload = getty_local_prefetch.fetch_person_getty_prefetch_payload(
+        "Brandi Glanville",
+        mode="discovery",
+        transport_mode="decodo_remote",
+    )
+
+    assert payload["getty_transport_mode"] == "decodo_remote"
+    assert payload["getty_proxy_fingerprint"] == "gate.decodo.com:7000:decodo"
+    assert payload["getty_runtime_probe_status"] == "not_run"
+    assert payload["getty_fallback_invoked"] is False

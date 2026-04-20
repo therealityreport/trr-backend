@@ -1,0 +1,2 @@
+application_name,backend_type,pid,query,state,wait_event,wait_event_type
+fk-index-wave-1-apply,client backend,2020059,"CREATE INDEX CONCURRENTLY IF NOT EXISTS ""social_scrape_runs_show_id_idx"" ON ""social"".""scrape_runs"" USING btree (""show_id"");",active,,

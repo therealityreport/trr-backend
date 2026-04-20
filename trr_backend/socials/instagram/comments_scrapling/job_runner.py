@@ -6,7 +6,10 @@ from datetime import timedelta
 from typing import Any
 
 from trr_backend.db import pg
-from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsScraplingFetcher
+from trr_backend.socials.instagram.comments_scrapling.fetcher import (
+    InstagramCommentsFetchResult,
+    InstagramCommentsScraplingFetcher,
+)
 from trr_backend.socials.instagram.comments_scrapling.persistence import persist_instagram_comments_for_post
 from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
 from trr_backend.socials.instagram.comments_scrapling.session import resolve_comments_scrapling_session
@@ -21,6 +24,18 @@ class CommentsScraplingRuntimeError(Exception):
 
     def __str__(self) -> str:
         return self.message
+
+
+def _comments_scrape_is_complete(
+    *,
+    result: InstagramCommentsFetchResult,
+    max_comments_per_post: int,
+) -> bool:
+    if result.fetch_failed or result.auth_failed:
+        return False
+    if max_comments_per_post <= 0:
+        return True
+    return len(result.comments) < max_comments_per_post
 
 
 def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:
@@ -88,10 +103,10 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             browser_account_id=session.browser_account_id,
             proxy_config=proxy_config,
         )
+        auth_metadata: dict[str, Any] = {}
         try:
             await fetcher.warmup()
             auth_metadata = dict(session.auth_session.metadata or {})
-            fetcher_metadata = dict(fetcher.runtime_metadata)
 
             repo._touch_job_heartbeat(job_id, worker_id=worker_id)
             repo._emit_job_progress(
@@ -135,7 +150,10 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     comments=result.comments,
                     run_id=run_id or None,
                     job_id=job_id,
-                    is_complete=not result.fetch_failed and not result.auth_failed and max_comments_per_post > 0,
+                    is_complete=_comments_scrape_is_complete(
+                        result=result,
+                        max_comments_per_post=max_comments_per_post,
+                    ),
                     source_scope=source_scope,
                 )
                 processed_posts += 1
@@ -165,8 +183,9 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     force=index == len(target_source_ids),
                 )
 
-            return auth_metadata, fetcher_metadata
+            return auth_metadata, dict(fetcher.runtime_metadata)
         finally:
+            fetcher_metadata = dict(fetcher.runtime_metadata)
             await fetcher.aclose()
 
     try:

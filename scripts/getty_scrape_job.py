@@ -93,6 +93,13 @@ def main() -> int:
         help="Getty prefetch mode",
     )
     parser.add_argument(
+        "--transport-mode",
+        dest="transport_mode",
+        default="auto",
+        choices=("auto", "decodo_remote", "local_browser", "cookies_only"),
+        help="Getty transport strategy",
+    )
+    parser.add_argument(
         "--heartbeat-interval-seconds",
         dest="heartbeat_interval_seconds",
         type=float,
@@ -198,6 +205,7 @@ def main() -> int:
             args.person_name,
             show_name=args.show_name,
             mode=args.mode,
+            transport_mode=args.transport_mode,
             progress_cb=_on_progress,
             heartbeat_cb=_heartbeat,
         )

@@ -1,0 +1,2236 @@
+metadata:
+  db_url_source: TRR_DB_URL
+  connection_mode: direct
+  resolved_db_host: db.vwxfvzutyufrkhfgoeaa.supabase.co
+  wave: wave-2
+  owned_schemas:
+  - surveys
+  - firebase_surveys
+  - public
+  - screenalytics
+  - ml
+  - pipeline
+  stats_refreshed: true
+  analyzed_tables:
+  - firebase_surveys.answers
+  - firebase_surveys.options
+  - firebase_surveys.questions
+  - firebase_surveys.responses
+  - firebase_surveys.survey_runs
+  - firebase_surveys.survey_trr_links
+  - ml.analysis_media_assets
+  - ml.analysis_media_cast_candidates
+  - ml.analysis_media_upload_sessions
+  - ml.face_reference_embeddings
+  - ml.face_reference_images
+  - ml.screentime_artifacts
+  - ml.screentime_evidence
+  - ml.screentime_person_metrics
+  - ml.screentime_publications
+  - ml.screentime_reference_fingerprints
+  - ml.screentime_review_state
+  - ml.screentime_runs
+  - ml.screentime_segments
+  - ml.screentime_unknown_clusters
+  - pipeline.run_stages
+  - pipeline.socialblade_growth_data
+  - public.flashback_events
+  - public.flashback_sessions
+  - public.site_typography_assignments
+  - public.survey_cast
+  - public.survey_episodes
+  - public.survey_show_seasons
+  - public.surveys
+  - screenalytics.cast_screentime_evidence
+  - screenalytics.cast_screentime_excluded_sections
+  - screenalytics.cast_screentime_publish_versions
+  - screenalytics.cast_screentime_reference_fingerprints
+  - screenalytics.cast_screentime_segments
+  - screenalytics.cast_screentime_show_settings
+  - screenalytics.cast_screentime_suggestion_decisions
+  - screenalytics.cast_screentime_unknown_review_state
+  - screenalytics.face_bank_images
+  - screenalytics.identity_locks
+  - screenalytics.job_runs
+  - screenalytics.media_upload_sessions
+  - screenalytics.run_artifacts
+  - screenalytics.run_person_metrics
+  - screenalytics.runs_v2
+  - screenalytics.suggestion_applies
+  - screenalytics.suggestion_batches
+  - screenalytics.suggestions
+  - screenalytics.unknown_clusters
+  - screenalytics.video_asset_cast_candidates
+  - screenalytics.video_assets
+  - surveys.aggregates
+  - surveys.answers
+  - surveys.options
+  - surveys.questions
+  - surveys.responses
+  - surveys.surveys
+  query_check_supported_schemas:
+  - firebase_surveys
+  - ml
+  - pipeline
+  - screenalytics
+  - surveys
+  representative_query_artifact: scripts/db/fk_index_wave2_explain.sql
+  rollout_ready_count: 38
+  deferred_missing_query_check_count: 0
+entries:
+- schema: firebase_surveys
+  table: answers
+  constraint_name: answers_option_id_fkey
+  fk_columns_in_order:
+  - option_id
+  referenced_schema: firebase_surveys
+  referenced_table: options
+  nullable_columns:
+  - option_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: firebase_surveys_answers_option_id_idx
+  proposed_index_columns:
+  - option_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: firebase_surveys
+  table: answers
+  constraint_name: answers_question_id_fkey
+  fk_columns_in_order:
+  - question_id
+  referenced_schema: firebase_surveys
+  referenced_table: questions
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: firebase_surveys_answers_question_id_idx
+  proposed_index_columns:
+  - question_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: firebase_surveys
+  table: answers
+  constraint_name: answers_response_id_fkey
+  fk_columns_in_order:
+  - response_id
+  referenced_schema: firebase_surveys
+  referenced_table: responses
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: firebase_surveys_answers_response_id_idx
+  proposed_index_columns:
+  - response_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: firebase_surveys
+  table: options
+  constraint_name: options_question_id_fkey
+  fk_columns_in_order:
+  - question_id
+  referenced_schema: firebase_surveys
+  referenced_table: questions
+  nullable_columns: []
+  estimated_row_count: 102
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: firebase_surveys_options_question_id_idx
+  proposed_index_columns:
+  - question_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: firebase_surveys
+  table: questions
+  constraint_name: questions_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: firebase_surveys
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 22
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: firebase_surveys_questions_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: firebase_surveys
+  table: responses
+  constraint_name: responses_survey_run_id_fkey
+  fk_columns_in_order:
+  - survey_run_id
+  referenced_schema: firebase_surveys
+  referenced_table: survey_runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: firebase_surveys_responses_survey_run_id_idx
+  proposed_index_columns:
+  - survey_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: firebase_surveys
+  table: survey_runs
+  constraint_name: survey_runs_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: firebase_surveys
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 2
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: firebase_surveys_survey_runs_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: firebase_surveys
+  table: survey_trr_links
+  constraint_name: survey_trr_links_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: firebase_surveys
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 2
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: firebase_surveys_survey_trr_links_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: analysis_media_assets
+  constraint_name: analysis_media_assets_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 28
+  single_column_null_frac: 0.464286
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_assets_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_assets
+  constraint_name: analysis_media_assets_media_asset_id_fkey
+  fk_columns_in_order:
+  - media_asset_id
+  referenced_schema: core
+  referenced_table: media_assets
+  nullable_columns:
+  - media_asset_id
+  estimated_row_count: 28
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_assets_media_asset_id_idx
+  proposed_index_columns:
+  - media_asset_id
+  proposed_partial_predicate: media_asset_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_assets
+  constraint_name: analysis_media_assets_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 28
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_assets_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_assets
+  constraint_name: analysis_media_assets_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 28
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_assets_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_cast_candidates
+  constraint_name: analysis_media_cast_candidates_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_cast_candidates_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_cast_candidates
+  constraint_name: analysis_media_cast_candidates_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: ml
+  referenced_table: analysis_media_assets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_analysis_media_cast_candidates_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: analysis_media_upload_sessions
+  constraint_name: analysis_media_upload_sessions_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 2
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_upload_sessions_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: episode_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_upload_sessions
+  constraint_name: analysis_media_upload_sessions_promoted_video_asset_id_fkey
+  fk_columns_in_order:
+  - promoted_video_asset_id
+  referenced_schema: ml
+  referenced_table: analysis_media_assets
+  nullable_columns:
+  - promoted_video_asset_id
+  estimated_row_count: 2
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_upload_sessions_promoted_video_asset_id_idx
+  proposed_index_columns:
+  - promoted_video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_upload_sessions
+  constraint_name: analysis_media_upload_sessions_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 2
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_upload_sessions_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: analysis_media_upload_sessions
+  constraint_name: analysis_media_upload_sessions_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 2
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_analysis_media_upload_sessions_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: face_reference_embeddings
+  constraint_name: face_reference_embeddings_reference_image_id_fkey
+  fk_columns_in_order:
+  - reference_image_id
+  referenced_schema: ml
+  referenced_table: face_reference_images
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_face_reference_embeddings_reference_image_id_idx
+  proposed_index_columns:
+  - reference_image_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: face_reference_images
+  constraint_name: face_reference_images_duplicate_of_reference_image_id_fkey
+  fk_columns_in_order:
+  - duplicate_of_reference_image_id
+  referenced_schema: ml
+  referenced_table: face_reference_images
+  nullable_columns:
+  - duplicate_of_reference_image_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_face_reference_images_duplicate_of_reference_image_id_idx
+  proposed_index_columns:
+  - duplicate_of_reference_image_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: face_reference_images
+  constraint_name: face_reference_images_media_asset_id_fkey
+  fk_columns_in_order:
+  - media_asset_id
+  referenced_schema: core
+  referenced_table: media_assets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_face_reference_images_media_asset_id_idx
+  proposed_index_columns:
+  - media_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: face_reference_images
+  constraint_name: face_reference_images_media_link_id_fkey
+  fk_columns_in_order:
+  - media_link_id
+  referenced_schema: core
+  referenced_table: media_links
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_face_reference_images_media_link_id_idx
+  proposed_index_columns:
+  - media_link_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: face_reference_images
+  constraint_name: face_reference_images_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_face_reference_images_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_artifacts
+  constraint_name: screentime_artifacts_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns: []
+  estimated_row_count: 36
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_artifacts_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_evidence
+  constraint_name: screentime_evidence_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_evidence_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_person_metrics
+  constraint_name: screentime_person_metrics_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_person_metrics_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_person_metrics
+  constraint_name: screentime_person_metrics_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_person_metrics_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_publications
+  constraint_name: screentime_publications_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_publications_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_publications
+  constraint_name: screentime_publications_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: ml
+  referenced_table: analysis_media_assets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_publications_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_reference_fingerprints
+  constraint_name: screentime_reference_fingerprints_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_reference_fingerprints_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_reference_fingerprints
+  constraint_name: screentime_reference_fingerprints_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_reference_fingerprints_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_reference_fingerprints
+  constraint_name: screentime_reference_fingerprints_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_reference_fingerprints_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_reference_fingerprints
+  constraint_name: screentime_reference_fingerprints_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_reference_fingerprints_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_reference_fingerprints
+  constraint_name: screentime_reference_fingerprints_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: ml
+  referenced_table: analysis_media_assets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_reference_fingerprints_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_review_state
+  constraint_name: screentime_review_state_candidate_person_id_fkey
+  fk_columns_in_order:
+  - candidate_person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - candidate_person_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_review_state_candidate_person_id_idx
+  proposed_index_columns:
+  - candidate_person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_review_state
+  constraint_name: screentime_review_state_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_review_state_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_review_state
+  constraint_name: screentime_review_state_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_review_state_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_review_state
+  constraint_name: screentime_review_state_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns:
+  - run_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_review_state_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_review_state
+  constraint_name: screentime_review_state_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_review_state_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_review_state
+  constraint_name: screentime_review_state_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_review_state_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_review_state
+  constraint_name: screentime_review_state_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: ml
+  referenced_table: analysis_media_assets
+  nullable_columns:
+  - video_asset_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_review_state_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_runs
+  constraint_name: screentime_runs_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: ml
+  referenced_table: analysis_media_assets
+  nullable_columns: []
+  estimated_row_count: 4
+  single_column_null_frac: 0.0
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_runs_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: ml
+  table: screentime_segments
+  constraint_name: screentime_segments_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_segments_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_segments
+  constraint_name: screentime_segments_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_segments_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: ml
+  table: screentime_unknown_clusters
+  constraint_name: screentime_unknown_clusters_assigned_person_id_fkey
+  fk_columns_in_order:
+  - assigned_person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - assigned_person_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: ml_screentime_unknown_clusters_assigned_person_id_idx
+  proposed_index_columns:
+  - assigned_person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: ml
+  table: screentime_unknown_clusters
+  constraint_name: screentime_unknown_clusters_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: ml
+  referenced_table: screentime_runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: ml_screentime_unknown_clusters_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: pipeline
+  table: run_stages
+  constraint_name: run_stages_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: pipeline
+  referenced_table: runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: pipeline_run_stages_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: pipeline
+  table: socialblade_growth_data
+  constraint_name: socialblade_growth_data_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 8
+  single_column_null_frac: 0.0
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: pipeline_socialblade_growth_data_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: public
+  table: flashback_events
+  constraint_name: flashback_events_quiz_id_fkey
+  fk_columns_in_order:
+  - quiz_id
+  referenced_schema: public
+  referenced_table: flashback_quizzes
+  nullable_columns: []
+  estimated_row_count: 7
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: public_flashback_events_quiz_id_idx
+  proposed_index_columns:
+  - quiz_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: public
+  table: flashback_sessions
+  constraint_name: flashback_sessions_quiz_id_fkey
+  fk_columns_in_order:
+  - quiz_id
+  referenced_schema: public
+  referenced_table: flashback_quizzes
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: public_flashback_sessions_quiz_id_idx
+  proposed_index_columns:
+  - quiz_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: public
+  table: site_typography_assignments
+  constraint_name: site_typography_assignments_set_id_fkey
+  fk_columns_in_order:
+  - set_id
+  referenced_schema: public
+  referenced_table: site_typography_sets
+  nullable_columns: []
+  estimated_row_count: 27
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: public_site_typography_assignments_set_id_idx
+  proposed_index_columns:
+  - set_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: public
+  table: survey_cast
+  constraint_name: survey_cast_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: public
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: public_survey_cast_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: public
+  table: survey_episodes
+  constraint_name: survey_episodes_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: public
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: public_survey_episodes_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: public
+  table: survey_show_seasons
+  constraint_name: survey_show_seasons_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: public
+  referenced_table: survey_shows
+  nullable_columns: []
+  estimated_row_count: 3
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: public_survey_show_seasons_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: public
+  table: surveys
+  constraint_name: fk_surveys_current_episode
+  fk_columns_in_order:
+  - current_episode_id
+  referenced_schema: public
+  referenced_table: survey_episodes
+  nullable_columns:
+  - current_episode_id
+  estimated_row_count: 4
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: public_surveys_current_episode_id_idx
+  proposed_index_columns:
+  - current_episode_id
+  proposed_partial_predicate: current_episode_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_evidence
+  constraint_name: cast_screentime_evidence_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 2289
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_evidence_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_excluded_sections
+  constraint_name: cast_screentime_excluded_sections_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 18
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_excluded_sections_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_publish_versions
+  constraint_name: cast_screentime_publish_versions_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 4
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_publish_versions_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_publish_versions
+  constraint_name: cast_screentime_publish_versions_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: screenalytics
+  referenced_table: video_assets
+  nullable_columns: []
+  estimated_row_count: 4
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_publish_versions_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_reference_fingerprints
+  constraint_name: cast_screentime_reference_fingerprints_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_reference_fingerprints_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_reference_fingerprints
+  constraint_name: cast_screentime_reference_fingerprints_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_reference_fingerprints_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_reference_fingerprints
+  constraint_name: cast_screentime_reference_fingerprints_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_reference_fingerprints_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_reference_fingerprints
+  constraint_name: cast_screentime_reference_fingerprints_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_reference_fingerprints_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_reference_fingerprints
+  constraint_name: cast_screentime_reference_fingerprints_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: screenalytics
+  referenced_table: video_assets
+  nullable_columns: []
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_reference_fingerprints_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_segments
+  constraint_name: cast_screentime_segments_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 3117
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_segments_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_segments
+  constraint_name: cast_screentime_segments_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 3117
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_segments_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_show_settings
+  constraint_name: cast_screentime_show_settings_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_show_settings_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_suggestion_decisions
+  constraint_name: cast_screentime_suggestion_decisions_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_suggestion_decisions_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_suggestion_decisions
+  constraint_name: cast_screentime_suggestion_decisions_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_suggestion_decisions_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_suggestion_decisions
+  constraint_name: cast_screentime_suggestion_decisions_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_suggestion_decisions_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_suggestion_decisions
+  constraint_name: cast_screentime_suggestion_decisions_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_suggestion_decisions_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_suggestion_decisions
+  constraint_name: cast_screentime_suggestion_decisions_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_suggestion_decisions_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_suggestion_decisions
+  constraint_name: cast_screentime_suggestion_decisions_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: screenalytics
+  referenced_table: video_assets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_suggestion_decisions_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_unknown_review_state
+  constraint_name: cast_screentime_unknown_review_state_candidate_person_id_fkey
+  fk_columns_in_order:
+  - candidate_person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - candidate_person_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_unknown_review_state_candidate_person_id_idx
+  proposed_index_columns:
+  - candidate_person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_unknown_review_state
+  constraint_name: cast_screentime_unknown_review_state_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_unknown_review_state_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_unknown_review_state
+  constraint_name: cast_screentime_unknown_review_state_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_unknown_review_state_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_unknown_review_state
+  constraint_name: cast_screentime_unknown_review_state_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_unknown_review_state_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_unknown_review_state
+  constraint_name: cast_screentime_unknown_review_state_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_unknown_review_state_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: cast_screentime_unknown_review_state
+  constraint_name: cast_screentime_unknown_review_state_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: screenalytics
+  referenced_table: video_assets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_cast_screentime_unknown_review_state_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: face_bank_images
+  constraint_name: face_bank_images_media_asset_id_fkey
+  fk_columns_in_order:
+  - media_asset_id
+  referenced_schema: core
+  referenced_table: media_assets
+  nullable_columns:
+  - media_asset_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_face_bank_images_media_asset_id_idx
+  proposed_index_columns:
+  - media_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: face_bank_images
+  constraint_name: face_bank_images_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_face_bank_images_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: identity_locks
+  constraint_name: identity_locks_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_identity_locks_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: job_runs
+  constraint_name: job_runs_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs
+  nullable_columns: []
+  estimated_row_count: 50
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_job_runs_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: media_upload_sessions
+  constraint_name: media_upload_sessions_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 29
+  single_column_null_frac: 0.448276
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_media_upload_sessions_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: media_upload_sessions
+  constraint_name: media_upload_sessions_promoted_video_asset_id_fkey
+  fk_columns_in_order:
+  - promoted_video_asset_id
+  referenced_schema: screenalytics
+  referenced_table: video_assets
+  nullable_columns:
+  - promoted_video_asset_id
+  estimated_row_count: 29
+  single_column_null_frac: 0.103448
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_media_upload_sessions_promoted_video_asset_id_idx
+  proposed_index_columns:
+  - promoted_video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: media_upload_sessions
+  constraint_name: media_upload_sessions_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 29
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_media_upload_sessions_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: media_upload_sessions
+  constraint_name: media_upload_sessions_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 29
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_media_upload_sessions_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: run_artifacts
+  constraint_name: run_artifacts_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 256
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_run_artifacts_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: run_person_metrics
+  constraint_name: run_person_metrics_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_run_person_metrics_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: run_person_metrics
+  constraint_name: run_person_metrics_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_run_person_metrics_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: runs_v2
+  constraint_name: runs_v2_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: screenalytics
+  referenced_table: video_assets
+  nullable_columns: []
+  estimated_row_count: 25
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_runs_v2_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: suggestion_applies
+  constraint_name: suggestion_applies_batch_id_fkey
+  fk_columns_in_order:
+  - batch_id
+  referenced_schema: screenalytics
+  referenced_table: suggestion_batches
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_suggestion_applies_batch_id_idx
+  proposed_index_columns:
+  - batch_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: suggestion_applies
+  constraint_name: suggestion_applies_suggestion_id_fkey
+  fk_columns_in_order:
+  - suggestion_id
+  referenced_schema: screenalytics
+  referenced_table: suggestions
+  nullable_columns:
+  - suggestion_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_suggestion_applies_suggestion_id_idx
+  proposed_index_columns:
+  - suggestion_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: suggestion_batches
+  constraint_name: suggestion_batches_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_suggestion_batches_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: suggestions
+  constraint_name: suggestions_batch_id_fkey
+  fk_columns_in_order:
+  - batch_id
+  referenced_schema: screenalytics
+  referenced_table: suggestion_batches
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_suggestions_batch_id_idx
+  proposed_index_columns:
+  - batch_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: unknown_clusters
+  constraint_name: unknown_clusters_assigned_person_id_fkey
+  fk_columns_in_order:
+  - assigned_person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - assigned_person_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_unknown_clusters_assigned_person_id_idx
+  proposed_index_columns:
+  - assigned_person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: unknown_clusters
+  constraint_name: unknown_clusters_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: screenalytics
+  referenced_table: runs_v2
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_unknown_clusters_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: video_asset_cast_candidates
+  constraint_name: video_asset_cast_candidates_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_video_asset_cast_candidates_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: video_asset_cast_candidates
+  constraint_name: video_asset_cast_candidates_video_asset_id_fkey
+  fk_columns_in_order:
+  - video_asset_id
+  referenced_schema: screenalytics
+  referenced_table: video_assets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_video_asset_cast_candidates_video_asset_id_idx
+  proposed_index_columns:
+  - video_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: video_assets
+  constraint_name: video_assets_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 26
+  single_column_null_frac: 0.423077
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_video_assets_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: video_assets
+  constraint_name: video_assets_media_asset_id_fkey
+  fk_columns_in_order:
+  - media_asset_id
+  referenced_schema: core
+  referenced_table: media_assets
+  nullable_columns:
+  - media_asset_id
+  estimated_row_count: 26
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: screenalytics_video_assets_media_asset_id_idx
+  proposed_index_columns:
+  - media_asset_id
+  proposed_partial_predicate: media_asset_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: screenalytics
+  table: video_assets
+  constraint_name: video_assets_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 26
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_video_assets_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: screenalytics
+  table: video_assets
+  constraint_name: video_assets_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 26
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: screenalytics_video_assets_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: aggregates
+  constraint_name: aggregates_question_id_fkey
+  fk_columns_in_order:
+  - question_id
+  referenced_schema: surveys
+  referenced_table: questions
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_aggregates_question_id_idx
+  proposed_index_columns:
+  - question_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: aggregates
+  constraint_name: aggregates_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: surveys
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_aggregates_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: answers
+  constraint_name: answers_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: surveys
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: surveys_answers_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: surveys
+  table: answers
+  constraint_name: survey_answers_survey_id_question_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  - question_id
+  referenced_schema: surveys
+  referenced_table: questions
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: surveys_answers_survey_id_question_id_idx
+  proposed_index_columns:
+  - survey_id
+  - question_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: surveys
+  table: answers
+  constraint_name: survey_answers_survey_id_response_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  - response_id
+  referenced_schema: surveys
+  referenced_table: responses
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: surveys_answers_survey_id_response_id_idx
+  proposed_index_columns:
+  - survey_id
+  - response_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: surveys
+  table: options
+  constraint_name: options_question_id_fkey
+  fk_columns_in_order:
+  - question_id
+  referenced_schema: surveys
+  referenced_table: questions
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_options_question_id_idx
+  proposed_index_columns:
+  - question_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: questions
+  constraint_name: questions_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: surveys
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_questions_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: responses
+  constraint_name: responses_survey_id_fkey
+  fk_columns_in_order:
+  - survey_id
+  referenced_schema: surveys
+  referenced_table: surveys
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_responses_survey_id_idx
+  proposed_index_columns:
+  - survey_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: responses
+  constraint_name: responses_user_id_fkey
+  fk_columns_in_order:
+  - user_id
+  referenced_schema: auth
+  referenced_table: users
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_responses_user_id_idx
+  proposed_index_columns:
+  - user_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: surveys
+  constraint_name: surveys_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns:
+  - episode_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_surveys_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: surveys
+  constraint_name: surveys_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_surveys_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: surveys
+  table: surveys
+  constraint_name: surveys_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: surveys_surveys_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered

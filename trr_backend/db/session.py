@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from psycopg2.extras import Json, RealDictCursor, execute_values
 
-from trr_backend.db.connection import resolve_database_url
-from trr_backend.db.pg import db_connection
+from trr_backend.db.pg import db_connection, db_read_connection
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -33,11 +35,87 @@ class DbResponse:
 class DbSession:
     """Lightweight DB session with a Supabase-like query interface."""
 
-    def __init__(self, database_url: str | None = None):
-        self._database_url = database_url or resolve_database_url()
-
     def schema(self, name: str) -> DbSchema:
-        return DbSchema(self, name)
+        return DbSchema(self, _validate_identifier(name))
+
+
+def _validate_identifier(name: str) -> str:
+    if not _IDENTIFIER_RE.fullmatch(name):
+        raise ValueError(f"Invalid SQL identifier: {name}")
+    return name
+
+
+def _validate_identifier_list(names: str) -> str:
+    validated = [_validate_identifier(name.strip()) for name in names.split(",") if name.strip()]
+    if not validated or ",".join(validated) != names.replace(" ", ""):
+        raise ValueError(f"Invalid SQL identifier list: {names}")
+    return ",".join(validated)
+
+
+def _validate_mapping_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    for key in payload:
+        _validate_identifier(key)
+    return payload
+
+
+def _parse_or_expression(expression: str) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    for raw_term in expression.split(","):
+        term = raw_term.strip()
+        if not term:
+            raise ValueError("Invalid OR expression: empty term")
+
+        parts = term.split(".")
+        if len(parts) < 3:
+            raise ValueError(f"Invalid OR expression term: {term}")
+
+        column = _validate_identifier(parts[0])
+        negate = False
+        operator_index = 1
+        if parts[1] == "not":
+            negate = True
+            operator_index = 2
+        if len(parts) <= operator_index:
+            raise ValueError(f"Invalid OR expression term: {term}")
+
+        operator = parts[operator_index]
+        raw_value = ".".join(parts[operator_index + 1 :])
+        if not raw_value:
+            raise ValueError(f"Invalid OR expression term: {term}")
+
+        clause: str
+        term_params: list[Any] = []
+
+        if operator == "is":
+            normalized = raw_value.lower()
+            if normalized != "null":
+                raise ValueError(f"Unsupported OR expression value for is: {raw_value}")
+            clause = f"{column} IS {'NOT ' if negate else ''}NULL"
+        elif operator in {"eq", "gt", "gte", "lt", "lte", "ilike"}:
+            operator_sql = {
+                "eq": "=",
+                "gt": ">",
+                "gte": ">=",
+                "lt": "<",
+                "lte": "<=",
+                "ilike": "ILIKE",
+            }[operator]
+            if raw_value == "now()":
+                clause = f"{column} {operator_sql} NOW()"
+            else:
+                clause = f"{column} {operator_sql} %s"
+                term_params.append(raw_value)
+            if negate:
+                clause = f"NOT ({clause})"
+        else:
+            raise ValueError(f"Unsupported OR expression operator: {operator}")
+
+        clauses.append(clause)
+        params.extend(term_params)
+
+    return "(" + " OR ".join(clauses) + ")", params
 
 
 class DbSchema:
@@ -46,10 +124,11 @@ class DbSchema:
         self._name = name
 
     def table(self, name: str) -> DbQuery:
-        return DbQuery(self._session, self._name, name)
+        return DbQuery(self._session, self._name, _validate_identifier(name))
 
     def rpc(self, function_name: str, params: dict[str, Any] | None = None) -> DbRpc:
-        return DbRpc(self._session, self._name, function_name, params or {})
+        safe_params = _validate_mapping_keys(params or {})
+        return DbRpc(self._session, self._name, _validate_identifier(function_name), safe_params)
 
 
 class DbQuery:
@@ -106,27 +185,33 @@ class DbQuery:
     ) -> DbQuery:
         self._op = "upsert"
         self._payload = payload
-        self._on_conflict = on_conflict
+        self._on_conflict = _validate_identifier_list(on_conflict) if on_conflict else None
         self._ignore_duplicates = ignore_duplicates
         self._default_to_null = default_to_null
         return self
 
     def eq(self, column: str, value: Any) -> DbQuery:
+        column = _validate_identifier(column)
         return self._add_filter(f"{column} = %s", [value])
 
     def gt(self, column: str, value: Any) -> DbQuery:
+        column = _validate_identifier(column)
         return self._add_filter(f"{column} > %s", [value])
 
     def gte(self, column: str, value: Any) -> DbQuery:
+        column = _validate_identifier(column)
         return self._add_filter(f"{column} >= %s", [value])
 
     def lt(self, column: str, value: Any) -> DbQuery:
+        column = _validate_identifier(column)
         return self._add_filter(f"{column} < %s", [value])
 
     def lte(self, column: str, value: Any) -> DbQuery:
+        column = _validate_identifier(column)
         return self._add_filter(f"{column} <= %s", [value])
 
     def in_(self, column: str, values: Iterable[Any]) -> DbQuery:
+        column = _validate_identifier(column)
         vals = list(values)
         if not vals:
             return self._add_filter("FALSE", [])
@@ -134,9 +219,15 @@ class DbQuery:
         return self._add_filter(f"{column} IN ({placeholders})", vals)
 
     def ilike(self, column: str, pattern: str) -> DbQuery:
+        column = _validate_identifier(column)
         return self._add_filter(f"{column} ILIKE %s", [pattern])
 
+    def or_(self, expression: str) -> DbQuery:
+        clause, params = _parse_or_expression(expression)
+        return self._add_filter(clause, params)
+
     def is_(self, column: str, value: Any) -> DbQuery:
+        column = _validate_identifier(column)
         if value is None or (isinstance(value, str) and value.lower() == "null"):
             return self._add_filter(f"{column} IS NULL", [])
         if isinstance(value, str) and value.lower().replace("_", " ") in {"not null", "notnull"}:
@@ -144,6 +235,7 @@ class DbQuery:
         return self._add_filter(f"{column} IS %s", [value])
 
     def order(self, column: str, *, desc: bool = False, nullsfirst: bool | None = None) -> DbQuery:
+        column = _validate_identifier(column)
         self._order.append((column, desc, nullsfirst))
         return self
 
@@ -224,23 +316,21 @@ class DbQuery:
         order_sql = self._build_order()
         limit_sql = self._build_limit_offset()
         sql = f"SELECT {self._columns} FROM {self._schema}.{self._table}{where_sql}{order_sql}{limit_sql}"
-        with db_connection() as conn:
+        with db_read_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
+            count_val: int | None = None
+            if self._count == "exact":
+                count_sql = f"SELECT COUNT(*) FROM {self._schema}.{self._table}{where_sql}"
+                with conn.cursor() as count_cur:
+                    count_cur.execute(count_sql, params)
+                    count_val = int(count_cur.fetchone()[0])
         data: Any
         if self._single:
             data = dict(rows[0]) if rows else None
         else:
             data = [dict(r) for r in rows]
-
-        count_val: int | None = None
-        if self._count == "exact":
-            count_sql = f"SELECT COUNT(*) FROM {self._schema}.{self._table}{where_sql}"
-            with db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(count_sql, params)
-                    count_val = int(cur.fetchone()[0])
 
         return DbResponse(data=data, error=None, count=count_val)
 
@@ -251,7 +341,7 @@ class DbQuery:
             rows = [self._payload]
         if not rows:
             return [], []
-        columns = sorted({key for row in rows for key in row.keys()})
+        columns = sorted({_validate_identifier(key) for row in rows for key in row.keys()})
         values: list[list[Any]] = []
         for row in rows:
             values.append(
@@ -274,6 +364,7 @@ class DbQuery:
     def _execute_update(self) -> DbResponse:
         if not isinstance(self._payload, dict):
             raise ValueError("Update payload must be a dict")
+        _validate_mapping_keys(self._payload)
         set_cols = sorted(self._payload.keys())
         if not set_cols:
             return DbResponse(data=[], error=None)
@@ -339,7 +430,7 @@ class DbRpc:
             else:
                 sql = f"SELECT * FROM {self._schema}.{self._function_name}()"
                 params = []
-            with db_connection() as conn:
+            with db_read_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(sql, params)
                     rows = cur.fetchall()

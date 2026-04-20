@@ -93,6 +93,8 @@ scripts/**/debug_html/
 # Large data files
 *.csv
 *.xlsx
+# FK Index Hardening evidence CSVs are committed as part of rollout artifact trail
+!docs/db/fk-index-hardening/evidence/**/*.csv
 
 # Local / generated
 .mcp.json

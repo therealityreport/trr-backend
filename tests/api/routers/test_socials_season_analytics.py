@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import jwt
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -3992,6 +3993,69 @@ def test_ingest_returns_503_when_queue_enabled_and_worker_missing(
     assert body["detail"]["code"] == "SOCIAL_WORKER_UNAVAILABLE"
     assert body["detail"]["worker_health"]["healthy"] is False
     ingest_mock.assert_not_called()
+
+
+def test_get_social_account_profile_comments_returns_503_when_database_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_comments",
+        side_effect=DatabaseServiceUnavailableError(
+            "Database pool initialization failed: no database URL candidates available",
+            reason="database_configuration",
+        ),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments?page=1&page_size=25",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert body["detail"]["reason"] == "database_configuration"
+
+
+def test_post_social_account_comments_scrape_returns_modal_error_when_modal_dispatch_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch("api.routers.socials._resolve_social_account_comments_route_execution", return_value={
+            "queue_enabled": True,
+            "used_inline_fallback": False,
+            "requires_modal_executor": True,
+        }),
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            side_effect=HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SOCIAL_MODAL_EXECUTOR_REQUIRED",
+                    "message": "Modal social dispatch is required for Instagram comments scraping.",
+                    "required_execution_backend": "modal",
+                    "worker_health": {"healthy": False, "reason": "modal_dispatch_unavailable"},
+                },
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"mode": "profile", "source_scope": "bravo", "refresh_policy": "stale_or_missing"},
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+    assert body["detail"]["required_execution_backend"] == "modal"
 
 
 def test_ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled(

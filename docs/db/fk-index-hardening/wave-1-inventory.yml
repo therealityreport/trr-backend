@@ -1,0 +1,4075 @@
+metadata:
+  db_url_source: TRR_DB_URL
+  connection_mode: direct
+  resolved_db_host: db.vwxfvzutyufrkhfgoeaa.supabase.co
+  wave: wave-1
+  owned_schemas:
+  - core
+  - admin
+  - social
+  stats_refreshed: true
+  analyzed_tables:
+  - admin.brand_family_link_rules
+  - admin.brand_family_members
+  - admin.brand_family_wikipedia_show_links
+  - admin.cast_photo_people_tags
+  - admin.network_streaming_completion_attempts
+  - admin.person_reprocess_job_events
+  - admin.person_reprocess_jobs
+  - admin.recent_people_views
+  - admin.reddit_discovery_posts
+  - admin.reddit_threads
+  - core.admin_operation_events
+  - core.admin_operations
+  - core.bravotv_image_runs
+  - core.cast_fandom
+  - core.cast_photos
+  - core.cast_tmdb
+  - core.credit_occurrences
+  - core.credits
+  - core.entity_links
+  - core.episode_external_ids
+  - core.episode_images
+  - core.episode_source_history
+  - core.episode_source_latest
+  - core.episodes
+  - core.google_news_sync_jobs
+  - core.media_asset_variants
+  - core.media_links
+  - core.media_uploads
+  - core.people_overrides
+  - core.person_external_ids
+  - core.person_images
+  - core.person_source_history
+  - core.person_source_latest
+  - core.season_external_ids
+  - core.season_fandom
+  - core.season_images
+  - core.season_source_history
+  - core.season_source_latest
+  - core.seasons
+  - core.show_alternative_names
+  - core.show_cast_role_assignments
+  - core.show_external_ids
+  - core.show_images
+  - core.show_role_catalog
+  - core.show_source_history
+  - core.show_source_latest
+  - core.show_watch_providers
+  - core.shows
+  - core.sync_state
+  - social.account_hashtag_assignments
+  - social.account_hashtag_review_queue
+  - social.dm_members
+  - social.dm_messages
+  - social.dm_read_receipts
+  - social.facebook_account_catalog_posts
+  - social.facebook_comments
+  - social.facebook_posts
+  - social.instagram_account_catalog_posts
+  - social.instagram_comments
+  - social.instagram_posts
+  - social.meta_threads_comments
+  - social.meta_threads_posts
+  - social.posts
+  - social.reactions
+  - social.reddit_comments
+  - social.reddit_media_mirrors
+  - social.reddit_period_post_matches
+  - social.reddit_refresh_runs
+  - social.scrape_jobs
+  - social.scrape_runs
+  - social.scrape_workers
+  - social.season_targets
+  - social.shared_account_run_frontiers
+  - social.shared_account_run_partitions
+  - social.shared_account_sources
+  - social.shared_post_matches
+  - social.shared_post_review_queue
+  - social.sync_sessions
+  - social.threads
+  - social.threads_account_catalog_posts
+  - social.tiktok_account_catalog_posts
+  - social.tiktok_anomaly_events
+  - social.tiktok_comments
+  - social.tiktok_post_cast_members
+  - social.tiktok_post_comment_enrichment
+  - social.tiktok_post_quality
+  - social.tiktok_post_tokens
+  - social.tiktok_post_velocity
+  - social.tiktok_posts
+  - social.tiktok_sound_posts
+  - social.twitter_account_catalog_posts
+  - social.twitter_scrape_query_tweets
+  - social.twitter_tweets
+  - social.youtube_account_catalog_posts
+  - social.youtube_channel_sync_state
+  - social.youtube_comments
+  - social.youtube_video_sync_state
+  - social.youtube_videos
+  query_check_supported_schemas:
+  - admin
+  - core
+  - social
+  representative_query_artifact: scripts/db/fk_index_wave1_explain.sql
+  rollout_ready_count: 51
+  deferred_missing_query_check_count: 0
+entries:
+- schema: admin
+  table: brand_family_link_rules
+  constraint_name: brand_family_link_rules_family_id_fkey
+  fk_columns_in_order:
+  - family_id
+  referenced_schema: admin
+  referenced_table: brand_families
+  nullable_columns: []
+  estimated_row_count: 629
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_brand_family_link_rules_family_id_idx
+  proposed_index_columns:
+  - family_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: brand_family_members
+  constraint_name: brand_family_members_family_id_fkey
+  fk_columns_in_order:
+  - family_id
+  referenced_schema: admin
+  referenced_table: brand_families
+  nullable_columns: []
+  estimated_row_count: 2
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_brand_family_members_family_id_idx
+  proposed_index_columns:
+  - family_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: brand_family_wikipedia_show_links
+  constraint_name: brand_family_wikipedia_show_links_family_id_fkey
+  fk_columns_in_order:
+  - family_id
+  referenced_schema: admin
+  referenced_table: brand_families
+  nullable_columns: []
+  estimated_row_count: 628
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_brand_family_wikipedia_show_links_family_id_idx
+  proposed_index_columns:
+  - family_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: brand_family_wikipedia_show_links
+  constraint_name: brand_family_wikipedia_show_links_matched_show_id_fkey
+  fk_columns_in_order:
+  - matched_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - matched_show_id
+  estimated_row_count: 628
+  single_column_null_frac: 0.917197
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_brand_family_wikipedia_show_links_matched_show_id_idx
+  proposed_index_columns:
+  - matched_show_id
+  proposed_partial_predicate: matched_show_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: cast_photo_people_tags
+  constraint_name: cast_photo_people_tags_cast_photo_id_fkey
+  fk_columns_in_order:
+  - cast_photo_id
+  referenced_schema: core
+  referenced_table: cast_photos
+  nullable_columns: []
+  estimated_row_count: 842
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_cast_photo_people_tags_cast_photo_id_idx
+  proposed_index_columns:
+  - cast_photo_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: network_streaming_completion_attempts
+  constraint_name: network_streaming_completion_attempts_completion_id_fkey
+  fk_columns_in_order:
+  - completion_id
+  referenced_schema: admin
+  referenced_table: network_streaming_completion
+  nullable_columns: []
+  estimated_row_count: 13159
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_network_streaming_completion_attempts_completion_id_idx
+  proposed_index_columns:
+  - completion_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: person_reprocess_job_events
+  constraint_name: person_reprocess_job_events_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: admin
+  referenced_table: person_reprocess_jobs
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_person_reprocess_job_events_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: person_reprocess_jobs
+  constraint_name: person_reprocess_jobs_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_person_reprocess_jobs_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: recent_people_views
+  constraint_name: recent_people_views_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 1
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: admin_recent_people_views_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: admin
+  table: reddit_discovery_posts
+  constraint_name: reddit_discovery_posts_community_id_fkey
+  fk_columns_in_order:
+  - community_id
+  referenced_schema: admin
+  referenced_table: reddit_communities
+  nullable_columns: []
+  estimated_row_count: 555
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_reddit_discovery_posts_community_id_idx
+  proposed_index_columns:
+  - community_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: admin
+  table: reddit_threads
+  constraint_name: reddit_threads_community_id_fkey
+  fk_columns_in_order:
+  - community_id
+  referenced_schema: admin
+  referenced_table: reddit_communities
+  nullable_columns: []
+  estimated_row_count: 57
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: admin_reddit_threads_community_id_idx
+  proposed_index_columns:
+  - community_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: admin_operation_events
+  constraint_name: admin_operation_events_operation_id_fkey
+  fk_columns_in_order:
+  - operation_id
+  referenced_schema: core
+  referenced_table: admin_operations
+  nullable_columns: []
+  estimated_row_count: 2605
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_admin_operation_events_operation_id_idx
+  proposed_index_columns:
+  - operation_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: admin_operations
+  constraint_name: admin_operations_parent_operation_id_fkey
+  fk_columns_in_order:
+  - parent_operation_id
+  referenced_schema: core
+  referenced_table: admin_operations
+  nullable_columns:
+  - parent_operation_id
+  estimated_row_count: 139
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_admin_operations_parent_operation_id_idx
+  proposed_index_columns:
+  - parent_operation_id
+  proposed_partial_predicate: parent_operation_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: bravotv_image_runs
+  constraint_name: bravotv_image_runs_operation_id_fkey
+  fk_columns_in_order:
+  - operation_id
+  referenced_schema: core
+  referenced_table: admin_operations
+  nullable_columns:
+  - operation_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_bravotv_image_runs_operation_id_idx
+  proposed_index_columns:
+  - operation_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: bravotv_image_runs
+  constraint_name: bravotv_image_runs_target_person_id_fkey
+  fk_columns_in_order:
+  - target_person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - target_person_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_bravotv_image_runs_target_person_id_idx
+  proposed_index_columns:
+  - target_person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: bravotv_image_runs
+  constraint_name: bravotv_image_runs_target_show_id_fkey
+  fk_columns_in_order:
+  - target_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - target_show_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_bravotv_image_runs_target_show_id_idx
+  proposed_index_columns:
+  - target_show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: cast_fandom
+  constraint_name: cast_fandom_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 75
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_cast_fandom_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: cast_photos
+  constraint_name: cast_photos_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 19738
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_cast_photos_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: cast_tmdb
+  constraint_name: cast_tmdb_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 328
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_cast_tmdb_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: credit_occurrences
+  constraint_name: credit_occurrences_credit_id_fkey
+  fk_columns_in_order:
+  - credit_id
+  referenced_schema: core
+  referenced_table: credits
+  nullable_columns: []
+  estimated_row_count: 23781
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_credit_occurrences_credit_id_idx
+  proposed_index_columns:
+  - credit_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: credit_occurrences
+  constraint_name: credit_occurrences_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns: []
+  estimated_row_count: 23781
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_credit_occurrences_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: credits
+  constraint_name: credits_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 1363
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_credits_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: credits
+  constraint_name: credits_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 1363
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_credits_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: entity_links
+  constraint_name: entity_links_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 3295
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_entity_links_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_external_ids
+  constraint_name: episode_external_ids_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns: []
+  estimated_row_count: 46068
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_external_ids_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_external_ids
+  constraint_name: episode_external_ids_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 46068
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_external_ids_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_images
+  constraint_name: episode_images_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns: []
+  estimated_row_count: 1090
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_images_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_images
+  constraint_name: episode_images_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 1090
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_images_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_images
+  constraint_name: episode_images_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 1090
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_images_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_source_history
+  constraint_name: episode_source_history_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_source_history_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_source_history
+  constraint_name: episode_source_history_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_source_history_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_source_latest
+  constraint_name: episode_source_latest_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_source_latest_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episode_source_latest
+  constraint_name: episode_source_latest_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episode_source_latest_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episodes
+  constraint_name: episodes_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 24553
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episodes_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: episodes
+  constraint_name: episodes_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 24553
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_episodes_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: google_news_sync_jobs
+  constraint_name: google_news_sync_jobs_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 48
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_google_news_sync_jobs_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: media_asset_variants
+  constraint_name: media_asset_variants_media_asset_id_fkey
+  fk_columns_in_order:
+  - media_asset_id
+  referenced_schema: core
+  referenced_table: media_assets
+  nullable_columns: []
+  estimated_row_count: 18216
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_media_asset_variants_media_asset_id_idx
+  proposed_index_columns:
+  - media_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: media_links
+  constraint_name: media_links_media_asset_id_fkey
+  fk_columns_in_order:
+  - media_asset_id
+  referenced_schema: core
+  referenced_table: media_assets
+  nullable_columns: []
+  estimated_row_count: 47241
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_media_links_media_asset_id_idx
+  proposed_index_columns:
+  - media_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: media_uploads
+  constraint_name: media_uploads_media_asset_id_fkey
+  fk_columns_in_order:
+  - media_asset_id
+  referenced_schema: core
+  referenced_table: media_assets
+  nullable_columns:
+  - media_asset_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_media_uploads_media_asset_id_idx
+  proposed_index_columns:
+  - media_asset_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: media_uploads
+  constraint_name: media_uploads_media_link_id_fkey
+  fk_columns_in_order:
+  - media_link_id
+  referenced_schema: core
+  referenced_table: media_links
+  nullable_columns:
+  - media_link_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_media_uploads_media_link_id_idx
+  proposed_index_columns:
+  - media_link_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: people_overrides
+  constraint_name: people_overrides_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_people_overrides_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: person_external_ids
+  constraint_name: person_external_ids_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 17442
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_person_external_ids_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: person_external_ids
+  constraint_name: person_external_ids_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 17442
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_person_external_ids_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: person_images
+  constraint_name: person_images_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 11172
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_person_images_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: person_source_history
+  constraint_name: person_source_history_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 121
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_person_source_history_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: person_source_history
+  constraint_name: person_source_history_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 121
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_person_source_history_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: person_source_latest
+  constraint_name: person_source_latest_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 10
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_person_source_latest_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: person_source_latest
+  constraint_name: person_source_latest_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 10
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_person_source_latest_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_external_ids
+  constraint_name: season_external_ids_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 2274
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_external_ids_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_external_ids
+  constraint_name: season_external_ids_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 2274
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_external_ids_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_fandom
+  constraint_name: season_fandom_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_fandom_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_fandom
+  constraint_name: season_fandom_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_fandom_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_images
+  constraint_name: season_images_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 2757
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_images_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_images
+  constraint_name: season_images_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 2757
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_images_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_source_history
+  constraint_name: season_source_history_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_source_history_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_source_history
+  constraint_name: season_source_history_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_source_history_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_source_latest
+  constraint_name: season_source_latest_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_source_latest_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: season_source_latest
+  constraint_name: season_source_latest_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_season_source_latest_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: seasons
+  constraint_name: seasons_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 1614
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_seasons_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_alternative_names
+  constraint_name: show_alternative_names_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 126
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_alternative_names_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_cast_role_assignments
+  constraint_name: show_cast_role_assignments_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns: []
+  estimated_row_count: 67
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_cast_role_assignments_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_cast_role_assignments
+  constraint_name: show_cast_role_assignments_role_id_fkey
+  fk_columns_in_order:
+  - role_id
+  referenced_schema: core
+  referenced_table: show_role_catalog
+  nullable_columns: []
+  estimated_row_count: 67
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_cast_role_assignments_role_id_idx
+  proposed_index_columns:
+  - role_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_cast_role_assignments
+  constraint_name: show_cast_role_assignments_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 67
+  single_column_null_frac: 0.0895522
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_cast_role_assignments_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_cast_role_assignments
+  constraint_name: show_cast_role_assignments_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 67
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_cast_role_assignments_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_external_ids
+  constraint_name: show_external_ids_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 980
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_external_ids_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_external_ids
+  constraint_name: show_external_ids_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 980
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_external_ids_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_images
+  constraint_name: show_images_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 10263
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_images_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_role_catalog
+  constraint_name: show_role_catalog_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 7
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_role_catalog_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_source_history
+  constraint_name: show_source_history_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 1096
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_source_history_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_source_history
+  constraint_name: show_source_history_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 1096
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_source_history_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_source_latest
+  constraint_name: show_source_latest_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 442
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_source_latest_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_source_latest
+  constraint_name: show_source_latest_source_id_fkey
+  fk_columns_in_order:
+  - source_id
+  referenced_schema: core
+  referenced_table: sources
+  nullable_columns: []
+  estimated_row_count: 442
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_source_latest_source_id_idx
+  proposed_index_columns:
+  - source_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_watch_providers
+  constraint_name: show_watch_providers_provider_id_fkey
+  fk_columns_in_order:
+  - provider_id
+  referenced_schema: core
+  referenced_table: watch_providers
+  nullable_columns: []
+  estimated_row_count: 12321
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_watch_providers_provider_id_idx
+  proposed_index_columns:
+  - provider_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: show_watch_providers
+  constraint_name: show_watch_providers_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 12321
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_show_watch_providers_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: shows
+  constraint_name: shows_primary_backdrop_image_id_fkey
+  fk_columns_in_order:
+  - primary_backdrop_image_id
+  referenced_schema: core
+  referenced_table: show_images
+  nullable_columns:
+  - primary_backdrop_image_id
+  estimated_row_count: 223
+  single_column_null_frac: 0.995516
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_shows_primary_backdrop_image_id_idx
+  proposed_index_columns:
+  - primary_backdrop_image_id
+  proposed_partial_predicate: primary_backdrop_image_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: shows
+  constraint_name: shows_primary_logo_image_id_fkey
+  fk_columns_in_order:
+  - primary_logo_image_id
+  referenced_schema: core
+  referenced_table: show_images
+  nullable_columns:
+  - primary_logo_image_id
+  estimated_row_count: 223
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_shows_primary_logo_image_id_idx
+  proposed_index_columns:
+  - primary_logo_image_id
+  proposed_partial_predicate: primary_logo_image_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: shows
+  constraint_name: shows_primary_poster_image_id_fkey
+  fk_columns_in_order:
+  - primary_poster_image_id
+  referenced_schema: core
+  referenced_table: show_images
+  nullable_columns:
+  - primary_poster_image_id
+  estimated_row_count: 223
+  single_column_null_frac: 0.995516
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_shows_primary_poster_image_id_idx
+  proposed_index_columns:
+  - primary_poster_image_id
+  proposed_partial_predicate: primary_poster_image_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: core
+  table: sync_state
+  constraint_name: sync_state_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 1509
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: core_sync_state_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: account_hashtag_assignments
+  constraint_name: account_hashtag_assignments_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_account_hashtag_assignments_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: account_hashtag_assignments
+  constraint_name: account_hashtag_assignments_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_account_hashtag_assignments_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: account_hashtag_review_queue
+  constraint_name: account_hashtag_review_queue_resolved_season_id_fkey
+  fk_columns_in_order:
+  - resolved_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - resolved_season_id
+  estimated_row_count: 356
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_account_hashtag_review_queue_resolved_season_id_idx
+  proposed_index_columns:
+  - resolved_season_id
+  proposed_partial_predicate: resolved_season_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: account_hashtag_review_queue
+  constraint_name: account_hashtag_review_queue_resolved_show_id_fkey
+  fk_columns_in_order:
+  - resolved_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - resolved_show_id
+  estimated_row_count: 356
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_account_hashtag_review_queue_resolved_show_id_idx
+  proposed_index_columns:
+  - resolved_show_id
+  proposed_partial_predicate: resolved_show_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: dm_members
+  constraint_name: dm_members_conversation_id_fkey
+  fk_columns_in_order:
+  - conversation_id
+  referenced_schema: social
+  referenced_table: dm_conversations
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_dm_members_conversation_id_idx
+  proposed_index_columns:
+  - conversation_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: dm_members
+  constraint_name: dm_members_user_id_fkey
+  fk_columns_in_order:
+  - user_id
+  referenced_schema: auth
+  referenced_table: users
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_dm_members_user_id_idx
+  proposed_index_columns:
+  - user_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: dm_messages
+  constraint_name: dm_messages_conversation_id_fkey
+  fk_columns_in_order:
+  - conversation_id
+  referenced_schema: social
+  referenced_table: dm_conversations
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_dm_messages_conversation_id_idx
+  proposed_index_columns:
+  - conversation_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: dm_messages
+  constraint_name: dm_messages_sender_id_fkey
+  fk_columns_in_order:
+  - sender_id
+  referenced_schema: auth
+  referenced_table: users
+  nullable_columns:
+  - sender_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_dm_messages_sender_id_idx
+  proposed_index_columns:
+  - sender_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: dm_read_receipts
+  constraint_name: dm_read_receipts_conversation_id_fkey
+  fk_columns_in_order:
+  - conversation_id
+  referenced_schema: social
+  referenced_table: dm_conversations
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_dm_read_receipts_conversation_id_idx
+  proposed_index_columns:
+  - conversation_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: dm_read_receipts
+  constraint_name: dm_read_receipts_last_read_message_id_fkey
+  fk_columns_in_order:
+  - last_read_message_id
+  referenced_schema: social
+  referenced_table: dm_messages
+  nullable_columns:
+  - last_read_message_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_dm_read_receipts_last_read_message_id_idx
+  proposed_index_columns:
+  - last_read_message_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: dm_read_receipts
+  constraint_name: dm_read_receipts_user_id_fkey
+  fk_columns_in_order:
+  - user_id
+  referenced_schema: auth
+  referenced_table: users
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_dm_read_receipts_user_id_idx
+  proposed_index_columns:
+  - user_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: facebook_account_catalog_posts
+  constraint_name: facebook_account_catalog_posts_assigned_season_id_fkey
+  fk_columns_in_order:
+  - assigned_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - assigned_season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_facebook_account_catalog_posts_assigned_season_id_idx
+  proposed_index_columns:
+  - assigned_season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: facebook_account_catalog_posts
+  constraint_name: facebook_account_catalog_posts_assigned_show_id_fkey
+  fk_columns_in_order:
+  - assigned_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - assigned_show_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_facebook_account_catalog_posts_assigned_show_id_idx
+  proposed_index_columns:
+  - assigned_show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: facebook_account_catalog_posts
+  constraint_name: facebook_account_catalog_posts_last_backfill_run_id_fkey
+  fk_columns_in_order:
+  - last_backfill_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_backfill_run_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_facebook_account_catalog_posts_last_backfill_run_id_idx
+  proposed_index_columns:
+  - last_backfill_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: facebook_comments
+  constraint_name: facebook_comments_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_comments_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: facebook_comments
+  constraint_name: facebook_comments_parent_comment_id_fkey
+  fk_columns_in_order:
+  - parent_comment_id
+  referenced_schema: social
+  referenced_table: facebook_comments
+  nullable_columns:
+  - parent_comment_id
+  estimated_row_count: 6
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_comments_parent_comment_id_idx
+  proposed_index_columns:
+  - parent_comment_id
+  proposed_partial_predicate: parent_comment_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: facebook_comments
+  constraint_name: facebook_comments_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: facebook_posts
+  nullable_columns: []
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_comments_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: facebook_comments
+  constraint_name: facebook_comments_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 6
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_comments_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: facebook_posts
+  constraint_name: facebook_posts_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 141
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_posts_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: facebook_posts
+  constraint_name: facebook_posts_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 141
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_posts_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: facebook_posts
+  constraint_name: facebook_posts_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 141
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_posts_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: facebook_posts
+  constraint_name: facebook_posts_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 141
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_facebook_posts_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: instagram_account_catalog_posts
+  constraint_name: instagram_account_catalog_posts_assigned_season_id_fkey
+  fk_columns_in_order:
+  - assigned_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - assigned_season_id
+  estimated_row_count: 29342
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_instagram_account_catalog_posts_assigned_season_id_idx
+  proposed_index_columns:
+  - assigned_season_id
+  proposed_partial_predicate: assigned_season_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: instagram_account_catalog_posts
+  constraint_name: instagram_account_catalog_posts_assigned_show_id_fkey
+  fk_columns_in_order:
+  - assigned_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - assigned_show_id
+  estimated_row_count: 29342
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_instagram_account_catalog_posts_assigned_show_id_idx
+  proposed_index_columns:
+  - assigned_show_id
+  proposed_partial_predicate: assigned_show_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: instagram_account_catalog_posts
+  constraint_name: instagram_account_catalog_posts_last_backfill_run_id_fkey
+  fk_columns_in_order:
+  - last_backfill_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_backfill_run_id
+  estimated_row_count: 29342
+  single_column_null_frac: 0.811908
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_instagram_account_catalog_posts_last_backfill_run_id_idx
+  proposed_index_columns:
+  - last_backfill_run_id
+  proposed_partial_predicate: last_backfill_run_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: instagram_comments
+  constraint_name: instagram_comments_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 142782
+  single_column_null_frac: 0.0
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_comments_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: instagram_comments
+  constraint_name: instagram_comments_last_seen_run_id_fkey
+  fk_columns_in_order:
+  - last_seen_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_seen_run_id
+  estimated_row_count: 142782
+  single_column_null_frac: 6.66667e-05
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: social_instagram_comments_last_seen_run_id_idx
+  proposed_index_columns:
+  - last_seen_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: social
+  table: instagram_comments
+  constraint_name: instagram_comments_parent_comment_id_fkey
+  fk_columns_in_order:
+  - parent_comment_id
+  referenced_schema: social
+  referenced_table: instagram_comments
+  nullable_columns:
+  - parent_comment_id
+  estimated_row_count: 142782
+  single_column_null_frac: 0.963233
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_comments_parent_comment_id_idx
+  proposed_index_columns:
+  - parent_comment_id
+  proposed_partial_predicate: parent_comment_id is not null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: instagram_comments
+  constraint_name: instagram_comments_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: instagram_posts
+  nullable_columns: []
+  estimated_row_count: 142782
+  single_column_null_frac: 0.0
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_comments_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: instagram_comments
+  constraint_name: instagram_comments_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 142782
+  single_column_null_frac: 0.0
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_comments_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: instagram_posts
+  constraint_name: instagram_posts_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 1152
+  single_column_null_frac: 0.000868056
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_posts_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: instagram_posts
+  constraint_name: instagram_posts_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 1152
+  single_column_null_frac: 1.0
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_posts_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: instagram_posts
+  constraint_name: instagram_posts_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 1152
+  single_column_null_frac: 0.104167
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_posts_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: instagram_posts
+  constraint_name: instagram_posts_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 1152
+  single_column_null_frac: 0.104167
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_instagram_posts_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: meta_threads_comments
+  constraint_name: meta_threads_comments_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 1744
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_comments_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: meta_threads_comments
+  constraint_name: meta_threads_comments_parent_comment_id_fkey
+  fk_columns_in_order:
+  - parent_comment_id
+  referenced_schema: social
+  referenced_table: meta_threads_comments
+  nullable_columns:
+  - parent_comment_id
+  estimated_row_count: 1744
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_comments_parent_comment_id_idx
+  proposed_index_columns:
+  - parent_comment_id
+  proposed_partial_predicate: parent_comment_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: meta_threads_comments
+  constraint_name: meta_threads_comments_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: meta_threads_posts
+  nullable_columns: []
+  estimated_row_count: 1744
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_comments_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: meta_threads_comments
+  constraint_name: meta_threads_comments_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 1744
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_comments_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: meta_threads_posts
+  constraint_name: meta_threads_posts_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 3495
+  single_column_null_frac: 0.0223176
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_posts_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: meta_threads_posts
+  constraint_name: meta_threads_posts_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 3495
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_posts_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: meta_threads_posts
+  constraint_name: meta_threads_posts_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 3495
+  single_column_null_frac: 0.935336
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_posts_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: season_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: meta_threads_posts
+  constraint_name: meta_threads_posts_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 3495
+  single_column_null_frac: 0.0100143
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_meta_threads_posts_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: posts
+  constraint_name: posts_parent_post_id_fkey
+  fk_columns_in_order:
+  - parent_post_id
+  referenced_schema: social
+  referenced_table: posts
+  nullable_columns:
+  - parent_post_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_posts_parent_post_id_idx
+  proposed_index_columns:
+  - parent_post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: posts
+  constraint_name: posts_thread_id_fkey
+  fk_columns_in_order:
+  - thread_id
+  referenced_schema: social
+  referenced_table: threads
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_posts_thread_id_idx
+  proposed_index_columns:
+  - thread_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: posts
+  constraint_name: posts_user_id_fkey
+  fk_columns_in_order:
+  - user_id
+  referenced_schema: auth
+  referenced_table: users
+  nullable_columns:
+  - user_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_posts_user_id_idx
+  proposed_index_columns:
+  - user_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: reactions
+  constraint_name: reactions_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: posts
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_reactions_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: reactions
+  constraint_name: reactions_user_id_fkey
+  fk_columns_in_order:
+  - user_id
+  referenced_schema: auth
+  referenced_table: users
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_reactions_user_id_idx
+  proposed_index_columns:
+  - user_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: reddit_comments
+  constraint_name: reddit_comments_reddit_post_id_fkey
+  fk_columns_in_order:
+  - reddit_post_id
+  referenced_schema: social
+  referenced_table: reddit_posts
+  nullable_columns: []
+  estimated_row_count: 100026
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_reddit_comments_reddit_post_id_idx
+  proposed_index_columns:
+  - reddit_post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: reddit_media_mirrors
+  constraint_name: reddit_media_mirrors_reddit_comment_id_fkey
+  fk_columns_in_order:
+  - reddit_comment_id
+  referenced_schema: social
+  referenced_table: reddit_comments
+  nullable_columns:
+  - reddit_comment_id
+  estimated_row_count: 11201
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_reddit_media_mirrors_reddit_comment_id_idx
+  proposed_index_columns:
+  - reddit_comment_id
+  proposed_partial_predicate: reddit_comment_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: reddit_media_mirrors
+  constraint_name: reddit_media_mirrors_reddit_post_id_fkey
+  fk_columns_in_order:
+  - reddit_post_id
+  referenced_schema: social
+  referenced_table: reddit_posts
+  nullable_columns: []
+  estimated_row_count: 11201
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_reddit_media_mirrors_reddit_post_id_idx
+  proposed_index_columns:
+  - reddit_post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: reddit_period_post_matches
+  constraint_name: reddit_period_post_matches_reddit_post_id_fkey
+  fk_columns_in_order:
+  - reddit_post_id
+  referenced_schema: social
+  referenced_table: reddit_posts
+  nullable_columns: []
+  estimated_row_count: 4618
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_reddit_period_post_matches_reddit_post_id_idx
+  proposed_index_columns:
+  - reddit_post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: reddit_period_post_matches
+  constraint_name: reddit_period_post_matches_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: reddit_refresh_runs
+  nullable_columns:
+  - run_id
+  estimated_row_count: 4618
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_reddit_period_post_matches_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: reddit_period_post_matches
+  constraint_name: reddit_period_post_matches_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 4618
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_reddit_period_post_matches_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: reddit_refresh_runs
+  constraint_name: reddit_refresh_runs_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 372
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_reddit_refresh_runs_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: scrape_jobs
+  constraint_name: scrape_jobs_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 24296
+  single_column_null_frac: 1.0
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: social_scrape_jobs_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: social
+  table: scrape_jobs
+  constraint_name: scrape_jobs_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - run_id
+  estimated_row_count: 24296
+  single_column_null_frac: 0.405252
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_scrape_jobs_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: scrape_jobs
+  constraint_name: scrape_jobs_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 24296
+  single_column_null_frac: 0.052025
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_scrape_jobs_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: scrape_jobs
+  constraint_name: scrape_jobs_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 24296
+  single_column_null_frac: 0.052025
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: social_scrape_jobs_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: social
+  table: scrape_runs
+  constraint_name: scrape_runs_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 760
+  single_column_null_frac: 0.153947
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_scrape_runs_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: scrape_runs
+  constraint_name: scrape_runs_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 760
+  single_column_null_frac: 0.153947
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: social_scrape_runs_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: social
+  table: scrape_runs
+  constraint_name: scrape_runs_sync_session_id_fkey
+  fk_columns_in_order:
+  - sync_session_id
+  referenced_schema: social
+  referenced_table: sync_sessions
+  nullable_columns:
+  - sync_session_id
+  estimated_row_count: 760
+  single_column_null_frac: 0.956579
+  hot_table: true
+  covered_by_existing_index: true
+  proposed_index_name: social_scrape_runs_sync_session_id_idx
+  proposed_index_columns:
+  - sync_session_id
+  proposed_partial_predicate: sync_session_id is not null
+  statement_timeout_tier: 3h
+  decision: skip-covered
+- schema: social
+  table: scrape_workers
+  constraint_name: scrape_workers_current_job_id_fkey
+  fk_columns_in_order:
+  - current_job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - current_job_id
+  estimated_row_count: 9
+  single_column_null_frac: 0.888889
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_scrape_workers_current_job_id_idx
+  proposed_index_columns:
+  - current_job_id
+  proposed_partial_predicate: current_job_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: scrape_workers
+  constraint_name: scrape_workers_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - run_id
+  estimated_row_count: 9
+  single_column_null_frac: 0.888889
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_scrape_workers_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: run_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: season_targets
+  constraint_name: season_targets_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 10
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_season_targets_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: season_targets
+  constraint_name: season_targets_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 10
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_season_targets_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: shared_account_run_frontiers
+  constraint_name: shared_account_run_frontiers_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns: []
+  estimated_row_count: 27
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_shared_account_run_frontiers_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: shared_account_run_partitions
+  constraint_name: shared_account_run_partitions_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 24
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_shared_account_run_partitions_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: shared_account_run_partitions
+  constraint_name: shared_account_run_partitions_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns: []
+  estimated_row_count: 24
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_shared_account_run_partitions_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: shared_account_sources
+  constraint_name: shared_account_sources_last_scrape_job_id_fkey
+  fk_columns_in_order:
+  - last_scrape_job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - last_scrape_job_id
+  estimated_row_count: 11
+  single_column_null_frac: 0.636364
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: social_shared_account_sources_last_scrape_job_id_idx
+  proposed_index_columns:
+  - last_scrape_job_id
+  proposed_partial_predicate: last_scrape_job_id is not null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: social
+  table: shared_account_sources
+  constraint_name: shared_account_sources_last_scrape_run_id_fkey
+  fk_columns_in_order:
+  - last_scrape_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_scrape_run_id
+  estimated_row_count: 11
+  single_column_null_frac: 0.636364
+  hot_table: true
+  covered_by_existing_index: false
+  proposed_index_name: social_shared_account_sources_last_scrape_run_id_idx
+  proposed_index_columns:
+  - last_scrape_run_id
+  proposed_partial_predicate: last_scrape_run_id is not null
+  statement_timeout_tier: 3h
+  decision: add
+  base_decision: add
+- schema: social
+  table: shared_post_matches
+  constraint_name: shared_post_matches_matched_season_id_fkey
+  fk_columns_in_order:
+  - matched_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - matched_season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_shared_post_matches_matched_season_id_idx
+  proposed_index_columns:
+  - matched_season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: shared_post_matches
+  constraint_name: shared_post_matches_matched_show_id_fkey
+  fk_columns_in_order:
+  - matched_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - matched_show_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_shared_post_matches_matched_show_id_idx
+  proposed_index_columns:
+  - matched_show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: shared_post_matches
+  constraint_name: shared_post_matches_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - run_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_shared_post_matches_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: shared_post_review_queue
+  constraint_name: shared_post_review_queue_resolved_season_id_fkey
+  fk_columns_in_order:
+  - resolved_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - resolved_season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_shared_post_review_queue_resolved_season_id_idx
+  proposed_index_columns:
+  - resolved_season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: shared_post_review_queue
+  constraint_name: shared_post_review_queue_resolved_show_id_fkey
+  fk_columns_in_order:
+  - resolved_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - resolved_show_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_shared_post_review_queue_resolved_show_id_idx
+  proposed_index_columns:
+  - resolved_show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: shared_post_review_queue
+  constraint_name: shared_post_review_queue_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - run_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_shared_post_review_queue_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: sync_sessions
+  constraint_name: sync_sessions_current_run_id_fkey
+  fk_columns_in_order:
+  - current_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - current_run_id
+  estimated_row_count: 18
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_sync_sessions_current_run_id_idx
+  proposed_index_columns:
+  - current_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: sync_sessions
+  constraint_name: sync_sessions_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 18
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_sync_sessions_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: sync_sessions
+  constraint_name: sync_sessions_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns: []
+  estimated_row_count: 18
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_sync_sessions_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: threads
+  constraint_name: threads_created_by_fkey
+  fk_columns_in_order:
+  - created_by
+  referenced_schema: auth
+  referenced_table: users
+  nullable_columns:
+  - created_by
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_threads_created_by_idx
+  proposed_index_columns:
+  - created_by
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: threads
+  constraint_name: threads_episode_id_fkey
+  fk_columns_in_order:
+  - episode_id
+  referenced_schema: core
+  referenced_table: episodes
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_threads_episode_id_idx
+  proposed_index_columns:
+  - episode_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: threads_account_catalog_posts
+  constraint_name: threads_account_catalog_posts_assigned_season_id_fkey
+  fk_columns_in_order:
+  - assigned_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - assigned_season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_threads_account_catalog_posts_assigned_season_id_idx
+  proposed_index_columns:
+  - assigned_season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: threads_account_catalog_posts
+  constraint_name: threads_account_catalog_posts_assigned_show_id_fkey
+  fk_columns_in_order:
+  - assigned_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - assigned_show_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_threads_account_catalog_posts_assigned_show_id_idx
+  proposed_index_columns:
+  - assigned_show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: threads_account_catalog_posts
+  constraint_name: threads_account_catalog_posts_last_backfill_run_id_fkey
+  fk_columns_in_order:
+  - last_backfill_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_backfill_run_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_threads_account_catalog_posts_last_backfill_run_id_idx
+  proposed_index_columns:
+  - last_backfill_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: tiktok_account_catalog_posts
+  constraint_name: tiktok_account_catalog_posts_assigned_season_id_fkey
+  fk_columns_in_order:
+  - assigned_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - assigned_season_id
+  estimated_row_count: 11232
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_tiktok_account_catalog_posts_assigned_season_id_idx
+  proposed_index_columns:
+  - assigned_season_id
+  proposed_partial_predicate: assigned_season_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: tiktok_account_catalog_posts
+  constraint_name: tiktok_account_catalog_posts_assigned_show_id_fkey
+  fk_columns_in_order:
+  - assigned_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - assigned_show_id
+  estimated_row_count: 11232
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_tiktok_account_catalog_posts_assigned_show_id_idx
+  proposed_index_columns:
+  - assigned_show_id
+  proposed_partial_predicate: assigned_show_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: tiktok_account_catalog_posts
+  constraint_name: tiktok_account_catalog_posts_last_backfill_run_id_fkey
+  fk_columns_in_order:
+  - last_backfill_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_backfill_run_id
+  estimated_row_count: 11232
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_tiktok_account_catalog_posts_last_backfill_run_id_idx
+  proposed_index_columns:
+  - last_backfill_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: tiktok_anomaly_events
+  constraint_name: tiktok_anomaly_events_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: tiktok_posts
+  nullable_columns:
+  - post_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_tiktok_anomaly_events_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: tiktok_anomaly_events
+  constraint_name: tiktok_anomaly_events_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_anomaly_events_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_comments
+  constraint_name: tiktok_comments_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 75275
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_comments_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_comments
+  constraint_name: tiktok_comments_last_seen_run_id_fkey
+  fk_columns_in_order:
+  - last_seen_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_seen_run_id
+  estimated_row_count: 75275
+  single_column_null_frac: 0.00843333
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_tiktok_comments_last_seen_run_id_idx
+  proposed_index_columns:
+  - last_seen_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: tiktok_comments
+  constraint_name: tiktok_comments_parent_comment_id_fkey
+  fk_columns_in_order:
+  - parent_comment_id
+  referenced_schema: social
+  referenced_table: tiktok_comments
+  nullable_columns:
+  - parent_comment_id
+  estimated_row_count: 75275
+  single_column_null_frac: 0.7117
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_comments_parent_comment_id_idx
+  proposed_index_columns:
+  - parent_comment_id
+  proposed_partial_predicate: parent_comment_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_comments
+  constraint_name: tiktok_comments_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: tiktok_posts
+  nullable_columns: []
+  estimated_row_count: 75275
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_comments_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_comments
+  constraint_name: tiktok_comments_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 75275
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_comments_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_post_cast_members
+  constraint_name: tiktok_post_cast_members_cast_member_id_fkey
+  fk_columns_in_order:
+  - cast_member_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - cast_member_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_post_cast_members_cast_member_id_idx
+  proposed_index_columns:
+  - cast_member_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_post_cast_members
+  constraint_name: tiktok_post_cast_members_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: tiktok_posts
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_post_cast_members_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_post_cast_members
+  constraint_name: tiktok_post_cast_members_run_id_fkey
+  fk_columns_in_order:
+  - run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - run_id
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_tiktok_post_cast_members_run_id_idx
+  proposed_index_columns:
+  - run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: tiktok_post_comment_enrichment
+  constraint_name: tiktok_post_comment_enrichment_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: tiktok_posts
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_post_comment_enrichment_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_post_quality
+  constraint_name: tiktok_post_quality_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: tiktok_posts
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_post_quality_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_post_tokens
+  constraint_name: tiktok_post_tokens_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: tiktok_posts
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_post_tokens_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_post_velocity
+  constraint_name: tiktok_post_velocity_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: tiktok_posts
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_post_velocity_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_posts
+  constraint_name: tiktok_posts_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 409
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_posts_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_posts
+  constraint_name: tiktok_posts_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 409
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_posts_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_posts
+  constraint_name: tiktok_posts_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 409
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_posts_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_posts
+  constraint_name: tiktok_posts_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 409
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_posts_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: tiktok_sound_posts
+  constraint_name: tiktok_sound_posts_sound_id_fkey
+  fk_columns_in_order:
+  - sound_id
+  referenced_schema: social
+  referenced_table: tiktok_sounds
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_tiktok_sound_posts_sound_id_idx
+  proposed_index_columns:
+  - sound_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: twitter_account_catalog_posts
+  constraint_name: twitter_account_catalog_posts_assigned_season_id_fkey
+  fk_columns_in_order:
+  - assigned_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - assigned_season_id
+  estimated_row_count: 45
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_twitter_account_catalog_posts_assigned_season_id_idx
+  proposed_index_columns:
+  - assigned_season_id
+  proposed_partial_predicate: assigned_season_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: twitter_account_catalog_posts
+  constraint_name: twitter_account_catalog_posts_assigned_show_id_fkey
+  fk_columns_in_order:
+  - assigned_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - assigned_show_id
+  estimated_row_count: 45
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_twitter_account_catalog_posts_assigned_show_id_idx
+  proposed_index_columns:
+  - assigned_show_id
+  proposed_partial_predicate: assigned_show_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: twitter_account_catalog_posts
+  constraint_name: twitter_account_catalog_posts_last_backfill_run_id_fkey
+  fk_columns_in_order:
+  - last_backfill_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_backfill_run_id
+  estimated_row_count: 45
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_twitter_account_catalog_posts_last_backfill_run_id_idx
+  proposed_index_columns:
+  - last_backfill_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: twitter_scrape_query_tweets
+  constraint_name: twitter_scrape_query_tweets_scrape_query_id_fkey
+  fk_columns_in_order:
+  - scrape_query_id
+  referenced_schema: social
+  referenced_table: twitter_scrape_queries
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_twitter_scrape_query_tweets_scrape_query_id_idx
+  proposed_index_columns:
+  - scrape_query_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: twitter_scrape_query_tweets
+  constraint_name: twitter_scrape_query_tweets_tweet_id_fkey
+  fk_columns_in_order:
+  - tweet_id
+  referenced_schema: social
+  referenced_table: twitter_tweets
+  nullable_columns: []
+  estimated_row_count: 0
+  single_column_null_frac: null
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_twitter_scrape_query_tweets_tweet_id_idx
+  proposed_index_columns:
+  - tweet_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: twitter_tweets
+  constraint_name: twitter_tweets_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 5725
+  single_column_null_frac: 0.322096
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_twitter_tweets_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: twitter_tweets
+  constraint_name: twitter_tweets_last_seen_run_id_fkey
+  fk_columns_in_order:
+  - last_seen_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_seen_run_id
+  estimated_row_count: 5725
+  single_column_null_frac: 0.857118
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_twitter_tweets_last_seen_run_id_idx
+  proposed_index_columns:
+  - last_seen_run_id
+  proposed_partial_predicate: last_seen_run_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: twitter_tweets
+  constraint_name: twitter_tweets_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 5725
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_twitter_tweets_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: twitter_tweets
+  constraint_name: twitter_tweets_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 5725
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_twitter_tweets_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: twitter_tweets
+  constraint_name: twitter_tweets_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 5725
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_twitter_tweets_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_account_catalog_posts
+  constraint_name: youtube_account_catalog_posts_assigned_season_id_fkey
+  fk_columns_in_order:
+  - assigned_season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - assigned_season_id
+  estimated_row_count: 40
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_youtube_account_catalog_posts_assigned_season_id_idx
+  proposed_index_columns:
+  - assigned_season_id
+  proposed_partial_predicate: assigned_season_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: youtube_account_catalog_posts
+  constraint_name: youtube_account_catalog_posts_assigned_show_id_fkey
+  fk_columns_in_order:
+  - assigned_show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - assigned_show_id
+  estimated_row_count: 40
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_youtube_account_catalog_posts_assigned_show_id_idx
+  proposed_index_columns:
+  - assigned_show_id
+  proposed_partial_predicate: assigned_show_id is not null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: youtube_account_catalog_posts
+  constraint_name: youtube_account_catalog_posts_last_backfill_run_id_fkey
+  fk_columns_in_order:
+  - last_backfill_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_backfill_run_id
+  estimated_row_count: 40
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_youtube_account_catalog_posts_last_backfill_run_id_idx
+  proposed_index_columns:
+  - last_backfill_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: youtube_channel_sync_state
+  constraint_name: youtube_channel_sync_state_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns: []
+  estimated_row_count: 1
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_channel_sync_state_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_channel_sync_state
+  constraint_name: youtube_channel_sync_state_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 1
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_youtube_channel_sync_state_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: youtube_comments
+  constraint_name: youtube_comments_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 30529
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_comments_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_comments
+  constraint_name: youtube_comments_last_seen_run_id_fkey
+  fk_columns_in_order:
+  - last_seen_run_id
+  referenced_schema: social
+  referenced_table: scrape_runs
+  nullable_columns:
+  - last_seen_run_id
+  estimated_row_count: 30529
+  single_column_null_frac: 3.33333e-05
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_youtube_comments_last_seen_run_id_idx
+  proposed_index_columns:
+  - last_seen_run_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: youtube_comments
+  constraint_name: youtube_comments_parent_comment_id_fkey
+  fk_columns_in_order:
+  - parent_comment_id
+  referenced_schema: social
+  referenced_table: youtube_comments
+  nullable_columns:
+  - parent_comment_id
+  estimated_row_count: 30529
+  single_column_null_frac: 0.588433
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_comments_parent_comment_id_idx
+  proposed_index_columns:
+  - parent_comment_id
+  proposed_partial_predicate: parent_comment_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_comments
+  constraint_name: youtube_comments_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 30529
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_comments_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_comments
+  constraint_name: youtube_comments_video_id_fkey
+  fk_columns_in_order:
+  - video_id
+  referenced_schema: social
+  referenced_table: youtube_videos
+  nullable_columns: []
+  estimated_row_count: 30529
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_comments_video_id_idx
+  proposed_index_columns:
+  - video_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_video_sync_state
+  constraint_name: youtube_video_sync_state_post_id_fkey
+  fk_columns_in_order:
+  - post_id
+  referenced_schema: social
+  referenced_table: youtube_videos
+  nullable_columns: []
+  estimated_row_count: 11
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_video_sync_state_post_id_idx
+  proposed_index_columns:
+  - post_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_video_sync_state
+  constraint_name: youtube_video_sync_state_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 11
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_video_sync_state_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_video_sync_state
+  constraint_name: youtube_video_sync_state_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 11
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: false
+  proposed_index_name: social_youtube_video_sync_state_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: add
+  base_decision: add
+- schema: social
+  table: youtube_videos
+  constraint_name: youtube_videos_job_id_fkey
+  fk_columns_in_order:
+  - job_id
+  referenced_schema: social
+  referenced_table: scrape_jobs
+  nullable_columns:
+  - job_id
+  estimated_row_count: 418
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_videos_job_id_idx
+  proposed_index_columns:
+  - job_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_videos
+  constraint_name: youtube_videos_person_id_fkey
+  fk_columns_in_order:
+  - person_id
+  referenced_schema: core
+  referenced_table: people
+  nullable_columns:
+  - person_id
+  estimated_row_count: 418
+  single_column_null_frac: 1.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_videos_person_id_idx
+  proposed_index_columns:
+  - person_id
+  proposed_partial_predicate: person_id is not null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_videos
+  constraint_name: youtube_videos_season_id_fkey
+  fk_columns_in_order:
+  - season_id
+  referenced_schema: core
+  referenced_table: seasons
+  nullable_columns:
+  - season_id
+  estimated_row_count: 418
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_videos_season_id_idx
+  proposed_index_columns:
+  - season_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered
+- schema: social
+  table: youtube_videos
+  constraint_name: youtube_videos_show_id_fkey
+  fk_columns_in_order:
+  - show_id
+  referenced_schema: core
+  referenced_table: shows
+  nullable_columns:
+  - show_id
+  estimated_row_count: 418
+  single_column_null_frac: 0.0
+  hot_table: false
+  covered_by_existing_index: true
+  proposed_index_name: social_youtube_videos_show_id_idx
+  proposed_index_columns:
+  - show_id
+  proposed_partial_predicate: null
+  statement_timeout_tier: 30min
+  decision: skip-covered

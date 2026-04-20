@@ -258,6 +258,22 @@ def test_scrape_marks_continuation_fetch_failure_as_retryable(monkeypatch) -> No
     assert scraper.last_retrieval_meta["posts_checked"] == 1
 
 
+def test_youtube_runtime_metadata_reports_hybrid_source_mode_and_counts() -> None:
+    scraper = YouTubeScraper()
+    scraper._request_count = 3  # noqa: SLF001
+    scraper._last_transport = "channel_page_json"  # noqa: SLF001
+    scraper._fallback_chain = ["channel_page_json", "yt_dlp_enrichment"]  # noqa: SLF001
+    scraper._last_stop_reason = "complete"  # noqa: SLF001
+    scraper._last_retryable = False  # noqa: SLF001
+    scraper._last_complete = True  # noqa: SLF001
+    scraper._last_source_mode = "hybrid"  # noqa: SLF001
+
+    assert scraper.runtime_metadata["request_count"] == 3
+    assert scraper.runtime_metadata["transport"] == "channel_page_json"
+    assert scraper.runtime_metadata["fallback_chain"] == ["channel_page_json", "yt_dlp_enrichment"]
+    assert scraper.runtime_metadata["source_mode"] == "hybrid"
+
+
 def test_fetch_comments_falls_back_to_shorts_bootstrap_when_watch_has_no_token(monkeypatch) -> None:
     scraper = YouTubeScraper()
     called_urls: list[str] = []

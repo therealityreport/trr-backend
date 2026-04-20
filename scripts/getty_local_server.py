@@ -89,6 +89,7 @@ class ScrapeRequest(BaseModel):
     person_name: str = Field(..., min_length=1, description="Full name to search Getty for")
     show_name: str | None = Field(default=None, description="Optional show name for show-scoped Getty query")
     mode: str = Field(default="full", description="Getty prefetch mode: discovery or full")
+    transport_mode: str = Field(default="auto", description="Getty transport mode")
 
 
 class ScrapeResponse(BaseModel):
@@ -103,6 +104,14 @@ class ScrapeResponse(BaseModel):
     query_summaries: list[dict[str, Any]] = Field(default_factory=list)
     auth_mode: str | None = None
     auth_warning: str | None = None
+    getty_transport_mode: str | None = None
+    getty_proxy_fingerprint: str | None = None
+    getty_runtime_probe_status: str | None = None
+    getty_runtime_probe_reason: str | None = None
+    getty_fallback_invoked: bool = False
+    getty_primary_failure_reason: str | None = None
+    session_validated: bool = False
+    session_truncated: bool = False
     elapsed_seconds: float
 
 
@@ -128,6 +137,7 @@ async def scrape_getty(req: ScrapeRequest) -> dict[str, Any]:
         person_name,
         show_name=req.show_name,
         mode=req.mode,
+        transport_mode=req.transport_mode,
     )
     logger.info(
         "DONE — %d images, %d events in %.1fs (auth_mode=%s)",

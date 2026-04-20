@@ -19,6 +19,7 @@ class _FakeConnection:
         self._autocommit = False
         self.closed = False
         self.transaction_status = TRANSACTION_STATUS_IDLE
+        self.executed_sql: list[str] = []
 
     @property
     def autocommit(self) -> bool:
@@ -41,6 +42,23 @@ class _FakeConnection:
 
     def get_backend_pid(self) -> int:
         return 12345
+
+    def cursor(self):
+        return _FakeCursor(self)
+
+
+class _FakeCursor:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+        return None
+
+    def execute(self, sql: str) -> None:
+        self._connection.executed_sql.append(sql)
 
 
 class _FakePool:

@@ -19034,6 +19034,34 @@ def _instagram_job_fixture(*, attempt_count: int = 1, max_attempts: int = 3) -> 
     }
 
 
+def _twitter_job_fixture(*, attempt_count: int = 1, max_attempts: int = 3) -> dict[str, object]:
+    return {
+        "id": "job-twitter-1",
+        "run_id": "run-1",
+        "platform": "twitter",
+        "job_type": "twitter",
+        "status": "running",
+        "config": {
+            "season_id": "season-1",
+            "source_scope": "bravo",
+            "account": "bravotv",
+            "stage": "posts",
+            "ingest_mode": "posts_and_comments",
+            "max_posts_per_target": 5,
+            "max_comments_per_post": 5,
+            "max_replies_per_post": 0,
+            "fetch_replies": False,
+            "hashtags": ["rhoslc"],
+            "keywords": ["rhoslc"],
+        },
+        "metadata": {"stage": "posts"},
+        "attempt_count": attempt_count,
+        "max_attempts": max_attempts,
+        "source_scope": "bravo",
+        "season_id": "season-1",
+    }
+
+
 def test_execute_claimed_job_uses_crawlee_path_for_instagram_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     state = _job_execute_test_harness(monkeypatch)
     calls: dict[str, int] = {"crawlee": 0, "legacy": 0}
@@ -19209,6 +19237,56 @@ def test_execute_claimed_job_marks_crawlee_blocked_errors_retrying(monkeypatch: 
     assert metadata["crawler_runtime"]["crawlee_request_count"] == 1
     assert metadata["crawler_runtime"]["crawlee_retry_count"] == 1
     assert last_finish["next_available_at"] is not None
+
+
+def test_execute_claimed_job_preserves_existing_crawler_runtime_and_adds_source_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _job_execute_test_harness(monkeypatch)
+
+    monkeypatch.setattr(social_repo, "should_use_crawlee", lambda _platform: True)
+    monkeypatch.setattr(
+        social_repo,
+        "build_runtime_config",
+        lambda _platform: SimpleNamespace(max_concurrency=2, max_retries=3, auth_strict=False),
+    )
+    monkeypatch.setattr(social_repo, "_load_twitter_auth", lambda: ({"ct0": "cookie-1"}, "bearer-token"))
+    monkeypatch.setattr(social_repo, "_load_twikit_credentials", lambda: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_run_platform_stage_via_crawlee",
+        lambda **_kwargs: (
+            2,
+            4,
+            {
+                "crawler_runtime": {
+                    "engine": "crawlee_python_incremental",
+                    "crawlee_request_count": 1,
+                    "crawlee_retry_count": 0,
+                    "crawlee_session_pool_used": True,
+                },
+                "auth_context": {"auth_preflight_ok": True, "fallback_to_legacy": False},
+                "source_runtime": {
+                    "request_count": 4,
+                    "transport": "graphql",
+                    "fallback_chain": ["graphql"],
+                    "stop_reason": "complete",
+                    "retryable": False,
+                    "complete": True,
+                },
+            },
+        ),
+    )
+
+    result = social_repo._execute_claimed_job(_twitter_job_fixture())
+    metadata = dict((state.get("last_finish") or {}).get("metadata") or {})
+
+    assert result["status"] == "completed"
+    assert metadata["crawler_runtime"]["crawlee_request_count"] == 1
+    assert metadata["source_runtime"]["request_count"] == 4
+    assert metadata["source_runtime"]["fallback_chain"] == ["graphql"]
+    assert metadata["source_runtime"]["complete"] is True
+    assert metadata["retrieval_meta"]["source_runtime"]["request_count"] == 4
 
 
 def test_execute_claimed_job_finalizes_preflight_crashes(monkeypatch: pytest.MonkeyPatch) -> None:

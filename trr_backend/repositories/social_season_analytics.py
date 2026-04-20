@@ -50341,10 +50341,16 @@ def start_social_account_comments_scrape(
                     detail=active_run,
                 )
             if is_queue_enabled() and not allow_local_dev_inline_bypass:
-                assert_worker_available_when_queue_enabled(
-                    required_worker_lane=INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
-                    platform=normalized_platform,
-                )
+                if is_modal_remote_executor_enabled():
+                    assert_worker_available_when_queue_enabled(
+                        required_execution_backend="modal",
+                        platform=normalized_platform,
+                    )
+                else:
+                    assert_worker_available_when_queue_enabled(
+                        required_worker_lane=INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+                        platform=normalized_platform,
+                    )
             target_source_ids: list[str]
             if normalized_mode == "single_post":
                 normalized_source_id = str(source_id or "").strip()

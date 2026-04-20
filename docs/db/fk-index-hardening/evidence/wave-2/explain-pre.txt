@@ -1,0 +1,138 @@
+[0;32mINFO:[0m Database URL resolved from: TRR_DB_URL
+[0;32mINFO:[0m Connection: postgresql://postgres.vwxfvzutyufrkhfgoeaa:****@aws-1-us-east-1.pooler.supabase.com:5432/postgres
+
+DO
+DO
+psql:scripts/db/guard_core_schema.sql:62: NOTICE:  Core schema guard passed: core.shows exists
+DO
+Wave 2 surveys representative query
+psql:scripts/db/fk_index_wave2_explain.sql:34: ERROR:  column "updated_at" does not exist
+LINE 5:   order by updated_at desc nulls last, created_at desc
+                   ^
+HINT:  Perhaps you meant to reference the column "surveys.created_at".
+Wave 2 ml representative query
+                                                                                  QUERY PLAN                                                                                  
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=7.69..7.70 rows=4 width=80) (actual time=7.234..7.237 rows=4 loops=1)
+   Buffers: shared hit=6 read=4
+   ->  Sort  (cost=7.69..7.70 rows=4 width=80) (actual time=7.233..7.235 rows=4 loops=1)
+         Sort Key: r.completed_at DESC NULLS LAST, r.created_at DESC
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=6 read=4
+         ->  Nested Loop  (cost=0.15..7.65 rows=4 width=80) (actual time=4.040..7.207 rows=4 loops=1)
+               Buffers: shared hit=3 read=4
+               ->  Seq Scan on screentime_runs r  (cost=0.00..3.04 rows=4 width=48) (actual time=1.766..3.618 rows=4 loops=1)
+                     Buffers: shared read=3
+               ->  Memoize  (cost=0.15..1.81 rows=1 width=64) (actual time=0.894..0.894 rows=1 loops=4)
+                     Cache Key: r.video_asset_id
+                     Cache Mode: logical
+                     Hits: 2  Misses: 2  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                     Buffers: shared hit=3 read=1
+                     ->  Index Scan using analysis_media_assets_pkey on analysis_media_assets va  (cost=0.14..1.80 rows=1 width=64) (actual time=1.781..1.781 rows=1 loops=2)
+                           Index Cond: (id = r.video_asset_id)
+                           Buffers: shared hit=3 read=1
+ Planning:
+   Buffers: shared hit=264 read=5
+ Planning Time: 12.882 ms
+ Execution Time: 7.295 ms
+(22 rows)
+
+Wave 2 pipeline representative query
+                                                                                  QUERY PLAN                                                                                  
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=13.52..13.52 rows=1 width=76) (actual time=13.144..13.147 rows=1 loops=1)
+   Buffers: shared hit=4 read=12 dirtied=4
+   ->  Sort  (cost=13.52..13.52 rows=1 width=76) (actual time=13.143..13.145 rows=1 loops=1)
+         Sort Key: (CASE WHEN (gd.person_id = socialblade_growth_data.person_id) THEN 0 ELSE 1 END), gd.updated_at DESC NULLS LAST, gd.created_at DESC
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=4 read=12 dirtied=4
+         ->  Nested Loop  (cost=12.36..13.51 rows=1 width=76) (actual time=13.130..13.132 rows=1 loops=1)
+               Buffers: shared hit=1 read=12 dirtied=4
+               ->  Limit  (cost=11.12..11.12 rows=1 width=56) (actual time=12.285..12.286 rows=1 loops=1)
+                     Buffers: shared read=11 dirtied=4
+                     ->  Sort  (cost=11.12..11.14 rows=8 width=56) (actual time=12.284..12.285 rows=1 loops=1)
+                           Sort Key: socialblade_growth_data.updated_at DESC NULLS LAST, socialblade_growth_data.created_at DESC
+                           Sort Method: top-N heapsort  Memory: 25kB
+                           Buffers: shared read=11 dirtied=4
+                           ->  Seq Scan on socialblade_growth_data  (cost=0.00..11.08 rows=8 width=56) (actual time=4.466..12.268 rows=8 loops=1)
+                                 Buffers: shared read=11 dirtied=4
+               ->  Bitmap Heap Scan on socialblade_growth_data gd  (cost=1.24..2.36 rows=1 width=72) (actual time=0.837..0.838 rows=1 loops=1)
+                     Recheck Cond: ((platform = socialblade_growth_data.platform) AND (account_handle = socialblade_growth_data.account_handle))
+                     Filter: ((person_id = socialblade_growth_data.person_id) OR (person_id IS NULL))
+                     Heap Blocks: exact=1
+                     Buffers: shared hit=1 read=1
+                     ->  Bitmap Index Scan on socialblade_growth_data_platform_account_handle_idx  (cost=0.00..1.24 rows=1 width=0) (actual time=0.821..0.822 rows=1 loops=1)
+                           Index Cond: ((platform = socialblade_growth_data.platform) AND (account_handle = socialblade_growth_data.account_handle))
+                           Buffers: shared read=1
+ Planning:
+   Buffers: shared hit=202 read=4
+ Planning Time: 8.944 ms
+ Execution Time: 13.217 ms
+(28 rows)
+
+Wave 2 firebase_surveys.answers.question_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:100: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from firebase_surveys.questions order by id lim...
+          ^
+DEALLOCATE
+Wave 2 firebase_surveys.answers.option_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:119: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from firebase_surveys.options order by id limit...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.face_bank_images.media_asset_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:142: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from core.media_assets order by created_at desc...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.identity_locks.run_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:162: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select run_id from screenalytics.runs order by created_at...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.media_upload_sessions.episode_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:182: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from core.episodes order by created_at desc nul...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.media_upload_sessions.promoted_video_asset_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:204: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from screenalytics.video_assets order by create...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.media_upload_sessions.season_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:224: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from core.seasons order by created_at desc null...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.suggestion_applies.suggestion_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:243: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select suggestion_id from screenalytics.suggestions order...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.suggestion_batches.run_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:262: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select run_id from screenalytics.runs order by created_at...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.unknown_clusters.assigned_person_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:283: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from core.people order by created_at desc nulls...
+          ^
+DEALLOCATE
+Wave 2 screenalytics.video_assets.media_asset_id deferred query-check
+PREPARE
+psql:scripts/db/fk_index_wave2_explain.sql:307: ERROR:  cannot use subquery in EXECUTE parameter
+LINE 3:   (select id from core.media_assets order by created_at desc...
+          ^
+DEALLOCATE

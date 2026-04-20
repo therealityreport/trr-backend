@@ -448,6 +448,12 @@ class YouTubeScraper:
         self.last_comment_fetch_reason: str | None = None
         self._last_channel_continuation_error: str | None = None
         self.comments_auth_failed = False
+        self._last_transport = "requests"
+        self._fallback_chain: list[str] = []
+        self._last_stop_reason: str | None = None
+        self._last_retryable = False
+        self._last_complete = False
+        self._last_source_mode = "scraper"
         self._precise_publish_ts_cache: dict[str, int] = {}
         self._precise_publish_attempts = 0
         self._precise_publish_successes = 0
@@ -455,6 +461,18 @@ class YouTubeScraper:
         self._shorts_precise_publish_attempts = 0
         self._shorts_precise_publish_successes = 0
         self._shorts_precise_publish_failures = 0
+
+    @property
+    def runtime_metadata(self) -> dict[str, Any]:
+        return {
+            "request_count": int(getattr(self, "_request_count", 0) or 0),
+            "transport": str(getattr(self, "_last_transport", "requests") or "requests"),
+            "fallback_chain": list(getattr(self, "_fallback_chain", []) or []),
+            "stop_reason": getattr(self, "_last_stop_reason", None),
+            "retryable": bool(getattr(self, "_last_retryable", False)),
+            "complete": bool(getattr(self, "_last_complete", False)),
+            "source_mode": str(getattr(self, "_last_source_mode", "scraper") or "scraper"),
+        }
 
     @staticmethod
     def _is_auth_related_failure(reason: str | None) -> bool:
@@ -2005,6 +2023,17 @@ class YouTubeScraper:
         continuation_pages_total = int(
             continuation_pages_by_surface.get("videos", 0) + continuation_pages_by_surface.get("shorts", 0)
         )
+        fallback_chain = ["channel_page_json"]
+        if continuation_pages_total > 0:
+            fallback_chain.append("continuation")
+        if should_supplement:
+            fallback_chain.append("yt_dlp_enrichment")
+        self._last_transport = "channel_page_json"
+        self._fallback_chain = fallback_chain
+        self._last_stop_reason = "continuation_fetch_failed" if continuation_failure_count > 0 else "complete"
+        self._last_retryable = continuation_failure_count > 0
+        self._last_complete = continuation_failure_count == 0
+        self._last_source_mode = "hybrid" if should_supplement else "scraper"
         self.last_retrieval_meta = {
             "retrieval_mode": "channel_continuation",
             "continuation_pages": continuation_pages_total,

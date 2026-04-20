@@ -183,6 +183,7 @@ class InstagramCommentsScraplingFetcher:
             "warmup_cookie_delta": dict(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
             "transport": "httpx_after_browser_warmup",
+            "request_count": self._request_count,
         }
 
     async def warmup(self) -> None:

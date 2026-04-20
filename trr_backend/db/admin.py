@@ -42,14 +42,20 @@ def get_supabase_timeout_config() -> tuple[float, float, float]:
     return postgrest, storage, pool
 
 
-@lru_cache
-def get_supabase_http2_enabled() -> bool:
-    """Check if HTTP/2 is enabled via environment variable."""
-    value = os.getenv("SUPABASE_HTTP2_ENABLED", "").strip().lower()
-    return value in ("1", "true", "yes", "on")
+def create_supabase_httpx_client() -> httpx.Client:
+    """Build the real HTTP client used by timeout validation helpers."""
+    postgrest_timeout, _, pool_timeout = get_supabase_timeout_config()
+    timeout = httpx.Timeout(
+        timeout=None,
+        connect=postgrest_timeout,
+        read=postgrest_timeout,
+        write=postgrest_timeout,
+        pool=pool_timeout,
+    )
+    return httpx.Client(timeout=timeout)
 
 
-def create_supabase_admin_client(*, url: str | None = None, service_role_key: str | None = None) -> DbSession:
+def create_supabase_admin_client() -> DbSession:
     return get_db_session()
 
 

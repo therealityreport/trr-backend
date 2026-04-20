@@ -1,0 +1,41 @@
+hot_tables:
+  - schema: social
+    table: scrape_jobs
+    reason: "shared social dispatch state and high-write operational table"
+    source: "code-path review plus current operational stats"
+  - schema: social
+    table: scrape_runs
+    reason: "shared social run state and high-write operational table"
+    source: "code-path review plus current operational stats"
+  - schema: social
+    table: shared_account_sources
+    reason: "frequently updated shared-account catalog sync table"
+    source: "code-path review plus current operational stats"
+  - schema: social
+    table: instagram_posts
+    reason: "high-volume social ingest child table"
+    source: "code-path review plus current operational stats"
+  - schema: social
+    table: instagram_comments
+    reason: "high-volume social ingest child table"
+    source: "code-path review plus current operational stats"
+  - schema: admin
+    table: network_streaming_completion
+    reason: "admin operational state tied to covered-show refreshes"
+    source: "code-path review plus current operational stats"
+  - schema: ml
+    table: screentime_runs
+    reason: "screenalytics result ingest and run state"
+    source: "code-path review plus current operational stats"
+  - schema: pipeline
+    table: socialblade_growth_data
+    reason: "pipeline upsert workload for socialblade growth imports"
+    source: "code-path review plus current operational stats"
+  - schema: surveys
+    table: answers
+    reason: "user survey submission child table"
+    source: "code-path review plus current operational stats"
+  - schema: firebase_surveys
+    table: responses
+    reason: "survey run response ingestion"
+    source: "code-path review plus current operational stats"

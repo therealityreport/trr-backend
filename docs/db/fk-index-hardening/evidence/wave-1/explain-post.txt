@@ -1,0 +1,93 @@
+[0;32mINFO:[0m Database URL resolved from: TRR_DB_URL
+[0;32mINFO:[0m Connection: postgresql://postgres.vwxfvzutyufrkhfgoeaa:****@aws-1-us-east-1.pooler.supabase.com:5432/postgres
+
+DO
+DO
+psql:scripts/db/guard_core_schema.sql:62: NOTICE:  Core schema guard passed: core.shows exists
+DO
+Wave 1 core/admin representative query
+                                                                                                       QUERY PLAN                                                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=342.25..342.27 rows=9 width=56) (actual time=92.169..92.179 rows=25 loops=1)
+   Buffers: shared hit=163 read=88
+   ->  Sort  (cost=342.25..342.27 rows=9 width=56) (actual time=92.168..92.176 rows=25 loops=1)
+         Sort Key: ((count(DISTINCT s.id))::integer) DESC, (min(btrim(network_name.network_name)))
+         Sort Method: top-N heapsort  Memory: 27kB
+         Buffers: shared hit=163 read=88
+         ->  Nested Loop Left Join  (cost=291.49..342.11 rows=9 width=56) (actual time=80.149..92.096 rows=53 loops=1)
+               Buffers: shared hit=157 read=88
+               ->  GroupAggregate  (cost=288.98..319.27 rows=9 width=72) (actual time=76.474..76.769 rows=53 loops=1)
+                     Group Key: (lower(btrim(network_name.network_name)))
+                     Buffers: shared hit=3 read=84
+                     ->  Sort  (cost=288.98..294.00 rows=2007 width=112) (actual time=76.433..76.474 rows=253 loops=1)
+                           Sort Key: (lower(btrim(network_name.network_name))), s.id
+                           Sort Method: quicksort  Memory: 36kB
+                           Buffers: shared hit=3 read=84
+                           ->  Nested Loop  (cost=46.49..178.89 rows=2007 width=112) (actual time=3.790..75.882 rows=253 loops=1)
+                                 Buffers: shared read=84
+                                 ->  Hash Left Join  (cost=46.48..132.35 rows=223 width=81) (actual time=3.739..74.996 rows=223 loops=1)
+                                       Hash Cond: ((s.id)::text = (btrim((cs.trr_show_id)::text)))
+                                       Buffers: shared read=84
+                                       ->  Seq Scan on shows s  (cost=0.00..85.23 rows=223 width=49) (actual time=1.962..73.010 rows=223 loops=1)
+                                             Buffers: shared read=83
+                                       ->  Hash  (cost=38.89..38.89 rows=607 width=32) (actual time=1.745..1.747 rows=13 loops=1)
+                                             Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                                             Buffers: shared read=1
+                                             ->  HashAggregate  (cost=28.27..38.89 rows=607 width=32) (actual time=1.728..1.736 rows=13 loops=1)
+                                                   Group Key: btrim((cs.trr_show_id)::text)
+                                                   Batches: 1  Memory Usage: 49kB
+                                                   Buffers: shared read=1
+                                                   ->  Seq Scan on covered_shows cs  (cost=0.00..26.75 rows=607 width=32) (actual time=1.707..1.717 rows=13 loops=1)
+                                                         Filter: (btrim((trr_show_id)::text) <> ''::text)
+                                                         Buffers: shared read=1
+                                 ->  Memoize  (cost=0.01..0.16 rows=9 width=32) (actual time=0.002..0.002 rows=1 loops=223)
+                                       Cache Key: s.networks
+                                       Cache Mode: binary
+                                       Hits: 166  Misses: 57  Evictions: 0  Overflows: 0  Memory Usage: 10kB
+                                       ->  Function Scan on unnest network_name  (cost=0.00..0.15 rows=9 width=32) (actual time=0.003..0.003 rows=2 loops=57)
+                                             Filter: (btrim(network_name) <> ''::text)
+               ->  Limit  (cost=2.50..2.51 rows=1 width=24) (actual time=0.288..0.288 rows=1 loops=53)
+                     Buffers: shared hit=154 read=4
+                     ->  Sort  (cost=2.50..2.51 rows=1 width=24) (actual time=0.288..0.288 rows=1 loops=53)
+                           Sort Key: c.updated_at DESC
+                           Sort Method: quicksort  Memory: 25kB
+                           Buffers: shared hit=154 read=4
+                           ->  Index Scan using network_streaming_completion_entity_type_entity_key_key on network_streaming_completion c  (cost=0.27..2.49 rows=1 width=24) (actual time=0.286..0.286 rows=1 loops=53)
+                                 Index Cond: ((entity_type = 'network'::text) AND (entity_key = (lower(btrim(network_name.network_name)))))
+                                 Buffers: shared hit=151 read=4
+ Planning:
+   Buffers: shared hit=576 read=16
+ Planning Time: 36.363 ms
+ Execution Time: 92.955 ms
+(51 rows)
+
+Wave 1 social representative query
+                                                                                                                                               QUERY PLAN                                                                                                                                                
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=10489.36..10540.04 rows=20273 width=136) (actual time=2023.614..2023.617 rows=0 loops=1)
+   Sort Key: (COALESCE(j.platform, 'unknown'::text)), (COALESCE(j.job_type, 'unknown'::text)), (COALESCE(j.status, 'unknown'::text)), (lower(COALESCE(NULLIF((j.config ->> 'stage'::text), ''::text), NULLIF((j.metadata ->> 'stage'::text), ''::text), NULLIF(j.job_type, ''::text), 'unknown'::text)))
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=6742 read=1
+   ->  HashAggregate  (cost=7720.48..8227.30 rows=20273 width=136) (actual time=2023.605..2023.607 rows=0 loops=1)
+         Group Key: COALESCE(j.platform, 'unknown'::text), COALESCE(j.job_type, 'unknown'::text), COALESCE(j.status, 'unknown'::text), lower(COALESCE(NULLIF((j.config ->> 'stage'::text), ''::text), NULLIF((j.metadata ->> 'stage'::text), ''::text), NULLIF(j.job_type, ''::text), 'unknown'::text))
+         Batches: 1  Memory Usage: 409kB
+         Buffers: shared hit=6742 read=1
+         ->  Hash Left Join  (cost=5.27..7416.78 rows=24296 width=128) (actual time=2023.546..2023.549 rows=0 loops=1)
+               Hash Cond: (j.run_id = scrape_runs.id)
+               Filter: ((j.status = ANY ('{queued,running,dispatching,dispatch_blocked,finalizing}'::text[])) OR (scrape_runs.id IS NOT NULL))
+               Rows Removed by Filter: 24296
+               Buffers: shared hit=6742 read=1
+               ->  Seq Scan on scrape_jobs j  (cost=0.00..6982.96 rows=24296 width=1342) (actual time=1.174..2007.603 rows=24296 loops=1)
+                     Buffers: shared hit=6740
+               ->  Hash  (cost=5.26..5.26 rows=1 width=16) (actual time=3.873..3.875 rows=0 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 8kB
+                     Buffers: shared hit=2 read=1
+                     ->  Index Scan using scrape_runs_status_idx on scrape_runs  (cost=0.28..5.26 rows=1 width=16) (actual time=3.872..3.872 rows=0 loops=1)
+                           Index Cond: (status = ANY ('{queued,running,dispatching,dispatch_blocked,finalizing}'::text[]))
+                           Buffers: shared hit=2 read=1
+ Planning:
+   Buffers: shared hit=563 read=1
+ Planning Time: 27.333 ms
+ Execution Time: 2024.179 ms
+(25 rows)
+

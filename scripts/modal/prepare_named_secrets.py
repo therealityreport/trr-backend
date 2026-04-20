@@ -33,6 +33,7 @@ CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
     "TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION": "probe_social_remote_auth",
+    "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_RUNTIME_SECRET_NAME": DEFAULT_RUNTIME_SECRET,
