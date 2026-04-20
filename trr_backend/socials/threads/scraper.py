@@ -205,6 +205,37 @@ class ThreadsScraper:
         self._last_429_at: float = 0.0
         self._consecutive_success: int = 0
         self._page_tokens: _PageTokens | None = None
+        self._last_transport = "requests"
+        self._fallback_chain: list[str] = []
+        self._last_stop_reason: str | None = None
+        self._last_retryable = False
+        self._last_complete = False
+
+    @property
+    def runtime_metadata(self) -> dict[str, Any]:
+        return {
+            "request_count": int(getattr(self, "_request_count", 0) or 0),
+            "transport": str(getattr(self, "_last_transport", "requests") or "requests"),
+            "fallback_chain": list(getattr(self, "_fallback_chain", []) or []),
+            "stop_reason": getattr(self, "_last_stop_reason", None),
+            "retryable": bool(getattr(self, "_last_retryable", False)),
+            "complete": bool(getattr(self, "_last_complete", False)),
+        }
+
+    def _set_runtime_state(
+        self,
+        *,
+        transport: str,
+        fallback_chain: list[str],
+        stop_reason: str | None,
+        retryable: bool,
+        complete: bool,
+    ) -> None:
+        self._last_transport = str(transport or "requests")
+        self._fallback_chain = list(fallback_chain or [])
+        self._last_stop_reason = str(stop_reason or "").strip() or None
+        self._last_retryable = bool(retryable)
+        self._last_complete = bool(complete)
 
     # ------------------------------------------------------------------
     # Session & HTTP helpers
@@ -1099,6 +1130,13 @@ class ThreadsScraper:
             self.last_retrieval_meta["error_code"] = "threads_graphql_page_fetch_failed"
             self.last_retrieval_meta["retryable"] = True
             self.last_retrieval_meta["error_class"] = "ThreadsGraphqlPageFetchError"
+        self._set_runtime_state(
+            transport="graphql",
+            fallback_chain=["graphql"],
+            stop_reason=stop_reason,
+            retryable=graph_fetch_failed,
+            complete=not graph_fetch_failed and stop_reason != "max_posts_reached",
+        )
         return posts
 
     def _scrape_via_fallback(
@@ -1189,6 +1227,13 @@ class ThreadsScraper:
             self.last_retrieval_meta["error_code"] = "threads_fallback_post_fetch_failed"
             self.last_retrieval_meta["retryable"] = True
             self.last_retrieval_meta["error_class"] = "ThreadsFallbackPostFetchError"
+        self._set_runtime_state(
+            transport="playwright_profile_discovery" if source == "playwright_profile_discovery" else "public_meta",
+            fallback_chain=[source],
+            stop_reason="complete" if matched_posts > 0 or failed_candidate_fetches == 0 else "post_fetch_failed",
+            retryable=matched_posts == 0 and failed_candidate_fetches > 0,
+            complete=matched_posts > 0 or failed_candidate_fetches == 0,
+        )
         return posts
 
     def scrape(
@@ -1237,6 +1282,12 @@ class ThreadsScraper:
             )
             if graphql_posts is not None:
                 self.last_retrieval_meta["profile_fetch_mode"] = profile_fetch_mode
+                if profile_fetch_mode == "anonymous_fallback":
+                    self._fallback_chain = [
+                        "authenticated_profile_fetch",
+                        "anonymous_profile_fetch",
+                        *self._fallback_chain,
+                    ]
                 logger.info(
                     "[threads] GraphQL scrape for @%s: %d posts found",
                     username,
@@ -1253,6 +1304,12 @@ class ThreadsScraper:
             progress_cb=progress_cb,
         )
         self.last_retrieval_meta["profile_fetch_mode"] = profile_fetch_mode
+        if profile_fetch_mode == "anonymous_fallback":
+            self._fallback_chain = [
+                "authenticated_profile_fetch",
+                "anonymous_profile_fetch",
+                *self._fallback_chain,
+            ]
         return fallback_posts
 
     # Instagram mobile UA needed for the text_feed REST API

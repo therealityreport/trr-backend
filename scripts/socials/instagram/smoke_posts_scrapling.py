@@ -6,7 +6,7 @@ Usage:
     python scripts/socials/instagram/smoke_posts_scrapling.py --account <handle> [--max-pages 1] [--fast]
 
 Requires:
-- Database reachable (TRR_DB_URL or SUPABASE_DB_URL set)
+- Database reachable (`TRR_DB_URL` set; `TRR_DB_FALLBACK_URL` optional as an explicit fallback)
 - Valid Instagram cookies (SOCIAL_INSTAGRAM_COOKIES_JSON or SOCIAL_INSTAGRAM_COOKIES_FILE)
 - Optional: DECODO_USERNAME/DECODO_PASSWORD for proxy (falls back to direct mode)
 """

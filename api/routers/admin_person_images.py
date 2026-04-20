@@ -27,6 +27,7 @@ from typing import Any, Literal, TypeVar, cast
 from urllib.parse import unquote, urlparse, urlunparse
 from uuid import UUID
 
+import requests
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -486,6 +487,38 @@ class RefreshImagesRequest(BaseModel):
         default=None,
         description="Optional auth/session warning from local Getty prefetch.",
     )
+    getty_transport_mode: str | None = Field(
+        default=None,
+        description="Optional Getty transport hint/metadata: decodo_remote, local_browser, or cookies_only.",
+    )
+    getty_proxy_fingerprint: str | None = Field(
+        default=None,
+        description="Safe Getty proxy fingerprint from the selected transport.",
+    )
+    getty_runtime_probe_status: str | None = Field(
+        default=None,
+        description="Optional Getty remote probe status: healthy, blocked, disabled, or not_run.",
+    )
+    getty_runtime_probe_reason: str | None = Field(
+        default=None,
+        description="Optional Getty remote probe reason code.",
+    )
+    getty_fallback_invoked: bool = Field(
+        default=False,
+        description="Whether Getty execution fell back from the primary transport to a secondary path.",
+    )
+    getty_primary_failure_reason: str | None = Field(
+        default=None,
+        description="Stable Getty primary-failure reason code for transport fallback or hard failure.",
+    )
+    getty_session_validated: bool = Field(
+        default=False,
+        description="Whether Getty session/runtime was validated before finishing prefetch.",
+    )
+    getty_session_truncated: bool = Field(
+        default=False,
+        description="Whether Getty session/runtime showed truncation/rewrite behavior.",
+    )
 
 
 class RefreshImagesResponse(BaseModel):
@@ -536,6 +569,14 @@ class RefreshImagesResponse(BaseModel):
     getty_failure_stage: str | None = None
     getty_http_status: int | None = None
     getty_page_classification: str | None = None
+    getty_transport_mode: str | None = None
+    getty_proxy_fingerprint: str | None = None
+    getty_runtime_probe_status: str | None = None
+    getty_runtime_probe_reason: str | None = None
+    getty_fallback_invoked: bool = False
+    getty_primary_failure_reason: str | None = None
+    getty_session_validated: bool = False
+    getty_session_truncated: bool = False
     matched_via_image_search: int = 0
     getty_snapshot_saved: bool = False
     getty_enrichment_pending: int = 0
@@ -692,6 +733,14 @@ class GettyEnrichmentRequest(BaseModel):
     getty_prefetched_queries: list[dict[str, Any]] | None = Field(default=None)
     getty_prefetch_auth_mode: str | None = Field(default=None)
     getty_prefetch_auth_warning: str | None = Field(default=None)
+    getty_transport_mode: str | None = Field(default=None)
+    getty_proxy_fingerprint: str | None = Field(default=None)
+    getty_runtime_probe_status: str | None = Field(default=None)
+    getty_runtime_probe_reason: str | None = Field(default=None)
+    getty_fallback_invoked: bool = Field(default=False)
+    getty_primary_failure_reason: str | None = Field(default=None)
+    getty_session_validated: bool = Field(default=False)
+    getty_session_truncated: bool = Field(default=False)
 
 
 class GettyEnrichmentResponse(BaseModel):
@@ -1844,6 +1893,14 @@ def _import_nbcumv_person_media(
     getty_deferred_editorial_ids: list[str] | None = None,
     getty_prefetch_auth_mode: str | None = None,
     getty_prefetch_auth_warning: str | None = None,
+    getty_transport_mode: str | None = None,
+    getty_proxy_fingerprint: str | None = None,
+    getty_runtime_probe_status: str | None = None,
+    getty_runtime_probe_reason: str | None = None,
+    getty_fallback_invoked: bool = False,
+    getty_primary_failure_reason: str | None = None,
+    getty_session_validated: bool = False,
+    getty_session_truncated: bool = False,
     allow_nbcumv_only_supplement: bool = True,
 ) -> dict[str, Any]:
     from api.routers.admin_nbcumv import (
@@ -1975,6 +2032,14 @@ def _import_nbcumv_person_media(
         "getty_failure_stage": None,
         "getty_http_status": None,
         "getty_page_classification": None,
+        "getty_transport_mode": str(getty_transport_mode or "").strip() or None,
+        "getty_proxy_fingerprint": str(getty_proxy_fingerprint or "").strip() or None,
+        "getty_runtime_probe_status": str(getty_runtime_probe_status or "").strip() or None,
+        "getty_runtime_probe_reason": str(getty_runtime_probe_reason or "").strip() or None,
+        "getty_fallback_invoked": bool(getty_fallback_invoked),
+        "getty_primary_failure_reason": str(getty_primary_failure_reason or "").strip() or None,
+        "getty_session_validated": bool(getty_session_validated),
+        "getty_session_truncated": bool(getty_session_truncated),
         "matched_via_image_search": 0,
         "cancelled": False,
         "getty_snapshot_saved": False,
@@ -2007,6 +2072,31 @@ def _import_nbcumv_person_media(
     result["existing_nbcumv_prefetched_enrichment_mode"] = existing_nbcumv_prefetched_enrichment_mode
     result["getty_only_direct_import_mode"] = getty_only_direct_import_mode
     result["getty_deferred_editorial_ids"] = list(requested_deferred_editorial_ids)
+    if getty_prefetched_assets is None and result.get("getty_transport_mode") == "decodo_remote":
+        from trr_backend.integrations import getty_transport as getty_transport_integration
+
+        getty_session, remote_transport_metadata = getty_transport_integration.build_remote_getty_session()
+        result["getty_proxy_fingerprint"] = (
+            str(remote_transport_metadata.get("getty_proxy_fingerprint") or "").strip() or result["getty_proxy_fingerprint"]
+        )
+        result["getty_transport_mode"] = (
+            str(remote_transport_metadata.get("getty_transport_mode") or "").strip() or result["getty_transport_mode"]
+        )
+        if result.get("getty_runtime_probe_status") in {None, ""}:
+            result["getty_runtime_probe_status"] = (
+                str(remote_transport_metadata.get("getty_runtime_probe_status") or "").strip() or None
+            )
+        if result.get("getty_runtime_probe_reason") in {None, ""}:
+            result["getty_runtime_probe_reason"] = (
+                str(remote_transport_metadata.get("getty_runtime_probe_reason") or "").strip() or None
+            )
+        if getty_session is None:
+            result["getty_primary_failure_reason"] = (
+                str(remote_transport_metadata.get("getty_primary_failure_reason") or "").strip()
+                or "proxy_unconfigured"
+            )
+            result["getty_transport_mode"] = "local_browser"
+            result["getty_fallback_invoked"] = True
     nbcumv_import_item_timeout_seconds = _resolve_nbcumv_import_item_timeout_seconds()
     normalized_person_name = str(person_name or "").strip()
     if not normalized_person_name:
@@ -2022,6 +2112,7 @@ def _import_nbcumv_person_media(
         "page_classification": None,
         "redirect_url": None,
     }
+    getty_session: requests.Session | None = None
 
     def _sync_getty_access_fields() -> None:
         status = str(getty_access_diagnostics.get("status") or "ok")
@@ -2036,7 +2127,10 @@ def _import_nbcumv_person_media(
             str(getty_access_diagnostics.get("page_classification") or "").strip() or None
         )
         if bool(result.get("getty_prefetched")):
-            result["getty_access_mode"] = "prefetched_local"
+            if result.get("getty_transport_mode") == "decodo_remote":
+                result["getty_access_mode"] = "prefetched_remote"
+            else:
+                result["getty_access_mode"] = "prefetched_local"
         elif status == "unavailable":
             result["getty_access_mode"] = "live_modal_unavailable"
         elif status == "degraded":
@@ -3082,7 +3176,19 @@ def _import_nbcumv_person_media(
     def _emit_getty_progress(payload: dict[str, Any]) -> None:
         if getty_progress_cb is None:
             return
-        getty_progress_cb(dict(payload))
+        enriched_payload = dict(payload)
+        for key in (
+            "getty_transport_mode",
+            "getty_proxy_fingerprint",
+            "getty_runtime_probe_status",
+            "getty_runtime_probe_reason",
+            "getty_fallback_invoked",
+            "getty_primary_failure_reason",
+            "getty_session_validated",
+            "getty_session_truncated",
+        ):
+            enriched_payload.setdefault(key, result.get(key))
+        getty_progress_cb(enriched_payload)
 
     def _is_nbcumv_access_error(exc: Exception) -> bool:
         message = str(exc or "").strip().lower()
@@ -3314,9 +3420,11 @@ def _import_nbcumv_person_media(
         broad_count = len(getty_assets) - bravo_count
         result["getty_prefetched"] = True
         result["getty_search_attempted"] = True
-        result["getty_access_mode"] = "prefetched_local"
+        result["getty_access_mode"] = "prefetched_remote" if result.get("getty_transport_mode") == "decodo_remote" else "prefetched_local"
         result["getty_auth_mode"] = str(getty_prefetch_auth_mode or "").strip() or None
         result["getty_prefetch_auth_warning"] = str(getty_prefetch_auth_warning or "").strip() or None
+        result["getty_session_validated"] = bool(getty_session_validated)
+        result["getty_session_truncated"] = bool(getty_session_truncated)
         result["unique_discovered_total"] = len(getty_assets)
         result["getty_candidates_total"] = len(getty_assets)
         result["getty_primary_candidates_total"] = bravo_count
@@ -3518,6 +3626,7 @@ def _import_nbcumv_person_media(
             discovered = getty_integration.search_editorial_assets(
                 phrase,
                 limit=getty_search_limit,
+                session=getty_session,
                 progress_cb=_emit_progress,
                 query_params=query_params or None,
                 max_search_pages=query_page_cap,
@@ -3612,6 +3721,7 @@ def _import_nbcumv_person_media(
         bravo_grouped_events = getty_integration.search_grouped_events(
             bravo_grouped_phrase,
             limit=getty_search_limit,
+            session=getty_session,
             person_name=normalized_person_name,
             source_query_scope="bravo",
             full_scan_person_assets=True,
@@ -3649,6 +3759,7 @@ def _import_nbcumv_person_media(
         broad_grouped_events = getty_integration.search_grouped_events(
             normalized_person_name,
             limit=getty_search_limit,
+            session=getty_session,
             person_name=normalized_person_name,
             person_match_required=True,
             minimum_grouped_image_count=2,
@@ -10871,6 +10982,14 @@ def refresh_person_images(
                 getty_deferred_editorial_ids=request.getty_deferred_editorial_ids,
                 getty_prefetch_auth_mode=request.getty_prefetch_auth_mode,
                 getty_prefetch_auth_warning=request.getty_prefetch_auth_warning,
+                getty_transport_mode=request.getty_transport_mode,
+                getty_proxy_fingerprint=request.getty_proxy_fingerprint,
+                getty_runtime_probe_status=request.getty_runtime_probe_status,
+                getty_runtime_probe_reason=request.getty_runtime_probe_reason,
+                getty_fallback_invoked=request.getty_fallback_invoked,
+                getty_primary_failure_reason=request.getty_primary_failure_reason,
+                getty_session_validated=request.getty_session_validated,
+                getty_session_truncated=request.getty_session_truncated,
                 allow_nbcumv_only_supplement=_allow_nbcumv_only_supplement_for_requested_sources(request.sources),
             )
             nbcumv_photos_fetched = int(nbcumv_result.get("fetched") or 0)
@@ -11262,6 +11381,14 @@ def refresh_person_images(
         getty_failure_stage=str(nbcumv_result.get("getty_failure_stage") or "").strip() or None,
         getty_http_status=(_ghs if isinstance((_ghs := nbcumv_result.get("getty_http_status")), int) else None),
         getty_page_classification=str(nbcumv_result.get("getty_page_classification") or "").strip() or None,
+        getty_transport_mode=str(nbcumv_result.get("getty_transport_mode") or "").strip() or None,
+        getty_proxy_fingerprint=str(nbcumv_result.get("getty_proxy_fingerprint") or "").strip() or None,
+        getty_runtime_probe_status=str(nbcumv_result.get("getty_runtime_probe_status") or "").strip() or None,
+        getty_runtime_probe_reason=str(nbcumv_result.get("getty_runtime_probe_reason") or "").strip() or None,
+        getty_fallback_invoked=bool(nbcumv_result.get("getty_fallback_invoked")),
+        getty_primary_failure_reason=str(nbcumv_result.get("getty_primary_failure_reason") or "").strip() or None,
+        getty_session_validated=bool(nbcumv_result.get("getty_session_validated")),
+        getty_session_truncated=bool(nbcumv_result.get("getty_session_truncated")),
         matched_via_image_search=int(nbcumv_result.get("matched_via_image_search") or 0),
         getty_snapshot_saved=getty_snapshot_saved,
         getty_enrichment_pending=int(nbcumv_result.get("getty_enrichment_pending") or 0),
@@ -11374,6 +11501,14 @@ def refresh_person_images_getty_enrichment(
         getty_deferred_editorial_ids=request.getty_deferred_editorial_ids,
         getty_prefetch_auth_mode=request.getty_prefetch_auth_mode,
         getty_prefetch_auth_warning=request.getty_prefetch_auth_warning,
+        getty_transport_mode=request.getty_transport_mode,
+        getty_proxy_fingerprint=request.getty_proxy_fingerprint,
+        getty_runtime_probe_status=request.getty_runtime_probe_status,
+        getty_runtime_probe_reason=request.getty_runtime_probe_reason,
+        getty_fallback_invoked=request.getty_fallback_invoked,
+        getty_primary_failure_reason=request.getty_primary_failure_reason,
+        getty_session_validated=request.getty_session_validated,
+        getty_session_truncated=request.getty_session_truncated,
         allow_nbcumv_only_supplement=_allow_nbcumv_only_supplement_for_requested_sources(["getty"]),
     )
 
@@ -13086,6 +13221,14 @@ async def refresh_person_images_stream(
                         getty_deferred_editorial_ids=request.getty_deferred_editorial_ids,
                         getty_prefetch_auth_mode=request.getty_prefetch_auth_mode,
                         getty_prefetch_auth_warning=request.getty_prefetch_auth_warning,
+                        getty_transport_mode=request.getty_transport_mode,
+                        getty_proxy_fingerprint=request.getty_proxy_fingerprint,
+                        getty_runtime_probe_status=request.getty_runtime_probe_status,
+                        getty_runtime_probe_reason=request.getty_runtime_probe_reason,
+                        getty_fallback_invoked=request.getty_fallback_invoked,
+                        getty_primary_failure_reason=request.getty_primary_failure_reason,
+                        getty_session_validated=request.getty_session_validated,
+                        getty_session_truncated=request.getty_session_truncated,
                         allow_nbcumv_only_supplement=_allow_nbcumv_only_supplement_for_requested_sources(
                             request.sources
                         ),
@@ -15164,6 +15307,14 @@ async def refresh_person_images_stream(
                 else None
             ),
             "getty_page_classification": str(nbcumv_result.get("getty_page_classification") or "").strip() or None,
+            "getty_transport_mode": str(nbcumv_result.get("getty_transport_mode") or "").strip() or None,
+            "getty_proxy_fingerprint": str(nbcumv_result.get("getty_proxy_fingerprint") or "").strip() or None,
+            "getty_runtime_probe_status": str(nbcumv_result.get("getty_runtime_probe_status") or "").strip() or None,
+            "getty_runtime_probe_reason": str(nbcumv_result.get("getty_runtime_probe_reason") or "").strip() or None,
+            "getty_fallback_invoked": bool(nbcumv_result.get("getty_fallback_invoked")),
+            "getty_primary_failure_reason": str(nbcumv_result.get("getty_primary_failure_reason") or "").strip() or None,
+            "getty_session_validated": bool(nbcumv_result.get("getty_session_validated")),
+            "getty_session_truncated": bool(nbcumv_result.get("getty_session_truncated")),
             "matched_via_image_search": int(nbcumv_result.get("matched_via_image_search") or 0),
             "getty_snapshot_saved": getty_snapshot_saved,
             "getty_enrichment_pending": int(nbcumv_result.get("getty_enrichment_pending") or 0),

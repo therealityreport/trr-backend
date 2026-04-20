@@ -143,6 +143,40 @@ def test_threads_scrape_via_graphql_keeps_feed_impression_count_without_activity
     assert posts[0].views == 120
 
 
+def test_threads_scrape_via_graphql_updates_runtime_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = ThreadsScraper(cookies={"csrftoken": "token"})
+    tokens = _PageTokens(fb_dtsg="fb-dtsg", lsd="lsd", jazoest="26474", user_id="123")
+
+    monkeypatch.setattr(scraper, "_extract_page_tokens", lambda _html: tokens)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_profile_posts_page",
+        lambda **_kwargs: ([_graphql_edge(impression_count=120)], None, False),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_post_view_count",
+        lambda **_kwargs: pytest.fail("expected feed impression_count to skip activity lookup"),
+    )
+
+    posts = scraper._scrape_via_graphql(  # noqa: SLF001
+        ThreadsScrapeConfig(
+            username="bravotv",
+            date_start=datetime(2025, 8, 1, tzinfo=UTC),
+            date_end=datetime(2025, 8, 31, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=1,
+        ),
+        page_html="<html></html>",
+        profile_url="https://www.threads.com/@bravotv",
+    )
+
+    assert len(posts or []) == 1
+    assert scraper.runtime_metadata["transport"] == "graphql"
+    assert scraper.runtime_metadata["fallback_chain"] == ["graphql"]
+    assert scraper.runtime_metadata["complete"] is True
+
+
 def test_threads_scrape_post_populates_views_from_activity_query(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = ThreadsScraper(cookies={"csrftoken": "token"})
     html_payload = (

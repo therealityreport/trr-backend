@@ -25,7 +25,7 @@
 | `SOCIAL_INSTAGRAM_POSTS_PROXY_URLS` | Explicit proxy list | Takes precedence over DECODO |
 | `SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER` | Override provider | Default: `decodo` |
 | `SOCIAL_INSTAGRAM_POSTS_HEADLESS` | Browser headless toggle | Default: `true` |
-| `TRR_DB_URL` or `SUPABASE_DB_URL` | Postgres URL | Required |
+| `TRR_DB_URL` | Postgres URL | Required. `TRR_DB_FALLBACK_URL` remains an optional explicit fallback only. |
 
 ## Invocation
 

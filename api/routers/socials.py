@@ -38,6 +38,7 @@ from trr_backend.job_plane import (
     execution_backend_canonical,
     execution_metadata,
     execution_owner_label,
+    is_modal_remote_executor_enabled,
     is_remote_job_plane_enabled,
 )
 from trr_backend.modal_dispatch import (
@@ -985,6 +986,93 @@ def _resolve_social_account_catalog_route_execution(
                 ),
                 "message": (
                     "Shared-account catalog operations for this platform require the Modal remote executor."
+                    if requires_modal_executor
+                    else "Social ingest remote-worker ownership is enforced."
+                ),
+                "execution_mode": canonical_execution_mode(),
+                "execution_owner": execution_owner_label(),
+                "required_execution_backend": "modal" if requires_modal_executor else None,
+            },
+        )
+    else:
+        used_inline_fallback = can_use_local_inline_fallback
+
+    return {
+        "queue_enabled": queue_enabled,
+        "used_inline_fallback": used_inline_fallback,
+        "requires_modal_executor": requires_modal_executor,
+    }
+
+
+def _resolve_social_account_comments_route_execution(
+    *,
+    allow_inline_dev_fallback: bool,
+    platform: str = "instagram",
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import (
+        INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+        SocialWorkerUnavailableError,
+        assert_worker_available_when_queue_enabled,
+        is_queue_enabled,
+    )
+
+    queue_enabled = is_queue_enabled()
+    remote_plane_enforced = is_remote_job_plane_enabled()
+    used_inline_fallback = False
+    requires_modal_executor = is_modal_remote_executor_enabled()
+    can_use_local_inline_fallback = _can_use_local_catalog_inline_fallback(
+        allow_inline_dev_fallback=allow_inline_dev_fallback,
+        remote_plane_enforced=remote_plane_enforced,
+    )
+
+    if queue_enabled:
+        try:
+            assert_worker_available_when_queue_enabled(
+                required_worker_lane=None if requires_modal_executor else INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+                required_execution_backend="modal" if requires_modal_executor else None,
+                platform=platform,
+            )
+            if requires_modal_executor:
+                _raise_if_modal_social_dispatch_unresolvable(platform)
+        except SocialWorkerUnavailableError as exc:
+            if can_use_local_inline_fallback:
+                queue_enabled = False
+                used_inline_fallback = True
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": (
+                            "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                            if requires_modal_executor
+                            else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                            if remote_plane_enforced
+                            else "SOCIAL_WORKER_UNAVAILABLE"
+                        ),
+                        "message": (
+                            "Instagram comments scraping requires the Modal remote executor."
+                            if requires_modal_executor
+                            else _remote_worker_unavailable_message(exc)
+                            if remote_plane_enforced
+                            else str(exc)
+                        ),
+                        "execution_mode": canonical_execution_mode(),
+                        "execution_owner": execution_owner_label(),
+                        "required_execution_backend": "modal" if requires_modal_executor else None,
+                        "worker_health": _worker_health_detail(exc.worker_health),
+                    },
+                ) from exc
+    elif remote_plane_enforced or (requires_modal_executor and not can_use_local_inline_fallback):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": (
+                    "SOCIAL_MODAL_EXECUTOR_REQUIRED"
+                    if requires_modal_executor
+                    else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                ),
+                "message": (
+                    "Instagram comments scraping requires the Modal remote executor."
                     if requires_modal_executor
                     else "Social ingest remote-worker ownership is enforced."
                 ),
@@ -4104,6 +4192,7 @@ def get_social_account_profile_comments_route(
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_comments
 
+    started_at = perf_counter()
     cache_key = _account_profile_cache_key(
         surface="comments",
         platform=platform,
@@ -4117,6 +4206,18 @@ def get_social_account_profile_comments_route(
         cache_key,
     )
     if cached_payload is not None:
+        log_read_path(
+            "social-account-profile-comments",
+            latency_ms=(perf_counter() - started_at) * 1000,
+            payload=cached_payload,
+            extra={
+                "cache": "hit",
+                "platform": platform,
+                "account_handle": account_handle,
+                "page": page,
+                "page_size": page_size,
+            },
+        )
         return cached_payload
     try:
         payload = get_social_account_profile_comments(
@@ -4133,11 +4234,32 @@ def get_social_account_profile_comments_route(
             ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
             max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
         )
+        log_read_path(
+            "social-account-profile-comments",
+            latency_ms=(perf_counter() - started_at) * 1000,
+            payload=payload,
+            extra={
+                "cache": "miss",
+                "platform": platform,
+                "account_handle": account_handle,
+                "page": page,
+                "page_size": page_size,
+            },
+        )
         return payload
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to read social account profile comments: platform=%s account=%s page=%s page_size=%s",
+            platform,
+            account_handle,
+            page,
+            page_size,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.post("/profiles/{platform}/{account_handle}/comments/scrape")
@@ -4154,12 +4276,16 @@ async def post_social_account_comments_scrape_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
-        is_queue_enabled,
         start_social_account_comments_scrape,
     )
 
-    queue_enabled = is_queue_enabled()
-    used_inline_fallback = bool(payload.allow_inline_dev_fallback) and not queue_enabled
+    execution_state = _resolve_social_account_comments_route_execution(
+        allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
+        platform=platform,
+    )
+    queue_enabled = bool(execution_state["queue_enabled"])
+    used_inline_fallback = bool(execution_state["used_inline_fallback"])
+    requires_modal_executor = bool(execution_state["requires_modal_executor"])
     try:
         result = start_social_account_comments_scrape(
             platform=platform,
@@ -4197,12 +4323,17 @@ async def post_social_account_comments_scrape_route(
         raise HTTPException(
             status_code=503,
             detail={
-                "code": "SOCIAL_WORKER_UNAVAILABLE",
-                "message": str(exc),
+                "code": "SOCIAL_MODAL_EXECUTOR_REQUIRED" if requires_modal_executor else "SOCIAL_WORKER_UNAVAILABLE",
+                "message": (
+                    "Instagram comments scraping requires the Modal remote executor."
+                    if requires_modal_executor
+                    else str(exc)
+                ),
                 "execution_mode": canonical_execution_mode(),
                 "execution_owner": execution_owner_label(),
                 "worker_health": _worker_health_detail(exc.worker_health),
-                "required_worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+                "required_worker_lane": None if requires_modal_executor else INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+                "required_execution_backend": "modal" if requires_modal_executor else None,
             },
         ) from exc
 

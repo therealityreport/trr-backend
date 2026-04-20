@@ -46,6 +46,10 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
         result["TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION"]
         == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION"]
     )
+    assert (
+        result["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
+        == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
+    )
 
 
 def test_apply_runtime_overrides_can_be_disabled() -> None:

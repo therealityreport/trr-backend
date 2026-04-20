@@ -17,6 +17,7 @@ DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_API_FUNCTION = "serve_backend_api"
 DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION = "probe_social_remote_auth"
+DEFAULT_GETTY_REMOTE_PROBE_FUNCTION = "probe_getty_remote_access"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -79,6 +80,11 @@ def _parse_args() -> argparse.Namespace:
         choices=("instagram",),
         default="",
         help="Optionally run the deployed remote auth probe for a supported platform.",
+    )
+    parser.add_argument(
+        "--probe-getty-remote-access",
+        action="store_true",
+        help="Optionally run the deployed Getty remote access probe on Modal.",
     )
     return parser.parse_args()
 
@@ -147,6 +153,8 @@ def expected_function_names() -> tuple[str, ...]:
         or "probe_reddit_refresh_runtime",
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
+        str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION).strip()
+        or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_SOCIAL_JOB_FUNCTION") or "run_social_job").strip() or "run_social_job",
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
         or "sweep_social_dispatch_queue",
@@ -165,6 +173,13 @@ def social_auth_probe_function_name() -> str:
     return (
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION
+    )
+
+
+def getty_remote_probe_function_name() -> str:
+    return (
+        str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION).strip()
+        or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION
     )
 
 
@@ -253,6 +268,7 @@ def verify_modal_readiness(
     function_names: tuple[str, ...] | list[str],
     modal_environment: str = "",
     probe_remote_auth_platform: str | None = None,
+    probe_getty_remote_access: bool = False,
 ) -> dict[str, Any]:
     secret_names = list_secret_names(modal_environment=modal_environment)
     app_descriptions = list_app_descriptions(modal_environment=modal_environment)
@@ -326,7 +342,42 @@ def verify_modal_readiness(
                 platform=probe_remote_auth_platform,
             )
 
-    probe_ready = True if remote_auth_probe is None else bool(remote_auth_probe.get("ready"))
+    getty_remote_probe: dict[str, Any] | None = None
+    if probe_getty_remote_access:
+        probe_function_name = getty_remote_probe_function_name()
+        probe_handle = app_function_handles.get(probe_function_name)
+        if probe_handle is None or probe_function_name in missing_functions:
+            getty_remote_probe = {
+                "platform": "getty",
+                "ready": False,
+                "reason": "probe_function_unavailable",
+            }
+        else:
+            try:
+                payload = probe_handle.remote()
+            except Exception as exc:  # noqa: BLE001
+                getty_remote_probe = {
+                    "platform": "getty",
+                    "ready": False,
+                    "reason": "probe_invocation_failed",
+                    "detail": {
+                        "phase": "remote_probe",
+                        "exception_class": type(exc).__name__,
+                        "message": str(exc)[:240],
+                    },
+                }
+            else:
+                getty_remote_probe = dict(payload) if isinstance(payload, dict) else {
+                    "platform": "getty",
+                    "ready": False,
+                    "reason": "probe_payload_invalid",
+                }
+
+    probe_ready = True
+    if remote_auth_probe is not None:
+        probe_ready = probe_ready and bool(remote_auth_probe.get("ready"))
+    if getty_remote_probe is not None:
+        probe_ready = probe_ready and bool(getty_remote_probe.get("ready"))
 
     return {
         "ok": app_found and not missing_secrets and not missing_functions and not missing_web_endpoints and probe_ready,
@@ -343,6 +394,7 @@ def verify_modal_readiness(
         "api_web_url": api_web_url,
         "missing_web_endpoints": missing_web_endpoints,
         "remote_auth_probe": remote_auth_probe,
+        "getty_remote_probe": getty_remote_probe,
     }
 
 
@@ -371,6 +423,10 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
             "  Remote auth probe: "
             f"{probe.get('platform')}: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}"
         )
+    if summary.get("getty_remote_probe"):
+        probe = summary["getty_remote_probe"]
+        probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
+        print(f"  Getty remote probe: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}")
     print(f"  Ready: {'yes' if summary['ok'] else 'no'}")
 
 
@@ -384,6 +440,7 @@ def main() -> int:
         function_names=expected_function_names(),
         modal_environment=args.env,
         probe_remote_auth_platform=str(args.probe_remote_auth or "").strip() or None,
+        probe_getty_remote_access=bool(args.probe_getty_remote_access),
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

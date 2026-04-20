@@ -7,7 +7,7 @@ from unittest.mock import patch
 import httpx
 
 from trr_backend.db.admin import (
-    get_supabase_http2_enabled,
+    create_supabase_httpx_client,
     get_supabase_timeout_config,
     is_timeout_error,
 )
@@ -16,7 +16,6 @@ from trr_backend.db.admin import (
 def clear_supabase_caches() -> None:
     """Clear all lru_cache caches for supabase config functions."""
     get_supabase_timeout_config.cache_clear()
-    get_supabase_http2_enabled.cache_clear()
 
 
 class TestTimeoutConfig:
@@ -68,28 +67,29 @@ class TestTimeoutConfig:
             assert pool == 5.0
 
 
-class TestHttp2Config:
-    """Tests for HTTP/2 configuration."""
+class TestHttpxClient:
+    """Tests for the real HTTP helper used by timeout validation scripts."""
 
-    def test_http2_disabled_by_default(self) -> None:
-        """Test HTTP/2 is disabled by default."""
+    def test_create_supabase_httpx_client_uses_postgrest_and_pool_timeouts(self) -> None:
         clear_supabase_caches()
-        with patch.dict("os.environ", {}, clear=True):
-            assert get_supabase_http2_enabled() is False
+        with patch.dict(
+            "os.environ",
+            {
+                "SUPABASE_POSTGREST_TIMEOUT_SEC": "12",
+                "SUPABASE_STORAGE_TIMEOUT_SEC": "45",
+                "SUPABASE_HTTP_POOL_TIMEOUT_SEC": "7",
+            },
+        ):
+            client = create_supabase_httpx_client()
 
-    def test_http2_enabled_with_env_var(self) -> None:
-        """Test HTTP/2 can be enabled via env var."""
-        for value in ("1", "true", "True", "TRUE", "yes", "YES", "on", "ON"):
-            clear_supabase_caches()
-            with patch.dict("os.environ", {"SUPABASE_HTTP2_ENABLED": value}):
-                assert get_supabase_http2_enabled() is True, f"Failed for value: {value}"
-
-    def test_http2_disabled_with_other_values(self) -> None:
-        """Test HTTP/2 is disabled for non-truthy values."""
-        for value in ("0", "false", "False", "no", "off", "random"):
-            clear_supabase_caches()
-            with patch.dict("os.environ", {"SUPABASE_HTTP2_ENABLED": value}):
-                assert get_supabase_http2_enabled() is False, f"Failed for value: {value}"
+        try:
+            assert isinstance(client.timeout, httpx.Timeout)
+            assert client.timeout.connect == 12.0
+            assert client.timeout.read == 12.0
+            assert client.timeout.write == 12.0
+            assert client.timeout.pool == 7.0
+        finally:
+            client.close()
 
 
 class TestTimeoutDetection:

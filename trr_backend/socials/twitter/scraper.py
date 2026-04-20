@@ -22,6 +22,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from trr_backend.socials.twitter.auth import has_cookie_auth
+from trr_backend.socials.twitter.fallbacks import TwitterRuntimeState, build_fallback_chain
+from trr_backend.socials.twitter.graphql import classify_search_transport
+
 logger = logging.getLogger(__name__)
 
 ADVANCED_QUERY_HINT_RE = re.compile(
@@ -365,6 +369,23 @@ class TwitterScraper:
         self._last_twikit_search_error: str | None = None
         self._last_playwright_search_error: str | None = None
         self.comments_auth_failed = False
+        self._last_transport = "requests"
+        self._fallback_chain: list[str] = []
+        self._last_stop_reason: str | None = None
+        self._last_retryable = False
+        self._last_complete = False
+        self._runtime_state = TwitterRuntimeState()
+
+    @property
+    def runtime_metadata(self) -> dict[str, Any]:
+        return {
+            "request_count": int(getattr(self._runtime_state, "request_count", 0) or 0),
+            "transport": str(getattr(self._runtime_state, "transport", "graphql") or "graphql"),
+            "fallback_chain": list(getattr(self._runtime_state, "fallback_chain", []) or []),
+            "stop_reason": getattr(self._runtime_state, "stop_reason", None),
+            "retryable": bool(getattr(self._runtime_state, "retryable", False)),
+            "complete": bool(getattr(self._runtime_state, "complete", False)),
+        }
 
     @staticmethod
     def _is_auth_related_failure(reason: str | None) -> bool:
@@ -469,7 +490,7 @@ class TwitterScraper:
 
     def _ensure_auth(self):
         """Ensure we have some form of authentication (cookies or guest token)."""
-        if self.cookies.get("ct0"):
+        if has_cookie_auth(self.cookies):
             return  # Have cookie-based auth
         self._activate_guest_token()
 
@@ -2848,6 +2869,7 @@ class TwitterScraper:
         Returns:
             List of Tweet objects matching the search.
         """
+        self._runtime_state = TwitterRuntimeState()
         self._ensure_auth()
 
         search_query = config.build_search_query()
@@ -3120,6 +3142,18 @@ class TwitterScraper:
             stop_reason=stop_reason,
             retryable=retryable,
             error_code=error_code,
+        )
+        runtime_stop_reason = "complete" if tweets and retrieval_mode != "graphql" else stop_reason
+        self._runtime_state = TwitterRuntimeState(
+            request_count=int(getattr(self, "_request_count", 0) or 0),
+            transport=classify_search_transport(retrieval_mode),
+            fallback_chain=build_fallback_chain(
+                retrieval_mode=retrieval_mode,
+                fallback_attempts=fallback_attempts,
+            ),
+            stop_reason=runtime_stop_reason,
+            retryable=retryable,
+            complete=complete or bool(tweets),
         )
 
         logger.info("Search complete: found %d tweets (%d checked)", len(tweets), posts_checked_total)

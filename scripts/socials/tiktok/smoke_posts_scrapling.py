@@ -6,7 +6,7 @@ Usage:
     python scripts/socials/tiktok/smoke_posts_scrapling.py --account <handle> [--max-pages 1]
 
 Requires:
-- Database reachable (TRR_DB_URL or SUPABASE_DB_URL set)
+- Database reachable (`TRR_DB_URL` set; `TRR_DB_FALLBACK_URL` optional as an explicit fallback)
 - Valid TikTok cookies (SOCIAL_TIKTOK_COOKIES_JSON or SOCIAL_TIKTOK_COOKIES_FILE or data/tiktok_cookies.json)
 - Optional: DECODO_USERNAME/DECODO_PASSWORD for proxy
 

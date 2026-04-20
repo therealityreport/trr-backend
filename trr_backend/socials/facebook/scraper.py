@@ -19,6 +19,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from trr_backend.socials.facebook.document_fetch import FacebookDocumentFetcher
+
 logger = logging.getLogger(__name__)
 
 _REEL_URL_RE = re.compile(r"https://(?:www\.)?facebook\.com/reel/([0-9]+)", re.IGNORECASE)
@@ -361,12 +363,28 @@ class FacebookScraper:
         self._request_count = 0
         self._last_429_at: float = 0.0
         self._consecutive_success: int = 0
+        self._last_transport = "requests"
+        self._fallback_chain: list[str] = []
+        self._last_stop_reason: str | None = None
+        self._last_retryable = False
+        self._last_complete = False
         # Shared Playwright browser for reuse within a single scrape() call.
         # Avoids launching a new browser per post during enrichment.
         self._shared_pw: Any = None
         self._shared_browser: Any = None
         self._shared_context: Any = None
         self._shared_skip_cookies_context: Any = None
+
+    @property
+    def runtime_metadata(self) -> dict[str, Any]:
+        return {
+            "request_count": int(getattr(self, "_request_count", 0) or 0),
+            "transport": str(getattr(self, "_last_transport", "requests") or "requests"),
+            "fallback_chain": list(getattr(self, "_fallback_chain", []) or []),
+            "stop_reason": getattr(self, "_last_stop_reason", None),
+            "retryable": bool(getattr(self, "_last_retryable", False)),
+            "complete": bool(getattr(self, "_last_complete", False)),
+        }
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
@@ -536,6 +554,9 @@ class FacebookScraper:
         self, url: str, *, delay_seconds: float, referer: str | None = None, fast_mode: bool = False
     ) -> str:
         self._rate_limit(delay_seconds, fast_mode=fast_mode)
+        self._last_transport = "public_ssr"
+        if not self._fallback_chain:
+            self._fallback_chain = ["public_ssr"]
         try:
             response = self.session.get(
                 url,
@@ -553,6 +574,26 @@ class FacebookScraper:
             # compliant, public-only behavior while using a real browser renderer.
             logger.info("[facebook] requests fetch failed for %s (%s); trying playwright fallback", url, exc)
             return self._fetch_html_with_playwright(url, delay_seconds=delay_seconds, referer=referer)
+
+    def _fetch_html_with_document_fetcher(
+        self,
+        url: str,
+        *,
+        delay_seconds: float,
+        referer: str | None = None,
+        fast_mode: bool = False,
+    ) -> str:
+        self._rate_limit(delay_seconds, fast_mode=fast_mode)
+        fetcher = FacebookDocumentFetcher(cookies=self.cookies, session=self.session)
+        html_text = fetcher.fetch(
+            url,
+            headers=self._headers(referer=referer, document=True),
+            referer=referer,
+        )
+        self._request_count += int(fetcher.runtime_metadata.get("request_count") or 0)
+        self._last_transport = "authenticated_document_fetch"
+        self._fallback_chain = ["public_ssr", "authenticated_document_fetch"]
+        return html_text
 
     @staticmethod
     def _playwright_fallback_enabled() -> bool:
@@ -1718,11 +1759,29 @@ class FacebookScraper:
         data (reactions, comment count, share count, view count) and comments
         is populated when *fetch_comment_list* is True.
         """
+        self._fallback_chain = ["public_ssr"]
+        self._last_transport = "public_ssr"
+        self._last_stop_reason = None
+        self._last_retryable = False
+        self._last_complete = False
         try:
             html_text = self._fetch_html(post_url, delay_seconds=delay_seconds, fast_mode=fast_mode)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[facebook] scrape_post failed for %s: %s", post_url, exc)
+            self._last_stop_reason = "post_fetch_failed"
             return None, []
+        if self.cookies and not self._has_primary_post_signals(html_text):
+            try:
+                html_text = self._fetch_html_with_document_fetcher(
+                    post_url,
+                    delay_seconds=delay_seconds,
+                    referer=post_url,
+                    fast_mode=fast_mode,
+                )
+                self._last_transport = "authenticated_document_fetch"
+                self._fallback_chain = ["public_ssr", "authenticated_document_fetch"]
+            except Exception:
+                logger.debug("[facebook] authenticated document fetch failed for %s", post_url, exc_info=True)
 
         # Resolve username: prefer owner_as_page name, then owner name, fall back to URL
         og_url = self._first_group(_OG_URL_RE, html_text) or post_url
@@ -1766,6 +1825,8 @@ class FacebookScraper:
             )
             post.raw_data["share_details"] = [share.to_dict() for share in post.share_details]
 
+        self._last_stop_reason = "complete"
+        self._last_complete = True
         return post, comments
 
     def search_posts(self, config: FacebookSearchConfig) -> list[FacebookPost]:
@@ -2076,6 +2137,13 @@ class FacebookScraper:
             self.last_retrieval_meta["error_code"] = "facebook_catalog_fetch_failed"
             self.last_retrieval_meta["retryable"] = True
             self.last_retrieval_meta["error_class"] = "FacebookCatalogFetchError"
+        self._last_transport = "playwright" if feed_candidates_from_scroll is not None else "public_ssr"
+        self._fallback_chain = (
+            ["public_ssr", "playwright"] if feed_candidates_from_scroll is not None else ["public_ssr"]
+        )
+        self._last_stop_reason = "catalog_fetch_failed" if self.last_retrieval_meta.get("error_code") else "complete"
+        self._last_retryable = bool(self.last_retrieval_meta.get("retryable"))
+        self._last_complete = not self._last_retryable
         return posts
 
     # Regex for extracting comments from Facebook SSR HTML payloads

@@ -20,6 +20,10 @@ def test_claim_stage_candidates_supports_comments_scrapling() -> None:
     assert worker._claim_stage_candidates("comments_scrapling") == ("comments_scrapling",)  # noqa: SLF001
 
 
+def test_claim_stage_candidates_preserves_threads_posts_scrapling() -> None:
+    assert worker._claim_stage_candidates("threads_posts_scrapling") == ("threads_posts_scrapling",)  # noqa: SLF001
+
+
 def test_worker_heartbeat_seeds_auth_capabilities(monkeypatch) -> None:
     monkeypatch.setattr(
         worker,
