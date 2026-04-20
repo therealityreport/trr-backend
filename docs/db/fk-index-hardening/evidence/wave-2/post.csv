@@ -1,0 +1,82 @@
+calls,label,mean_exec_time,query,queryid,rows,total_exec_time
+5,ml_analysis_media_assets,1.4208876,"SELECT mus.status
+        FROM ml.analysis_media_assets va
+        LEFT JOIN ml.analysis_media_upload_sessions mus
+          ON mus.id::text = coalesce(va.source_json->>$1, $2)
+        WHERE va.id = $3
+        LIMIT $4",-3760442158075933378,5,7.104438
+5,ml_analysis_media_assets,0.8707586,SELECT * FROM ml.analysis_media_assets WHERE id = $1,1612712019855059950,5,4.353793
+4,ml_analysis_media_cast_candidates,0.34913375,"SELECT
+          vacc.person_id::text AS person_id,
+          p.full_name AS display_name,
+          vacc.source,
+          vacc.confidence,
+          vacc.credit_category,
+          vacc.billing_order,
+          vacc.role
+        FROM ml.analysis_media_cast_candidates vacc
+        JOIN core.people p ON p.id = vacc.person_id
+        WHERE vacc.video_asset_id = $1
+        ORDER BY vacc.billing_order NULLS LAST, p.full_name ASC",-3337551033592462822,0,1.396535
+4,ml_face_reference_images,0.01661175,"SELECT DISTINCT person_id::text AS person_id
+        FROM ml.face_reference_images
+        WHERE is_active = $1
+          AND approved = $2
+          AND person_id::text = ANY(ARRAY[$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86,$87,$88,$89,$90,$91,$92,$93,$94,$95,$96,$97,$98,$99,$100,$101,$102,$103,$104,$105,$106,$107,$108,$109,$110,$111,$112,$113,$114,$115,$116,$117,$118,$119,$120,$121,$122,$123,$124,$125,$126,$127,$128,$129,$130,$131,$132,$133,$134,$135,$136,$137,$138,$139,$140,$141,$142,$143,$144,$145,$146,$147,$148,$149,$150,$151,$152,$153,$154,$155,$156,$157,$158,$159,$160,$161,$162,$163,$164,$165,$166,$167,$168,$169,$170,$171,$172,$173,$174,$175,$176,$177,$178,$179,$180,$181,$182,$183,$184,$185,$186,$187,$188,$189,$190,$191,$192,$193,$194,$195,$196,$197,$198,$199,$200,$201,$202,$203,$204,$205,$206,$207,$208,$209,$210,$211,$212,$213,$214,$215,$216,$217,$218,$219,$220,$221,$222,$223,$224,$225,$226,$227,$228,$229,$230,$231,$232,$233,$234,$235,$236,$237,$238,$239,$240,$241,$242,$243,$244,$245,$246,$247,$248,$249,$250,$251,$252,$253,$254,$255,$256,$257,$258,$259,$260,$261,$262,$263,$264,$265,$266,$267,$268,$269,$270,$271,$272,$273,$274,$275,$276,$277,$278,$279,$280,$281,$282,$283,$284,$285,$286,$287,$288,$289,$290,$291,$292,$293,$294,$295,$296,$297,$298,$299,$300,$301,$302,$303,$304,$305,$306,$307,$308,$309,$310,$311,$312,$313,$314,$315,$316,$317,$318,$319,$320,$321,$322,$323,$324,$325,$326,$327,$328,$329,$330,$331,$332,$333,$334,$335,$336,$337,$338,$339,$340,$341,$342,$343,$344,$345,$346,$347,$348,$349,$350,$351,$352,$353,$354,$355,$356,$357,$358,$359,$360,$361,$362,$363,$364,$365,$366,$367,$368,$369,$370,$371,$372,$373,$374,$375,$376,$377,$378,$379,$380,$381,$382,$383,$384,$385,$386,$387,$388,$389,$390,$391,$392,$393,$394,$395,$396,$397,$398,$399,$400,$401,$402,$403,$404,$405,$406,$407,$408,$409,$410,$411,$412,$413,$414,$415,$416,$417,$418,$419,$420,$421,$422,$423,$424,$425,$426,$427,$428,$429,$430,$431,$432,$433,$434,$435,$436,$437,$438,$439,$440,$441,$442,$443,$444,$445,$446,$447,$448,$449,$450,$451,$452,$453,$454,$455,$456,$457,$458,$459,$460,$461,$462,$463,$464,$465,$466,$467,$468,$469,$470,$471,$472,$473,$474,$475,$476,$477,$478,$479])",-5200489179804488586,0,0.066447
+3,ml_screentime_person_metrics,0.00611066666666667,DELETE FROM ml.screentime_person_metrics WHERE run_id = $1,7647935313390008716,0,0.018332
+3,ml_screentime_review_state,0.005539,DELETE FROM ml.screentime_review_state WHERE run_id = $1 AND review_kind = $2,-8703381383883003635,0,0.016617
+3,ml_screentime_segments,0.00622533333333333,DELETE FROM ml.screentime_segments WHERE run_id = $1,5689979212956177474,0,0.018676
+243,pipeline,11.9918845720165,SELECT * FROM pipeline.socialblade_growth_data WHERE person_id = $1 AND instagram_handle = $2,-4760448207275515022,211,2914.027951
+3,pipeline,3.59445166666667,"WITH ranked AS (
+  SELECT
+    id,
+    ROW_NUMBER() OVER (
+      PARTITION BY platform, account_handle
+      ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+    ) AS rn
+  FROM pipeline.socialblade_growth_data
+)
+DELETE FROM pipeline.socialblade_growth_data target
+USING ranked
+WHERE target.id = ranked.id
+  AND ranked.rn > $1",-7136449913370311116,0,10.783355
+4,pipeline,0.57479875,"select person_id::text, instagram_handle, scraped_at,
+coalesce(jsonb_array_length(daily_total_followers_chart->$1), $2) as chart_points,
+daily_total_followers_chart->$3 as date_range
+from pipeline.socialblade_growth_data
+where person_id = $4
+  and instagram_handle = $5",1981736216961752699,2,2.299195
+214,screenalytics_face_bank_images,0.100771355140187,"SELECT
+                      f.person_id::text AS person_id,
+                      p.full_name AS person_name,
+                      f.s3_embedding_key
+                    FROM screenalytics.face_bank_images AS f
+                    JOIN core.people AS p
+                      ON p.id = f.person_id
+                    WHERE f.approved = $1
+                      AND f.is_seed = $2
+                      AND f.s3_embedding_key IS NOT NULL
+                    ORDER BY f.created_at DESC
+                    LIMIT $3",4671505537781482513,0,21.56507
+19,screenalytics_face_bank_images,0.232909578947368,"SELECT
+                      image_id::text AS image_id,
+                      person_id::text AS person_id,
+                      s3_original_key,
+                      s3_aligned_key,
+                      s3_embedding_key,
+                      quality_score,
+                      is_seed,
+                      approved,
+                      created_at
+                    FROM screenalytics.face_bank_images
+                    WHERE approved = $1
+                      AND person_id IN ($2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8::uuid, $9::uuid, $10::uuid, $11::uuid, $12::uuid, $13::uuid, $14::uuid, $15::uuid, $16::uuid, $17::uuid, $18::uuid, $19::uuid, $20::uuid, $21::uuid, $22::uuid, $23::uuid, $24::uuid, $25::uuid, $26::uuid, $27::uuid, $28::uuid, $29::uuid, $30::uuid, $31::uuid, $32::uuid, $33::uuid, $34::uuid, $35::uuid, $36::uuid, $37::uuid, $38::uuid, $39::uuid, $40::uuid, $41::uuid, $42::uuid, $43::uuid, $44::uuid, $45::uuid, $46::uuid, $47::uuid, $48::uuid, $49::uuid, $50::uuid, $51::uuid, $52::uuid, $53::uuid, $54::uuid, $55::uuid, $56::uuid, $57::uuid, $58::uuid, $59::uuid, $60::uuid, $61::uuid, $62::uuid, $63::uuid, $64::uuid, $65::uuid, $66::uuid, $67::uuid, $68::uuid, $69::uuid, $70::uuid, $71::uuid, $72::uuid, $73::uuid, $74::uuid, $75::uuid, $76::uuid, $77::uuid, $78::uuid, $79::uuid, $80::uuid, $81::uuid, $82::uuid, $83::uuid, $84::uuid, $85::uuid, $86::uuid, $87::uuid, $88::uuid, $89::uuid, $90::uuid, $91::uuid, $92::uuid, $93::uuid, $94::uuid, $95::uuid, $96::uuid, $97::uuid, $98::uuid, $99::uuid, $100::uuid, $101::uuid, $102::uuid, $103::uuid, $104::uuid, $105::uuid, $106::uuid, $107::uuid, $108::uuid, $109::uuid, $110::uuid, $111::uuid, $112::uuid, $113::uuid, $114::uuid, $115::uuid, $116::uuid, $117::uuid, $118::uuid, $119::uuid, $120::uuid, $121::uuid, $122::uuid, $123::uuid, $124::uuid, $125::uuid, $126::uuid, $127::uuid, $128::uuid, $129::uuid, $130::uuid, $131::uuid, $132::uuid, $133::uuid, $134::uuid, $135::uuid, $136::uuid, $137::uuid, $138::uuid, $139::uuid, $140::uuid, $141::uuid, $142::uuid, $143::uuid, $144::uuid, $145::uuid, $146::uuid, $147::uuid, $148::uuid, $149::uuid, $150::uuid, $151::uuid, $152::uuid, $153::uuid, $154::uuid, $155::uuid, $156::uuid, $157::uuid, $158::uuid, $159::uuid, $160::uuid, $161::uuid, $162::uuid, $163::uuid, $164::uuid, $165::uuid, $166::uuid, $167::uuid, $168::uuid, $169::uuid, $170::uuid, $171::uuid, $172::uuid, $173::uuid, $174::uuid, $175::uuid, $176::uuid, $177::uuid, $178::uuid, $179::uuid, $180::uuid, $181::uuid, $182::uuid, $183::uuid, $184::uuid, $185::uuid, $186::uuid, $187::uuid, $188::uuid, $189::uuid, $190::uuid, $191::uuid, $192::uuid, $193::uuid, $194::uuid, $195::uuid, $196::uuid, $197::uuid, $198::uuid, $199::uuid, $200::uuid, $201::uuid, $202::uuid, $203::uuid, $204::uuid, $205::uuid, $206::uuid, $207::uuid, $208::uuid, $209::uuid, $210::uuid, $211::uuid, $212::uuid, $213::uuid, $214::uuid, $215::uuid, $216::uuid, $217::uuid, $218::uuid, $219::uuid, $220::uuid, $221::uuid, $222::uuid, $223::uuid, $224::uuid, $225::uuid, $226::uuid, $227::uuid, $228::uuid, $229::uuid, $230::uuid, $231::uuid, $232::uuid, $233::uuid, $234::uuid, $235::uuid, $236::uuid, $237::uuid, $238::uuid, $239::uuid, $240::uuid, $241::uuid, $242::uuid, $243::uuid, $244::uuid, $245::uuid, $246::uuid, $247::uuid)
+                    ORDER BY person_id, is_seed DESC, quality_score DESC NULLS LAST, created_at DESC",-4551427581585510584,0,4.425282
+28,screenalytics_media_upload_sessions,0.126944821428571,SELECT * FROM screenalytics.media_upload_sessions WHERE id = $1,-7333596908090591009,26,3.554455
+27,screenalytics_video_assets,1.78892174074074,"SELECT mus.status
+        FROM screenalytics.video_assets va
+        LEFT JOIN screenalytics.media_upload_sessions mus
+          ON mus.id::text = coalesce(va.source_json->>$1, $2)
+        WHERE va.id = $3
+        LIMIT $4",4640366793497492619,27,48.300887
+30,screenalytics_video_assets,0.0958715,SELECT * FROM screenalytics.video_assets WHERE id = $1,3422631761679946430,30,2.876145

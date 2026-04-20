@@ -9,8 +9,8 @@
 ## Pre-flight Checks
 
 - Inventory regenerated from the live database on `2026-04-20T18:35:19Z`.
-- Inventory ran on `direct` because direct-host connectivity is currently blocked from this workstation.
-- Direct apply / observer lane remains blocked until `db.<project>.supabase.co:5432` is reachable from this machine.
+- Inventory ran on `direct` against `db.<project>.supabase.co:5432`; Stage 0 connectivity verified per `connectivity-readiness.md`.
+- Pre-apply checks (2026-04-20T18:40Z): baseline.csv captured, presence-before reports 38/38 absent, invalid-before empty, duplicate-before empty, explain-pre captured.
 - Query-check gate applied before generating forward SQL; candidates without a committed representative query artifact are deferred.
 
 ## Candidate Summary
@@ -34,28 +34,51 @@
 
 ## Baseline Snapshot
 
-- Pending. Capture with `scripts/db/run_fk_index_observer.py baseline` once direct connectivity is fixed.
+- Captured `2026-04-20T18:40Z` → `evidence/wave-2/baseline.csv` (82 rows; wave-2 patterns = surveys/pipeline/firebase_surveys + 7 screenalytics per-table + 9 ml per-table).
+- Post-apply snapshot: `evidence/wave-2/post.csv` (82 rows).
+- Comparison: `evidence/wave-2/compare.csv` (15 queryid deltas; 5 `ok` at ratio 1.0, 10 `insufficient_calls`, 0 regressions).
+
+## Rollout Window
+
+- Wave 1 soak: operator authorized proceeding to Wave 2 immediately (no 24h gap). Rationale: Wave 1 completed 11s with zero regressions; Wave 2 targets independent schemas (surveys, firebase_surveys, ml, screenalytics); Wave 2 pre-apply checks were already green from Stage 3.
+- Started: `2026-04-20T18:56:32Z`
+- Finished: `2026-04-20T18:56:38Z`
+- Wall time: **6 seconds** (38 CREATE INDEX CONCURRENTLY on tables all <30 rows currently; fastest-path concurrent builds).
+- Apply session: `application_name = fk-index-wave-2-apply`.
 
 ## Per-Candidate Apply Outcome
 
-- Pending direct-lane rollout.
+- Indexes requested: 38 (2 surveys + 25 ml + 9 screenalytics + 2 firebase_surveys)
+- Indexes created successfully: **38 / 38**
+- Indexes requiring manual re-create: 0
+- presence-after verdict: **PASS** (0 flagged rows; predicate-normalization fix from `59b8706` prevents false positives)
+- invalid-after verdict: **PASS** (empty)
+- duplicate-after verdict: **PASS** (empty — no new left-prefix duplicates)
+- Observer snapshots: apply completed before first poll interval; verified via post-apply presence/invalid/duplicate instead.
+- Abort conditions tripped: **None**
 
 ## Invalid-Index Cleanup
 
-- Pending direct-lane rollout.
+- Not triggered. No interrupted builds.
 
 ## Aborts and Rollbacks
 
-- None yet.
+- None.
 
 ## Schema-Doc Diffs
 
-- Pending. Run `make schema-docs-check` after direct apply on the validation target and commit any resulting `supabase/schema_docs/*` drift.
+- Stage 6 will run `make schema-docs-check` after both waves completed; resulting `supabase/schema_docs/*` drift will commit with the closeout handoff.
 
 ## Soak Results
 
-- Pending. Respect `24h` soak between Wave 1 apply completion and Wave 2 apply start.
+- Soak start: `2026-04-20T18:56:38Z`
+- Wave-2 soak optional since rollout is complete; `pg_stat_user_indexes.idx_scan` monitoring available via ad-hoc `run_sql.sh -c` queries during normal operation.
+
+## Final FK Coverage Verification
+
+- Wave 1 + Wave 2 total: 89 FK-supporting indexes created (51 + 38).
+- Owned-schema `add` candidates remaining: to be re-verified at Stage 6 Task 6.1 by re-running `run_fk_index_inventory` for both waves and counting `decision: add`.
 
 ## Next Checkpoint
 
-- Do not start apply until direct-connectivity is repaired and baseline snapshots are captured.
+- Stage 6 closeout: `make schema-docs-check` + register pre-staged migrations via `supabase db push` + `../scripts/handoff-lifecycle.sh closeout`.
