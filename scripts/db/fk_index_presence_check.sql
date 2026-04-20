@@ -38,7 +38,13 @@ select
     when actual.index_name is null then 'missing'
     when not actual.indisvalid then 'invalid'
     when actual.actual_columns <> expected.expected_columns then 'wrong_columns'
-    when coalesce(actual.actual_predicate, '') <> coalesce(expected.expected_predicate, '') then 'wrong_predicate'
+    when coalesce(
+           lower(regexp_replace(regexp_replace(actual.actual_predicate, '^\s*\((.*)\)\s*$', '\1'), '\s+', ' ', 'g')),
+           ''
+         ) <> coalesce(
+           lower(regexp_replace(regexp_replace(expected.expected_predicate, '^\s*\((.*)\)\s*$', '\1'), '\s+', ' ', 'g')),
+           ''
+         ) then 'wrong_predicate'
     else 'ok'
   end as status
 from expected_indexes expected
@@ -49,5 +55,11 @@ left join actual_indexes actual
 where actual.index_name is null
    or not actual.indisvalid
    or actual.actual_columns <> expected.expected_columns
-   or coalesce(actual.actual_predicate, '') <> coalesce(expected.expected_predicate, '')
+   or coalesce(
+        lower(regexp_replace(regexp_replace(actual.actual_predicate, '^\s*\((.*)\)\s*$', '\1'), '\s+', ' ', 'g')),
+        ''
+      ) <> coalesce(
+        lower(regexp_replace(regexp_replace(expected.expected_predicate, '^\s*\((.*)\)\s*$', '\1'), '\s+', ' ', 'g')),
+        ''
+      )
 order by expected.schema_name, expected.table_name, expected.index_name;
