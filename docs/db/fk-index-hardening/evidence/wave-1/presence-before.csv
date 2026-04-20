@@ -1,0 +1,52 @@
+actual_columns,actual_predicate,expected_columns,expected_predicate,index_name,indisvalid,schema_name,status,table_name
+,,['person_id'],,admin_recent_people_views_person_id_idx,,admin,missing,recent_people_views
+,,['season_id'],,social_account_hashtag_assignments_season_id_idx,,social,missing,account_hashtag_assignments
+,,['resolved_season_id'],resolved_season_id is not null,social_account_hashtag_review_queue_resolved_season_id_idx,,social,missing,account_hashtag_review_queue
+,,['resolved_show_id'],resolved_show_id is not null,social_account_hashtag_review_queue_resolved_show_id_idx,,social,missing,account_hashtag_review_queue
+,,['sender_id'],,social_dm_messages_sender_id_idx,,social,missing,dm_messages
+,,['last_read_message_id'],,social_dm_read_receipts_last_read_message_id_idx,,social,missing,dm_read_receipts
+,,['user_id'],,social_dm_read_receipts_user_id_idx,,social,missing,dm_read_receipts
+,,['assigned_season_id'],,social_facebook_account_catalog_posts_assigned_season_id_idx,,social,missing,facebook_account_catalog_posts
+,,['assigned_show_id'],,social_facebook_account_catalog_posts_assigned_show_id_idx,,social,missing,facebook_account_catalog_posts
+,,['last_backfill_run_id'],,social_facebook_account_catalog_posts_last_backfill_run_id_idx,,social,missing,facebook_account_catalog_posts
+,,['assigned_season_id'],assigned_season_id is not null,social_instagram_account_catalog_posts_assigned_season_id_idx,,social,missing,instagram_account_catalog_posts
+,,['assigned_show_id'],assigned_show_id is not null,social_instagram_account_catalog_posts_assigned_show_id_idx,,social,missing,instagram_account_catalog_posts
+,,['last_backfill_run_id'],last_backfill_run_id is not null,social_instagram_account_catalog_posts_last_backfill_run_id_idx,,social,missing,instagram_account_catalog_posts
+,,['last_seen_run_id'],,social_instagram_comments_last_seen_run_id_idx,,social,missing,instagram_comments
+,,['user_id'],,social_reactions_user_id_idx,,social,missing,reactions
+,,['reddit_post_id'],,social_reddit_period_post_matches_reddit_post_id_idx,,social,missing,reddit_period_post_matches
+,,['run_id'],,social_reddit_period_post_matches_run_id_idx,,social,missing,reddit_period_post_matches
+,,['season_id'],,social_reddit_period_post_matches_season_id_idx,,social,missing,reddit_period_post_matches
+,,['season_id'],,social_reddit_refresh_runs_season_id_idx,,social,missing,reddit_refresh_runs
+,,['person_id'],person_id is not null,social_scrape_jobs_person_id_idx,,social,missing,scrape_jobs
+,,['show_id'],,social_scrape_jobs_show_id_idx,,social,missing,scrape_jobs
+,,['show_id'],,social_scrape_runs_show_id_idx,,social,missing,scrape_runs
+,,['current_job_id'],current_job_id is not null,social_scrape_workers_current_job_id_idx,,social,missing,scrape_workers
+,,['run_id'],run_id is not null,social_scrape_workers_run_id_idx,,social,missing,scrape_workers
+,,['job_id'],,social_shared_account_run_partitions_job_id_idx,,social,missing,shared_account_run_partitions
+,,['last_scrape_job_id'],last_scrape_job_id is not null,social_shared_account_sources_last_scrape_job_id_idx,,social,missing,shared_account_sources
+,,['last_scrape_run_id'],last_scrape_run_id is not null,social_shared_account_sources_last_scrape_run_id_idx,,social,missing,shared_account_sources
+,,['matched_show_id'],,social_shared_post_matches_matched_show_id_idx,,social,missing,shared_post_matches
+,,['run_id'],,social_shared_post_matches_run_id_idx,,social,missing,shared_post_matches
+,,['resolved_show_id'],,social_shared_post_review_queue_resolved_show_id_idx,,social,missing,shared_post_review_queue
+,,['run_id'],,social_shared_post_review_queue_run_id_idx,,social,missing,shared_post_review_queue
+,,['show_id'],,social_sync_sessions_show_id_idx,,social,missing,sync_sessions
+,,['assigned_season_id'],,social_threads_account_catalog_posts_assigned_season_id_idx,,social,missing,threads_account_catalog_posts
+,,['assigned_show_id'],,social_threads_account_catalog_posts_assigned_show_id_idx,,social,missing,threads_account_catalog_posts
+,,['last_backfill_run_id'],,social_threads_account_catalog_posts_last_backfill_run_id_idx,,social,missing,threads_account_catalog_posts
+,,['assigned_season_id'],assigned_season_id is not null,social_tiktok_account_catalog_posts_assigned_season_id_idx,,social,missing,tiktok_account_catalog_posts
+,,['assigned_show_id'],assigned_show_id is not null,social_tiktok_account_catalog_posts_assigned_show_id_idx,,social,missing,tiktok_account_catalog_posts
+,,['last_backfill_run_id'],,social_tiktok_account_catalog_posts_last_backfill_run_id_idx,,social,missing,tiktok_account_catalog_posts
+,,['post_id'],,social_tiktok_anomaly_events_post_id_idx,,social,missing,tiktok_anomaly_events
+,,['last_seen_run_id'],,social_tiktok_comments_last_seen_run_id_idx,,social,missing,tiktok_comments
+,,['run_id'],,social_tiktok_post_cast_members_run_id_idx,,social,missing,tiktok_post_cast_members
+,,['assigned_season_id'],assigned_season_id is not null,social_twitter_account_catalog_posts_assigned_season_id_idx,,social,missing,twitter_account_catalog_posts
+,,['assigned_show_id'],assigned_show_id is not null,social_twitter_account_catalog_posts_assigned_show_id_idx,,social,missing,twitter_account_catalog_posts
+,,['last_backfill_run_id'],,social_twitter_account_catalog_posts_last_backfill_run_id_idx,,social,missing,twitter_account_catalog_posts
+,,['last_seen_run_id'],last_seen_run_id is not null,social_twitter_tweets_last_seen_run_id_idx,,social,missing,twitter_tweets
+,,['assigned_season_id'],assigned_season_id is not null,social_youtube_account_catalog_posts_assigned_season_id_idx,,social,missing,youtube_account_catalog_posts
+,,['assigned_show_id'],assigned_show_id is not null,social_youtube_account_catalog_posts_assigned_show_id_idx,,social,missing,youtube_account_catalog_posts
+,,['last_backfill_run_id'],,social_youtube_account_catalog_posts_last_backfill_run_id_idx,,social,missing,youtube_account_catalog_posts
+,,['show_id'],,social_youtube_channel_sync_state_show_id_idx,,social,missing,youtube_channel_sync_state
+,,['last_seen_run_id'],,social_youtube_comments_last_seen_run_id_idx,,social,missing,youtube_comments
+,,['show_id'],,social_youtube_video_sync_state_show_id_idx,,social,missing,youtube_video_sync_state

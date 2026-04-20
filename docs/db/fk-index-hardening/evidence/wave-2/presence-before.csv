@@ -1,0 +1,39 @@
+actual_columns,actual_predicate,expected_columns,expected_predicate,index_name,indisvalid,schema_name,status,table_name
+,,['option_id'],,firebase_surveys_answers_option_id_idx,,firebase_surveys,missing,answers
+,,['question_id'],,firebase_surveys_answers_question_id_idx,,firebase_surveys,missing,answers
+,,['episode_id'],,ml_analysis_media_assets_episode_id_idx,,ml,missing,analysis_media_assets
+,,['media_asset_id'],media_asset_id is not null,ml_analysis_media_assets_media_asset_id_idx,,ml,missing,analysis_media_assets
+,,['season_id'],,ml_analysis_media_assets_season_id_idx,,ml,missing,analysis_media_assets
+,,['show_id'],,ml_analysis_media_assets_show_id_idx,,ml,missing,analysis_media_assets
+,,['person_id'],,ml_analysis_media_cast_candidates_person_id_idx,,ml,missing,analysis_media_cast_candidates
+,,['episode_id'],episode_id is not null,ml_analysis_media_upload_sessions_episode_id_idx,,ml,missing,analysis_media_upload_sessions
+,,['promoted_video_asset_id'],,ml_analysis_media_upload_sessions_promoted_video_asset_id_idx,,ml,missing,analysis_media_upload_sessions
+,,['season_id'],,ml_analysis_media_upload_sessions_season_id_idx,,ml,missing,analysis_media_upload_sessions
+,,['show_id'],,ml_analysis_media_upload_sessions_show_id_idx,,ml,missing,analysis_media_upload_sessions
+,,['duplicate_of_reference_image_id'],,ml_face_reference_images_duplicate_of_reference_image_id_idx,,ml,missing,face_reference_images
+,,['media_asset_id'],,ml_face_reference_images_media_asset_id_idx,,ml,missing,face_reference_images
+,,['person_id'],,ml_screentime_person_metrics_person_id_idx,,ml,missing,screentime_person_metrics
+,,['episode_id'],,ml_screentime_reference_fingerprints_episode_id_idx,,ml,missing,screentime_reference_fingerprints
+,,['run_id'],,ml_screentime_reference_fingerprints_run_id_idx,,ml,missing,screentime_reference_fingerprints
+,,['season_id'],,ml_screentime_reference_fingerprints_season_id_idx,,ml,missing,screentime_reference_fingerprints
+,,['show_id'],,ml_screentime_reference_fingerprints_show_id_idx,,ml,missing,screentime_reference_fingerprints
+,,['video_asset_id'],,ml_screentime_reference_fingerprints_video_asset_id_idx,,ml,missing,screentime_reference_fingerprints
+,,['candidate_person_id'],,ml_screentime_review_state_candidate_person_id_idx,,ml,missing,screentime_review_state
+,,['episode_id'],,ml_screentime_review_state_episode_id_idx,,ml,missing,screentime_review_state
+,,['person_id'],,ml_screentime_review_state_person_id_idx,,ml,missing,screentime_review_state
+,,['season_id'],,ml_screentime_review_state_season_id_idx,,ml,missing,screentime_review_state
+,,['show_id'],,ml_screentime_review_state_show_id_idx,,ml,missing,screentime_review_state
+,,['video_asset_id'],,ml_screentime_review_state_video_asset_id_idx,,ml,missing,screentime_review_state
+,,['person_id'],,ml_screentime_segments_person_id_idx,,ml,missing,screentime_segments
+,,['assigned_person_id'],,ml_screentime_unknown_clusters_assigned_person_id_idx,,ml,missing,screentime_unknown_clusters
+,,['media_asset_id'],,screenalytics_face_bank_images_media_asset_id_idx,,screenalytics,missing,face_bank_images
+,,['run_id'],,screenalytics_identity_locks_run_id_idx,,screenalytics,missing,identity_locks
+,,['episode_id'],,screenalytics_media_upload_sessions_episode_id_idx,,screenalytics,missing,media_upload_sessions
+,,['promoted_video_asset_id'],,screenalytics_media_upload_sessions_promoted_video_asset_id_idx,,screenalytics,missing,media_upload_sessions
+,,['season_id'],,screenalytics_media_upload_sessions_season_id_idx,,screenalytics,missing,media_upload_sessions
+,,['suggestion_id'],,screenalytics_suggestion_applies_suggestion_id_idx,,screenalytics,missing,suggestion_applies
+,,['run_id'],,screenalytics_suggestion_batches_run_id_idx,,screenalytics,missing,suggestion_batches
+,,['assigned_person_id'],,screenalytics_unknown_clusters_assigned_person_id_idx,,screenalytics,missing,unknown_clusters
+,,['media_asset_id'],media_asset_id is not null,screenalytics_video_assets_media_asset_id_idx,,screenalytics,missing,video_assets
+,,"['survey_id', 'question_id']",,surveys_answers_survey_id_question_id_idx,,surveys,missing,answers
+,,"['survey_id', 'response_id']",,surveys_answers_survey_id_response_id_idx,,surveys,missing,answers
