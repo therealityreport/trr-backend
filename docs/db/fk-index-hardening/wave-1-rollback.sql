@@ -1,5 +1,5 @@
 -- wave-1 FK index hardening rollback
--- generated_at: 2026-04-17T19:09:04Z
+-- generated_at: 2026-04-20T18:35:19Z
 -- apply with direct Postgres connectivity only
 
 -- rollback admin.recent_people_views admin_recent_people_views_person_id_idx

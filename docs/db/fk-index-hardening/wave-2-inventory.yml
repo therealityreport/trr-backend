@@ -1,7 +1,7 @@
 metadata:
   db_url_source: TRR_DB_URL
-  connection_mode: runtime
-  resolved_db_host: aws-1-us-east-1.pooler.supabase.com
+  connection_mode: direct
+  resolved_db_host: db.vwxfvzutyufrkhfgoeaa.supabase.co
   wave: wave-2
   owned_schemas:
   - surveys

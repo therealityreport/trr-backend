@@ -1,5 +1,5 @@
 -- wave-2 FK index hardening forward apply
--- generated_at: 2026-04-17T19:09:05Z
+-- generated_at: 2026-04-20T18:35:19Z
 -- apply with direct Postgres connectivity only
 
 -- Operator contract: set PGAPPNAME=fk-index-<wave>-apply before invoking psql.

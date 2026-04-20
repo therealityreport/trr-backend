@@ -1,15 +1,15 @@
 # Wave-1 FK Index Hardening Status
 
-- generated_at: `2026-04-17T19:22:58Z`
+- generated_at: `2026-04-20T18:35:19Z`
 - inventory_source: [`wave-1-inventory.yml`](./wave-1-inventory.yml)
 - representative_query_checks: [`scripts/db/fk_index_wave1_explain.sql`](../../scripts/db/fk_index_wave1_explain.sql)
-- connection_mode_used_for_inventory: `runtime`
-- resolved_inventory_host: `aws-1-us-east-1.pooler.supabase.com`
+- connection_mode_used_for_inventory: `direct`
+- resolved_inventory_host: `db.vwxfvzutyufrkhfgoeaa.supabase.co`
 
 ## Pre-flight Checks
 
-- Inventory regenerated from the live database on `2026-04-17T19:22:58Z`.
-- Inventory ran on `runtime` because direct-host connectivity is currently blocked from this workstation.
+- Inventory regenerated from the live database on `2026-04-20T18:35:19Z`.
+- Inventory ran on `direct` because direct-host connectivity is currently blocked from this workstation.
 - Direct apply / observer lane remains blocked until `db.<project>.supabase.co:5432` is reachable from this machine.
 - Query-check gate applied before generating forward SQL; candidates without a committed representative query artifact are deferred.
 
@@ -22,7 +22,7 @@
 
 ## Pre-Flight Disk Targets
 
-- `social.instagram_comments` — estimated_row_count: 142843
+- `social.instagram_comments` — estimated_row_count: 142782
 - `social.tiktok_comments` — estimated_row_count: 75275
 - `social.youtube_comments` — estimated_row_count: 30529
 - `social.instagram_account_catalog_posts` — estimated_row_count: 29342

@@ -1,7 +1,7 @@
 metadata:
   db_url_source: TRR_DB_URL
-  connection_mode: runtime
-  resolved_db_host: aws-1-us-east-1.pooler.supabase.com
+  connection_mode: direct
+  resolved_db_host: db.vwxfvzutyufrkhfgoeaa.supabase.co
   wave: wave-1
   owned_schemas:
   - core
@@ -2021,7 +2021,7 @@ entries:
   referenced_table: scrape_jobs
   nullable_columns:
   - job_id
-  estimated_row_count: 142843
+  estimated_row_count: 142782
   single_column_null_frac: 0.0
   hot_table: true
   covered_by_existing_index: true
@@ -2040,8 +2040,8 @@ entries:
   referenced_table: scrape_runs
   nullable_columns:
   - last_seen_run_id
-  estimated_row_count: 142843
-  single_column_null_frac: 0.0001
+  estimated_row_count: 142782
+  single_column_null_frac: 6.66667e-05
   hot_table: true
   covered_by_existing_index: false
   proposed_index_name: social_instagram_comments_last_seen_run_id_idx
@@ -2060,8 +2060,8 @@ entries:
   referenced_table: instagram_comments
   nullable_columns:
   - parent_comment_id
-  estimated_row_count: 142843
-  single_column_null_frac: 0.9643
+  estimated_row_count: 142782
+  single_column_null_frac: 0.963233
   hot_table: true
   covered_by_existing_index: true
   proposed_index_name: social_instagram_comments_parent_comment_id_idx
@@ -2078,7 +2078,7 @@ entries:
   referenced_schema: social
   referenced_table: instagram_posts
   nullable_columns: []
-  estimated_row_count: 142843
+  estimated_row_count: 142782
   single_column_null_frac: 0.0
   hot_table: true
   covered_by_existing_index: true
@@ -2097,7 +2097,7 @@ entries:
   referenced_table: seasons
   nullable_columns:
   - season_id
-  estimated_row_count: 142843
+  estimated_row_count: 142782
   single_column_null_frac: 0.0
   hot_table: true
   covered_by_existing_index: true
@@ -3266,7 +3266,7 @@ entries:
   nullable_columns:
   - last_seen_run_id
   estimated_row_count: 75275
-  single_column_null_frac: 0.00873333
+  single_column_null_frac: 0.00843333
   hot_table: false
   covered_by_existing_index: false
   proposed_index_name: social_tiktok_comments_last_seen_run_id_idx
@@ -3286,7 +3286,7 @@ entries:
   nullable_columns:
   - parent_comment_id
   estimated_row_count: 75275
-  single_column_null_frac: 0.713933
+  single_column_null_frac: 0.7117
   hot_table: false
   covered_by_existing_index: true
   proposed_index_name: social_tiktok_comments_parent_comment_id_idx
@@ -3894,7 +3894,7 @@ entries:
   nullable_columns:
   - parent_comment_id
   estimated_row_count: 30529
-  single_column_null_frac: 0.588233
+  single_column_null_frac: 0.588433
   hot_table: false
   covered_by_existing_index: true
   proposed_index_name: social_youtube_comments_parent_comment_id_idx
