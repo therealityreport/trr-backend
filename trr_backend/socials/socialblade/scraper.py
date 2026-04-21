@@ -1,7 +1,8 @@
-"""SocialBlade scraper using Playwright."""
+"""SocialBlade scraper entrypoints and legacy browser fallbacks."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -774,51 +775,73 @@ def scrape_socialblade_with_shared_browser_session(
 
 def scrape_socialblade(
     handle: str,
-    cookies: list[dict[str, Any]],
+    cookies: Any,
     *,
     platform: str = "instagram",
     allow_login_fallback: bool = True,
     allow_visible_browser_retry: bool = False,
 ) -> dict[str, Any]:
-    """Scrape SocialBlade account data using Playwright.
+    """Scrape SocialBlade account data using the default Scrapling flow.
 
-    Args:
-        handle: Social account handle (e.g. "lisabarlow14").
-        cookies: List of cookie dicts to inject (Playwright format).
-                 Each should have at least ``name``, ``value``, ``domain``.
-
-    Returns:
-        Combined scrape result dict matching the existing JSON schema.
+    The visible shared-browser and credential-login Playwright paths remain as
+    recovery fallbacks when the authenticated SocialBlade endpoints challenge
+    the default fetch path.
     """
-    from playwright.sync_api import sync_playwright
-
-    from trr_backend.socials.browser_cookie_refresh import launch_browser
-    from trr_backend.socials.socialblade.auth import (
-        SOCIALBLADE_STEALTH_USER_AGENT,
-    )
     _log(f"Scraping SocialBlade for {platform} @{handle}")
-
-    with sync_playwright() as pw:
-        browser = launch_browser(pw, headless=True)
-        try:
-            context = browser.new_context(
-                viewport={"width": 1440, "height": 1600},
-                user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-            return _scrape_socialblade_in_context(
-                context,
+    try:
+        return _run_scrapling_socialblade_fetch(handle, cookies, platform=platform)
+    except Exception as exc:  # noqa: BLE001
+        candidate_error = exc.__cause__ if getattr(exc, "__cause__", None) is not None else exc
+        if allow_visible_browser_retry and _should_retry_in_visible_shared_browser(candidate_error):
+            _log("Retrying SocialBlade scrape through visible shared Chrome session...")
+            return scrape_socialblade_with_shared_browser_session(
                 handle,
                 platform=platform,
-                playwright=pw,
-                cookies=cookies,
-                allow_login_fallback=allow_login_fallback,
-                allow_visible_browser_retry=allow_visible_browser_retry,
             )
 
+        if platform == "instagram" and allow_login_fallback and _has_socialblade_login_credentials():
+            try:
+                _log("Attempting SocialBlade login fallback before retrying Scrapling fetch...")
+                refreshed_cookies = _refresh_socialblade_cookies_via_login()
+                return _run_scrapling_socialblade_fetch(handle, refreshed_cookies, platform=platform)
+            except Exception as login_exc:  # noqa: BLE001
+                candidate_login_error = (
+                    login_exc.__cause__ if getattr(login_exc, "__cause__", None) is not None else login_exc
+                )
+                if allow_visible_browser_retry and _should_retry_in_visible_shared_browser(candidate_login_error):
+                    _log("Login fallback still challenged; retrying in visible shared Chrome session...")
+                    return scrape_socialblade_with_shared_browser_session(
+                        handle,
+                        platform=platform,
+                    )
+                raise login_exc from exc
+
+        raise
+
+
+def _run_scrapling_socialblade_fetch(
+    handle: str,
+    cookies: Any,
+    *,
+    platform: str,
+) -> dict[str, Any]:
+    from trr_backend.socials.socialblade.fetcher import SocialBladeScraplingFetcher
+    from trr_backend.socials.socialblade.session import resolve_socialblade_scrapling_session
+
+    session = resolve_socialblade_scrapling_session(cookies)
+
+    async def _run() -> dict[str, Any]:
+        fetcher = SocialBladeScraplingFetcher(
+            cookies=session.cookies,
+            raw_cookies=session.raw_cookies,
+            platform=platform,
+        )
+        try:
+            return await fetcher.scrape(handle)
         finally:
-            browser.close()
+            await fetcher.aclose()
+
+    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -878,6 +901,41 @@ def _do_login(page: Any, context: Any) -> None:
     sb_cookies = [c for c in cookies if "socialblade" in c.get("domain", "")]
     if sb_cookies:
         _log(f"Captured {len(sb_cookies)} SocialBlade cookies after login")
+
+
+def _refresh_socialblade_cookies_via_login() -> dict[str, str]:
+    from playwright.sync_api import sync_playwright
+
+    from trr_backend.socials.browser_cookie_refresh import cookie_payload, launch_browser, write_cookie_file
+    from trr_backend.socials.socialblade.auth import (
+        SOCIALBLADE_COOKIE_DOMAINS,
+        SOCIALBLADE_STEALTH_INIT_SCRIPT,
+        SOCIALBLADE_STEALTH_USER_AGENT,
+        socialblade_cookie_file_path,
+    )
+
+    with sync_playwright() as pw:
+        browser = launch_browser(pw, headless=True)
+        try:
+            context = browser.new_context(
+                viewport={"width": 1440, "height": 1600},
+                user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+            context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
+            page = context.new_page()
+            try:
+                _do_login(page, context)
+                refreshed = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
+                if not refreshed:
+                    raise RuntimeError("SocialBlade login fallback completed without any SocialBlade cookies")
+                write_cookie_file(socialblade_cookie_file_path(), refreshed)
+                return refreshed
+            finally:
+                page.close()
+        finally:
+            browser.close()
 
 
 # ---------------------------------------------------------------------------

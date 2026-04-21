@@ -82,7 +82,7 @@ def test_main_dispatches_sync_newer(monkeypatch, capsys) -> None:
     assert "run-sync-newer-1" in capsys.readouterr().out
 
 
-def test_main_fill_missing_photos_dispatches_sync_newer(monkeypatch, capsys) -> None:
+def test_main_fill_missing_posts_dispatches_sync_newer(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
     monkeypatch.setattr(
@@ -92,7 +92,7 @@ def test_main_fill_missing_photos_dispatches_sync_newer(monkeypatch, capsys) -> 
             platform="tiktok",
             account="bravotv",
             source_scope="bravo",
-            action="fill_missing_photos",
+            action="fill_missing_posts",
         ),
     )
 
@@ -119,7 +119,7 @@ def test_main_fill_missing_photos_dispatches_sync_newer(monkeypatch, capsys) -> 
     assert "run-head-gap-1" in capsys.readouterr().out
 
 
-def test_main_fill_missing_photos_dispatches_backfill_for_tail_gap(monkeypatch, capsys) -> None:
+def test_main_fill_missing_posts_dispatches_backfill_for_tail_gap(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
     monkeypatch.setattr(
@@ -129,7 +129,7 @@ def test_main_fill_missing_photos_dispatches_backfill_for_tail_gap(monkeypatch, 
             platform="instagram",
             account="bravotv",
             source_scope="bravo",
-            action="fill_missing_photos",
+            action="fill_missing_posts",
         ),
     )
 
@@ -163,7 +163,7 @@ def test_main_fill_missing_photos_dispatches_backfill_for_tail_gap(monkeypatch, 
     assert "run-tail-gap-1" in capsys.readouterr().out
 
 
-def test_main_fill_missing_photos_dispatches_bounded_window_backfill(monkeypatch, capsys) -> None:
+def test_main_fill_missing_posts_dispatches_bounded_window_backfill(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
     monkeypatch.setattr(
@@ -173,7 +173,7 @@ def test_main_fill_missing_photos_dispatches_bounded_window_backfill(monkeypatch
             platform="facebook",
             account="bravotv",
             source_scope="bravo",
-            action="fill_missing_photos",
+            action="fill_missing_posts",
         ),
     )
 
@@ -213,7 +213,7 @@ def test_main_fill_missing_photos_dispatches_bounded_window_backfill(monkeypatch
     assert "run-window-gap-1" in capsys.readouterr().out
 
 
-def test_main_fill_missing_photos_exits_nonzero_for_complete_state(monkeypatch, capsys) -> None:
+def test_main_fill_missing_posts_exits_nonzero_for_complete_state(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
     monkeypatch.setattr(
@@ -223,7 +223,7 @@ def test_main_fill_missing_photos_exits_nonzero_for_complete_state(monkeypatch, 
             platform="youtube",
             account="bravo",
             source_scope="bravo",
-            action="fill_missing_photos",
+            action="fill_missing_posts",
         ),
     )
 

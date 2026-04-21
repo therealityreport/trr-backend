@@ -4631,7 +4631,7 @@ def test_refresh_stream_emits_terminal_error_for_unhandled_exception(client, mon
                     ):
                         response = client.post(
                             f"/api/v1/admin/person/{person_id}/refresh-images/stream",
-                            json={"skip_mirror": True},
+                            json={"skip_mirror": True, "sources": ["imdb"]},
                             headers={"Authorization": f"Bearer {token}"},
                         )
 
@@ -4661,7 +4661,7 @@ def test_refresh_stream_emits_terminal_error_when_operation_kickoff_fails(client
                     ):
                         response = client.post(
                             f"/api/v1/admin/person/{person_id}/refresh-images/stream",
-                            json={"skip_mirror": True},
+                            json={"skip_mirror": True, "sources": ["imdb"]},
                             headers={"Authorization": f"Bearer {token}"},
                         )
 
@@ -4674,6 +4674,78 @@ def test_refresh_stream_emits_terminal_error_when_operation_kickoff_fails(client
         or '"error_code":"STREAM_OPERATION_START_FAILED"' in normalized_payload
     )
     assert "kickoff failed" in normalized_payload
+
+
+def test_refresh_stream_hydrates_getty_prefetch_before_operation_start(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "api.routers.admin_person_images._get_person_details",
+        return_value={"id": person_id, "full_name": "Example Person", "external_ids": {"imdb": "nm123"}},
+    ):
+        with patch(
+            "api.routers.admin_person_images._hydrate_refresh_request_getty_prefetch",
+            side_effect=lambda request, **_kwargs: request.model_copy(
+                update={
+                    "getty_prefetch_attempted": True,
+                    "getty_prefetch_succeeded": True,
+                    "getty_prefetched_assets": [{"editorial_id": "928663262"}],
+                    "getty_prefetched_queries": [{"query": "Example Person Bravo"}],
+                    "getty_prefetch_mode": "full",
+                }
+            ),
+        ) as hydrate_mock:
+            with patch(
+                "api.routers.admin_person_images.start_operation_for_stream",
+                return_value={"id": str(uuid4())},
+            ) as start_mock:
+                with patch("api.routers.admin_person_images.operation_stream_response", return_value=Response("ok")):
+                    response = client.post(
+                        f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                        json={"sources": ["getty"], "skip_mirror": True},
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+
+    assert response.status_code == 200
+    hydrate_mock.assert_called_once()
+    _, kwargs = start_mock.call_args
+    payload = kwargs["request_payload"]["payload"]
+    assert payload["getty_prefetch_attempted"] is True
+    assert payload["getty_prefetch_succeeded"] is True
+    assert payload["getty_prefetched_assets"] == [{"editorial_id": "928663262"}]
+    assert payload["getty_prefetched_queries"] == [{"query": "Example Person Bravo"}]
+    assert payload["getty_prefetch_mode"] == "full"
+
+
+def test_refresh_stream_emits_terminal_error_when_getty_prefetch_fails(client, monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "api.routers.admin_person_images._get_person_details",
+        return_value={"id": person_id, "full_name": "Example Person", "external_ids": {"imdb": "nm123"}},
+    ):
+        with patch(
+            "api.routers.admin_person_images._hydrate_refresh_request_getty_prefetch",
+            side_effect=admin_person_images.HTTPException(status_code=503, detail="Getty blocked"),
+        ):
+            response = client.post(
+                f"/api/v1/admin/person/{person_id}/refresh-images/stream",
+                json={"sources": ["getty"], "skip_mirror": True},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    assert response.status_code == 200
+    normalized_payload = response.text.replace("\r\n", "\n")
+    assert "event: error" in normalized_payload
+    assert (
+        '"error_code": "GETTY_PREFETCH_FAILED"' in normalized_payload
+        or '"error_code":"GETTY_PREFETCH_FAILED"' in normalized_payload
+    )
+    assert "Getty blocked" in normalized_payload
 
 
 def test_reprocess_stream_emits_terminal_error_for_unhandled_exception(client, monkeypatch) -> None:

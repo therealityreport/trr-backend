@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.socials.browser_cookie_refresh import (
@@ -156,6 +158,84 @@ def _socialblade_visible_chrome_cdp_url() -> str:
     return _DEFAULT_VISIBLE_CHROME_CDP_URL
 
 
+def _visible_managed_chrome_workspace_script() -> Path:
+    return Path(__file__).resolve().parents[4] / "scripts" / "ensure-managed-chrome.sh"
+
+
+def _is_local_visible_managed_chrome_url(cdp_url: str) -> bool:
+    parsed = urlparse(cdp_url)
+    return parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 9222
+
+
+def _ensure_visible_managed_chrome_available(cdp_url: str) -> bool:
+    if _chrome_cdp_endpoint_reachable(cdp_url):
+        return False
+    if not _is_local_visible_managed_chrome_url(cdp_url):
+        return False
+
+    launcher = _visible_managed_chrome_workspace_script()
+    if not launcher.is_file():
+        return False
+
+    env = os.environ.copy()
+    env["CODEX_CHROME_MODE"] = "shared"
+    env["CODEX_CHROME_SHARED_PORT"] = "9222"
+    env["CODEX_CHROME_PORT"] = "9222"
+    env["CHROME_AGENT_DEBUG_PORT"] = "9222"
+    env["CHROME_AGENT_HEADLESS"] = "0"
+
+    subprocess.run(
+        ["bash", str(launcher)],
+        check=True,
+        cwd=str(launcher.parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if not _chrome_cdp_endpoint_reachable(cdp_url, timeout_seconds=2.0):
+        raise RuntimeError(
+            "Visible shared Chrome was launched but the debugging endpoint on port 9222 is still unavailable"
+        )
+    return True
+
+
+def _open_socialblade_repair_tab(cdp_url: str) -> bool:
+    parsed = urlparse(cdp_url)
+    if not parsed.scheme or not parsed.netloc:
+        return False
+
+    request = Request(
+        f"{parsed.scheme}://{parsed.netloc}/json/new?{_socialblade_validation_url()}",
+        method="PUT",
+    )
+    try:
+        with urlopen(request, timeout=5):
+            return True
+    except Exception:
+        return False
+
+
+def _render_visible_cookie_refresh_error(exc: Exception, *, cdp_url: str, auto_launched: bool) -> str:
+    detail = str(exc).strip() or type(exc).__name__
+    if "usable SocialBlade Cloudflare clearance cookie" in detail or "blocked by Cloudflare" in detail:
+        opened_repair_tab = _open_socialblade_repair_tab(cdp_url)
+        if opened_repair_tab:
+            return (
+                "Opened SocialBlade in the visible shared Chrome window, but Cloudflare clearance is still missing. "
+                "Complete the challenge there and retry."
+            )
+        return (
+            "Visible shared Chrome reached SocialBlade, but Cloudflare clearance is still missing. "
+            "Complete the challenge in the shared browser on port 9222 and retry."
+        )
+    if "did not expose any browser contexts" in detail:
+        return "Visible shared Chrome started, but no browser context was available yet. Wait a moment and retry."
+    if auto_launched:
+        return f"Auto-launched visible shared Chrome, but SocialBlade cookie refresh still failed: {detail}"
+    return f"Visible shared Chrome cookie refresh failed: {detail}"
+
+
 def export_socialblade_cookies_from_shared_chrome(*, cdp_url: str | None = None) -> dict[str, str]:
     try:
         from playwright.sync_api import sync_playwright
@@ -195,11 +275,20 @@ def refresh_socialblade_cookies(
     allow_headless_fallback: bool = True,
 ) -> dict[str, str]:
     del reason
+    visible_cdp_url = _socialblade_visible_chrome_cdp_url()
+    auto_launched_visible_chrome = False
     try:
-        return export_socialblade_cookies_from_shared_chrome(cdp_url=_socialblade_visible_chrome_cdp_url())
+        auto_launched_visible_chrome = _ensure_visible_managed_chrome_available(visible_cdp_url)
+        return export_socialblade_cookies_from_shared_chrome(cdp_url=visible_cdp_url)
     except Exception as exc:  # noqa: BLE001
         if not allow_headless_fallback:
-            raise RuntimeError("Visible shared Chrome session could not provide a valid SocialBlade cookie set") from exc
+            raise RuntimeError(
+                _render_visible_cookie_refresh_error(
+                    exc,
+                    cdp_url=visible_cdp_url,
+                    auto_launched=auto_launched_visible_chrome,
+                )
+            ) from exc
 
     try:
         from playwright.sync_api import sync_playwright

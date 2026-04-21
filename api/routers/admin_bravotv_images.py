@@ -15,6 +15,7 @@ from trr_backend.bravotv.run_service import (
     get_bravotv_run,
     get_latest_bravotv_run,
 )
+from trr_backend.db.admin import create_supabase_admin_client
 from trr_backend.media.s3_mirror import get_object_storage_bucket, get_object_storage_client
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 
@@ -39,6 +40,96 @@ class BravotvImageRunRequest(BaseModel):
     getty_prefetch_mode: str | None = None
     getty_prefetch_auth_mode: str | None = None
     getty_prefetch_auth_warning: str | None = None
+
+
+def _bravotv_request_needs_getty_prefetch(payload: BravotvImageRunRequest) -> bool:
+    if payload.getty_prefetched_assets is not None:
+        return False
+    requested_sources = {
+        str(source or "").strip().lower() for source in (payload.sources or ["all"]) if str(source or "").strip()
+    }
+    return bool(requested_sources & {"all", "getty", "nbcumv"})
+
+
+def _fetch_person_full_name(person_id: UUID) -> str:
+    db = create_supabase_admin_client()
+    response = db.schema("core").table("people").select("id,full_name").eq("id", str(person_id)).limit(1).execute()
+    if getattr(response, "error", None):
+        raise HTTPException(status_code=502, detail="Failed to load BRAVOTV person context.")
+    rows = response.data if isinstance(getattr(response, "data", None), list) else []
+    if not rows:
+        raise HTTPException(status_code=404, detail="BRAVOTV person not found.")
+    full_name = str((rows[0] or {}).get("full_name") or "").strip()
+    if not full_name:
+        raise HTTPException(status_code=400, detail="BRAVOTV person is missing full_name.")
+    return full_name
+
+
+def _fetch_show_name(show_id: UUID) -> str:
+    db = create_supabase_admin_client()
+    response = db.schema("core").table("shows").select("id,name").eq("id", str(show_id)).limit(1).execute()
+    if getattr(response, "error", None):
+        raise HTTPException(status_code=502, detail="Failed to load BRAVOTV show context.")
+    rows = response.data if isinstance(getattr(response, "data", None), list) else []
+    if not rows:
+        raise HTTPException(status_code=404, detail="BRAVOTV show not found.")
+    show_name = str((rows[0] or {}).get("name") or "").strip()
+    if not show_name:
+        raise HTTPException(status_code=400, detail="BRAVOTV show is missing name.")
+    return show_name
+
+
+def _hydrate_bravotv_getty_prefetch(payload: BravotvImageRunRequest) -> BravotvImageRunRequest:
+    if not _bravotv_request_needs_getty_prefetch(payload):
+        return payload
+
+    prefetch_mode = str(payload.getty_prefetch_mode or "full").strip().lower() or "full"
+    try:
+        if payload.mode == "person":
+            from trr_backend.integrations.getty_local_prefetch import fetch_person_getty_prefetch_payload
+
+            if payload.person_id is None:
+                raise HTTPException(status_code=400, detail="BRAVOTV person Getty prefetch requires person_id.")
+            prefetch_payload = fetch_person_getty_prefetch_payload(
+                _fetch_person_full_name(payload.person_id),
+                mode=prefetch_mode,
+            )
+        else:
+            from trr_backend.integrations.getty_local_prefetch import fetch_show_getty_prefetch_payload
+
+            if payload.show_id is None:
+                raise HTTPException(status_code=400, detail="BRAVOTV show Getty prefetch requires show_id.")
+            prefetch_payload = fetch_show_getty_prefetch_payload(
+                _fetch_show_name(payload.show_id),
+                season=payload.season,
+                episode=payload.episode,
+                mode=prefetch_mode,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Getty prefetch failed: {exc}") from exc
+
+    return payload.model_copy(
+        update={
+            "getty_prefetched_assets": (
+                list(prefetch_payload.get("merged")) if isinstance(prefetch_payload.get("merged"), list) else []
+            ),
+            "getty_prefetched_events": (
+                list(prefetch_payload.get("merged_events"))
+                if isinstance(prefetch_payload.get("merged_events"), list)
+                else []
+            ),
+            "getty_prefetched_queries": (
+                list(prefetch_payload.get("query_summaries"))
+                if isinstance(prefetch_payload.get("query_summaries"), list)
+                else []
+            ),
+            "getty_prefetch_mode": str(prefetch_payload.get("prefetch_mode") or prefetch_mode).strip() or prefetch_mode,
+            "getty_prefetch_auth_mode": str(prefetch_payload.get("auth_mode") or "").strip() or None,
+            "getty_prefetch_auth_warning": str(prefetch_payload.get("auth_warning") or "").strip() or None,
+        }
+    )
 
 
 def _sse_event(event_type: str, payload: dict[str, Any]) -> str:
@@ -70,6 +161,7 @@ def start_bravotv_image_run(
     payload: BravotvImageRunRequest = Body(...),
     admin_user: InternalAdminUser = None,
 ) -> StreamingResponse:
+    payload = _hydrate_bravotv_getty_prefetch(payload)
     actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
     request_payload = {
         "mode": payload.mode,

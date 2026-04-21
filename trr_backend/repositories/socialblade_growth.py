@@ -16,6 +16,29 @@ _PLATFORM_RE = re.compile(r"[^a-z]")
 _HANDLE_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
 
+def _build_previous_run_snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    profile_stats = data.get("profile_stats")
+    if not isinstance(profile_stats, dict) or not profile_stats:
+        return None
+
+    snapshot: dict[str, Any] = {
+        "profile_stats": profile_stats,
+        "scraped_at": data.get("scraped_at"),
+    }
+
+    rankings = data.get("rankings")
+    if isinstance(rankings, dict) and rankings:
+        snapshot["rankings"] = rankings
+
+    profile_stats_labels = data.get("profile_stats_labels")
+    if isinstance(profile_stats_labels, dict) and profile_stats_labels:
+        snapshot["profile_stats_labels"] = profile_stats_labels
+
+    return snapshot
+
+
 def normalize_socialblade_platform(platform: str | None) -> str:
     normalized = _PLATFORM_RE.sub("", str(platform or "").strip().lower())
     return normalized or "instagram"
@@ -142,8 +165,16 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
         "rankings": existing.get("rankings", {}),
         "daily_channel_metrics_60day": existing.get("daily_channel_metrics_60day", {}),
     }
+    existing_previous_run = existing.get("previous_run")
+    if isinstance(existing_previous_run, dict) and existing_previous_run:
+        merged["previous_run"] = existing_previous_run
 
     if stats_refreshed:
+        previous_run = _build_previous_run_snapshot(existing)
+        if previous_run:
+            merged["previous_run"] = previous_run
+        else:
+            merged.pop("previous_run", None)
         merged["profile_stats"] = fresh.get("profile_stats", existing.get("profile_stats", {}))
         merged["rankings"] = fresh.get("rankings", existing.get("rankings", {}))
         merged["daily_channel_metrics_60day"] = fresh.get(
@@ -198,6 +229,7 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
     """Convert a database row to the JSON response shape the frontend expects."""
     platform = normalize_socialblade_platform(row.get("platform"))
     raw_response = (row.get("raw_response") or {}) if isinstance(row.get("raw_response"), dict) else {}
+    previous_run = _build_previous_run_snapshot(raw_response.get("previous_run"))
     account_handle = str(row.get("account_handle") or row.get("instagram_handle") or "").strip()
     scraped_at_raw = row.get("scraped_at")
     scraped_at_value = scraped_at_raw.isoformat() if hasattr(scraped_at_raw, "isoformat") else str(scraped_at_raw or "")
@@ -229,6 +261,7 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
         "daily_total_followers_chart": row.get("daily_total_followers_chart"),
         "chart_metric_label": raw_response.get("chart_metric_label"),
         "socialblade_url": raw_response.get("socialblade_url"),
+        "previous_run": previous_run,
         "freshness_status": freshness_status,
         "is_stale": is_stale,
         "age_hours": age_hours,

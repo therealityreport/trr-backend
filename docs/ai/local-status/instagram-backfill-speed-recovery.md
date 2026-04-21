@@ -15,8 +15,10 @@
 - Instagram partition discovery and partition fetch now prefer authenticated GraphQL first and can disable public fallback.
 - Partitioned full-history fetch raises immediately when Instagram auth is not available instead of silently degrading to the slow public crawl.
 - `post_classify` is no longer enqueued during frontier bootstrap or per-fetch-page progress. Classification is now deferred until the fetch phase is fully complete for the run.
-- New jobs are stamped with `required_runtime_version`, and claim selection now filters modal-required jobs to the matching runtime label.
-- Run progress exposes `required_runtime_version` and a `runtime_version_pin_mismatch` warning for requeue guidance.
+- New modal-required catalog jobs are stamped from the authoritative fresh Modal heartbeat runtime when available. If no fresh healthy Modal worker or dispatcher heartbeat exists, the runtime is treated as unknown instead of falling back to the API process stamp.
+- Claim selection, run-progress drift detection, and runtime-remediation candidate selection now share the same semantic matcher: `execution_backend`, then `modal_image`, then `commit_sha`, then label-only as a last resort.
+- Run progress distinguishes `runtime_version_drift`, `runtime_superseded`, and `no_eligible_worker_for_required_runtime` so operators can tell the difference between mixed workers, successful auto-replacement, and missing eligible workers.
+- Terminal Instagram runs that end in `history discovery complete` plus `recovery.reason=no_partitions_discovered` and `completion_gap_reason=fetch_incomplete` now surface a dedicated failed-recovery alert instead of looking like a generic incomplete fetch.
 
 ## Benchmarking
 - Added `scripts/socials/benchmark_instagram_catalog_full_history.py`.

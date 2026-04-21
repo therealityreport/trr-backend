@@ -70,6 +70,14 @@ UVICORN_ARGS=(
   --timeout-graceful-shutdown "$GRACEFUL_SHUTDOWN_SECONDS"
 )
 
+# For local development, let repo-local .env provide backend-specific defaults
+# that the workspace launcher does not export globally.
+if [[ -f ".env" ]]; then
+  UVICORN_ARGS+=(
+    --env-file ".env"
+  )
+fi
+
 if [[ "$EFFECTIVE_TRR_BACKEND_WORKERS" -gt 1 ]]; then
   UVICORN_ARGS+=(
     --workers "$EFFECTIVE_TRR_BACKEND_WORKERS"

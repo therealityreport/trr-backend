@@ -237,6 +237,9 @@ Worker-health alert codes to watch:
 Catalog-progress alert codes to watch:
 
 - `runtime_version_drift`
+- `runtime_superseded`
+- `no_eligible_worker_for_required_runtime`
+- `failed_recovery_no_partitions_discovered`
 - `frontier_lease_stale`
 - `modal_capacity_wait_exceeded`
 - `dispatch_blocked`
@@ -245,12 +248,22 @@ Catalog-progress alert codes to watch:
 
 Interpretation:
 
-- `runtime_version_drift`: the app/backend view of the worker build does not match the Modal worker that processed the run; stop and verify deploy state before retrying.
+- `runtime_version_drift`: one run observed more than one semantically distinct runtime identity. Equivalent labels that resolve to the same `modal_image` or `commit_sha` do not count as drift.
+- `runtime_superseded`: a stale run was automatically replaced by a fresh run on the current worker runtime. Follow the `replacement_run_id` rather than the cancelled run.
+- `no_eligible_worker_for_required_runtime`: no healthy worker currently matches the stale run's pinned runtime. This can appear while work is still queued, or after discovery completed and the recovery handoff still could not advance into catalog fetch. Manual remediation stays available in either state until a replacement run is clearly active.
+- `failed_recovery_no_partitions_discovered`: history discovery completed, but the run still failed with `completion_gap_reason=fetch_incomplete` before any recovery fetch work materialized. Treat this as a recovery dead-end first, not as a generic incomplete fetch.
 - `frontier_lease_stale`: a frontier lease heartbeat has expired or was not reclaimed correctly; do not assume the next retry is safe until ownership is reconciled.
 - `modal_capacity_wait_exceeded`: jobs are dispatched but stuck pending in Modal longer than the configured threshold; treat this as capacity pressure, not a duplicate backfill.
 - `classify_backlog_after_scrape`: scrape stages are complete but classify fanout has not drained in time; pause follow-up backfills until the backlog clears or the cause is understood.
 - `dispatch_blocked` / `dispatch_blocked_jobs`: the control plane could not hand work to Modal; do not keep scheduling new runs.
 - `retry_loop_detected`: the same frontier or job type is retrying repeatedly; investigate before the next launch.
+
+Runtime authority rules:
+
+- Modal-required catalog runs use fresh healthy Modal worker or dispatcher heartbeats as the authoritative runtime source.
+- If no fresh healthy Modal heartbeat publishes `metadata.runtime_version`, the authoritative remote runtime is `unknown`, not the API process build.
+- The terminal Instagram failure shape `history discovery complete -> no_partitions_discovered -> fetch_incomplete` should now end in one of two operator-visible outcomes: a semantically eligible worker claims the recovery/catalog-fetch work, or the stale run is superseded exactly once into a replacement run on the current runtime.
+- Manual `Cancel + Requeue clean run` is fallback-only. The UI hides it only after auto-requeue has already produced a `replacement_run_id` with `auto_requeue_status=queued|running`.
 
 One catalog run can legitimately fan out into multiple classify jobs. Multiple
 queued classify jobs are downstream work from the same run, not proof that the

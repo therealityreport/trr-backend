@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from trr_backend.repositories.socialblade_growth import merge_chart_data
+from trr_backend.repositories.socialblade_growth import _row_to_response, merge_chart_data
 
 
 def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_zeroes() -> None:
@@ -102,3 +102,77 @@ def test_merge_chart_data_keeps_older_history_when_fresh_window_starts_later() -
     assert "2023-03-19" in merged_dates
     assert "2023-04-01" in merged_dates
     assert merged_points[-1] == {"date": "2026-04-07", "followers": 687613}
+
+
+def test_merge_chart_data_stores_previous_run_snapshot_on_full_refresh() -> None:
+    existing = {
+        "scraped_at": "2026-03-18T05:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {
+            "followers": 685081,
+            "following": 900,
+            "media_count": 250,
+            "engagement_rate": "3.11%",
+            "average_likes": 1200,
+            "average_comments": 45,
+        },
+        "profile_stats_labels": {"followers": "Followers"},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {"data": [{"date": "2026-03-18", "followers": 685081}]},
+    }
+    fresh = {
+        "scraped_at": "2026-04-07T08:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {
+            "followers": 687613,
+            "following": 930,
+            "media_count": 252,
+            "engagement_rate": "3.25%",
+            "average_likes": 1325,
+            "average_comments": 49,
+        },
+        "rankings": {"grade": "A-"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {"data": [{"date": "2026-04-07", "followers": 687613}]},
+    }
+
+    merged = merge_chart_data(existing, fresh)
+
+    assert merged["previous_run"] == {
+        "scraped_at": "2026-03-18T05:30:00Z",
+        "profile_stats": existing["profile_stats"],
+        "profile_stats_labels": {"followers": "Followers"},
+        "rankings": {"grade": "B+"},
+    }
+
+
+def test_row_to_response_exposes_previous_run_snapshot() -> None:
+    row = {
+        "platform": "instagram",
+        "account_handle": "thetraitors.us",
+        "scraped_at": datetime.now(tz=UTC),
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 1000},
+        "rankings": {"grade": "B"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": None,
+        "raw_response": {
+            "profile_stats_labels": {"followers": "Followers"},
+            "chart_metric_label": "Followers",
+            "socialblade_url": "https://socialblade.com/instagram/user/thetraitors.us",
+            "previous_run": {
+                "scraped_at": "2026-04-19T12:00:00Z",
+                "profile_stats": {"followers": 950},
+                "rankings": {"grade": "B-"},
+            },
+        },
+    }
+
+    response = _row_to_response(row)
+
+    assert response["previous_run"] == {
+        "scraped_at": "2026-04-19T12:00:00Z",
+        "profile_stats": {"followers": 950},
+        "rankings": {"grade": "B-"},
+    }

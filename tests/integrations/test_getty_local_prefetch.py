@@ -231,6 +231,57 @@ def test_fetch_person_getty_prefetch_payload_emits_query_progress(monkeypatch) -
     assert progress_events[-1]["status"] == "completed"
 
 
+def test_fetch_show_getty_prefetch_payload_discovery_mode_uses_show_queries(monkeypatch) -> None:
+    search_calls: list[dict[str, object]] = []
+
+    @contextmanager
+    def _fake_bridge():
+        yield getty_local_prefetch.LocalGettyBridge(
+            session=object(),  # type: ignore[arg-type]
+            auth_details={"auth_mode": "chrome_profile_browser_session", "auth_warning": None},
+            search_page_fetcher=lambda url: ("<html></html>", url, 200),
+        )
+
+    def _fake_search_editorial_assets(phrase: str, **kwargs):
+        search_calls.append({"phrase": phrase, **kwargs})
+        editorial_id = phrase.lower().replace(" ", "-")
+        return [
+            {
+                "editorial_id": editorial_id,
+                "detail_url": f"https://www.gettyimages.com/detail/news-photo/{editorial_id}/1",
+                "original_image_url": f"https://media.gettyimages.com/id/{editorial_id}/photo/example.jpg",
+            }
+        ]
+
+    monkeypatch.setattr(getty_local_prefetch, "local_getty_bridge", _fake_bridge)
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_editorial_assets",
+        _fake_search_editorial_assets,
+    )
+
+    payload = getty_local_prefetch.fetch_show_getty_prefetch_payload(
+        "The Real Housewives of Beverly Hills",
+        season=3,
+        episode=2,
+        mode="discovery",
+    )
+
+    assert [call["phrase"] for call in search_calls] == [
+        "The Real Housewives of Beverly Hills Season 3 Episode 2",
+        "The Real Housewives of Beverly Hills Bravo",
+    ]
+    assert all(call["include_details"] is False for call in search_calls)
+    assert payload["prefetch_mode"] == "discovery"
+    assert payload["merged_total"] == 2
+    assert payload["merged_events_total"] == 0
+    assert payload["detail_enrichment_total"] == 2
+    assert payload["deferred_editorial_ids"] == [
+        "the-real-housewives-of-beverly-hills-bravo",
+        "the-real-housewives-of-beverly-hills-season-3-episode-2",
+    ]
+
+
 def test_fetch_person_getty_prefetch_payload_requires_authenticated_profile(monkeypatch) -> None:
     @contextmanager
     def _fake_bridge():

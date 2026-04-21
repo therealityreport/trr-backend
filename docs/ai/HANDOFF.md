@@ -11,6 +11,7 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - None.
 
 ## Recent Completions
+- `FK Index Hardening Rollout — Closeout` | last updated `2026-04-20` | current phase `closeout complete` | next action `Monitor planner usage for the new indexes over the next 24-48h and merge the rollout branch via PR.` | details `local-status/fk-index-hardening-rollout-2026-04-20.md`
 - `TikTok vs. Instagram Scrapers — Comparison After Bug Fixes` | last updated `2026-04-14` | current phase `social scraper comparison` | next action `Use this comparison as continuity context for follow-up Instagram runtime hardening` | details `local-status/scraper-compare-2026-04-14.md`
 
 ## Older Plans

@@ -5,6 +5,7 @@ import types
 from trr_backend.bravotv.get_images_pipeline import (
     _extract_bravo_image_people_names,
     _extract_people_from_text,
+    _normalize_external_ids,
     _normalize_getty_record,
     _normalize_nup_key,
     _refreshed_artifacts,
@@ -50,6 +51,29 @@ def test_extract_bravo_image_people_names_does_not_fall_back_to_gallery_cast() -
         known_people=["Brandi Glanville", "Kyle Richards", "Kim Richards"],
     )
     assert people == ["Kyle Richards", "Kim Richards"]
+
+
+def test_normalize_external_ids_matches_people_full_name(monkeypatch) -> None:
+    db = types.SimpleNamespace()
+    response = types.SimpleNamespace(
+        data=[{"id": "person-1", "full_name": "Jane Doe", "external_ids": {"imdb": "nm123", "tmdb": "456"}}]
+    )
+    query = types.SimpleNamespace(execute=lambda: response)
+    query = types.SimpleNamespace(limit=lambda _count: query, execute=lambda: response)
+    query = types.SimpleNamespace(eq=lambda *_args: query, limit=lambda _count: query, execute=lambda: response)
+    query = types.SimpleNamespace(
+        select=lambda *_args: query,
+        eq=lambda *_args: query,
+        limit=lambda _count: query,
+        execute=lambda: response,
+    )
+    db.schema = lambda _name: types.SimpleNamespace(table=lambda _table: query)
+
+    monkeypatch.setattr("trr_backend.bravotv.get_images_pipeline.create_supabase_admin_client", lambda: db)
+
+    result = _normalize_external_ids("Jane Doe")
+
+    assert result == {"person_id": "person-1", "imdb_id": "nm123", "tmdb_id": 456}
 
 
 def test_build_bridge_and_catalog_prefers_exact_nup_matches() -> None:
