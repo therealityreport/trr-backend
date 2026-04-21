@@ -126,6 +126,20 @@ def stub_nbcumv_direct_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def stub_hydrate_refresh_request_getty_prefetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent the refresh-images handlers from reaching out to a real Chrome profile during tests."""
+
+    def _passthrough(request, **_kwargs):
+        return request
+
+    monkeypatch.setattr(
+        admin_person_images,
+        "_hydrate_refresh_request_getty_prefetch",
+        _passthrough,
+    )
+
+
 def test_names_match_requires_first_and_last_name_alignment() -> None:
     assert admin_person_images._names_match("Henry Barlow", "Henry Barlow")
     assert admin_person_images._names_match("Wendy Osefo", "Dr. Wendy Osefo")
@@ -4681,6 +4695,13 @@ def test_refresh_stream_hydrates_getty_prefetch_before_operation_start(client, m
     person_id = str(uuid4())
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
+    # The router-conftest autouse fixture defaults the Getty prefetch gate to off;
+    # re-enable it here so this test can exercise the hydration branch.
+    monkeypatch.setattr(
+        "api.routers.admin_person_images._request_needs_getty_prefetch",
+        lambda _request: True,
+    )
+
     with patch(
         "api.routers.admin_person_images._get_person_details",
         return_value={"id": person_id, "full_name": "Example Person", "external_ids": {"imdb": "nm123"}},
@@ -4723,6 +4744,13 @@ def test_refresh_stream_emits_terminal_error_when_getty_prefetch_fails(client, m
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     person_id = str(uuid4())
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    # The router-conftest autouse fixture defaults the Getty prefetch gate to off;
+    # re-enable it here so this test can exercise the prefetch-failure branch.
+    monkeypatch.setattr(
+        "api.routers.admin_person_images._request_needs_getty_prefetch",
+        lambda _request: True,
+    )
 
     with patch(
         "api.routers.admin_person_images._get_person_details",

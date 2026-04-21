@@ -1908,10 +1908,20 @@ def test_post_social_account_catalog_run_cancel(client: TestClient, monkeypatch:
         "summary": {"total_jobs": 5, "failed_jobs": 1},
     }
 
-    with patch(
-        "trr_backend.repositories.social_season_analytics.cancel_social_account_catalog_run",
-        return_value=expected,
-    ) as mocked:
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.cancel_social_account_catalog_run",
+            return_value=expected,
+        ) as mocked,
+        # The cancel route schedules `reconcile_cancelled_shared_run` as a background
+        # task. FastAPI's TestClient runs background tasks synchronously after the
+        # response, and the real implementation tries to open a live DB pool — which
+        # blows up in CI with no DATABASE_URL configured. Stub it to a no-op.
+        patch(
+            "trr_backend.repositories.social_season_analytics.reconcile_cancelled_shared_run",
+            return_value=None,
+        ),
+    ):
         response = client.post(
             f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/cancel",
             headers={"Authorization": f"Bearer {token}"},
