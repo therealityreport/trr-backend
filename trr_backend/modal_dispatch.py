@@ -358,12 +358,30 @@ def _record_dispatcher_heartbeat(
     supported_platforms: list[str] | None = None,
 ) -> None:
     try:
-        from trr_backend.socials.control_plane import update_worker_heartbeat
+        from trr_backend.db import pg
+        from trr_backend.socials.control_plane import _resolve_runtime_version_stamp, update_worker_heartbeat
+
+        existing_metadata: dict[str, Any] = {}
+        try:
+            row = pg.fetch_one(
+                """
+                select metadata
+                  from social.scrape_workers
+                 where worker_id = %s
+                """,
+                [_dispatcher_worker_id(dispatcher_name)],
+            )
+            if isinstance((row or {}).get("metadata"), dict):
+                existing_metadata = dict((row or {}).get("metadata") or {})
+        except Exception:  # noqa: BLE001
+            existing_metadata = {}
 
         metadata = {
+            **existing_metadata,
             "dispatcher_name": dispatcher_name,
             "execution_backend_canonical": _MODAL_EXECUTION_BACKEND,
             "execution_mode_canonical": _REMOTE_EXECUTION_MODE,
+            "runtime_version": dict(_resolve_runtime_version_stamp()),
             **(metadata_updates or {}),
         }
         update_worker_heartbeat(

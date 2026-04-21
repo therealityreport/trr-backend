@@ -185,10 +185,15 @@ _COMMENTS_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _COMMENTS_COVERAGE_CACHE_LOCK = Lock()
 _MIRROR_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _MIRROR_COVERAGE_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_TTL_SECONDS", "20"))
+_ACCOUNT_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_TTL_SECONDS", "120"))
 _ACCOUNT_PROFILE_CACHE_MAX_ENTRIES = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES", "256"))
+_ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS = int(
+    os.getenv("SOCIAL_ACCOUNT_PROFILE_RUN_PROGRESS_CACHE_TTL_SECONDS", "3")
+)
 _ACCOUNT_PROFILE_SUMMARY_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_PROGRESS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_POSTS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_POSTS_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_HASHTAGS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
@@ -326,7 +331,7 @@ def _start_runs_in_background(
 
     def _runner() -> None:
         for index, run_id in enumerate(run_ids, start=1):
-            worker_id = f"{worker_prefix}:{index}"
+            worker_id = worker_prefix if len(run_ids) == 1 else f"{worker_prefix}:{index}"
             execute_run_with_inline_worker_registration(
                 run_id,
                 worker_id=worker_id,
@@ -810,6 +815,7 @@ def _account_profile_cache_key(
 
 def _clear_account_profile_caches() -> None:
     _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
+    _clear_ttl_cache(_ACCOUNT_PROFILE_PROGRESS_CACHE, _ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE, _ACCOUNT_PROFILE_HASHTAG_TIMELINE_CACHE_LOCK)
@@ -1067,9 +1073,7 @@ def _resolve_social_account_comments_route_execution(
             status_code=503,
             detail={
                 "code": (
-                    "SOCIAL_MODAL_EXECUTOR_REQUIRED"
-                    if requires_modal_executor
-                    else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
+                    "SOCIAL_MODAL_EXECUTOR_REQUIRED" if requires_modal_executor else "SOCIAL_REMOTE_JOB_PLANE_ENFORCED"
                 ),
                 "message": (
                     "Instagram comments scraping requires the Modal remote executor."
@@ -1101,14 +1105,35 @@ def _finalize_social_account_catalog_route_response(
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     run_id = str(result.get("run_id") or "").strip()
-    if not queue_enabled and run_id:
+    catalog_run_id = str(result.get("catalog_run_id") or run_id or "").strip()
+    comments_run_id = str(result.get("comments_run_id") or "").strip()
+    if not queue_enabled and catalog_run_id:
         logger.warning(
             "Catalog route using inline fallback: platform=%s queue_enabled=%s requires_modal_executor=%s",
             platform,
             queue_enabled,
             requires_modal_executor,
         )
-        _start_runs_in_background([run_id], background_tasks, worker_prefix=f"api-background:catalog:{platform}")
+        _start_runs_in_background(
+            [catalog_run_id],
+            background_tasks,
+            worker_prefix=f"api-background:catalog:{platform}",
+        )
+    if not queue_enabled and comments_run_id:
+        from trr_backend.repositories.social_season_analytics import (
+            INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+        )
+
+        _start_runs_in_background(
+            [comments_run_id],
+            background_tasks,
+            worker_prefix=f"api-background:comments:{platform}",
+            stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+            platform="instagram",
+            supported_platforms=["instagram"],
+            metadata_updates={"worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE},
+        )
     execution_mode, execution_mode_canonical, execution_mode_legacy = _resolve_social_execution_modes(
         queue_enabled=queue_enabled,
         used_inline_fallback=used_inline_fallback,
@@ -2877,6 +2902,22 @@ class CatalogBackfillRequest(BaseModel):
     backfill_scope: Literal["full_history", "bounded_window"] = Field(default="full_history")
     allow_inline_dev_fallback: bool = Field(default=False)
     execution_preference: Literal["auto", "prefer_local_inline"] = Field(default="auto")
+    selected_tasks: list[Literal["post_details", "comments", "media"]] | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def validate_selected_tasks(self) -> CatalogBackfillRequest:
+        if self.selected_tasks is None:
+            self.selected_tasks = ["post_details", "comments", "media"]
+            return self
+        normalized = [str(task or "").strip().lower() for task in self.selected_tasks if str(task or "").strip()]
+        if not normalized:
+            raise ValueError("selected_tasks must include at least one of post_details, comments, or media")
+        deduped: list[Literal["post_details", "comments", "media"]] = []
+        for task in ("post_details", "comments", "media"):
+            if task in normalized:
+                deduped.append(task)
+        self.selected_tasks = deduped
+        return self
 
 
 class CatalogSyncRecentRequest(BaseModel):
@@ -2893,6 +2934,12 @@ class CatalogSyncNewerRequest(BaseModel):
 class CatalogResumeTailRequest(BaseModel):
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
     allow_inline_dev_fallback: bool = Field(default=False)
+
+
+class CatalogRemediateDriftRequest(BaseModel):
+    run_id: UUID | None = None
+    requeue_canary: bool = Field(default=False)
+    source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
 
 
 class ApifyBackfillRequest(BaseModel):
@@ -2926,9 +2973,9 @@ class SocialAccountCommentsScrapeRequest(BaseModel):
     mode: Literal["profile", "single_post"] = Field(default="profile")
     source_scope: Literal["bravo", "creator", "community"] = Field(default="bravo")
     source_id: str | None = Field(default=None, min_length=1, max_length=64)
-    max_posts: int = Field(default=50, ge=1, le=500)
-    max_comments_per_post: int = Field(default=200, ge=1, le=1000000)
-    refresh_policy: Literal["stale_or_missing"] = Field(default="stale_or_missing")
+    max_posts: int | None = Field(default=None, ge=1, le=500)
+    max_comments_per_post: int | None = Field(default=None, ge=1, le=1000000)
+    refresh_policy: Literal["stale_or_missing", "all_saved_posts"] = Field(default="stale_or_missing")
     allow_inline_dev_fallback: bool = Field(default=False)
 
     @model_validator(mode="after")
@@ -4018,21 +4065,32 @@ def put_shared_account_sources_route(
 
 @router.get("/profiles/{platform}/{account_handle}/summary")
 def get_social_account_profile_summary_route(
+    request: Request,
     platform: str,
     account_handle: str,
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import get_social_account_profile_summary
+    from trr_backend.repositories.social_season_analytics import (
+        _normalize_social_account_profile_summary_detail,
+        get_social_account_profile_summary,
+    )
+
+    detail = _normalize_social_account_profile_summary_detail(request.query_params.get("detail"))
 
     cache_key = _account_profile_cache_key(
         surface="summary",
         platform=platform,
         account_handle=account_handle,
+        extra=(detail,),
     )
     try:
         return _resolve_account_profile_singleflight(
             cache_key,
-            lambda: get_social_account_profile_summary(platform=platform, account_handle=account_handle),
+            lambda: get_social_account_profile_summary(
+                platform=platform,
+                account_handle=account_handle,
+                detail=detail,
+            ),
             cache=_ACCOUNT_PROFILE_SUMMARY_CACHE,
             cache_lock=_ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK,
             ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
@@ -4045,6 +4103,29 @@ def get_social_account_profile_summary_route(
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Failed to fetch social account profile summary: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/live-profile-total")
+def get_social_account_live_profile_total_route(
+    platform: str,
+    account_handle: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_live_profile_total
+
+    try:
+        return get_social_account_live_profile_total(platform=platform, account_handle=account_handle)
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account live profile total: platform=%s account=%s",
             platform,
             account_handle,
         )
@@ -4287,7 +4368,8 @@ async def post_social_account_comments_scrape_route(
     used_inline_fallback = bool(execution_state["used_inline_fallback"])
     requires_modal_executor = bool(execution_state["requires_modal_executor"])
     try:
-        result = start_social_account_comments_scrape(
+        result = await run_in_threadpool(
+            start_social_account_comments_scrape,
             platform=platform,
             account_handle=account_handle,
             mode=payload.mode,
@@ -4391,6 +4473,35 @@ def get_social_account_catalog_posts_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.get("/profiles/{platform}/{account_handle}/catalog/posts/{source_id}/detail")
+def get_social_account_catalog_post_detail_route(
+    platform: str,
+    account_handle: str,
+    source_id: str,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_social_account_catalog_post_detail
+
+    try:
+        return get_social_account_catalog_post_detail(
+            platform=platform,
+            account_handle=account_handle,
+            source_id=source_id,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account catalog post detail: platform=%s account=%s source_id=%s",
+            platform,
+            account_handle,
+            source_id,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/hashtags")
@@ -4562,6 +4673,10 @@ def get_social_account_catalog_run_progress_route(
                 run_id=str(run_id),
                 recent_log_limit=recent_log_limit,
             ),
+            cache=_ACCOUNT_PROFILE_PROGRESS_CACHE,
+            cache_lock=_ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK,
+            ttl_seconds=_ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
@@ -4729,9 +4844,13 @@ def post_social_account_catalog_run_cancel_route(
     platform: str,
     account_handle: str,
     run_id: UUID,
+    background_tasks: BackgroundTasks,
     user: InternalAdminUser,
 ) -> dict[str, Any]:
-    from trr_backend.repositories.social_season_analytics import cancel_social_account_catalog_run
+    from trr_backend.repositories.social_season_analytics import (
+        cancel_social_account_catalog_run,
+        reconcile_cancelled_shared_run,
+    )
 
     try:
         result = cancel_social_account_catalog_run(
@@ -4739,7 +4858,9 @@ def post_social_account_catalog_run_cancel_route(
             account_handle=account_handle,
             run_id=str(run_id),
             cancelled_by=(user or {}).get("email"),
+            reconcile_summary=False,
         )
+        background_tasks.add_task(reconcile_cancelled_shared_run, str(run_id))
         _clear_account_profile_caches()
         return result
     except ValueError as exc:
@@ -4879,7 +5000,7 @@ async def post_social_account_catalog_backfill_route(
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
         _normalize_catalog_backfill_window,
-        start_social_account_catalog_backfill,
+        launch_social_account_catalog_backfill,
     )
 
     execution_state = _resolve_social_account_catalog_route_execution(
@@ -4898,7 +5019,8 @@ async def post_social_account_catalog_backfill_route(
             date_start=date_start,
             date_end=date_end,
         )
-        result = start_social_account_catalog_backfill(
+        result = await run_in_threadpool(
+            launch_social_account_catalog_backfill,
             platform=platform,
             account_handle=account_handle,
             source_scope=payload.source_scope,
@@ -4908,8 +5030,7 @@ async def post_social_account_catalog_backfill_route(
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
             execution_preference=payload.execution_preference,
-            catalog_action="backfill",
-            catalog_action_scope=payload.backfill_scope,
+            selected_tasks=payload.selected_tasks,
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
@@ -4944,6 +5065,35 @@ async def post_social_account_catalog_backfill_route(
         requires_modal_executor=requires_modal_executor,
         background_tasks=background_tasks,
     )
+
+
+@router.post("/profiles/{platform}/{account_handle}/catalog/remediate-drift")
+async def post_social_account_catalog_remediate_drift_route(
+    platform: str,
+    account_handle: str,
+    payload: CatalogRemediateDriftRequest,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    """Cancel and optionally replace a stale catalog run under the runtime-supersession guard."""
+    from trr_backend.repositories.social_season_analytics import (
+        remediate_social_account_catalog_runtime_supersession,
+    )
+
+    initiated_by = (user or {}).get("email")
+    try:
+        return remediate_social_account_catalog_runtime_supersession(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(payload.run_id) if payload.run_id else None,
+            requeue_canary=payload.requeue_canary,
+            source_scope=payload.source_scope,
+            initiated_by=initiated_by,
+            cancelled_by=initiated_by,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
 
 
 @router.post("/profiles/{platform}/{account_handle}/catalog/apify-backfill")
@@ -5139,10 +5289,11 @@ async def post_social_account_catalog_resume_tail_route(
     user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
+        SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS,
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
-        start_social_account_catalog_backfill,
+        launch_social_account_catalog_backfill,
     )
 
     execution_state = _resolve_social_account_catalog_route_execution(
@@ -5154,15 +5305,15 @@ async def post_social_account_catalog_resume_tail_route(
     requires_modal_executor = bool(execution_state["requires_modal_executor"])
 
     try:
-        result = start_social_account_catalog_backfill(
+        result = await run_in_threadpool(
+            launch_social_account_catalog_backfill,
             platform=platform,
             account_handle=account_handle,
             source_scope=payload.source_scope,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
-            catalog_action="backfill",
-            catalog_action_scope="full_history",
+            selected_tasks=list(SOCIAL_ACCOUNT_CATALOG_BACKFILL_SELECTED_TASKS),
         )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:

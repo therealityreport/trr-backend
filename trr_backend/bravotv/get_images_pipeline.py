@@ -843,7 +843,12 @@ def _normalize_external_ids(person_name: str) -> dict[str, Any]:
     try:
         db = create_supabase_admin_client()
         response = (
-            db.schema("core").table("people").select("id,name,external_ids").eq("name", person_name).limit(1).execute()
+            db.schema("core")
+            .table("people")
+            .select("id,full_name,external_ids")
+            .eq("full_name", person_name)
+            .limit(1)
+            .execute()
         )
     except Exception:
         return {}
@@ -1229,8 +1234,7 @@ def run_get_images_pipeline(
             if isinstance(getty_prefetched_assets, list):
                 prefetch_mode_label = normalized_getty_prefetch_mode or "full"
                 manifest["notes"].append(
-                    "getty_prefetched_assets supplied; "
-                    f"skipping live Getty search ({prefetch_mode_label})."
+                    f"getty_prefetched_assets supplied; skipping live Getty search ({prefetch_mode_label})."
                 )
                 _load_or_collect("getty", lambda: list(getty_prefetched_assets))
             else:
@@ -1247,8 +1251,7 @@ def run_get_images_pipeline(
             if isinstance(getty_prefetched_assets, list):
                 prefetch_mode_label = normalized_getty_prefetch_mode or "full"
                 manifest["notes"].append(
-                    "getty_prefetched_assets supplied; "
-                    f"skipping live Getty search ({prefetch_mode_label})."
+                    f"getty_prefetched_assets supplied; skipping live Getty search ({prefetch_mode_label})."
                 )
                 _load_or_collect("getty", lambda: list(getty_prefetched_assets))
             else:

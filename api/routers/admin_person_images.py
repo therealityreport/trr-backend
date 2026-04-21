@@ -1234,6 +1234,94 @@ def _normalize_operational_refresh_sources(
     )
 
 
+def _request_needs_getty_prefetch(request: RefreshImagesRequest) -> bool:
+    if request.expand_event_url:
+        return False
+    if request.getty_prefetched_assets is not None:
+        return False
+    requested_sources = {
+        str(source or "").strip().lower() for source in (request.sources or ALL_SOURCES) if str(source or "").strip()
+    }
+    return bool(requested_sources & {"all", "getty", "nbcumv"})
+
+
+def _hydrate_refresh_request_getty_prefetch(
+    request: RefreshImagesRequest,
+    *,
+    person_name: str | None,
+    show_name: str | None,
+) -> RefreshImagesRequest:
+    if not _request_needs_getty_prefetch(request):
+        return request
+
+    normalized_person_name = str(person_name or "").strip()
+    if not normalized_person_name:
+        raise HTTPException(status_code=400, detail="Getty prefetch requires a person name.")
+
+    from trr_backend.integrations.getty_local_prefetch import (
+        GettyPrefetchSessionError,
+        fetch_person_getty_prefetch_payload,
+    )
+
+    prefetch_mode = str(request.getty_prefetch_mode or "full").strip().lower() or "full"
+    transport_mode = str(request.getty_transport_mode or "auto").strip().lower() or "auto"
+    try:
+        prefetch_payload = fetch_person_getty_prefetch_payload(
+            normalized_person_name,
+            show_name=show_name,
+            mode=prefetch_mode,
+            transport_mode=transport_mode,
+        )
+    except GettyPrefetchSessionError as exc:
+        raise HTTPException(status_code=503, detail=f"Getty prefetch failed [{exc.code}]: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Getty prefetch failed: {exc}") from exc
+
+    deferred_editorial_ids = [
+        str(value).strip() for value in (prefetch_payload.get("deferred_editorial_ids") or []) if str(value).strip()
+    ]
+    enrichment_pending = str(prefetch_payload.get("enrichment_status") or "").strip().lower() == "pending"
+    return request.model_copy(
+        update={
+            "getty_prefetch_attempted": True,
+            "getty_prefetch_succeeded": True,
+            "getty_prefetch_error_code": None,
+            "getty_prefetched_assets": (
+                list(prefetch_payload.get("merged")) if isinstance(prefetch_payload.get("merged"), list) else []
+            ),
+            "getty_prefetched_events": (
+                list(prefetch_payload.get("merged_events"))
+                if isinstance(prefetch_payload.get("merged_events"), list)
+                else []
+            ),
+            "getty_prefetched_queries": (
+                list(prefetch_payload.get("query_summaries"))
+                if isinstance(prefetch_payload.get("query_summaries"), list)
+                else []
+            ),
+            "getty_prefetch_mode": str(prefetch_payload.get("prefetch_mode") or prefetch_mode).strip() or prefetch_mode,
+            "getty_deferred_enrichment": enrichment_pending,
+            "getty_deferred_editorial_ids": deferred_editorial_ids,
+            "getty_prefetch_auth_mode": str(prefetch_payload.get("auth_mode") or "").strip() or None,
+            "getty_prefetch_auth_warning": str(prefetch_payload.get("auth_warning") or "").strip() or None,
+            "getty_transport_mode": str(prefetch_payload.get("getty_transport_mode") or "").strip() or None,
+            "getty_proxy_fingerprint": str(prefetch_payload.get("getty_proxy_fingerprint") or "").strip() or None,
+            "getty_runtime_probe_status": (
+                str(prefetch_payload.get("getty_runtime_probe_status") or "").strip() or None
+            ),
+            "getty_runtime_probe_reason": (
+                str(prefetch_payload.get("getty_runtime_probe_reason") or "").strip() or None
+            ),
+            "getty_fallback_invoked": bool(prefetch_payload.get("getty_fallback_invoked")),
+            "getty_primary_failure_reason": (
+                str(prefetch_payload.get("getty_primary_failure_reason") or "").strip() or None
+            ),
+            "getty_session_validated": bool(prefetch_payload.get("session_validated")),
+            "getty_session_truncated": bool(prefetch_payload.get("session_truncated")),
+        }
+    )
+
+
 def _read_positive_int_env(name: str, default: int) -> int:
     return person_image_source_policy.read_positive_int_env(name, default)
 
@@ -2077,7 +2165,8 @@ def _import_nbcumv_person_media(
 
         getty_session, remote_transport_metadata = getty_transport_integration.build_remote_getty_session()
         result["getty_proxy_fingerprint"] = (
-            str(remote_transport_metadata.get("getty_proxy_fingerprint") or "").strip() or result["getty_proxy_fingerprint"]
+            str(remote_transport_metadata.get("getty_proxy_fingerprint") or "").strip()
+            or result["getty_proxy_fingerprint"]
         )
         result["getty_transport_mode"] = (
             str(remote_transport_metadata.get("getty_transport_mode") or "").strip() or result["getty_transport_mode"]
@@ -2092,8 +2181,7 @@ def _import_nbcumv_person_media(
             )
         if getty_session is None:
             result["getty_primary_failure_reason"] = (
-                str(remote_transport_metadata.get("getty_primary_failure_reason") or "").strip()
-                or "proxy_unconfigured"
+                str(remote_transport_metadata.get("getty_primary_failure_reason") or "").strip() or "proxy_unconfigured"
             )
             result["getty_transport_mode"] = "local_browser"
             result["getty_fallback_invoked"] = True
@@ -3420,7 +3508,9 @@ def _import_nbcumv_person_media(
         broad_count = len(getty_assets) - bravo_count
         result["getty_prefetched"] = True
         result["getty_search_attempted"] = True
-        result["getty_access_mode"] = "prefetched_remote" if result.get("getty_transport_mode") == "decodo_remote" else "prefetched_local"
+        result["getty_access_mode"] = (
+            "prefetched_remote" if result.get("getty_transport_mode") == "decodo_remote" else "prefetched_local"
+        )
         result["getty_auth_mode"] = str(getty_prefetch_auth_mode or "").strip() or None
         result["getty_prefetch_auth_warning"] = str(getty_prefetch_auth_warning or "").strip() or None
         result["getty_session_validated"] = bool(getty_session_validated)
@@ -10751,6 +10841,11 @@ def refresh_person_images(
     tmdb_person_id = _get_tmdb_id(db, person_id_str, external_ids)
     person_name = person.get("full_name")
     show_name = request.show_name or _get_show_name(db, request.show_id)
+    request = _hydrate_refresh_request_getty_prefetch(
+        request,
+        person_name=person_name,
+        show_name=show_name,
+    )
     wwhl_credit_episode_imdb_ids = _load_person_wwhl_episode_imdb_ids_from_credits(db, person_id_str)
     sources, fandom_skipped = _resolve_refresh_sources(db, request)
     sources = _normalize_operational_refresh_sources(sources, request)
@@ -15312,7 +15407,9 @@ async def refresh_person_images_stream(
             "getty_runtime_probe_status": str(nbcumv_result.get("getty_runtime_probe_status") or "").strip() or None,
             "getty_runtime_probe_reason": str(nbcumv_result.get("getty_runtime_probe_reason") or "").strip() or None,
             "getty_fallback_invoked": bool(nbcumv_result.get("getty_fallback_invoked")),
-            "getty_primary_failure_reason": str(nbcumv_result.get("getty_primary_failure_reason") or "").strip() or None,
+            "getty_primary_failure_reason": (
+                str(nbcumv_result.get("getty_primary_failure_reason") or "").strip() or None
+            ),
             "getty_session_validated": bool(nbcumv_result.get("getty_session_validated")),
             "getty_session_truncated": bool(nbcumv_result.get("getty_session_truncated")),
             "matched_via_image_search": int(nbcumv_result.get("matched_via_image_search") or 0),
@@ -15441,6 +15538,41 @@ async def refresh_person_images_stream(
         return stream_response
 
     actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    try:
+        if _request_needs_getty_prefetch(request):
+            from trr_backend.db.admin import create_supabase_admin_client
+
+            startup_db = db or create_supabase_admin_client()
+            person = _get_person_details(startup_db, person_id_str)
+            if not person:
+                raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
+            request = _hydrate_refresh_request_getty_prefetch(
+                request,
+                person_name=person.get("full_name"),
+                show_name=request.show_name or _get_show_name(startup_db, request.show_id),
+            )
+    except HTTPException as exc:
+        detail = str(exc.detail or "Getty prefetch failed")
+        return _terminal_sse_error_response(
+            operation_id=operation_id,
+            run_id=run_id,
+            stage="startup",
+            error="Refresh stream failed",
+            detail=detail,
+            error_code="GETTY_PREFETCH_FAILED",
+            checkpoint="getty_prefetch_failed",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Getty prefetch startup failed for %s: %s", person_id_str, exc)
+        return _terminal_sse_error_response(
+            operation_id=operation_id,
+            run_id=run_id,
+            stage="startup",
+            error="Refresh stream failed",
+            detail=f"Getty prefetch failed: {exc}",
+            error_code="GETTY_PREFETCH_FAILED",
+            checkpoint="getty_prefetch_failed",
+        )
     request_payload = {
         "person_id": person_id_str,
         "payload": request.model_dump(mode="json"),

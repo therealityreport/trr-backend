@@ -111,6 +111,92 @@ def _set_run_status(run_id: str, status: str) -> None:
         legacy._invalidate_week_detail_cache_after_run_terminal_status()
 
 
+def _merge_run_config(run_id: str, *, config_updates: dict[str, Any]) -> dict[str, Any]:
+    row = (
+        legacy.pg.fetch_one(
+            """
+            update social.scrape_runs
+            set config = coalesce(config, '{}'::jsonb) || %s::jsonb
+            where id = %s::uuid
+            returning config
+            """,
+            [legacy._json_dumps(legacy._metadata_dict(config_updates)), run_id],
+        )
+        or {}
+    )
+    legacy._invalidate_queue_status_cache()
+    return legacy._metadata_dict(row.get("config"))
+
+
+def _maybe_start_deferred_comments_followup(
+    *,
+    run_id: str,
+    run_status: str,
+    run_config: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    if str(run_status or "").strip().lower() != "completed":
+        return
+    if not legacy._shared_account_catalog_scrape_complete(run_config=run_config, summary=summary):
+        return
+    followup = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
+    if str(followup.get("state") or "").strip().lower() != "pending":
+        return
+    if str(followup.get("platform") or "").strip().lower() != "instagram":
+        return
+
+    now_iso = legacy._iso(legacy._now_utc())
+    try:
+        comments_result = legacy.start_social_account_comments_scrape(
+            str(followup.get("platform") or "").strip(),
+            str(followup.get("account_handle") or "").strip(),
+            mode="profile",
+            source_scope=str(followup.get("source_scope") or "bravo"),
+            max_posts=None,
+            max_comments_per_post=None,
+            refresh_policy=str(followup.get("refresh_policy") or "all_saved_posts"),
+            initiated_by="catalog_completion_followup",
+            allow_local_dev_inline_bypass=bool(followup.get("allow_local_dev_inline_bypass")),
+            comments_enable_media_followups=bool(followup.get("comments_enable_media_followups")),
+            launch_group_id=str(followup.get("launch_group_id") or "").strip() or None,
+        )
+        _merge_run_config(
+            run_id,
+            config_updates={
+                "deferred_comments_followup": {
+                    **followup,
+                    "state": "started",
+                    "started_at": now_iso,
+                    "comments_run_id": str((comments_result or {}).get("run_id") or "").strip() or None,
+                    "runtime_version": legacy._metadata_dict((comments_result or {}).get("runtime_version"))
+                    or legacy._metadata_dict(followup.get("runtime_version"))
+                    or dict(legacy._resolve_runtime_version_stamp()),
+                    "created_by_runtime_version": legacy._metadata_dict(
+                        (comments_result or {}).get("created_by_runtime_version")
+                    )
+                    or legacy._metadata_dict(followup.get("created_by_runtime_version"))
+                    or dict(legacy._resolve_runtime_version_stamp()),
+                }
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _merge_run_config(
+            run_id,
+            config_updates={
+                "deferred_comments_followup": {
+                    **followup,
+                    "state": "failed",
+                    "failed_at": now_iso,
+                    "error_message": str(exc),
+                }
+            },
+        )
+        legacy.logger.exception(
+            "Failed to auto-start deferred Instagram comments followup after run finalization: run=%s",
+            run_id,
+        )
+
+
 def _status_is_active(status: str | None) -> bool:
     return str(status or "").strip().lower() in {"queued", "pending", "retrying", "running"}
 
@@ -549,15 +635,22 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
             run_id
         )
         if status_breakdown["running_jobs"] > 0:
-            _set_run_status(run_id, "running")
+            next_status = "running"
         elif status_breakdown["cancelling_jobs"] > 0:
-            _set_run_status(run_id, "cancelling")
+            next_status = "cancelling"
         elif active_jobs > 0 or status_breakdown["queued_jobs"] > 0:
-            _set_run_status(run_id, "queued")
+            next_status = "queued"
         elif failed_jobs > 0 or fetch_terminal_error:
-            _set_run_status(run_id, "failed")
+            next_status = "failed"
         else:
-            _set_run_status(run_id, "completed")
+            next_status = "completed"
+        _set_run_status(run_id, next_status)
+        _maybe_start_deferred_comments_followup(
+            run_id=run_id,
+            run_status=next_status,
+            run_config=current_config,
+            summary=summary,
+        )
         if legacy._column_exists("social", "scrape_runs", "sync_session_id"):
             run_row = (
                 legacy.pg.fetch_one(

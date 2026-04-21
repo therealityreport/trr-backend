@@ -30,6 +30,7 @@ fields. Unknown/empty shortcodes cause a skip (logged).
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,6 +61,7 @@ _INT_MEDIA_TYPE_TO_STRING = {
 class PersistedInstagramPosts:
     posts_upserted: int
     posts_skipped: int
+    posts_skipped_by_reason: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -341,28 +343,82 @@ def persist_instagram_posts(
     context = repo.get_season_context(season_id) if season_id else None
     posts_upserted = 0
     posts_skipped = 0
+    posts_skipped_by_reason: dict[str, int] = {}
+
+    def _record_skip(reason: str) -> None:
+        nonlocal posts_skipped
+        posts_skipped += 1
+        posts_skipped_by_reason[reason] = int(posts_skipped_by_reason.get(reason) or 0) + 1
 
     with pg.db_connection() as conn:
         for node in post_nodes:
             if not isinstance(node, dict):
-                posts_skipped += 1
+                _record_skip("invalid_node_type")
                 continue
             shortcode = _extract_shortcode(node)
             if not shortcode:
-                posts_skipped += 1
+                _record_skip("missing_shortcode")
                 continue
             try:
                 dto = _graph_node_to_post_dto(node, account_handle=account_handle)
-                repo._upsert_instagram_post(
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to adapt post %s into canonical DTO", shortcode)
+                _record_skip("dto_adaptation_exception")
+                continue
+
+            try:
+                upserted = repo._upsert_instagram_post(
                     context,
                     job_id=job_id,
                     account=account_handle,
                     post=dto,
                     conn=conn,
                 )
-                posts_upserted += 1
             except Exception:  # noqa: BLE001
                 logger.exception("Failed to upsert post %s via canonical helper", shortcode)
-                posts_skipped += 1
+                _record_skip("canonical_upsert_exception")
+                continue
 
-    return PersistedInstagramPosts(posts_upserted=posts_upserted, posts_skipped=posts_skipped)
+            if not upserted:
+                logger.warning("Canonical Instagram post upsert returned no row for shortcode=%s", shortcode)
+                _record_skip("canonical_upsert_returned_none")
+                continue
+
+            posts_upserted += 1
+
+    if job_id:
+        existing_row = pg.fetch_one(
+            "select metadata from social.scrape_jobs where id = %s",
+            [job_id],
+        ) or {}
+        metadata = dict(existing_row.get("metadata") or {})
+        existing_summary = metadata.get("posts_scrapling_persist_diagnostics")
+        existing_reasons = (
+            dict(existing_summary.get("posts_skipped_by_reason") or {})
+            if isinstance(existing_summary, dict)
+            else {}
+        )
+        merged_reasons = {
+            reason: int(existing_reasons.get(reason) or 0) + int(posts_skipped_by_reason.get(reason) or 0)
+            for reason in sorted(set(existing_reasons) | set(posts_skipped_by_reason))
+        }
+        metadata["posts_scrapling_persist_diagnostics"] = {
+            "posts_upserted": int((existing_summary or {}).get("posts_upserted") or 0) + posts_upserted,
+            "posts_skipped": int((existing_summary or {}).get("posts_skipped") or 0) + posts_skipped,
+            "posts_skipped_by_reason": merged_reasons,
+        }
+        pg.fetch_one(
+            """
+            update social.scrape_jobs
+            set metadata = %s::jsonb
+            where id = %s
+            returning id::text
+            """,
+            [json.dumps(metadata), job_id],
+        )
+
+    return PersistedInstagramPosts(
+        posts_upserted=posts_upserted,
+        posts_skipped=posts_skipped,
+        posts_skipped_by_reason=posts_skipped_by_reason,
+    )

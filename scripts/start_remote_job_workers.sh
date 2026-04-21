@@ -9,6 +9,29 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
 fi
 
+resolve_python_bin() {
+  if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+    printf '%s\n' "$ROOT_DIR/.venv/bin/python"
+    return
+  fi
+  if command -v python3.11 >/dev/null 2>&1; then
+    command -v python3.11
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return
+  fi
+  if command -v python >/dev/null 2>&1; then
+    command -v python
+    return
+  fi
+  echo "[remote-workers] ERROR: no usable Python interpreter found (.venv/bin/python, python3.11, python3, python)." >&2
+  exit 1
+}
+
+PYTHON_BIN="${PYTHON_BIN:-$(resolve_python_bin)}"
+
 REMOTE_EXECUTOR="${TRR_REMOTE_EXECUTOR:-legacy_worker}"
 MODAL_ENABLED="${TRR_MODAL_ENABLED:-0}"
 
@@ -109,11 +132,11 @@ stop_all() {
 
 trap stop_all EXIT INT TERM
 
-echo "[remote-workers] config admin=${ADMIN_ENABLED}/${ADMIN_COUNT} reddit=${REDDIT_ENABLED}/${REDDIT_COUNT} google_news=${GOOGLE_NEWS_ENABLED}/${GOOGLE_NEWS_COUNT} social_ingest=${SOCIAL_INGEST_ENABLED} poll=${POLL_SECONDS}s"
+echo "[remote-workers] config admin=${ADMIN_ENABLED}/${ADMIN_COUNT} reddit=${REDDIT_ENABLED}/${REDDIT_COUNT} google_news=${GOOGLE_NEWS_ENABLED}/${GOOGLE_NEWS_COUNT} social_ingest=${SOCIAL_INGEST_ENABLED} poll=${POLL_SECONDS}s python=${PYTHON_BIN}"
 
 if flag_is_enabled "$ADMIN_ENABLED"; then
   ADMIN_COUNT="$(normalize_count "$ADMIN_COUNT" "TRR_ADMIN_OPERATION_WORKER_COUNT")"
-  admin_cmd=(python -m scripts.workers.admin_operations_worker --poll-seconds "$POLL_SECONDS")
+  admin_cmd=("$PYTHON_BIN" -m scripts.workers.admin_operations_worker --poll-seconds "$POLL_SECONDS")
   if [[ -n "$ADMIN_EXCLUDE_TYPES" ]]; then
     IFS=',' read -r -a admin_excludes <<<"$ADMIN_EXCLUDE_TYPES"
     for excluded in "${admin_excludes[@]}"; do
@@ -127,11 +150,11 @@ if flag_is_enabled "$ADMIN_ENABLED"; then
 fi
 if flag_is_enabled "$REDDIT_ENABLED"; then
   REDDIT_COUNT="$(normalize_count "$REDDIT_COUNT" "TRR_REDDIT_REFRESH_WORKER_COUNT")"
-  start_worker_group "reddit-refresh" "$REDDIT_COUNT" python -m scripts.workers.reddit_refresh_worker --poll-seconds "$POLL_SECONDS"
+  start_worker_group "reddit-refresh" "$REDDIT_COUNT" "$PYTHON_BIN" -m scripts.workers.reddit_refresh_worker --poll-seconds "$POLL_SECONDS"
 fi
 if flag_is_enabled "$GOOGLE_NEWS_ENABLED"; then
   GOOGLE_NEWS_COUNT="$(normalize_count "$GOOGLE_NEWS_COUNT" "TRR_GOOGLE_NEWS_WORKER_COUNT")"
-  start_worker_group "google-news" "$GOOGLE_NEWS_COUNT" python -m scripts.workers.google_news_worker --poll-seconds "$POLL_SECONDS" --lease-seconds "$GOOGLE_NEWS_LEASE_SECONDS"
+  start_worker_group "google-news" "$GOOGLE_NEWS_COUNT" "$PYTHON_BIN" -m scripts.workers.google_news_worker --poll-seconds "$POLL_SECONDS" --lease-seconds "$GOOGLE_NEWS_LEASE_SECONDS"
 fi
 if flag_is_enabled "$SOCIAL_INGEST_ENABLED"; then
   SOCIAL_POSTS_WORKERS="$(normalize_optional_count "$SOCIAL_POSTS_WORKERS" "TRR_SOCIAL_INGEST_WORKER_POSTS")"
@@ -140,22 +163,22 @@ if flag_is_enabled "$SOCIAL_INGEST_ENABLED"; then
   SOCIAL_MEDIA_MIRROR_WORKERS="$(normalize_optional_count "$SOCIAL_MEDIA_MIRROR_WORKERS" "TRR_SOCIAL_INGEST_WORKER_MEDIA_MIRROR")"
   SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS="$(normalize_optional_count "$SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS" "TRR_SOCIAL_INGEST_WORKER_COMMENT_MEDIA_MIRROR")"
   if [[ "$SOCIAL_POSTS_WORKERS" -gt 0 ]]; then
-    start_worker "social-ingest:posts" python -m scripts.socials.worker --stage posts --parallel "$SOCIAL_POSTS_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
+    start_worker "social-ingest:posts" "$PYTHON_BIN" -m scripts.socials.worker --stage posts --parallel "$SOCIAL_POSTS_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
   fi
   if [[ "$SOCIAL_COMMENTS_WORKERS" -gt 0 ]]; then
-    start_worker "social-ingest:comments" python -m scripts.socials.worker --stage comments --parallel "$SOCIAL_COMMENTS_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
+    start_worker "social-ingest:comments" "$PYTHON_BIN" -m scripts.socials.worker --stage comments --parallel "$SOCIAL_COMMENTS_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
   fi
   if [[ "$SOCIAL_COMMENTS_SCRAPLING_WORKERS" -gt 0 ]]; then
     # P0-2: Dedicated lane. The wrapper sets SOCIAL_WORKER_LANE and prepends
     # `--stage comments_scrapling --platform instagram` so this process only
     # claims jobs that require the `instagram_comments_scrapling` lane.
-    start_worker "social-ingest:comments-scrapling" python -m scripts.socials.instagram.comments_worker --parallel "$SOCIAL_COMMENTS_SCRAPLING_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
+    start_worker "social-ingest:comments-scrapling" "$PYTHON_BIN" -m scripts.socials.instagram.comments_worker --parallel "$SOCIAL_COMMENTS_SCRAPLING_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
   fi
   if [[ "$SOCIAL_MEDIA_MIRROR_WORKERS" -gt 0 ]]; then
-    start_worker "social-ingest:media-mirror" python -m scripts.socials.worker --stage media_mirror --parallel "$SOCIAL_MEDIA_MIRROR_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
+    start_worker "social-ingest:media-mirror" "$PYTHON_BIN" -m scripts.socials.worker --stage media_mirror --parallel "$SOCIAL_MEDIA_MIRROR_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
   fi
   if [[ "$SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS" -gt 0 ]]; then
-    start_worker "social-ingest:comment-media-mirror" python -m scripts.socials.worker --stage comment_media_mirror --parallel "$SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
+    start_worker "social-ingest:comment-media-mirror" "$PYTHON_BIN" -m scripts.socials.worker --stage comment_media_mirror --parallel "$SOCIAL_COMMENT_MEDIA_MIRROR_WORKERS" --interval "$SOCIAL_POLL_SECONDS"
   fi
 fi
 

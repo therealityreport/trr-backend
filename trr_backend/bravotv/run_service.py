@@ -91,7 +91,9 @@ def _fetch_show_row(show_id: str) -> dict[str, Any]:
 
 def _fetch_person_row(person_id: str) -> dict[str, Any]:
     db = create_supabase_admin_client()
-    response = db.schema("core").table("people").select("id,name,external_ids").eq("id", person_id).limit(1).execute()
+    response = (
+        db.schema("core").table("people").select("id,full_name,external_ids").eq("id", person_id).limit(1).execute()
+    )
     if hasattr(response, "error") and response.error:
         raise RuntimeError(f"Failed to load person: {response.error}")
     rows = response.data or []
@@ -104,7 +106,7 @@ def _fetch_person_aliases(person_id: str) -> set[str]:
     db = create_supabase_admin_client()
     aliases: set[str] = set()
     person = _fetch_person_row(person_id)
-    aliases.add(_normalize_name(person.get("name")))
+    aliases.add(_normalize_name(person.get("full_name")))
     overrides = (
         db.schema("core").table("people_overrides").select("full_name_override").eq("person_id", person_id).execute()
     )
@@ -771,7 +773,7 @@ def execute_bravotv_image_run(
         show_name = str(show_row.get("name") or "").strip() or None
     if person_id:
         person_row = _fetch_person_row(person_id)
-        person_name = str(person_row.get("name") or "").strip() or None
+        person_name = str(person_row.get("full_name") or "").strip() or None
         external_ids = _safe_json(person_row.get("external_ids"))
         imdb_id = str(external_ids.get("imdb") or "").strip() or None
         tmdb_raw = str(external_ids.get("tmdb") or "").strip()

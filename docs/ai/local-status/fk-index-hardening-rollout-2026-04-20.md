@@ -1,5 +1,16 @@
 # FK Index Hardening Rollout — Closeout
 
+## Handoff Snapshot
+```yaml
+handoff:
+  include: true
+  state: recent
+  last_updated: 2026-04-20
+  current_phase: "closeout complete"
+  next_action: "Monitor planner usage for the new indexes over the next 24-48h and merge the rollout branch via PR."
+  detail: self
+```
+
 Completed: 2026-04-20
 Branch: `feat/fk-index-hardening-rollout` (26 commits off `f2529eb`)
 

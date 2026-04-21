@@ -33,6 +33,7 @@ def main() -> int:
         )
     except SocialBladeRefreshError as exc:
         raise RuntimeError(str(exc)) from exc
+    previous_run = (after.get("previous_run") or {}) if isinstance(after, dict) else {}
 
     print(
         json.dumps(
@@ -43,6 +44,8 @@ def main() -> int:
                 "before_scraped_at": before_scraped_at,
                 "after_scraped_at": after.get("scraped_at"),
                 "refresh_status": after.get("refresh_status"),
+                "previous_run_scraped_at": previous_run.get("scraped_at"),
+                "previous_run_available": bool(previous_run),
             },
             indent=2,
         )

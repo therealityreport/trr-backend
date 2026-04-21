@@ -36,8 +36,8 @@ if TYPE_CHECKING:
 
 DEFAULT_POOL_MINCONN = 2
 DEFAULT_POOL_MAXCONN = 24
-DEFAULT_SESSION_POOLER_MINCONN = 1
-DEFAULT_SESSION_POOLER_MAXCONN = 2
+DEFAULT_SESSION_POOLER_MINCONN = 4
+DEFAULT_SESSION_POOLER_MAXCONN = 16
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
 DEFAULT_QUERY_TRANSIENT_ATTEMPTS = 3
@@ -222,6 +222,20 @@ def _resolve_pool_sizing(url: str) -> dict[str, Any]:
     maxconn_overridden = _env_has_value("TRR_DB_POOL_MAXCONN")
     minconn = _env_int("TRR_DB_POOL_MINCONN", default_minconn)
     maxconn = _env_int("TRR_DB_POOL_MAXCONN", default_maxconn)
+    requested_minconn = minconn
+    requested_maxconn = maxconn
+    minconn_source = "env:TRR_DB_POOL_MINCONN" if minconn_overridden else "default"
+    maxconn_source = "env:TRR_DB_POOL_MAXCONN" if maxconn_overridden else "default"
+    session_pooler_override_clamped = False
+    if session_pooler and _is_local_or_dev_runtime():
+        if minconn > DEFAULT_SESSION_POOLER_MINCONN:
+            minconn = DEFAULT_SESSION_POOLER_MINCONN
+            minconn_source = "clamped:session_pooler_default"
+            session_pooler_override_clamped = True
+        if maxconn > DEFAULT_SESSION_POOLER_MAXCONN:
+            maxconn = DEFAULT_SESSION_POOLER_MAXCONN
+            maxconn_source = "clamped:session_pooler_default"
+            session_pooler_override_clamped = True
     maxconn = max(minconn, maxconn)
     return {
         "session_pooler": session_pooler,
@@ -229,8 +243,11 @@ def _resolve_pool_sizing(url: str) -> dict[str, Any]:
         "default_maxconn": default_maxconn,
         "minconn": minconn,
         "maxconn": maxconn,
-        "minconn_source": "env:TRR_DB_POOL_MINCONN" if minconn_overridden else "default",
-        "maxconn_source": "env:TRR_DB_POOL_MAXCONN" if maxconn_overridden else "default",
+        "requested_minconn": requested_minconn,
+        "requested_maxconn": requested_maxconn,
+        "minconn_source": minconn_source,
+        "maxconn_source": maxconn_source,
+        "session_pooler_override_clamped": session_pooler_override_clamped,
         "using_tiny_session_defaults": (
             session_pooler
             and not minconn_overridden
@@ -552,22 +569,41 @@ def _get_pool() -> ThreadedConnectionPool:
                         sizing["maxconn"],
                     )
                 elif sizing["session_pooler"] and (
-                    int(sizing["minconn"]) > DEFAULT_SESSION_POOLER_MINCONN
+                    bool(sizing.get("session_pooler_override_clamped"))
+                    or int(sizing["minconn"]) > DEFAULT_SESSION_POOLER_MINCONN
                     or int(sizing["maxconn"]) > DEFAULT_SESSION_POOLER_MAXCONN
                 ):
-                    logger.warning(
-                        (
-                            "[db-pool] oversized_session_pool_override source=%s host=%s port=%s "
-                            "minconn=%s maxconn=%s default_minconn=%s default_maxconn=%s"
-                        ),
-                        candidate_detail["source"],
-                        candidate_detail["host"],
-                        candidate_detail["port"],
-                        sizing["minconn"],
-                        sizing["maxconn"],
-                        sizing["default_minconn"],
-                        sizing["default_maxconn"],
-                    )
+                    if bool(sizing.get("session_pooler_override_clamped")):
+                        logger.warning(
+                            (
+                                "[db-pool] clamped_session_pool_override source=%s host=%s port=%s "
+                                "requested_minconn=%s requested_maxconn=%s effective_minconn=%s "
+                                "effective_maxconn=%s default_minconn=%s default_maxconn=%s"
+                            ),
+                            candidate_detail["source"],
+                            candidate_detail["host"],
+                            candidate_detail["port"],
+                            sizing["requested_minconn"],
+                            sizing["requested_maxconn"],
+                            sizing["minconn"],
+                            sizing["maxconn"],
+                            sizing["default_minconn"],
+                            sizing["default_maxconn"],
+                        )
+                    else:
+                        logger.warning(
+                            (
+                                "[db-pool] oversized_session_pool_override source=%s host=%s port=%s "
+                                "minconn=%s maxconn=%s default_minconn=%s default_maxconn=%s"
+                            ),
+                            candidate_detail["source"],
+                            candidate_detail["host"],
+                            candidate_detail["port"],
+                            sizing["minconn"],
+                            sizing["maxconn"],
+                            sizing["default_minconn"],
+                            sizing["default_maxconn"],
+                        )
                 return _pool
             except Exception as error:
                 init_errors.append(error)

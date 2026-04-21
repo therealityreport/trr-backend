@@ -408,7 +408,7 @@ def test_get_pool_logs_effective_session_pooler_defaults_warning(
         with pg.db_connection():
             pass
 
-    assert "minconn=1 maxconn=2" in caplog.text
+    assert "minconn=4 maxconn=16" in caplog.text
     assert "minconn_source=default maxconn_source=default" in caplog.text
     assert "application_name=trr-backend" in caplog.text
     assert "session_pooler_tiny_defaults" in caplog.text
@@ -421,8 +421,23 @@ def test_resolve_pool_sizing_keeps_production_session_defaults_conservative(monk
 
     sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
-    assert sizing["minconn"] == 1
-    assert sizing["maxconn"] == 2
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 16
+
+
+def test_resolve_pool_sizing_clamps_local_session_pooler_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("TRR_DB_POOL_MINCONN", "6")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "20")
+
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
+
+    assert sizing["requested_minconn"] == 6
+    assert sizing["requested_maxconn"] == 20
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 16
+    assert sizing["session_pooler_override_clamped"] is True
+    assert sizing["maxconn_source"] == "clamped:session_pooler_default"
 
 
 def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pytest.MonkeyPatch) -> None:

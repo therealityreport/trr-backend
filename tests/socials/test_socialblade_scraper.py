@@ -13,6 +13,7 @@ from trr_backend.socials.socialblade.scraper import (
     _page_access_denied,
     _scrape_socialblade_in_context,
     _socialblade_profile_url,
+    scrape_socialblade,
 )
 
 BODY_TEXT = """
@@ -162,7 +163,9 @@ def test_page_access_denied_detects_cloudflare_block() -> None:
 
 
 def test_socialblade_profile_url_switches_route_by_platform() -> None:
-    assert _socialblade_profile_url("instagram", "lisabarlow14") == "https://socialblade.com/instagram/user/lisabarlow14"
+    assert (
+        _socialblade_profile_url("instagram", "lisabarlow14") == "https://socialblade.com/instagram/user/lisabarlow14"
+    )
     assert _socialblade_profile_url("facebook", "bravotv") == "https://socialblade.com/facebook/user/bravotv"
     assert _socialblade_profile_url("youtube", "facebookapp") == "https://socialblade.com/youtube/handle/facebookapp"
     assert _socialblade_profile_url("youtube", "UCabc123") == "https://socialblade.com/youtube/channel/UCabc123"
@@ -500,3 +503,39 @@ def test_scrape_context_configures_page_controls_before_table_fallback(
     assert calls[:2] == ["configure_controls", "evaluate_table"]
     assert payload["history_source"] == "table_fallback"
     assert payload["daily_channel_metrics_60day"]["period"] == "Last 60 Days"
+
+
+def test_scrape_socialblade_uses_visible_browser_retry_when_scrapling_path_is_challenged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_scrapling(*_args, **_kwargs):
+        raise RuntimeError("scrapling failed") from SocialBladeEndpointError("/api/trpc/instagram.monthly?batch=1", 412)
+
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._run_scrapling_socialblade_fetch",
+        fake_run_scrapling,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper.scrape_socialblade_with_shared_browser_session",
+        lambda handle, platform="instagram", playwright=None: {
+            "username": handle,
+            "platform": platform,
+            "history_source": "authenticated_api",
+            "stats_refreshed": True,
+        },
+    )
+
+    payload = scrape_socialblade(
+        "heathergay",
+        {"cf_clearance": "token"},
+        platform="instagram",
+        allow_login_fallback=False,
+        allow_visible_browser_retry=True,
+    )
+
+    assert payload == {
+        "username": "heathergay",
+        "platform": "instagram",
+        "history_source": "authenticated_api",
+        "stats_refreshed": True,
+    }

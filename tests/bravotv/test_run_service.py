@@ -83,7 +83,11 @@ def test_build_asset_payload_preserves_getty_large_and_thumb_metadata() -> None:
 
 def test_execute_bravotv_image_run_requires_local_getty_prefetch_for_remote_modal(monkeypatch) -> None:
     monkeypatch.setattr(run_service, "execution_backend_canonical", lambda: "modal")
-    monkeypatch.setattr(run_service, "_fetch_person_row", lambda _person_id: {"id": "person-1", "name": "Jane Doe"})
+    monkeypatch.setattr(
+        run_service,
+        "_fetch_person_row",
+        lambda _person_id: {"id": "person-1", "full_name": "Jane Doe"},
+    )
     create_run_mock = MagicMock()
     monkeypatch.setattr(run_service, "create_run", create_run_mock)
 
@@ -95,6 +99,27 @@ def test_execute_bravotv_image_run_requires_local_getty_prefetch_for_remote_moda
         )
 
     create_run_mock.assert_not_called()
+
+
+def test_fetch_person_aliases_uses_full_name(monkeypatch) -> None:
+    db = MagicMock()
+    overrides_response = MagicMock()
+    overrides_response.error = None
+    overrides_response.data = [{"full_name_override": "J. Doe"}]
+    (
+        db.schema.return_value.table.return_value.select.return_value.eq.return_value.execute.return_value
+    ) = overrides_response
+
+    monkeypatch.setattr(run_service, "create_supabase_admin_client", lambda: db)
+    monkeypatch.setattr(
+        run_service,
+        "_fetch_person_row",
+        lambda _person_id: {"id": "person-1", "full_name": "Jane Doe", "external_ids": {}},
+    )
+
+    aliases = run_service._fetch_person_aliases("person-1")
+
+    assert aliases == {"jane doe", "j. doe"}
 
 
 def test_import_catalog_person_mode_skips_non_deterministic_person_links() -> None:

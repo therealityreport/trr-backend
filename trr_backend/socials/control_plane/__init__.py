@@ -107,6 +107,7 @@ from trr_backend.socials.control_plane.runtime import (
     _load_twikit_credentials,
     _load_twitter_auth,
     _pg_upsert_many,
+    _resolve_runtime_version_stamp,
     check_platform_cookie_health,
     refresh_platform_cookies_interactive,
 )
@@ -180,6 +181,7 @@ __all__ = [
     "_normalize_week_totals_payload",
     "_pg_upsert_many",
     "_resolve_depth_defaults",
+    "_resolve_runtime_version_stamp",
     "_rows_for_platform",
     "_rule_based_sentiment_for_text",
     "_shared_account_catalog_requires_modal_executor",

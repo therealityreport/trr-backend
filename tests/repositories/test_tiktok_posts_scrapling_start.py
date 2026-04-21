@@ -141,3 +141,21 @@ def test_start_tiktok_posts_raises_conflict_when_lock_already_held(monkeypatch) 
     assert getattr(exc_info.value, "detail", {}).get("run_id") == "existing-tiktok-run"
     assert create_run_called is False
     assert create_job_called is False
+
+
+def test_start_tiktok_posts_marks_run_failed_when_job_create_errors(monkeypatch) -> None:
+    set_run_status_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(repo, "_create_run", lambda *a, **k: "failed-tiktok-run-id")
+    monkeypatch.setattr(repo, "_create_job", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("job create failed")))
+    monkeypatch.setattr(repo, "_set_run_status", lambda run_id, status: set_run_status_calls.append((run_id, status)))
+    monkeypatch.setattr(repo, "is_queue_enabled", lambda: False)
+    monkeypatch.setattr(repo, "_assert_social_account_profile_exists", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "get_active_social_account_posts_scrapling_run", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "dispatch_due_social_jobs", lambda **k: None)
+    _build_lock_mocks(monkeypatch, locked=True)
+
+    with pytest.raises(RuntimeError, match="job create failed"):
+        repo.start_tiktok_posts_scrapling_scrape(account_handle="someone", initiated_by="test")
+
+    assert set_run_status_calls == [("failed-tiktok-run-id", "failed")]

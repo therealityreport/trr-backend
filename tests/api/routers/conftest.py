@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from api.routers import admin_person_images as admin_person_images_router
 from api.routers import socials as socials_router
 from trr_backend.pipeline import admin_operations as pipeline_admin_operations
 from trr_backend.repositories import admin_operations as admin_ops_repo
@@ -28,6 +29,27 @@ def _allow_service_role_admin_in_router_tests(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setenv("TRR_ADMIN_ALLOW_SERVICE_ROLE", "1")
     monkeypatch.setenv("TRR_INTERNAL_ADMIN_ALLOW_SERVICE_ROLE", "1")
+
+
+@pytest.fixture(autouse=True)
+def _disable_getty_prefetch_gate_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the admin-person-images Getty prefetch gate to off for router tests.
+
+    PR #119 added `_request_needs_getty_prefetch` + `_hydrate_refresh_request_getty_prefetch`
+    calls that execute before per-test mocks can intercept. Without this, any refresh-images
+    test that omits `sources` or uses `nbcumv`/`getty`/`all` triggers a real Chrome/Getty
+    session in CI (→ `getty_prefetch_failed` 503s). Tests that specifically exercise the
+    prefetch path (e.g. `test_refresh_stream_hydrates_getty_prefetch_before_operation_start`)
+    override this fixture by re-patching the gate to `True` within their own `with patch(...)`
+    block, which wins over monkeypatch's attribute-level replacement for the duration of
+    the `with`.
+    """
+
+    monkeypatch.setattr(
+        admin_person_images_router,
+        "_request_needs_getty_prefetch",
+        lambda _request: False,
+    )
 
 
 @pytest.fixture(autouse=True)

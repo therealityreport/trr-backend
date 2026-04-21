@@ -180,7 +180,8 @@ class InstagramCommentsScraplingFetcher:
         """Postmortem data for job metadata. The only way job_runner should
         read internal fetcher state."""
         return {
-            "warmup_cookie_delta": dict(self._warmup_cookie_delta),
+            "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
+            "warmup_cookie_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
             "transport": "httpx_after_browser_warmup",
             "request_count": self._request_count,

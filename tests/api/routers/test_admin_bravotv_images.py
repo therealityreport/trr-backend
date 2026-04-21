@@ -62,18 +62,22 @@ def test_start_bravotv_person_run_starts_shared_admin_operation(
     )
 
     with patch(
-        "api.routers.admin_bravotv_images.start_operation_for_stream",
-        return_value={"id": operation_id},
-    ) as start_mock:
+        "api.routers.admin_bravotv_images._hydrate_bravotv_getty_prefetch",
+        side_effect=lambda payload: payload,
+    ):
         with patch(
-            "api.routers.admin_bravotv_images.operation_stream_response",
-            return_value=fake_stream,
-        ) as response_mock:
-            response = client.post(
-                f"/api/v1/admin/bravotv/images/people/{person_id}/stream",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"mode": "person", "sources": ["getty"], "show_id": str(uuid4())},
-            )
+            "api.routers.admin_bravotv_images.start_operation_for_stream",
+            return_value={"id": operation_id},
+        ) as start_mock:
+            with patch(
+                "api.routers.admin_bravotv_images.operation_stream_response",
+                return_value=fake_stream,
+            ) as response_mock:
+                response = client.post(
+                    f"/api/v1/admin/bravotv/images/people/{person_id}/stream",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"mode": "person", "sources": ["getty"], "show_id": str(uuid4())},
+                )
 
     assert response.status_code == 200
     assert "event: progress" in response.text
@@ -127,6 +131,51 @@ def test_start_bravotv_person_run_preserves_getty_prefetch_payload(
     assert payload["getty_prefetch_mode"] == "full"
     assert payload["getty_prefetch_auth_mode"] == "local_cookie_profile"
     assert payload["getty_prefetch_auth_warning"] == "local Getty prefetch required"
+
+
+def test_start_bravotv_person_run_auto_hydrates_getty_prefetch_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    person_id = str(uuid4())
+
+    fake_stream = StreamingResponse(iter([b"event: progress\ndata: {}\n\n"]), media_type="text/event-stream")
+
+    with patch(
+        "api.routers.admin_bravotv_images._hydrate_bravotv_getty_prefetch",
+        side_effect=lambda payload: payload.model_copy(
+            update={
+                "getty_prefetched_assets": [{"editorial_id": "928663262"}],
+                "getty_prefetched_queries": [{"query": "Jane Doe Bravo"}],
+                "getty_prefetch_mode": "full",
+                "getty_prefetch_auth_mode": "chrome_profile_browser_session",
+            }
+        ),
+    ) as hydrate_mock:
+        with patch(
+            "api.routers.admin_bravotv_images.start_operation_for_stream",
+            return_value={"id": str(uuid4())},
+        ) as start_mock:
+            with patch(
+                "api.routers.admin_bravotv_images.operation_stream_response",
+                return_value=fake_stream,
+            ):
+                response = client.post(
+                    f"/api/v1/admin/bravotv/images/people/{person_id}/stream",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"mode": "person", "sources": ["getty"]},
+                )
+
+    assert response.status_code == 200
+    hydrate_mock.assert_called_once()
+    _, kwargs = start_mock.call_args
+    payload = kwargs["request_payload"]["payload"]
+    assert payload["getty_prefetched_assets"] == [{"editorial_id": "928663262"}]
+    assert payload["getty_prefetched_queries"] == [{"query": "Jane Doe Bravo"}]
+    assert payload["getty_prefetch_mode"] == "full"
+    assert payload["getty_prefetch_auth_mode"] == "chrome_profile_browser_session"
 
 
 def test_get_latest_show_run_returns_null_when_missing(

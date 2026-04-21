@@ -167,3 +167,34 @@ def test_start_instagram_posts_raises_conflict_when_lock_already_held(monkeypatc
     # CRITICAL: no run/job rows should have been created
     assert create_run_called is False
     assert create_job_called is False
+
+
+def test_start_instagram_posts_marks_run_failed_when_job_create_errors(monkeypatch) -> None:
+    set_run_status_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(repo, "_create_run", lambda *a, **k: "failed-run-id")
+    monkeypatch.setattr(repo, "_create_job", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("job create failed")))
+    monkeypatch.setattr(repo, "_set_run_status", lambda run_id, status: set_run_status_calls.append((run_id, status)))
+    monkeypatch.setattr(repo, "is_queue_enabled", lambda: False)
+    monkeypatch.setattr(repo, "_assert_social_account_profile_exists", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "get_active_social_account_posts_scrapling_run", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "dispatch_due_social_jobs", lambda **k: None)
+
+    lock_conn_mock = MagicMock()
+    cur_mock = MagicMock()
+    cur_mock.__enter__ = lambda self: self
+    cur_mock.__exit__ = lambda *a: None
+    lock_conn_mock.__enter__ = lambda self: lock_conn_mock
+    lock_conn_mock.__exit__ = lambda *a: None
+    monkeypatch.setattr(repo.pg, "db_connection", lambda *a, **k: lock_conn_mock)
+    monkeypatch.setattr(repo.pg, "db_cursor", lambda *a, **k: cur_mock)
+    monkeypatch.setattr(
+        repo.pg,
+        "fetch_one_with_cursor",
+        lambda cur, q, params=None: {"locked": True} if "advisory_lock" in q else {"unlocked": True},
+    )
+
+    with pytest.raises(RuntimeError, match="job create failed"):
+        repo.start_instagram_posts_scrapling_scrape(account_handle="bravotv", initiated_by="test")
+
+    assert set_run_status_calls == [("failed-run-id", "failed")]
