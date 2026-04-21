@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import logging
 import os
 import random
@@ -16,6 +18,7 @@ from datetime import UTC, datetime
 
 from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
 from trr_backend.socials.control_plane import (
+    _resolve_runtime_version_stamp,
     cancel_claimed_job_before_processing,
     claim_next_queued_jobs,
     ensure_media_mirror_s3_ready,
@@ -67,6 +70,7 @@ class WorkerHeartbeat:
                 "auth_capabilities": get_worker_auth_capabilities(),
                 "hostname": socket.gethostname(),
                 "pid": os.getpid(),
+                "runtime_version": dict(_resolve_runtime_version_stamp()),
                 "worker_lane": _worker_lane_from_env(),
                 "worker_script": _worker_script_label(),
             },
@@ -215,6 +219,180 @@ def _claim_jobs_for_stage_candidates(
         if claimed_jobs:
             return claimed_jobs
     return []
+
+
+def _metadata_dict(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _normalize_non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_reason_counts(value: object) -> dict[str, int]:
+    payload = value if isinstance(value, dict) else {}
+    return {
+        str(reason).strip(): _normalize_non_negative_int(count)
+        for reason, count in payload.items()
+        if str(reason).strip() and _normalize_non_negative_int(count) > 0
+    }
+
+
+def _persist_job_metadata(job_id: str, metadata: dict[str, object]) -> dict[str, object] | None:
+    from trr_backend.db import pg
+
+    row = pg.fetch_one(
+        """
+        update social.scrape_jobs
+        set metadata = %s::jsonb
+        where id = %s
+        returning
+          id::text,
+          run_id::text as run_id,
+          platform,
+          job_type,
+          status,
+          items_found,
+          error_message,
+          metadata
+        """,
+        [json.dumps(metadata), job_id],
+    )
+    return dict(row) if isinstance(row, dict) else None
+
+
+def _apply_post_persist_truthfulness_diagnostics(job: dict[str, object]) -> tuple[dict[str, object], bool]:
+    metadata = _metadata_dict(job.get("metadata"))
+    persist_summary = _metadata_dict(metadata.get("posts_scrapling_persist_diagnostics"))
+    if not persist_summary:
+        return job, False
+
+    updated_metadata = copy.deepcopy(metadata)
+    persist_counters = _metadata_dict(updated_metadata.get("persist_counters"))
+    stage_counters = _metadata_dict(updated_metadata.get("stage_counters"))
+    activity = _metadata_dict(updated_metadata.get("activity"))
+    diagnostics = _metadata_dict(updated_metadata.get("diagnostics"))
+    posts_upserted = _normalize_non_negative_int(persist_summary.get("posts_upserted"))
+    posts_skipped = _normalize_non_negative_int(persist_summary.get("posts_skipped"))
+    posts_skipped_by_reason = _normalize_reason_counts(persist_summary.get("posts_skipped_by_reason"))
+    posts_checked = max(
+        _normalize_non_negative_int(activity.get("posts_checked")),
+        _normalize_non_negative_int(stage_counters.get("posts")),
+        _normalize_non_negative_int(job.get("items_found")),
+    )
+
+    persist_counters["posts_upserted"] = posts_upserted
+    persist_counters["posts_skipped"] = posts_skipped
+    persist_counters["posts_skipped_by_reason"] = posts_skipped_by_reason
+    updated_metadata["persist_counters"] = persist_counters
+
+    silent_drop_detected = (
+        str(job.get("status") or "").strip().lower() == "completed"
+        and posts_checked > 0
+        and posts_upserted == 0
+    )
+    diagnostics["post_persist_truthfulness"] = {
+        "posts_checked": posts_checked,
+        "posts_upserted": posts_upserted,
+        "posts_skipped": posts_skipped,
+        "posts_skipped_by_reason": posts_skipped_by_reason,
+        "silent_drop_detected": silent_drop_detected,
+    }
+    if silent_drop_detected:
+        diagnostics["post_persist_truthfulness"]["status_resolution"] = "completed_with_silent_drop_alert"
+        diagnostics["post_persist_truthfulness"]["operator_summary"] = (
+            "Instagram posts persistence completed with zero saved posts after checking live posts."
+        )
+    updated_metadata["diagnostics"] = diagnostics
+
+    if silent_drop_detected:
+        alerts = [dict(item) for item in list(updated_metadata.get("alerts") or []) if isinstance(item, dict)]
+        alert_code = "instagram_posts_persist_zero_saved"
+        if not any(str(item.get("code") or "") == alert_code for item in alerts):
+            alerts.append(
+                {
+                    "code": alert_code,
+                    "severity": "warning",
+                    "message": (
+                        f"Instagram posts Scrapling checked {posts_checked} posts but persisted 0 for "
+                        f"@{str(updated_metadata.get('account') or '').strip().lstrip('@') or 'unknown'}."
+                    ),
+                }
+            )
+        updated_metadata["alerts"] = alerts
+
+    if updated_metadata == metadata:
+        return job, silent_drop_detected
+
+    job_id = str(job.get("id") or "").strip()
+    if not job_id:
+        return {**job, "metadata": updated_metadata}, silent_drop_detected
+
+    try:
+        persisted_job = _persist_job_metadata(job_id, updated_metadata)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to persist post-persist diagnostics: worker metadata patch error for job_id=%s error=%s",
+            job_id,
+            exc,
+        )
+        return {**job, "metadata": updated_metadata}, silent_drop_detected
+
+    return (persisted_job or {**job, "metadata": updated_metadata}), silent_drop_detected
+
+
+def _single_target_catalog_progress_for_run(run_id: str, run_result: dict[str, object]) -> dict[str, object] | None:
+    from trr_backend.repositories import social_season_analytics as repo
+
+    config = _metadata_dict(run_result.get("config"))
+    if (
+        str(config.get("pipeline_ingest_mode") or "").strip().lower()
+        != repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
+    ):
+        return None
+    platforms = [
+        str(item or "").strip().lower()
+        for item in list(config.get("platforms") or [])
+        if str(item or "").strip()
+    ]
+    accounts = [
+        str(item or "").strip().lstrip("@").lower()
+        for item in list(config.get("accounts_override") or [])
+        if str(item or "").strip()
+    ]
+    if len(platforms) != 1 or len(accounts) != 1:
+        return None
+    return repo.get_social_account_catalog_run_progress(platforms[0], accounts[0], run_id)
+
+
+def _build_run_completion_metadata(run_id: str, run_result: dict[str, object]) -> dict[str, object]:
+    metadata_updates: dict[str, object] = {"run_complete": True, "last_completed_run_id": run_id}
+    try:
+        progress = _single_target_catalog_progress_for_run(run_id, run_result)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Run completion diagnostics lookup failed: run_id=%s error=%s", run_id, exc)
+        return metadata_updates
+    if not progress:
+        return metadata_updates
+    alert_codes = [
+        str(item.get("code") or "").strip()
+        for item in list(progress.get("alerts") or [])
+        if isinstance(item, dict) and str(item.get("code") or "").strip()
+    ]
+    metadata_updates["run_clean_completion"] = len(alert_codes) == 0
+    if alert_codes:
+        metadata_updates["run_completion_alerts"] = alert_codes[:5]
+    diagnostics = _metadata_dict(progress.get("run_diagnostics"))
+    if diagnostics:
+        metadata_updates["run_completion_diagnostics"] = {
+            "posts_upserted": _normalize_non_negative_int(diagnostics.get("posts_upserted")),
+            "posts_skipped": _normalize_non_negative_int(diagnostics.get("posts_skipped")),
+            "silent_drop_detected": bool(diagnostics.get("silent_drop_detected")),
+        }
+    return metadata_updates
 
 
 def parse_args() -> argparse.Namespace:
@@ -507,11 +685,11 @@ def main() -> int:
                 platform_filter or "any",
             )
             heartbeat.set_state(status="working", run_id=args.run_id, stage=stage_filter or "any")
-            execute_run(args.run_id, worker_id=worker_id, stage=stage_filter, platform=platform_filter)
+            run_result = execute_run(args.run_id, worker_id=worker_id, stage=stage_filter, platform=platform_filter)
             heartbeat.set_state(
                 status="idle",
                 current_job_id=None,
-                metadata_updates={"run_complete": True, "last_completed_run_id": args.run_id},
+                metadata_updates=_build_run_completion_metadata(args.run_id, dict(run_result or {})),
             )
             return 0
 
@@ -650,6 +828,7 @@ def main() -> int:
                     if args.once:
                         return 1
                     continue
+                job, silent_drop_alert = _apply_post_persist_truthfulness_diagnostics(job)
                 processed += 1
                 heartbeat.set_state(
                     status="working",
@@ -658,6 +837,11 @@ def main() -> int:
                     current_job_id=str(job.get("id") or "") or None,
                     metadata_updates={"processed_jobs": processed},
                 )
+                if silent_drop_alert:
+                    logger.warning(
+                        "Processed job=%s completed with a post-persist silent-drop alert",
+                        job.get("id"),
+                    )
                 logger.info(
                     "Processed job=%s run_id=%s platform=%s status=%s items=%s elapsed=%.2fs",
                     job.get("id"),

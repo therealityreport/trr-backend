@@ -47,11 +47,14 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
     progress_state = repo._new_job_progress_state()
     posts_fetched = 0
     posts_upserted = 0
+    posts_skipped = 0
+    posts_skipped_by_reason: dict[str, int] = {}
     pages_fetched = 0
     fetcher_metadata: dict[str, Any] = {}
 
     async def _run_job() -> tuple[dict[str, Any], dict[str, Any]]:
-        nonlocal posts_fetched, posts_upserted, pages_fetched, fetcher_metadata
+        nonlocal posts_fetched, posts_upserted, posts_skipped, posts_skipped_by_reason
+        nonlocal pages_fetched, fetcher_metadata
 
         session = resolve_posts_scrapling_session(
             browser_account_id=account_handle,
@@ -103,6 +106,9 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     )
                     posts_fetched += len(result.posts)
                     posts_upserted += persisted.posts_upserted
+                    posts_skipped += persisted.posts_skipped
+                    for reason, count in persisted.posts_skipped_by_reason.items():
+                        posts_skipped_by_reason[reason] = posts_skipped_by_reason.get(reason, 0) + int(count or 0)
 
                 pages_fetched += 1
                 repo._emit_job_progress(
@@ -138,7 +144,16 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
             "fast_mode": fast_mode,
             "source_scope": source_scope,
             "stage_counters": {"posts": posts_fetched, "pages": pages_fetched},
-            "persist_counters": {"posts_upserted": posts_upserted},
+            "persist_counters": {
+                "posts_upserted": posts_upserted,
+                "posts_skipped": posts_skipped,
+                "posts_skipped_by_reason": posts_skipped_by_reason,
+            },
+            "posts_scrapling_persist_diagnostics": {
+                "posts_upserted": posts_upserted,
+                "posts_skipped": posts_skipped,
+                "posts_skipped_by_reason": posts_skipped_by_reason,
+            },
             "activity": {"phase": "posts_scrapling_end", "last_progress_at": repo._iso(repo._now_utc())},
             "auth_context": {
                 "session_source": auth_metadata.get("source"),
@@ -178,7 +193,16 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                 "error_code": error_code,
                 "error_class": error_class,
                 "activity": {"phase": "failed", "last_progress_at": repo._iso(repo._now_utc())},
-                "persist_counters": {"posts_upserted": posts_upserted},
+                "persist_counters": {
+                    "posts_upserted": posts_upserted,
+                    "posts_skipped": posts_skipped,
+                    "posts_skipped_by_reason": posts_skipped_by_reason,
+                },
+                "posts_scrapling_persist_diagnostics": {
+                    "posts_upserted": posts_upserted,
+                    "posts_skipped": posts_skipped,
+                    "posts_skipped_by_reason": posts_skipped_by_reason,
+                },
                 "runtime_metadata": getattr(exc, "runtime_metadata", None),
                 "fetcher_runtime": fetcher_metadata,
             },

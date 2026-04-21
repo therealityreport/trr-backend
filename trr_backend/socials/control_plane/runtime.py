@@ -14,6 +14,7 @@ from trr_backend.repositories.social_season_analytics import (
     _load_twikit_credentials,
     _load_twitter_auth,
     _pg_upsert_many,
+    _resolve_runtime_version_stamp,
     check_platform_cookie_health,
     refresh_platform_cookies_interactive,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "_load_twikit_credentials",
     "_load_twitter_auth",
     "_pg_upsert_many",
+    "_resolve_runtime_version_stamp",
     "adapt_payload_json_values",
     "check_platform_cookie_health",
     "load_facebook_cookies",

@@ -750,6 +750,31 @@ def test_redirect_login_failure_marks_auth_block_and_attempts_interactive_repair
     assert scraper.last_retrieval_meta["redirect_target"] == "https://www.instagram.com/accounts/login/"
 
 
+def test_fetch_profile_info_tolerates_duplicate_csrftoken_session_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
+    scraper.session.cookies.set("csrftoken", "csrf-a", domain=".instagram.com")
+    scraper.session.cookies.set("csrftoken", "csrf-b", domain="i.instagram.com")
+
+    warmed: list[bool] = []
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *args, **kwargs: warmed.append(True) or {"lsd": "lsd-token"},
+    )
+
+    class _Client:
+        def get_json(self, *args, **kwargs):
+            return {"user": {"username": "bravotv"}}
+
+    monkeypatch.setattr(scraper, "_request_client", _Client())
+    monkeypatch.setattr(scraper, "_get", lambda *args, **kwargs: _FakeResponse())
+
+    payload = scraper.fetch_profile_info("bravotv", delay=0.0)
+
+    assert payload == {"user": {"username": "bravotv"}}
+    assert warmed == []
+
+
 def test_checkpoint_failure_does_not_retire_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
     scraper._identity_pool_enabled = True

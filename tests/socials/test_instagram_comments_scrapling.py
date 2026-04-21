@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
 from trr_backend.socials.instagram.comments_scrapling.session import resolve_comments_scrapling_session
@@ -115,3 +116,28 @@ def test_resolve_comments_scrapling_session_reuses_instagram_auth_session(monkey
             "path": "/",
         },
     ]
+
+
+def test_comments_fetcher_runtime_metadata_never_exposes_cookie_values(monkeypatch) -> None:
+    mock_fetcher_cls = MagicMock()
+    mock_module = MagicMock()
+    mock_module.StealthyFetcher = mock_fetcher_cls
+    mock_module.ProxyRotator = MagicMock()
+    monkeypatch.setitem(__import__("sys").modules, "scrapling.fetchers", mock_module)
+
+    from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsScraplingFetcher
+
+    fetcher = InstagramCommentsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing-cookie"},
+        browser_account_id="test",
+    )
+    fetcher._warmup_cookie_delta = {"sessionid": "new-sensitive-value", "csrftoken": "secret-token"}
+
+    meta = fetcher.runtime_metadata
+    serialized = repr(meta)
+    assert "new-sensitive-value" not in serialized
+    assert "secret-token" not in serialized
+    assert meta.get("warmup_cookie_names") == ["csrftoken", "sessionid"]
+    assert meta.get("warmup_cookie_count") == 2
+    assert "warmup_cookie_delta" not in meta

@@ -155,7 +155,7 @@ def _validate_startup_config() -> None:
             maxconn = int(raw_maxconn) if raw_maxconn else None
         except ValueError:
             maxconn = None
-        if (minconn is not None and minconn > 1) or (maxconn is not None and maxconn > 2):
+        if (minconn is not None and minconn > 4) or (maxconn is not None and maxconn > 16):
             logger.warning(
                 "[startup-config] oversized_session_pool_override detected for "
                 "Supavisor session mode: TRR_DB_POOL_MINCONN=%s TRR_DB_POOL_MAXCONN=%s",

@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 SUPPORTED_SOURCE_SCOPES = ("bravo", "creator", "community")
-SUPPORTED_ACTIONS = ("backfill", "sync_recent", "sync_newer", "fill_missing_photos")
+SUPPORTED_ACTIONS = ("backfill", "sync_recent", "sync_newer", "fill_missing_posts", "fill_missing_photos")
 LOCAL_SCRIPT_LABEL = "local-script:local_catalog_action.py"
 
 
@@ -99,7 +99,7 @@ def _start_backfill(
     )
 
 
-def _dispatch_fill_missing_photos(
+def _dispatch_fill_missing_posts(
     analytics_repo: Any,
     *,
     platform: str,
@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                 allow_local_dev_inline_bypass=True,
             )
         else:
-            payload = _dispatch_fill_missing_photos(
+            payload = _dispatch_fill_missing_posts(
                 analytics_repo,
                 platform=args.platform,
                 account=args.account,

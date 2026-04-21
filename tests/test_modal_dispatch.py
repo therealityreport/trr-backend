@@ -8,6 +8,7 @@ import types
 import pytest
 
 from trr_backend import modal_dispatch
+from trr_backend.db import pg
 
 
 class _FakeStatus:
@@ -210,3 +211,69 @@ def test_resolve_modal_function_hydrates_when_available(monkeypatch: pytest.Monk
 
 def test_supports_admin_operation_includes_bravotv_image_runs() -> None:
     assert modal_dispatch.supports_admin_operation("admin_bravotv_image_run") is True
+
+
+def test_record_dispatcher_heartbeat_preserves_existing_auth_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "metadata": {
+                "auth_capabilities": {"instagram_authenticated": True},
+                "heartbeat_source": "modal_cron",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        modal_dispatch,
+        "_dispatcher_worker_id",
+        lambda dispatcher_name: f"modal:{dispatcher_name}-dispatcher",
+    )
+
+    def _fake_update_worker_heartbeat(
+        worker_id: str,
+        *,
+        stage: str,
+        status: str,
+        metadata: dict[str, object],
+        supported_platforms: list[str] | None = None,
+    ) -> None:
+        captured["worker_id"] = worker_id
+        captured["stage"] = stage
+        captured["status"] = status
+        captured["metadata"] = metadata
+        captured["supported_platforms"] = supported_platforms
+
+    monkeypatch.setattr(
+        "trr_backend.socials.control_plane._resolve_runtime_version_stamp",
+        lambda: {"label": "modal"},
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.control_plane.update_worker_heartbeat",
+        _fake_update_worker_heartbeat,
+    )
+
+    modal_dispatch._record_dispatcher_heartbeat(
+        dispatcher_name="social",
+        status="idle",
+        metadata_updates={"last_dispatch_success_at": "2026-04-21T08:54:12Z"},
+        supported_platforms=["instagram"],
+    )
+
+    assert captured["worker_id"] == "modal:social-dispatcher"
+    assert captured["stage"] == "any"
+    assert captured["status"] == "idle"
+    assert captured["supported_platforms"] == ["instagram"]
+    assert captured["metadata"] == {
+        "auth_capabilities": {"instagram_authenticated": True},
+        "dispatcher_name": "social",
+        "execution_backend_canonical": "modal",
+        "execution_mode_canonical": "remote",
+        "heartbeat_source": "modal_cron",
+        "last_dispatch_success_at": "2026-04-21T08:54:12Z",
+        "runtime_version": {"label": "modal"},
+    }

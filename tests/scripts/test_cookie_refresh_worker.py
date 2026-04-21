@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from scripts.socials import cookie_refresh_worker as cli
+
+
+def _iso_days_ago(days: int) -> str:
+    return (datetime.now(tz=UTC) - timedelta(days=days)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def test_run_worker_skips_when_cookies_are_fresh_and_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -14,7 +19,7 @@ def test_run_worker_skips_when_cookies_are_fresh_and_healthy(monkeypatch: pytest
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",
-        lambda _path: {"_cookie_refreshed_at": "2026-04-07T12:00:00Z"},
+        lambda _path: {"_cookie_refreshed_at": _iso_days_ago(1)},
     )
     monkeypatch.setattr(
         cli.social_repo,
@@ -40,7 +45,7 @@ def test_run_worker_repairs_when_recent_unauthorized_exists(monkeypatch: pytest.
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",
-        lambda _path: {"_cookie_refreshed_at": "2026-04-07T12:00:00Z"},
+        lambda _path: {"_cookie_refreshed_at": _iso_days_ago(1)},
     )
     monkeypatch.setattr(
         cli.social_repo,
@@ -71,7 +76,7 @@ def test_run_worker_repairs_when_cookie_age_is_stale(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",
-        lambda _path: {"_cookie_refreshed_at": "2026-03-01T12:00:00Z"},
+        lambda _path: {"_cookie_refreshed_at": _iso_days_ago(30)},
     )
     monkeypatch.setattr(
         cli.social_repo,
@@ -102,7 +107,7 @@ def test_run_worker_returns_failed_payload_when_repair_fails(monkeypatch: pytest
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",
-        lambda _path: {"_cookie_refreshed_at": "2026-03-01T12:00:00Z"},
+        lambda _path: {"_cookie_refreshed_at": _iso_days_ago(30)},
     )
     monkeypatch.setattr(
         cli.social_repo,

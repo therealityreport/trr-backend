@@ -2378,7 +2378,7 @@ class InstagramScraper:
         self._rate_limit(delay)
         url = f"{self.PROFILE_INFO_URL}?username={username}"
         timeout = request_timeout or self.request_timeout
-        if not self.session.cookies.get("csrftoken"):
+        if not self.session.cookies.get_dict().get("csrftoken"):
             self._warm_profile_request_context(username, timeout=timeout)
 
         attempts_remaining = 2

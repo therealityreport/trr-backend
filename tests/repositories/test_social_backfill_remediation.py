@@ -80,13 +80,12 @@ def test_resume_tail_passes_frontier_seed_into_new_run(monkeypatch: pytest.Monke
         captured.update(kwargs)
         return {"run_id": "run-new", "status": "queued"}
 
-    monkeypatch.setattr(social_repo, "start_social_account_catalog_backfill", _fake_start)
+    monkeypatch.setattr(social_repo, "launch_social_account_catalog_backfill", _fake_start)
 
     payload = social_repo.resume_tail_social_account_catalog("instagram", "bravotv")
 
     assert payload["run_id"] == "run-new"
-    assert captured["catalog_action"] == "backfill"
-    assert captured["catalog_action_scope"] == "full_history"
+    assert captured["selected_tasks"] == ["post_details", "comments", "media"]
 
 
 def test_refresh_tiktok_post_detail_uses_stored_canonical_url(monkeypatch: pytest.MonkeyPatch) -> None:

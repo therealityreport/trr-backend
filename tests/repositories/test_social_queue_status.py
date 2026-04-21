@@ -477,6 +477,13 @@ def test_get_queue_status_recent_failures_include_run_id(monkeypatch: pytest.Mon
     payload = social_repo.get_queue_status(include_stuck_jobs=False, include_runs_summary=False)
 
     assert payload["queue"]["recent_failures"][0]["run_id"] == "22222222-2222-2222-2222-222222222222"
+    normalized_sql = " ".join(
+        social_repo._recent_failure_not_dismissed_sql("social.scrape_jobs").split()
+    ).lower()
+    assert "failure_dismissed_at" in normalized_sql
+    assert "completed_at" in normalized_sql
+    assert "created_at" in normalized_sql
+    assert "make_interval(secs => 600)" in normalized_sql
 
 
 def test_get_queue_status_includes_tiktok_single_path_alerts_from_recent_failures(

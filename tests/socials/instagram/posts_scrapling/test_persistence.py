@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+from contextlib import contextmanager
+
+import pytest
+
 
 def test_adapt_graph_node_to_post_dto():
     from trr_backend.socials.instagram.posts_scrapling.persistence import _graph_node_to_post_dto
@@ -139,3 +144,104 @@ def test_adapt_xdt_media_dict_carousel():
     dto = _graph_node_to_post_dto(node, account_handle="u")
     assert dto.post_type == "carousel"  # media_type=8 → carousel
     assert len(dto.media_urls) >= 3  # 2 image urls + 1 video url
+
+
+def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling.persistence import persist_instagram_posts
+
+    @contextmanager
+    def _fake_conn(*, label: str | None = None):
+        del label
+        yield object()
+
+    captured_updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(pg, "db_connection", _fake_conn)
+    monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
+
+    def _fake_upsert(_context, *, job_id, account, post, conn):  # noqa: ANN001
+        del job_id, account, conn
+        shortcode = str(getattr(post, "shortcode", "") or "")
+        if shortcode == "keep-me":
+            return {"id": "post-1"}
+        if shortcode == "drop-me":
+            return None
+        raise RuntimeError("db write failed")
+
+    def _fake_fetch_one(sql, params):  # noqa: ANN001
+        normalized = " ".join(str(sql).split()).lower()
+        if normalized.startswith("select metadata from social.scrape_jobs"):
+            return {
+                "metadata": {
+                    "posts_scrapling_persist_diagnostics": {
+                        "posts_upserted": 2,
+                        "posts_skipped": 1,
+                        "posts_skipped_by_reason": {"missing_shortcode": 1},
+                    }
+                }
+            }
+        if normalized.startswith("update social.scrape_jobs"):
+            captured_updates.append(json.loads(str(params[0])))
+            return {"id": "job-1"}
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    monkeypatch.setattr(repo, "_upsert_instagram_post", _fake_upsert)
+    monkeypatch.setattr(pg, "fetch_one", _fake_fetch_one)
+
+    result = persist_instagram_posts(
+        account_handle="traitors",
+        post_nodes=[
+            "not-a-dict",
+            {"__typename": "GraphImage"},
+            {
+                "shortcode": "keep-me",
+                "taken_at_timestamp": 1700000000,
+                "__typename": "GraphImage",
+                "display_url": "https://example.com/keep.jpg",
+                "owner": {"username": "traitors"},
+                "id": "keep-1",
+            },
+            {
+                "shortcode": "drop-me",
+                "taken_at_timestamp": 1700000000,
+                "__typename": "GraphImage",
+                "display_url": "https://example.com/drop.jpg",
+                "owner": {"username": "traitors"},
+                "id": "drop-1",
+            },
+            {
+                "shortcode": "explode-me",
+                "taken_at_timestamp": 1700000000,
+                "__typename": "GraphImage",
+                "display_url": "https://example.com/explode.jpg",
+                "owner": {"username": "traitors"},
+                "id": "explode-1",
+            },
+        ],
+        run_id="run-1",
+        job_id="job-1",
+        season_id=None,
+    )
+
+    assert result.posts_upserted == 1
+    assert result.posts_skipped == 4
+    assert result.posts_skipped_by_reason == {
+        "invalid_node_type": 1,
+        "missing_shortcode": 1,
+        "canonical_upsert_returned_none": 1,
+        "canonical_upsert_exception": 1,
+    }
+    assert captured_updates[-1]["posts_scrapling_persist_diagnostics"] == {
+        "posts_upserted": 3,
+        "posts_skipped": 5,
+        "posts_skipped_by_reason": {
+            "canonical_upsert_exception": 1,
+            "canonical_upsert_returned_none": 1,
+            "invalid_node_type": 1,
+            "missing_shortcode": 2,
+        },
+    }

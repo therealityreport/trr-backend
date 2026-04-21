@@ -40,6 +40,120 @@ def test_worker_heartbeat_seeds_auth_capabilities(monkeypatch) -> None:
     }
 
 
+def test_apply_post_persist_truthfulness_diagnostics_adds_silent_drop_alert(monkeypatch) -> None:
+    persisted: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        worker,
+        "_persist_job_metadata",
+        lambda job_id, metadata: (
+            persisted.append((job_id, metadata)),
+            {
+                "id": job_id,
+                "run_id": "run-1",
+                "platform": "instagram",
+                "job_type": "posts_scrapling",
+                "status": "completed",
+                "items_found": 6,
+                "error_message": None,
+                "metadata": metadata,
+            },
+        )[1],
+    )
+
+    updated_job, silent_drop_alert = worker._apply_post_persist_truthfulness_diagnostics(  # noqa: SLF001
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "platform": "instagram",
+            "status": "completed",
+            "items_found": 6,
+            "metadata": {
+                "stage": "posts_scrapling",
+                "account": "thetraitorsus",
+                "stage_counters": {"posts": 6},
+                "persist_counters": {"posts_upserted": 0},
+                "posts_scrapling_persist_diagnostics": {
+                    "posts_upserted": 0,
+                    "posts_skipped": 6,
+                    "posts_skipped_by_reason": {"canonical_upsert_returned_none": 6},
+                },
+            },
+        }
+    )
+
+    assert silent_drop_alert is True
+    assert persisted and persisted[0][0] == "job-1"
+    assert updated_job["metadata"]["persist_counters"] == {
+        "posts_upserted": 0,
+        "posts_skipped": 6,
+        "posts_skipped_by_reason": {"canonical_upsert_returned_none": 6},
+    }
+    assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"] == {
+        "posts_checked": 6,
+        "posts_upserted": 0,
+        "posts_skipped": 6,
+        "posts_skipped_by_reason": {"canonical_upsert_returned_none": 6},
+        "silent_drop_detected": True,
+        "status_resolution": "completed_with_silent_drop_alert",
+        "operator_summary": "Instagram posts persistence completed with zero saved posts after checking live posts.",
+    }
+    assert updated_job["metadata"]["alerts"] == [
+        {
+            "code": "instagram_posts_persist_zero_saved",
+            "severity": "warning",
+            "message": "Instagram posts Scrapling checked 6 posts but persisted 0 for @thetraitorsus.",
+        }
+    ]
+
+
+def test_apply_post_persist_truthfulness_diagnostics_surfaces_skip_counters_without_alert(monkeypatch) -> None:
+    monkeypatch.setattr(
+        worker,
+        "_persist_job_metadata",
+        lambda job_id, metadata: {
+            "id": job_id,
+            "run_id": "run-1",
+            "platform": "instagram",
+            "job_type": "posts_scrapling",
+            "status": "completed",
+            "items_found": 4,
+            "error_message": None,
+            "metadata": metadata,
+        },
+    )
+
+    updated_job, silent_drop_alert = worker._apply_post_persist_truthfulness_diagnostics(  # noqa: SLF001
+        {
+            "id": "job-2",
+            "run_id": "run-1",
+            "platform": "instagram",
+            "status": "completed",
+            "items_found": 4,
+            "metadata": {
+                "stage": "posts_scrapling",
+                "account": "traitors",
+                "stage_counters": {"posts": 4},
+                "persist_counters": {"posts_upserted": 3},
+                "posts_scrapling_persist_diagnostics": {
+                    "posts_upserted": 3,
+                    "posts_skipped": 1,
+                    "posts_skipped_by_reason": {"missing_shortcode": 1},
+                },
+            },
+        }
+    )
+
+    assert silent_drop_alert is False
+    assert "alerts" not in updated_job["metadata"]
+    assert updated_job["metadata"]["persist_counters"] == {
+        "posts_upserted": 3,
+        "posts_skipped": 1,
+        "posts_skipped_by_reason": {"missing_shortcode": 1},
+    }
+    assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"]["silent_drop_detected"] is False
+
+
 def test_main_queue_parallel_fanout_spawns_child_workers(monkeypatch) -> None:
     spawned_cmds: list[list[str]] = []
 

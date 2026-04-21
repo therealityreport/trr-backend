@@ -131,6 +131,33 @@ def _failed_summary(
     }
 
 
+def _verify_modal_readiness_failure_reason(verify_payload: dict[str, Any]) -> str | None:
+    remote_auth_probe = (
+        dict(verify_payload.get("remote_auth_probe") or {})
+        if isinstance(verify_payload.get("remote_auth_probe"), dict)
+        else {}
+    )
+    if not bool(remote_auth_probe.get("ready")):
+        return "remote_probe_failed"
+    if not bool(verify_payload.get("app_found")):
+        return "modal_app_missing"
+    if list(verify_payload.get("missing_secrets") or []):
+        return "missing_named_secrets"
+    if list(verify_payload.get("missing_web_endpoints") or []):
+        return "missing_web_endpoints"
+
+    ignored_missing_functions = {"probe_getty_remote_access"}
+    missing_functions = {
+        str(name).strip()
+        for name in (verify_payload.get("missing_functions") or [])
+        if str(name).strip()
+    }
+    relevant_missing_functions = sorted(missing_functions - ignored_missing_functions)
+    if relevant_missing_functions:
+        return "missing_required_functions"
+    return None
+
+
 def run_repair(
     *,
     source_env: Path,
@@ -210,20 +237,22 @@ def run_repair(
         if isinstance(verify_payload.get("remote_auth_probe"), dict)
         else None
     )
-    if not bool(verify_payload.get("ok")) or not bool((remote_auth_probe or {}).get("ready")):
+    verify_failure_reason = _verify_modal_readiness_failure_reason(verify_payload)
+    if verify_failure_reason is not None:
         steps.append(
             {
                 "name": "verify_remote_auth",
                 "status": "failed",
                 "result": {
                     "ok": bool(verify_payload.get("ok")),
+                    "failure_reason": verify_failure_reason,
                     "reason": (remote_auth_probe or {}).get("reason"),
                 },
             }
         )
         return _failed_summary(
             steps=steps,
-            failure_reason="remote_probe_failed",
+            failure_reason=verify_failure_reason,
             remote_auth_probe=remote_auth_probe,
         )
     steps.append({"name": "verify_remote_auth", "status": "ok", "result": {"ready": True}})

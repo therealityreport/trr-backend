@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from trr_backend.db import pg
@@ -17,16 +18,41 @@ class PersistedInstagramComments:
     comment_media_mirror_job_enqueue_errors: int
 
 
+@dataclass(slots=True)
+class InstagramCommentsMaterializationError(Exception):
+    message: str
+    failure_metadata: dict[str, Any]
+    error_code: str = "instagram_comments_post_materialization_failed"
+    retryable: bool = False
+    runtime_metadata: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.runtime_metadata is None:
+            self.runtime_metadata = dict(self.failure_metadata)
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class _MaterializedInstagramPost(SimpleNamespace):
+    def to_dict(self) -> dict[str, Any]:
+        return dict(getattr(self, "raw_data", {}) or {})
+
+
 def _load_repo_helpers():
     from trr_backend.repositories import social_season_analytics as repo
 
     return repo
 
 
-def find_instagram_post_for_comments(*, account_handle: str, shortcode: str) -> dict[str, Any] | None:
+def find_instagram_post_for_comments(
+    *,
+    account_handle: str,
+    shortcode: str,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
     normalized_account = str(account_handle or "").strip().lower().lstrip("@")
-    return pg.fetch_one(
-        """
+    query = """
         select
           p.id::text as id,
           p.season_id::text as season_id,
@@ -36,8 +62,94 @@ def find_instagram_post_for_comments(*, account_handle: str, shortcode: str) -> 
           and ltrim(lower(coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '')), '@') = %s
         order by p.posted_at desc nulls last, p.id desc
         limit 1
-        """,
-        [shortcode, normalized_account],
+        """
+    if conn is not None:
+        with pg.db_cursor(conn=conn) as cur:
+            return pg.fetch_one_with_cursor(cur, query, [shortcode, normalized_account])
+    return pg.fetch_one(query, [shortcode, normalized_account])
+
+
+def _materialize_instagram_post_for_comments(
+    *,
+    repo: Any,
+    account_handle: str,
+    shortcode: str,
+    conn: Any,
+) -> dict[str, Any]:
+    existing_post = find_instagram_post_for_comments(account_handle=account_handle, shortcode=shortcode, conn=conn)
+    if existing_post:
+        return existing_post
+
+    normalized_account = str(account_handle or "").strip().lower().lstrip("@")
+    failure_metadata: dict[str, Any] = {
+        "platform": "instagram",
+        "account_handle": normalized_account,
+        "shortcode": str(shortcode or "").strip(),
+        "materialization_stage": "comments_scrapling",
+        "materialization_mode": "materialize_before_persist",
+    }
+    catalog_rows = repo._fetch_shared_catalog_rows(
+        "instagram",
+        normalized_account,
+        source_ids=[str(shortcode or "").strip()],
+        limit=1,
+        conn=conn,
+    )
+    catalog_row = next(iter(catalog_rows or []), None)
+    if not catalog_row:
+        failure_metadata["catalog_row_found"] = False
+        raise InstagramCommentsMaterializationError(
+            f"Instagram post {shortcode} for @{account_handle} could not be materialized before comment persistence.",
+            failure_metadata=failure_metadata,
+        )
+
+    failure_metadata["catalog_row_found"] = True
+    failure_metadata["catalog_row_id"] = str(catalog_row.get("id") or "").strip() or None
+    season_id = str(catalog_row.get("season_id") or "").strip() or None
+    context = repo.get_season_context(season_id, conn=conn) if season_id else None
+    post = _MaterializedInstagramPost(
+        shortcode=str(catalog_row.get("source_id") or shortcode or "").strip(),
+        taken_at=catalog_row.get("posted_at"),
+        media_urls=list(catalog_row.get("media_urls") or []),
+        thumbnail_url=catalog_row.get("thumbnail_url"),
+        likes=catalog_row.get("likes"),
+        comments=catalog_row.get("comments_count"),
+        video_views_observed=catalog_row.get("views"),
+        video_views=catalog_row.get("views"),
+        hosted_media_urls=list(catalog_row.get("hosted_media_urls") or []),
+        hosted_thumbnail_url=catalog_row.get("hosted_thumbnail_url"),
+        profile_tags=list(catalog_row.get("profile_tags") or []),
+        collaborators=list(catalog_row.get("collaborators") or []),
+        hashtags=list(catalog_row.get("hashtags") or []),
+        mentions=list(catalog_row.get("mentions") or []),
+        media_mirror_status=catalog_row.get("media_mirror_status"),
+        media_mirror_error=catalog_row.get("media_mirror_error"),
+        media_mirror_attempt_count=catalog_row.get("media_mirror_attempt_count"),
+        media_mirror_last_attempt_at=catalog_row.get("media_mirror_last_attempt_at"),
+        media_mirror_last_job_id=catalog_row.get("media_mirror_last_job_id"),
+        metadata_scraped_at=catalog_row.get("metadata_scraped_at"),
+        duration_seconds=catalog_row.get("duration_seconds"),
+        raw_data=dict(catalog_row),
+        username=normalized_account,
+        source_account=normalized_account,
+    )
+    upserted = repo._upsert_instagram_post(
+        context,
+        job_id=None,
+        account=normalized_account,
+        post=post,
+        conn=conn,
+    )
+    failure_metadata["materialized_post_id"] = str((upserted or {}).get("id") or "").strip() or None
+
+    materialized_post = find_instagram_post_for_comments(account_handle=account_handle, shortcode=shortcode, conn=conn)
+    if materialized_post:
+        return materialized_post
+
+    failure_metadata["materialization_upserted"] = bool(upserted)
+    raise InstagramCommentsMaterializationError(
+        f"Instagram post {shortcode} for @{account_handle} could not be materialized before comment persistence.",
+        failure_metadata=failure_metadata,
     )
 
 
@@ -52,20 +164,22 @@ def persist_instagram_comments_for_post(
     source_scope: str = "bravo",
 ) -> PersistedInstagramComments:
     repo = _load_repo_helpers()
-    post_row = find_instagram_post_for_comments(account_handle=account_handle, shortcode=shortcode)
-    if not post_row:
-        raise ValueError(f"Instagram post {shortcode} for @{account_handle} was not found.")
-
-    observed_comment_ids: set[str] = set()
-    persist_stats = repo._new_comment_persist_stats()
-    comments_upserted = 0
-    comments_marked_missing = 0
-    post_id = str(post_row.get("id") or "").strip()
-    season_id = str(post_row.get("season_id") or "").strip() or None
-
     with pg.db_connection() as conn:
+        post_row = _materialize_instagram_post_for_comments(
+            repo=repo,
+            account_handle=account_handle,
+            shortcode=shortcode,
+            conn=conn,
+        )
+        observed_comment_ids: set[str] = set()
+        persist_stats = repo._new_comment_persist_stats()
+        comments_upserted = 0
+        comments_marked_missing = 0
+        post_id = str(post_row.get("id") or "").strip()
+        season_id = str(post_row.get("season_id") or "").strip() or None
+
         if season_id:
-            context = repo.get_season_context(season_id)
+            context = repo.get_season_context(season_id, conn=conn)
             comments_upserted = repo._batch_upsert_instagram_comments(
                 context,
                 job_id=job_id,
@@ -103,7 +217,7 @@ def persist_instagram_comments_for_post(
                 conn=conn,
             )
 
-    stored_total = repo._count_stored_comments([post_id], "instagram").get(post_id, 0)
+        stored_total = repo._count_stored_comments([post_id], "instagram", conn=conn).get(post_id, 0)
     return PersistedInstagramComments(
         post_id=post_id,
         stored_total_comments=int(stored_total or 0),
