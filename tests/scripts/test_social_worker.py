@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 
 import scripts.socials.worker as worker
@@ -754,7 +755,7 @@ def test_default_claim_batch_size_for_posts_is_single_claim() -> None:
     assert worker._default_claim_batch_size_for_stage("comments") == 2
 
 
-def test_claim_stage_candidates_allow_comments_workers_to_borrow_posts() -> None:
+def test_claim_stage_candidates_comments_workers_fall_back_to_posts() -> None:
     assert worker._claim_stage_candidates("comments") == ("comments", "posts")  # noqa: SLF001
     assert worker._claim_stage_candidates("posts") == ("posts",)  # noqa: SLF001
 
@@ -843,3 +844,36 @@ def test_parse_args_accepts_shared_pipeline_stages(monkeypatch) -> None:
 
     assert args.stage == "post_classify"
     assert args.once is True
+
+
+def test_wait_for_children_times_out_and_terminates_hung_child(monkeypatch) -> None:
+    events: list[str] = []
+
+    class _HungProc:
+        def wait(self, timeout=None):  # noqa: ANN001
+            if timeout is None or timeout > 0:
+                raise subprocess.TimeoutExpired(cmd="hung", timeout=timeout)
+            raise subprocess.TimeoutExpired(cmd="hung", timeout=timeout)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            events.append("terminate")
+
+        def kill(self):
+            events.append("kill")
+
+    exit_code = worker._wait_for_children(  # noqa: SLF001
+        [_HungProc()],
+        context_label="queue fanout",
+        wait_timeout_seconds=0.1,
+        terminate_grace_seconds=0.1,
+    )
+
+    assert exit_code == 124
+    assert events == ["terminate", "kill"]
+
+
+def test_resolve_child_wait_timeout_adds_grace_to_max_run_seconds() -> None:
+    assert worker._resolve_child_wait_timeout_seconds(180.0) == 210.0  # noqa: SLF001

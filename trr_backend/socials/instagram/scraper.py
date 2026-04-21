@@ -90,6 +90,10 @@ _INSTAGRAM_BROWSER_SESSIONS = AccountBrowserSessionManager(
     platform="instagram",
     cookie_domains=(".instagram.com",),
 )
+_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 25
+_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 10
+_COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 30.0
+_REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 20.0
 
 
 @dataclass
@@ -218,6 +222,36 @@ class InstagramComment:
         # Convert nested replies
         result["replies"] = [r.to_dict() if hasattr(r, "to_dict") else r for r in self.replies]
         return result
+
+
+@dataclass
+class ConcurrentCommentFetchResult:
+    """Structured concurrent comment fetch outcome with explicit per-post errors."""
+
+    comments_by_shortcode: dict[str, list[InstagramComment]] = field(default_factory=dict)
+    errors_by_shortcode: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def total_comments(self) -> int:
+        return sum(len(comments) for comments in self.comments_by_shortcode.values())
+
+    @property
+    def comments(self) -> dict[str, list[InstagramComment]]:
+        return self.comments_by_shortcode
+
+    @property
+    def errors(self) -> dict[str, str]:
+        return self.errors_by_shortcode
+
+    @property
+    def had_failures(self) -> bool:
+        return bool(self.errors_by_shortcode)
+
+    def __getitem__(self, shortcode: str) -> list[InstagramComment]:
+        return self.comments_by_shortcode[shortcode]
+
+    def get(self, shortcode: str, default: list[InstagramComment] | None = None) -> list[InstagramComment] | None:
+        return self.comments_by_shortcode.get(shortcode, default)
 
 
 @dataclass
@@ -352,6 +386,8 @@ class InstagramScraper:
         self._rate_controller = InstagramRateController()
         self._request_client = InstagramRequestClient(session=self.session)
         self._profile_page_context_cache: dict[str, dict[str, str]] = {}
+        self._context_cache_lock = threading.RLock()
+        self._concurrent_rate_limit_lock: threading.Lock | None = None
         self.last_retrieval_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self.last_comment_fetch_reason: str | None = None
@@ -395,6 +431,45 @@ class InstagramScraper:
     @staticmethod
     def _env_truthy(name: str) -> bool:
         return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _resolve_positive_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _resolve_positive_float_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            return default
+        return max(minimum, min(maximum, value))
+
+    def _get_profile_page_context_cache_entry(self, username: str) -> dict[str, str]:
+        with self._context_cache_lock:
+            cached = self._profile_page_context_cache.get(username) or {}
+            return dict(cached)
+
+    def _set_profile_page_context_cache_entry(self, username: str, context: dict[str, str]) -> None:
+        with self._context_cache_lock:
+            self._profile_page_context_cache[username] = dict(context)
+
+    def _pop_profile_page_context_cache_entry(self, username: str) -> None:
+        with self._context_cache_lock:
+            self._profile_page_context_cache.pop(username, None)
+
+    def _clear_profile_page_context_cache(self) -> None:
+        with self._context_cache_lock:
+            self._profile_page_context_cache.clear()
 
     def _build_identity_pool(self) -> InstagramIdentityPool:
         proxy_urls = [
@@ -445,7 +520,7 @@ class InstagramScraper:
             self.last_retrieval_meta["identity_pool_exhausted"] = True
             return False
         self.cookies = self._active_identity.cookies
-        self._profile_page_context_cache.pop(username, None)
+        self._pop_profile_page_context_cache_entry(username)
         self._reset_request_session(preserve_session_cookies=False)
         return previous_session_id != self._active_identity.session_id
 
@@ -639,7 +714,7 @@ class InstagramScraper:
                 self.cookies = fresh_cookies
             for k, v in fresh_cookies.items():
                 self.session.cookies.set(k, v, domain=".instagram.com")
-            self._profile_page_context_cache.clear()
+            self._clear_profile_page_context_cache()
             logger.info("[instagram] cookie auto-refresh succeeded — sessionid=%s…", fresh_cookies["sessionid"][:8])
             return {"refreshed": True, "reason": None, "cookie_file": str(cookie_path)}
         except Exception as exc:  # noqa: BLE001
@@ -714,7 +789,7 @@ class InstagramScraper:
                 self.cookies = fresh_cookies
             for k, v in fresh_cookies.items():
                 self.session.cookies.set(k, v, domain=".instagram.com")
-            self._profile_page_context_cache.clear()
+            self._clear_profile_page_context_cache()
             logger.info("[instagram] interactive login succeeded — sessionid=%s…", fresh_cookies["sessionid"][:8])
             return {"refreshed": True, "reason": None, "method": "interactive_chrome"}
         except Exception as exc:  # noqa: BLE001
@@ -972,14 +1047,17 @@ class InstagramScraper:
                     )
                 runtime = dict((result or {}).get("runtime") or {})
                 if runtime:
-                    self._profile_page_context_cache[username] = {
+                    self._set_profile_page_context_cache_entry(
+                        username,
+                        {
                         "lsd": str(runtime.get("lsd") or "").strip(),
                         "spin_r": str(runtime.get("__spin_r") or "").strip(),
                         "spin_b": str(runtime.get("__spin_b") or "").strip(),
                         "spin_t": str(runtime.get("__spin_t") or "").strip(),
                         "hsi": str(runtime.get("__hsi") or "").strip(),
                         "hs": str(runtime.get("__hs") or "").strip(),
-                    }
+                        },
+                    )
                 for cookie in context.cookies():
                     name = str(cookie.get("name") or "").strip()
                     value = str(cookie.get("value") or "")
@@ -1462,7 +1540,7 @@ class InstagramScraper:
         timeout: tuple[int, int] | float | None = None,
         force: bool = False,
     ) -> dict[str, str]:
-        cached = self._profile_page_context_cache.get(username) or {}
+        cached = self._get_profile_page_context_cache_entry(username)
         if cached and not force:
             return dict(cached)
 
@@ -1498,17 +1576,39 @@ class InstagramScraper:
                     domain=".instagram.com",
                 )
         if context:
-            self._profile_page_context_cache[username] = dict(context)
+            self._set_profile_page_context_cache_entry(username, context)
         return dict(context or cached)
 
     def _rate_limit(self, delay: float, *, fast_mode: bool = False):
         self._rate_controller._sleeper = time.sleep
         self._rate_controller._clock = time.monotonic
-        self._rate_controller.before_query(
-            QUERY_TYPE_LEGACY,
-            base_delay=delay,
-            fast_mode=fast_mode,
-        )
+        rate_lock = getattr(self, "_concurrent_rate_limit_lock", None)
+        if rate_lock is None:
+            self._rate_controller.before_query(
+                QUERY_TYPE_LEGACY,
+                base_delay=delay,
+                fast_mode=fast_mode,
+            )
+            return
+        with rate_lock:
+            self._rate_controller.before_query(
+                QUERY_TYPE_LEGACY,
+                base_delay=delay,
+                fast_mode=fast_mode,
+            )
+
+    def _rate_limit_with_lock(
+        self,
+        delay: float,
+        *,
+        fast_mode: bool = False,
+        rate_lock: Any = None,
+    ) -> None:
+        if rate_lock is None:
+            self._rate_limit(delay, fast_mode=fast_mode)
+            return
+        with rate_lock:
+            self._rate_limit(delay, fast_mode=fast_mode)
 
     def _track_response_status(self, status_code: int) -> None:
         self._rate_controller.record_response(QUERY_TYPE_LEGACY, status_code)
@@ -2462,7 +2562,7 @@ class InstagramScraper:
                     force=(bool(cursor) or attempt_index > 0) if should_warm else False,
                 )
                 if should_warm
-                else self._profile_page_context_cache.get(username, {})
+                else self._get_profile_page_context_cache_entry(username)
             )
             request_cookies = self._request_cookies()
             viewer_id = str(request_cookies.get("ds_user_id") or self.cookies.get("ds_user_id") or "0")
@@ -2612,7 +2712,7 @@ class InstagramScraper:
                 "instagram_graphql_cursor_rate_limited",
             }:
                 self._reset_request_session()
-                self._profile_page_context_cache.pop(username, None)
+                self._pop_profile_page_context_cache_entry(username)
             logger.warning("Instagram GraphQL exhausted cursor retries for @%s after cursor=%s", username, cursor)
         elif last_error is not None:
             self.last_retrieval_meta.update(self._graphql_request_error_details(cursor=cursor, error=last_error))
@@ -2639,7 +2739,7 @@ class InstagramScraper:
             refresh_result = self._try_auto_refresh_cookies()
             if refresh_result.get("refreshed"):
                 self._reset_request_session()
-                self._profile_page_context_cache.pop(username, None)
+                self._pop_profile_page_context_cache_entry(username)
                 retry_payload = self.fetch_posts_graphql(
                     username,
                     cursor=cursor,
@@ -2671,7 +2771,7 @@ class InstagramScraper:
             if interactive_result.get("refreshed"):
                 # Got fresh cookies — retry the failed request once
                 self._reset_request_session()
-                self._profile_page_context_cache.pop(username, None)
+                self._pop_profile_page_context_cache_entry(username)
                 retry_payload = self.fetch_posts_graphql(
                     username,
                     cursor=cursor,
@@ -2833,6 +2933,7 @@ class InstagramScraper:
         delay: float = 2.0,
         *,
         fast_mode: bool = False,
+        rate_lock: Any = None,
     ) -> list[InstagramComment]:
         """
         Fetch comments for a post including replies.
@@ -2861,10 +2962,28 @@ class InstagramScraper:
         comments = []
         cursor = None
         comments_fetched = 0
+        pages_seen = 0
+        seen_cursors: set[str] = set()
+        deadline = time.monotonic() + self._resolve_positive_float_env(
+            "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS",
+            _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT,
+            minimum=1.0,
+            maximum=300.0,
+        )
+        page_cap = self._resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES",
+            _COMMENT_PAGINATION_MAX_PAGES_DEFAULT,
+            minimum=1,
+            maximum=250,
+        )
 
         while True:
             response: requests.Response | None = None
-            self._rate_limit(delay, fast_mode=fast_mode)
+            if time.monotonic() >= deadline:
+                self.last_comment_fetch_reason = "pagination_deadline_exceeded"
+                logger.warning("Instagram comments pagination deadline exceeded for shortcode=%s", shortcode)
+                break
+            self._rate_limit_with_lock(delay, fast_mode=fast_mode, rate_lock=rate_lock)
             url = self.COMMENTS_URL.format(media_id=media_id)
             params = {"can_support_threading": "true", "permalink_enabled": "false"}
             if cursor:
@@ -2929,6 +3048,7 @@ class InstagramScraper:
                 comment_rows = data.get("comments", [])
             else:
                 comment_rows = []
+            pages_seen += 1
             for comment_data in comment_rows:
                 comment = self._parse_comment(comment_data, shortcode, post_url)
                 comments.append(comment)
@@ -2943,6 +3063,7 @@ class InstagramScraper:
                         post_url,
                         delay,
                         fast_mode=fast_mode,
+                        rate_lock=rate_lock,
                     )
                     comment.replies = replies
                     logger.info(f"  Comment {comment.comment_id}: {comment.reply_count} replies fetched")
@@ -2963,8 +3084,26 @@ class InstagramScraper:
             if not has_more:
                 break
             next_cursor = (data.get("next_min_id") or data.get("next_max_id")) if isinstance(data, dict) else None
-            if not next_cursor or next_cursor == cursor:
+            if not next_cursor:
                 break
+            next_cursor = str(next_cursor)
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                self.last_comment_fetch_reason = "pagination_repeated_cursor"
+                logger.warning(
+                    "Instagram comments pagination repeated cursor for shortcode=%s cursor=%s",
+                    shortcode,
+                    next_cursor,
+                )
+                break
+            if pages_seen >= page_cap:
+                self.last_comment_fetch_reason = "pagination_page_cap_reached"
+                logger.warning(
+                    "Instagram comments pagination page cap reached for shortcode=%s page_cap=%d",
+                    shortcode,
+                    page_cap,
+                )
+                break
+            seen_cursors.add(next_cursor)
             cursor = next_cursor
 
         logger.info(f"Total: {len(comments)} comments fetched for {shortcode}")
@@ -2979,14 +3118,33 @@ class InstagramScraper:
         delay: float = 2.0,
         *,
         fast_mode: bool = False,
+        rate_lock: Any = None,
     ) -> list[InstagramComment]:
         """Fetch replies to a specific comment."""
         replies = []
         cursor = None
+        pages_seen = 0
+        seen_cursors: set[str] = set()
+        deadline = time.monotonic() + self._resolve_positive_float_env(
+            "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_SECONDS",
+            _REPLY_PAGINATION_MAX_SECONDS_DEFAULT,
+            minimum=1.0,
+            maximum=300.0,
+        )
+        page_cap = self._resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES",
+            _REPLY_PAGINATION_MAX_PAGES_DEFAULT,
+            minimum=1,
+            maximum=250,
+        )
 
         while True:
             response: requests.Response | None = None
-            self._rate_limit(delay, fast_mode=fast_mode)
+            if time.monotonic() >= deadline:
+                self.last_comment_fetch_reason = "pagination_deadline_exceeded"
+                logger.warning("Instagram reply pagination deadline exceeded for comment_id=%s", comment_id)
+                break
+            self._rate_limit_with_lock(delay, fast_mode=fast_mode, rate_lock=rate_lock)
             url = self.COMMENT_REPLIES_URL.format(media_id=media_id, comment_id=comment_id)
             params = {}
             if cursor:
@@ -3047,6 +3205,7 @@ class InstagramScraper:
                 reply_rows = data
             else:
                 reply_rows = []
+            pages_seen += 1
             for reply_data in reply_rows:
                 reply = self._parse_comment(reply_data, shortcode, post_url, is_reply=True, parent_id=comment_id)
                 replies.append(reply)
@@ -3058,6 +3217,24 @@ class InstagramScraper:
             cursor = data.get("next_min_child_cursor") if isinstance(data, dict) else None
             if not cursor:
                 break
+            cursor = str(cursor)
+            if cursor in seen_cursors:
+                self.last_comment_fetch_reason = "pagination_repeated_cursor"
+                logger.warning(
+                    "Instagram reply pagination repeated cursor for comment_id=%s cursor=%s",
+                    comment_id,
+                    cursor,
+                )
+                break
+            if pages_seen >= page_cap:
+                self.last_comment_fetch_reason = "pagination_page_cap_reached"
+                logger.warning(
+                    "Instagram reply pagination page cap reached for comment_id=%s page_cap=%d",
+                    comment_id,
+                    page_cap,
+                )
+                break
+            seen_cursors.add(cursor)
 
         return replies
 
@@ -3070,10 +3247,10 @@ class InstagramScraper:
         *,
         fast_mode: bool = False,
         max_workers: int | None = None,
-    ) -> dict[str, list["InstagramComment"]]:
+    ) -> ConcurrentCommentFetchResult:
         """Fetch comments for multiple posts concurrently.
 
-        Returns a dict mapping shortcode -> list of comments.
+        Returns structured per-shortcode comments and explicit per-shortcode errors.
         Uses a ThreadPoolExecutor for parallel fetching while coordinating
         rate limiting across threads via a shared lock.
 
@@ -3088,34 +3265,29 @@ class InstagramScraper:
         if max_workers is None:
             max_workers = int(os.getenv("SOCIAL_INSTAGRAM_COMMENT_CONCURRENCY", "3"))
         max_workers = max(1, min(max_workers, 8))  # Clamp to 1-8
+        rate_lock = threading.Lock()
 
         if len(shortcodes) <= 1 or max_workers <= 1:
-            # Sequential fallback for single items or concurrency=1
-            result: dict[str, list[InstagramComment]] = {}
+            sequential_result = ConcurrentCommentFetchResult()
             for sc in shortcodes:
-                result[sc] = self.fetch_comments(
-                    sc,
-                    max_comments=max_comments,
-                    fetch_replies=fetch_replies,
-                    delay=delay,
-                    fast_mode=fast_mode,
-                )
-            return result
+                try:
+                    sequential_result.comments_by_shortcode[sc] = self.fetch_comments(
+                        sc,
+                        max_comments=max_comments,
+                        fetch_replies=fetch_replies,
+                        delay=delay,
+                        fast_mode=fast_mode,
+                        rate_lock=rate_lock,
+                    )
+                except Exception as exc:
+                    sequential_result.comments_by_shortcode.setdefault(sc, [])
+                    sequential_result.errors_by_shortcode[sc] = f"{exc.__class__.__name__}: {exc}"
+                    logger.exception("Sequential comment fetch failed for %s", sc)
+            return sequential_result
 
-        # Use a lock to serialize _rate_limit sleep calls so threads don't
-        # all sleep independently (which would be slower than sequential).
-        rate_lock = threading.Lock()
-        original_rate_limit = self._rate_limit
+        result = ConcurrentCommentFetchResult()
 
-        def _synchronized_rate_limit(d: float, *, fast_mode: bool = False):
-            with rate_lock:
-                original_rate_limit(d, fast_mode=fast_mode)
-
-        results: dict[str, list[InstagramComment]] = {}
-
-        def _fetch_one(shortcode: str) -> tuple[str, list[InstagramComment]]:
-            # Temporarily patch _rate_limit with the synchronized version
-            self._rate_limit = _synchronized_rate_limit  # type: ignore[assignment]
+        def _fetch_one(shortcode: str) -> tuple[str, list[InstagramComment], str | None]:
             try:
                 comments = self.fetch_comments(
                     shortcode,
@@ -3123,11 +3295,12 @@ class InstagramScraper:
                     fetch_replies=fetch_replies,
                     delay=delay,
                     fast_mode=fast_mode,
+                    rate_lock=rate_lock,
                 )
-                return shortcode, comments
+                return shortcode, comments, None
             except Exception as exc:
-                logger.error("Concurrent comment fetch failed for %s: %s", shortcode, exc)
-                return shortcode, []
+                logger.exception("Concurrent comment fetch failed for %s", shortcode)
+                return shortcode, [], f"{exc.__class__.__name__}: {exc}"
 
         logger.info(
             "Fetching comments for %d posts concurrently (workers=%d, fast=%s)",
@@ -3139,8 +3312,17 @@ class InstagramScraper:
             futures = {executor.submit(_fetch_one, sc): sc for sc in shortcodes}
             completed = 0
             for future in as_completed(futures):
-                shortcode, comments = future.result()
-                results[shortcode] = comments
+                shortcode = futures[future]
+                try:
+                    shortcode, comments, error = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    result.comments_by_shortcode.setdefault(shortcode, [])
+                    result.errors_by_shortcode[shortcode] = f"{exc.__class__.__name__}: {exc}"
+                    logger.exception("Concurrent comment future crashed for %s", shortcode)
+                    continue
+                result.comments_by_shortcode[shortcode] = comments
+                if error:
+                    result.errors_by_shortcode[shortcode] = error
                 completed += 1
                 if completed % 10 == 0:
                     logger.info(
@@ -3149,14 +3331,13 @@ class InstagramScraper:
                         len(shortcodes),
                     )
 
-        # Restore original _rate_limit
-        self._rate_limit = original_rate_limit  # type: ignore[assignment]
         logger.info(
-            "Concurrent comment fetch complete: %d posts, %d total comments",
-            len(results),
-            sum(len(v) for v in results.values()),
+            "Concurrent comment fetch complete: %d posts, %d total comments, %d errors",
+            len(result.comments_by_shortcode),
+            result.total_comments,
+            len(result.errors_by_shortcode),
         )
-        return results
+        return result
 
     def _parse_comment(
         self,
@@ -3887,7 +4068,7 @@ class InstagramScraper:
                     if refresh.get("refreshed"):
                         rotation_successes += 1
                         self._reset_request_session()
-                        self._profile_page_context_cache.pop(config.username, None)
+                        self._pop_profile_page_context_cache_entry(config.username)
                         page_num -= 1  # retry same page with fresh cookies
                         continue
                 if page_num == 1:
@@ -4001,7 +4182,7 @@ class InstagramScraper:
                     if refresh.get("refreshed"):
                         rotation_successes += 1
                         self._reset_request_session()
-                        self._profile_page_context_cache.pop(config.username, None)
+                        self._pop_profile_page_context_cache_entry(config.username)
 
         logger.info("Scrape complete: checked %d posts, found %d matches", posts_checked, len(posts))
         profile_avatar_backfilled_posts = 0

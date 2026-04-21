@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -26,6 +27,11 @@ from trr_backend.socials.instagram.permalink_metadata import _shortcode_to_media
 from trr_backend.socials.instagram.scraper import InstagramComment, InstagramScraper
 
 logger = logging.getLogger("socials.instagram.comments_scrapling.fetcher")
+
+_COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 25
+_REPLY_PAGINATION_MAX_PAGES_DEFAULT = 10
+_COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 30.0
+_REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 20.0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,6 +53,28 @@ def _env_truthy(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
+
+
+def _resolve_positive_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def _resolve_positive_float_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
 
 
 def _auth_failure_text(text: str) -> bool:
@@ -198,7 +226,7 @@ class InstagramCommentsScraplingFetcher:
         if _status_code(response) in {401, 403} or _auth_failure_text(text):
             raise RuntimeError("Instagram auth warm-up failed; session appears logged out or challenged.")
         self._merge_warmup_cookies(response)
-        self._rebuild_http_client()
+        await self._rebuild_http_client()
 
     async def fetch_comments_for_shortcode(
         self,
@@ -226,8 +254,28 @@ class InstagramCommentsScraplingFetcher:
         auth_failed = False
         fetch_reason: str | None = None
         retryable = False
+        pages_seen = 0
+        seen_cursors: set[str] = set()
+        deadline = time.monotonic() + _resolve_positive_float_env(
+            "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS",
+            _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT,
+            minimum=1.0,
+            maximum=300.0,
+        )
+        page_cap = _resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES",
+            _COMMENT_PAGINATION_MAX_PAGES_DEFAULT,
+            minimum=1,
+            maximum=250,
+        )
 
         while True:
+            if time.monotonic() >= deadline:
+                fetch_failed = True
+                fetch_reason = "pagination_deadline_exceeded"
+                retryable = True
+                logger.warning("Instagram comments pagination deadline exceeded for shortcode=%s", shortcode)
+                break
             response = await self._fetch_json_response(
                 COMMENTS_URL.format(media_id=media_id),
                 referer=post_url,
@@ -238,12 +286,18 @@ class InstagramCommentsScraplingFetcher:
                 },
             )
             payload = response.get("payload")
-            fetch_reason = response.get("reason")
-            fetch_failed = bool(response.get("failed"))
-            auth_failed = bool(response.get("auth_failed"))
-            retryable = bool(response.get("retryable"))
-            if fetch_failed or not isinstance(payload, (dict, list)):
+            page_fetch_reason = response.get("reason")
+            page_fetch_failed = bool(response.get("failed"))
+            page_auth_failed = bool(response.get("auth_failed"))
+            page_retryable = bool(response.get("retryable"))
+            fetch_failed = fetch_failed or page_fetch_failed
+            auth_failed = auth_failed or page_auth_failed
+            retryable = retryable or page_retryable
+            if page_fetch_reason and not fetch_reason:
+                fetch_reason = page_fetch_reason
+            if page_fetch_failed or not isinstance(payload, (dict, list)):
                 break
+            pages_seen += 1
 
             comment_rows = payload if isinstance(payload, list) else list(payload.get("comments") or [])
             for comment_data in comment_rows:
@@ -274,9 +328,29 @@ class InstagramCommentsScraplingFetcher:
                 break
             has_more = bool(payload.get("has_more_comments", False)) or bool(payload.get("has_more_headload_comments"))
             next_cursor = payload.get("next_min_id") or payload.get("next_max_id")
-            if not has_more or not next_cursor or next_cursor == cursor:
+            if not has_more or not next_cursor:
                 break
-            cursor = str(next_cursor)
+            next_cursor = str(next_cursor)
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                fetch_failed = True
+                fetch_reason = "pagination_repeated_cursor"
+                logger.warning(
+                    "Instagram comments pagination repeated cursor for shortcode=%s cursor=%s",
+                    shortcode,
+                    next_cursor,
+                )
+                break
+            if pages_seen >= page_cap:
+                fetch_failed = True
+                fetch_reason = "pagination_page_cap_reached"
+                logger.warning(
+                    "Instagram comments pagination page cap reached for shortcode=%s page_cap=%d",
+                    shortcode,
+                    page_cap,
+                )
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
         return InstagramCommentsFetchResult(
             comments=comments,
@@ -314,8 +388,28 @@ class InstagramCommentsScraplingFetcher:
         auth_failed = False
         fetch_reason: str | None = None
         retryable = False
+        pages_seen = 0
+        seen_cursors: set[str] = set()
+        deadline = time.monotonic() + _resolve_positive_float_env(
+            "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_SECONDS",
+            _REPLY_PAGINATION_MAX_SECONDS_DEFAULT,
+            minimum=1.0,
+            maximum=300.0,
+        )
+        page_cap = _resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES",
+            _REPLY_PAGINATION_MAX_PAGES_DEFAULT,
+            minimum=1,
+            maximum=250,
+        )
 
         while True:
+            if time.monotonic() >= deadline:
+                fetch_failed = True
+                fetch_reason = "pagination_deadline_exceeded"
+                retryable = True
+                logger.warning("Instagram reply pagination deadline exceeded for comment_id=%s", comment_id)
+                break
             response = await self._fetch_json_response(
                 COMMENT_REPLIES_URL.format(media_id=media_id, comment_id=comment_id),
                 referer=post_url,
@@ -328,6 +422,7 @@ class InstagramCommentsScraplingFetcher:
             retryable = retryable or bool(response.get("retryable"))
             if fetch_failed or not isinstance(payload, (dict, list)):
                 break
+            pages_seen += 1
 
             if isinstance(payload, dict):
                 reply_rows = payload.get("child_comments") or payload.get("replies") or []
@@ -351,9 +446,29 @@ class InstagramCommentsScraplingFetcher:
             if not bool(payload.get("has_more_tail_child_comments", False)):
                 break
             next_cursor = payload.get("next_min_child_cursor")
-            if not next_cursor or next_cursor == cursor:
+            if not next_cursor:
                 break
-            cursor = str(next_cursor)
+            next_cursor = str(next_cursor)
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                fetch_failed = True
+                fetch_reason = "pagination_repeated_cursor"
+                logger.warning(
+                    "Instagram reply pagination repeated cursor for comment_id=%s cursor=%s",
+                    comment_id,
+                    next_cursor,
+                )
+                break
+            if pages_seen >= page_cap:
+                fetch_failed = True
+                fetch_reason = "pagination_page_cap_reached"
+                logger.warning(
+                    "Instagram reply pagination page cap reached for comment_id=%s page_cap=%d",
+                    comment_id,
+                    page_cap,
+                )
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
         return InstagramCommentsFetchResult(
             comments=replies,
@@ -387,11 +502,15 @@ class InstagramCommentsScraplingFetcher:
                 except Exception:  # noqa: BLE001
                     pass
 
-    def _rebuild_http_client(self) -> None:
+    async def _rebuild_http_client(self) -> None:
         """Create or recreate the httpx client with current cookies and proxy."""
-        if self._http_client is not None:
-            # Can't await aclose in a sync context; let GC handle it.
-            self._http_client = None
+        existing_client = self._http_client
+        self._http_client = None
+        if existing_client is not None:
+            try:
+                await existing_client.aclose()
+            except Exception:  # noqa: BLE001
+                pass
         self._http_client = httpx.AsyncClient(
             cookies=dict(self._raw_cookies),
             timeout=httpx.Timeout(self._timeout_ms / 1000),
@@ -443,7 +562,7 @@ class InstagramCommentsScraplingFetcher:
     ) -> httpx.Response:
         """Plain HTTP GET via httpx. Used for comments/replies JSON API calls."""
         if self._http_client is None:
-            self._rebuild_http_client()
+            await self._rebuild_http_client()
         self._request_count += 1
         headers = self._parser._get_headers(referer)
         clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None

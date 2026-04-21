@@ -42,12 +42,34 @@ def _make_fetcher():
             raw_cookies={"sessionid": "x", "csrftoken": "y", "ds_user_id": "1"},
             browser_account_id="t",
         )
-        fetcher._rebuild_http_client()
+        asyncio.run(fetcher._rebuild_http_client())
         return fetcher
 
 
 _SLEEP_TARGET = "trr_backend.socials.instagram.posts_scrapling.fetcher.asyncio.sleep"
 _URL = "https://www.instagram.com/graphql/query"
+
+
+class _TrackingClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_rebuild_http_client_closes_previous_client(monkeypatch) -> None:
+    fetcher = _make_fetcher()
+    old = _TrackingClient()
+    fetcher._http_client = old
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.posts_scrapling.fetcher.httpx.AsyncClient",
+        lambda **_kwargs: _TrackingClient(),
+    )
+
+    asyncio.run(fetcher._rebuild_http_client())
+
+    assert old.closed is True
 
 
 # 1 — 429 then 200 succeeds
@@ -158,6 +180,17 @@ def test_timeout_exhausts_retries() -> None:
     assert result["retryable"] is True
     assert result["reason"] == "transport_timeout"
     assert fetcher._fetch_graphql.await_count == InstagramPostsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
+
+
+def test_rebuild_http_client_closes_existing_async_client() -> None:
+    fetcher = _make_fetcher()
+    stale_client = AsyncMock()
+    fetcher._http_client = stale_client
+
+    asyncio.run(fetcher._rebuild_http_client())
+
+    stale_client.aclose.assert_awaited_once()
+    assert fetcher._http_client is not stale_client
 
 
 # 8 — Redirect to /accounts/login → auth_failed, non-retryable

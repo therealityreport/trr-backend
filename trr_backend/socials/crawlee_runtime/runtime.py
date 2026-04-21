@@ -12,12 +12,12 @@ from threading import Thread
 from typing import Any
 from uuid import uuid4
 
-logger = logging.getLogger(__name__)
-
 from .auth_preflight import AuthPreflightResult, build_auth_context
 from .config import CrawleeRuntimeConfig
 from .error_taxonomy import classify_exception
 from .request_keys import build_request_key
+
+logger = logging.getLogger(__name__)
 
 StageRunner = Callable[[], tuple[int, int, dict[str, Any]]]
 
@@ -122,7 +122,24 @@ def _build_runtime_meta(
     }
 
 
-def _run_coroutine(coro: Any) -> Any:
+def _resolve_join_timeout_seconds(*, platform: str, runtime_config: CrawleeRuntimeConfig) -> float:
+    platform_suffix = (platform or "").strip().upper()
+    default_timeout_seconds = max(30.0, min(900.0, float(max(1, int(runtime_config.max_retries))) * 120.0))
+    raw = (
+        os.getenv(f"SOCIAL_CRAWLEE_JOIN_TIMEOUT_SECONDS_{platform_suffix}")
+        or os.getenv("SOCIAL_CRAWLEE_JOIN_TIMEOUT_SECONDS")
+        or ""
+    ).strip()
+    if not raw:
+        return default_timeout_seconds
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return default_timeout_seconds
+    return max(1.0, min(3600.0, parsed))
+
+
+def _run_coroutine(coro: Any, *, join_timeout_seconds: float | None = None) -> Any:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -131,16 +148,40 @@ def _run_coroutine(coro: Any) -> Any:
     payload: dict[str, Any] = {}
 
     def _thread_main() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        task = loop.create_task(coro)
+        payload["loop"] = loop
+        payload["task"] = task
         try:
-            payload["result"] = asyncio.run(coro)
+            payload["result"] = loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            payload["cancelled"] = True
         except Exception as exc:  # noqa: BLE001
             payload["error"] = exc
+        finally:
+            try:
+                loop.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     thread = Thread(target=_thread_main, daemon=True)
     thread.start()
-    thread.join()
+    thread.join(timeout=join_timeout_seconds)
+    if thread.is_alive():
+        loop = payload.get("loop")
+        task = payload.get("task")
+        if loop is not None and task is not None and hasattr(loop, "call_soon_threadsafe"):
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except Exception:  # noqa: BLE001
+                pass
+        thread.join(timeout=1.0)
+        raise TimeoutError(f"Crawlee runtime coroutine exceeded join timeout ({join_timeout_seconds}s)")
     if "error" in payload:
         raise payload["error"]
+    if payload.get("cancelled"):
+        raise TimeoutError(f"Crawlee runtime coroutine exceeded join timeout ({join_timeout_seconds}s)")
     return payload.get("result")
 
 
@@ -184,10 +225,15 @@ def _execute_with_internal_retry(
             if error_code in {"blocked", "rate_limited"}:
                 counters.blocked_events += 1
             if retryable and attempt < attempts:
-                backoff = min(60, 2 ** attempt)  # 1s, 2s, 4s, 8s … capped at 60s
+                backoff = min(60, 2 ** (attempt - 1))  # 1s, 2s, 4s, 8s … capped at 60s
                 logger.warning(
                     "crawlee retry %d/%d for %s:%s (%s) — backing off %.1fs",
-                    attempt, attempts, platform, stage, error_code, backoff,
+                    attempt,
+                    attempts,
+                    platform,
+                    stage,
+                    error_code,
+                    backoff,
                 )
                 time.sleep(backoff)
                 counters.retries_total += 1
@@ -356,10 +402,15 @@ def execute_platform_stage_with_crawlee(
                         if can_retry:
                             queued_request.retry_count += 1
                             queued_request.session_rotation_count = (queued_request.session_rotation_count or 0) + 1
-                            backoff = min(60, 2 ** queued_request.retry_count)
+                            backoff = min(60, 2 ** max(0, queued_request.retry_count - 1))
                             logger.warning(
                                 "crawlee queue retry %d/%d for %s:%s (%s) — backing off %.1fs",
-                                queued_request.retry_count, max_retries, platform, stage, error_code, backoff,
+                                queued_request.retry_count,
+                                max_retries,
+                                platform,
+                                stage,
+                                error_code,
+                                backoff,
                             )
                             await asyncio.sleep(backoff)
                             counters.retries_total += 1
@@ -408,4 +459,5 @@ def execute_platform_stage_with_crawlee(
             },
         )
 
-    return _run_coroutine(_execute_with_queue())
+    join_timeout_seconds = _resolve_join_timeout_seconds(platform=platform, runtime_config=runtime_config)
+    return _run_coroutine(_execute_with_queue(), join_timeout_seconds=join_timeout_seconds)

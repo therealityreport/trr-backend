@@ -35,6 +35,22 @@ def _ingest_options() -> IngestOptions:
     )
 
 
+def test_normalize_hosted_tagged_profile_pics_accepts_string_and_object_values() -> None:
+    payload = social_repo._normalize_hosted_tagged_profile_pics(  # noqa: SLF001
+        {
+            "andy": "https://cdn.test/a.jpg",
+            "cohen": {
+                "hosted_url": "https://cdn.test/c.jpg",
+                "sha256": "abc",
+                "mirrored_at": "2026-04-21T00:00:00+00:00",
+            },
+        }
+    )
+
+    assert payload["andy"]["hosted_url"] == "https://cdn.test/a.jpg"
+    assert payload["cohen"]["sha256"] == "abc"
+
+
 def test_get_post_comments_instagram_filters_missing_comments_and_includes_media_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

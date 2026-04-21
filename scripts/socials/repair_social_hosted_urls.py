@@ -292,7 +292,9 @@ def _repair_platform(
         old_media_urls = _as_text_list(row.get("hosted_media_urls"))
         old_avatar_url = str(row.get("hosted_user_avatar_url") or "").strip()
         old_owner_avatar_url = str(row.get("hosted_owner_profile_pic_url") or "").strip()
-        old_tagged_profile_pics = _as_json_object(row.get("hosted_tagged_profile_pics"))
+        old_tagged_profile_pics = social_repo._normalize_hosted_tagged_profile_pics(  # noqa: SLF001
+            row.get("hosted_tagged_profile_pics")
+        )
         old_raw_data = _as_json_object(row.get("raw_data"))
 
         new_thumbnail_url, thumb_changed = _rewrite_to_cdn(old_thumbnail_url, cdn_base_url=cdn_base_url)
@@ -312,12 +314,16 @@ def _repair_platform(
         )
 
         tagged_profile_rewrites = 0
-        new_tagged_profile_pics: dict[str, str] = {}
+        new_tagged_profile_pics: dict[str, dict[str, object]] = {}
         for key, value in old_tagged_profile_pics.items():
-            rewritten, changed = _rewrite_to_cdn(str(value or "").strip(), cdn_base_url=cdn_base_url)
+            rewritten, changed = _rewrite_to_cdn(str(value.get("hosted_url") or "").strip(), cdn_base_url=cdn_base_url)
             if changed:
                 tagged_profile_rewrites += 1
-            new_tagged_profile_pics[str(key)] = rewritten
+            new_tagged_profile_pics[str(key)] = {
+                "hosted_url": rewritten,
+                "sha256": value.get("sha256"),
+                "mirrored_at": value.get("mirrored_at"),
+            }
 
         new_raw_data, media_asset_meta_rewrites = _rewrite_media_asset_meta(
             old_raw_data,

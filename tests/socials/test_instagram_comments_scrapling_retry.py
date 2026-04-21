@@ -7,6 +7,7 @@ Mocks target `_fetch_api` (httpx path) for JSON tests, not the old `_fetch`
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +18,15 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     InstagramCommentsFetchResult,
     InstagramCommentsScraplingFetcher,
 )
+from trr_backend.socials.instagram.scraper import InstagramComment
+
+
+class _TrackingClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def _build_fetcher() -> InstagramCommentsScraplingFetcher:
@@ -28,8 +38,83 @@ def _build_fetcher() -> InstagramCommentsScraplingFetcher:
             browser_account_id="testaccount",
         )
         # Pre-build httpx client so tests don't need warmup.
-        fetcher._rebuild_http_client()
+        asyncio.run(fetcher._rebuild_http_client())
         return fetcher
+
+
+def test_rebuild_http_client_closes_previous_client(monkeypatch) -> None:
+    fetcher = _build_fetcher()
+    old = _TrackingClient()
+    fetcher._http_client = old
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.fetcher.httpx.AsyncClient",
+        lambda **_kwargs: _TrackingClient(),
+    )
+
+    asyncio.run(fetcher._rebuild_http_client())
+
+    assert old.closed is True
+
+
+def test_fetch_comments_preserves_reply_failure_across_later_pages(monkeypatch) -> None:
+    fetcher = _build_fetcher()
+    fetcher._parser._parse_comment = MagicMock(
+        side_effect=[
+            InstagramComment(
+                comment_id="c1",
+                text="one",
+                username="alpha",
+                user_id="1",
+                created_at=1,
+                date_time="1970-01-01T00:00:01+00:00",
+                likes=0,
+                is_reply=False,
+                parent_comment_id=None,
+                reply_count=1,
+            )
+        ]
+    )
+    fetcher._fetch_json_response = AsyncMock(
+        side_effect=[
+            {
+                "payload": {
+                    "comments": [{"id": "c1"}],
+                    "has_more_comments": True,
+                    "next_min_id": "cursor-2",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            {
+                "payload": {
+                    "comments": [],
+                    "has_more_comments": False,
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+        ]
+    )
+    fetcher._fetch_comment_replies = AsyncMock(
+        return_value=InstagramCommentsFetchResult(
+            comments=[],
+            fetch_failed=True,
+            auth_failed=False,
+            fetch_reason="reply_timeout",
+            request_count=1,
+            retryable=True,
+        )
+    )
+
+    result = asyncio.run(fetcher.fetch_comments_for_shortcode("ABC123", max_comments=10, fetch_replies=True))
+
+    assert result.fetch_failed is True
+    assert result.retryable is True
+    assert result.fetch_reason == "reply_timeout"
 
 
 def _mock_httpx_response(
@@ -181,6 +266,17 @@ def test_httpx_timeout_exception_is_retryable() -> None:
 
     assert result["failed"] is False
     assert fetcher._fetch_api.await_count == 2
+
+
+def test_rebuild_http_client_closes_existing_async_client() -> None:
+    fetcher = _build_fetcher()
+    stale_client = AsyncMock()
+    fetcher._http_client = stale_client
+
+    asyncio.run(fetcher._rebuild_http_client())
+
+    stale_client.aclose.assert_awaited_once()
+    assert fetcher._http_client is not stale_client
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +502,7 @@ def test_job_runner_partial_progress_persists_before_error(monkeypatch: pytest.M
     monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
 
     job = {
         "id": "job-1",
@@ -433,9 +530,9 @@ def test_job_runner_partial_progress_persists_before_error(monkeypatch: pytest.M
 
 
 def test_job_runner_marks_uncapped_success_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
     from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
-    from trr_backend.repositories import social_season_analytics as repo
 
     captured_is_complete: list[bool] = []
 
@@ -481,6 +578,7 @@ def test_job_runner_marks_uncapped_success_complete(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
 
     job = {
         "id": "job-1",
@@ -505,9 +603,9 @@ def test_job_runner_marks_uncapped_success_complete(monkeypatch: pytest.MonkeyPa
 
 
 def test_job_runner_keeps_capped_success_incomplete_when_local_cap_is_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
     from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
-    from trr_backend.repositories import social_season_analytics as repo
 
     captured_is_complete: list[bool] = []
 
@@ -557,6 +655,7 @@ def test_job_runner_keeps_capped_success_incomplete_when_local_cap_is_hit(monkey
     monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
 
     job = {
         "id": "job-1",
@@ -582,9 +681,9 @@ def test_job_runner_keeps_capped_success_incomplete_when_local_cap_is_hit(monkey
 
 
 def test_job_runner_completed_metadata_reports_final_request_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
     from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
-    from trr_backend.repositories import social_season_analytics as repo
 
     finish_calls: list[dict[str, Any]] = []
 
@@ -634,6 +733,7 @@ def test_job_runner_completed_metadata_reports_final_request_count(monkeypatch: 
     monkeypatch.setattr(repo, "_finish_job", fake_finish_job)
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
 
     job = {
         "id": "job-1",
@@ -657,3 +757,152 @@ def test_job_runner_completed_metadata_reports_final_request_count(monkeypatch: 
     metadata = finish_calls[-1]["metadata"]
     assert metadata["fetch_counters"]["request_count"] == 4
     assert metadata["fetcher_runtime"]["request_count"] == 4
+
+
+def test_job_runner_reuses_one_db_connection_for_all_post_persists(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
+
+    persist_conns: list[object] = []
+    shared_conn = object()
+
+    def fake_persist(*, conn: object, **_kwargs: Any) -> PersistedInstagramComments:
+        persist_conns.append(conn)
+        return PersistedInstagramComments(
+            post_id="post-id",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+        )
+
+    class _FakeFetcher:
+        _request_count = 2
+
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {"transport": "test", "request_count": self._request_count}
+
+        async def warmup(self) -> None:
+            return None
+
+        async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+
+        async def aclose(self) -> None:
+            return None
+
+    fake_session = MagicMock()
+    fake_session.cookies = []
+    fake_session.auth_session.cookies = {}
+    fake_session.auth_session.metadata = {"source": "test"}
+    fake_session.browser_account_id = "testaccount"
+
+    monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(shared_conn))
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1", "SHORT2"],
+            "fetch_replies": False,
+        },
+        "attempt_count": 1,
+        "max_attempts": 1,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        return_value={"id": "job-1", "status": "completed"},
+    ):
+        jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert persist_conns == [shared_conn, shared_conn]
+
+
+def test_job_runner_returns_degraded_summary_when_final_job_read_hits_db_saturation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
+
+    class _FakeFetcher:
+        _request_count = 2
+
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {"transport": "test", "request_count": self._request_count}
+
+        async def warmup(self) -> None:
+            return None
+
+        async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+
+        async def aclose(self) -> None:
+            return None
+
+    fake_session = MagicMock()
+    fake_session.cookies = []
+    fake_session.auth_session.cookies = {}
+    fake_session.auth_session.metadata = {"source": "test"}
+    fake_session.browser_account_id = "testaccount"
+
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_comments_for_post",
+        lambda **_kwargs: PersistedInstagramComments(
+            post_id="post-id",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+        ),
+    )
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1"],
+            "fetch_replies": False,
+        },
+        "attempt_count": 1,
+        "max_attempts": 1,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        side_effect=jr.pg.DatabaseServiceUnavailableError("db saturated"),
+    ):
+        payload = jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert payload["id"] == "job-1"
+    assert payload["status"] == "completed"
+    assert payload["metadata"]["degraded_summary"] is True

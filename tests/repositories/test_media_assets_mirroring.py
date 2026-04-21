@@ -7,6 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trr_backend.repositories import media_assets
+from trr_backend.repositories import social_season_analytics as social_repo
+
 
 def test_is_allowed_domain_valid() -> None:
     """Test domain allowlist validation for allowed domains."""
@@ -311,3 +314,44 @@ def test_update_asset_with_mirror_result_persists_dimensions() -> None:
     payload = call_args[0][0]
     assert payload["width"] == 1000
     assert payload["height"] == 1500
+
+
+def test_download_and_upload_redacts_signed_instagram_cdn_urls() -> None:
+    assert social_repo.redact_signed_url("https://cdn.test/file.jpg?oh=abc&oe=def") == "https://cdn.test/file.jpg"  # noqa: SLF001
+
+
+def test_is_retryable_mirror_reason_strips_nested_prefixes() -> None:
+    assert social_repo._is_retryable_mirror_reason("download_failed:ytdlp_fallback_failed:http_503") is True  # noqa: SLF001
+    assert social_repo._is_retryable_mirror_reason("invalid_source_url") is False  # noqa: SLF001
+
+
+def test_ensure_media_mirror_s3_ready_requires_write_access(monkeypatch) -> None:
+    client = MagicMock()
+    monkeypatch.setattr(
+        "trr_backend.media.s3_mirror.get_s3_config",
+        lambda: MagicMock(bucket="bucket"),
+    )
+    monkeypatch.setattr(
+        "trr_backend.media.s3_mirror.get_object_storage_client",
+        lambda: client,
+    )
+
+    social_repo.ensure_media_mirror_s3_ready()  # noqa: SLF001
+
+    client.head_bucket.assert_called_once_with(Bucket="bucket")
+    client.put_object.assert_called_once()
+    client.delete_object.assert_called_once()
+
+
+def test_update_asset_with_hosted_fields_requires_hosted_triplet() -> None:
+    db = MagicMock()
+
+    with pytest.raises(ValueError, match="hosted_bucket"):
+        media_assets.update_asset_with_hosted_fields(
+            db,
+            "asset-1",
+            hosted_bucket="",
+            hosted_key="key",
+            hosted_url="https://cdn.test/x.jpg",
+            hosted_bytes=12,
+        )

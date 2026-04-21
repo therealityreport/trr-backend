@@ -80,7 +80,9 @@ class _AvatarBackfillPost:
             if isinstance(item, dict)
         ]
         self.hosted_owner_profile_pic_url = str(row.get("hosted_owner_profile_pic_url") or "").strip() or None
-        self.hosted_tagged_profile_pics = social_repo._as_json_string_map(row.get("hosted_tagged_profile_pics"))  # noqa: SLF001
+        self.hosted_tagged_profile_pics = social_repo._normalize_hosted_tagged_profile_pics(  # noqa: SLF001
+            row.get("hosted_tagged_profile_pics")
+        )
         self.profile_pic_mirror_status = str(row.get("profile_pic_mirror_status") or "").strip() or None
         self.profile_pic_mirror_error = str(row.get("profile_pic_mirror_error") or "").strip() or None
         self._raw_data = row.get("raw_data") if isinstance(row.get("raw_data"), dict) else {}

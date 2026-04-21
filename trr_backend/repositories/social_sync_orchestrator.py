@@ -97,6 +97,29 @@ def _normalize_platforms(platforms: list[str] | None) -> list[str]:
     return normalized or list(SOCIAL_SUPPORTED_PLATFORMS)
 
 
+def _as_hosted_tagged_url_map(social_repo: Any, value: Any) -> dict[str, str]:
+    repo_helper = getattr(social_repo, "_as_json_string_map", None)
+    if callable(repo_helper):
+        return dict(repo_helper(value) or {})
+
+    result: dict[str, str] = {}
+    if not isinstance(value, dict):
+        return result
+    for raw_key, raw_value in value.items():
+        key = str(raw_key or "").strip().lstrip("@").lower()
+        if not key:
+            continue
+        if isinstance(raw_value, str):
+            hosted_url = raw_value.strip()
+        elif isinstance(raw_value, dict):
+            hosted_url = str(raw_value.get("hosted_url") or "").strip()
+        else:
+            hosted_url = ""
+        if hosted_url:
+            result[key] = hosted_url
+    return result
+
+
 def _window_span_days(*, date_start: datetime | None, date_end: datetime | None) -> float:
     if date_start is None or date_end is None:
         return 0.0
@@ -490,11 +513,7 @@ def _build_avatar_coverage_snapshot(
                 if owner_source and not owner_hosted:
                     if (platform, owner_handle.lstrip("@").lower(), owner_source) not in completed_avatar_keys:
                         missing_avatar_count += 1
-                hosted_tagged = (
-                    post_json.get("hosted_tagged_profile_pics")
-                    if isinstance(post_json.get("hosted_tagged_profile_pics"), dict)
-                    else {}
-                )
+                hosted_tagged = _as_hosted_tagged_url_map(social_repo, post_json.get("hosted_tagged_profile_pics"))
                 for detail_key in ("tagged_users_detail", "collaborators_detail"):
                     for detail in post_json.get(detail_key) or []:
                         if not isinstance(detail, dict):
@@ -1068,11 +1087,7 @@ def _build_missing_detail_target_groups(
             if bool(avatar_state.get("needs_repair")):
                 _add_group_target("avatars", platform, source_id)
             if platform == "instagram":
-                hosted_tagged = (
-                    post_json.get("hosted_tagged_profile_pics")
-                    if isinstance(post_json.get("hosted_tagged_profile_pics"), dict)
-                    else {}
-                )
+                hosted_tagged = _as_hosted_tagged_url_map(social_repo, post_json.get("hosted_tagged_profile_pics"))
                 mention_gap = False
                 for mention in social_repo._as_text_list(  # noqa: SLF001
                     post_json.get("mentions"),

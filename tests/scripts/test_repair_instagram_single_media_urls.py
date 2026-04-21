@@ -55,6 +55,21 @@ def test_repair_candidate_row_skips_rows_already_normalized() -> None:
     assert repair is None
 
 
+def test_repair_candidate_row_archives_legacy_media_urls() -> None:
+    repair = repair_script._repair_candidate_row(  # noqa: SLF001
+        {
+            "id": "1",
+            "shortcode": "repair-me",
+            "media_type": "image",
+            "post_format": "post",
+            "media_urls": ["https://example.com/one.jpg", "https://example.com/two.jpg"],
+            "raw_data": {},
+        }
+    )
+
+    assert repair["legacy_media_urls"] == ["https://example.com/one.jpg", "https://example.com/two.jpg"]
+
+
 def test_main_dry_run_reports_repairs_without_updating(monkeypatch) -> None:
     candidate_rows = [
         {
@@ -153,6 +168,10 @@ def test_main_apply_updates_only_rows_needing_repair(monkeypatch) -> None:
             "id": "row-1",
             "shortcode": "repair-me",
             "old_media_urls": [
+                "https://example.com/primary.jpg",
+                "https://example.com/secondary.jpg",
+            ],
+            "legacy_media_urls": [
                 "https://example.com/primary.jpg",
                 "https://example.com/secondary.jpg",
             ],
