@@ -42,7 +42,7 @@ Backend owns shared-schema SQL in this workspace.
 
 - Canonical migrations for shared database surfaces belong in `TRR-Backend`, especially `firebase_surveys.*`, `admin.*`, grants, RLS, and anything that depends on backend-owned schemas such as `core.*`.
 - `TRR-APP/apps/web/scripts/run-migrations.mjs` now defaults to app-local migrations only.
-- The app runner still exposes a transitional opt-in for older environments that have not finished porting shared-schema SQL out of `TRR-APP`, but that path is compatibility-only and should not be treated as the long-term owner.
+- The app runner no longer exposes a shared-schema execution mode. The legacy `--include-transitional-shared-schema` flag is removed, and backend-owned SQL still checked into `TRR-APP/apps/web/db/migrations/` is backlog only until it is ported out of the app repo.
 
 ### FK Index Hardening Workflow
 

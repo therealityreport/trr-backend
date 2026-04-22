@@ -20,11 +20,11 @@ from trr_backend.security.jwt import InvalidTokenError, verify_jwt_token
 logger = logging.getLogger(__name__)
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
+def _env_flag_strict(name: str, default: bool = False) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
         return default
-    return raw not in {"0", "false", "no", "off"}
+    return raw in {"1", "true", "yes", "on"}
 
 
 def get_bearer_token(request: Request) -> str | None:
@@ -52,6 +52,9 @@ def _build_internal_admin_identity(payload: dict[str, Any], token: str) -> dict[
         "token": token,
         "issuer": payload.get("iss"),
         "scope": payload.get("scope"),
+        "admin_uid": payload.get("admin_uid"),
+        "admin_email": payload.get("admin_email"),
+        "verified_at": payload.get("verified_at"),
     }
 
 
@@ -62,13 +65,17 @@ def _internal_admin_secret_matches(request: Request) -> bool:
 
 
 def _raw_internal_admin_fallback_matches(request: Request) -> bool:
-    if not _env_flag("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", False):
+    if not _env_flag_strict("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", False):
         return False
+    logger.warning("[auth] raw-secret-fallback engaged; dev-only flag TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK is enabled")
     return _internal_admin_secret_matches(request)
 
 
 def _service_role_allowed(env_name: str) -> bool:
-    return _env_flag(env_name, False)
+    if not _env_flag_strict(env_name, False):
+        return False
+    logger.warning("[auth] service-role bypass engaged via %s; dev-only flag is enabled", env_name)
+    return True
 
 
 async def get_current_user(request: Request) -> dict | None:
