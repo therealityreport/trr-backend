@@ -130,7 +130,7 @@ scripts/socials/**/*.csv
 # Git worktrees
 /.worktrees/
 .loom-backup/
-brain/sessions/
+trr-backend-brain/sessions/
 
 # Sensitive session data
 data/instagram_cookies.json
