@@ -896,6 +896,9 @@ def update_asset_with_hosted_fields(
     turn a usable hosted mirror into a hard failure.
     """
 
+    if not hosted_bucket or not hosted_key or not hosted_url:
+        raise ValueError("update_asset_with_hosted_fields requires hosted_bucket, hosted_key, and hosted_url")
+
     payload: dict[str, Any] = {
         "hosted_bucket": hosted_bucket,
         "hosted_key": hosted_key,

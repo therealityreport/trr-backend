@@ -334,7 +334,7 @@ class InstagramPostsScraplingFetcher:
             raise RuntimeError("Instagram auth warm-up failed; session appears logged out or challenged.")
         self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(response)
-        self._rebuild_http_client()
+        await self._rebuild_http_client()
         logger.info(
             "instagram_posts_scrapling warmup_success",
             extra={
@@ -472,11 +472,15 @@ class InstagramPostsScraplingFetcher:
         for name, value in new_cookies.items():
             self._raw_cookies[name] = value
 
-    def _rebuild_http_client(self) -> None:
+    async def _rebuild_http_client(self) -> None:
         """Create or recreate the httpx client with current cookies and proxy."""
-        if self._http_client is not None:
-            # Can't await aclose in a sync context; let GC handle it.
-            self._http_client = None
+        existing_client = self._http_client
+        self._http_client = None
+        if existing_client is not None:
+            try:
+                await existing_client.aclose()
+            except Exception:  # noqa: BLE001
+                pass
         self._http_client = httpx.AsyncClient(
             cookies=dict(self._raw_cookies),
             timeout=httpx.Timeout(self._timeout_ms / 1000),
@@ -526,7 +530,7 @@ class InstagramPostsScraplingFetcher:
     ) -> httpx.Response:
         """Plain HTTP POST via httpx. Used for GraphQL posts-page calls."""
         if self._http_client is None:
-            self._rebuild_http_client()
+            await self._rebuild_http_client()
         self._request_count += 1
         return await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
 

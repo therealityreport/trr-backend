@@ -94,7 +94,7 @@ See `docs/architecture.md` for the full TMDb enrichment pipeline.
 
 - `social.scrape_jobs`: Track scrape operations (platform, job_type, status, items_found).
 - `social.instagram_posts`: Instagram posts and reels (shortcode unique key).
-- `social.instagram_comments`: Instagram comments with reply support (parent_comment_id).
+- `social.instagram_comments`: Instagram comments with reply support (parent_comment_id), mirrored comment media fields, and hosted commenter-avatar storage.
 - `social.tiktok_posts`: TikTok videos (video_id unique key).
 - `social.tiktok_comments`: TikTok comments with reply support (parent_comment_id).
 - `social.youtube_videos`: YouTube videos (video_id unique key).

@@ -440,6 +440,38 @@ def test_resolve_pool_sizing_clamps_local_session_pooler_overrides(monkeypatch: 
     assert sizing["maxconn_source"] == "clamped:session_pooler_default"
 
 
+def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("MODAL_TASK_ID", "ta-123")
+    monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
+
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
+
+    assert sizing["requested_minconn"] == 4
+    assert sizing["requested_maxconn"] == 16
+    assert sizing["minconn"] == 1
+    assert sizing["maxconn"] == 4
+    assert sizing["modal_session_pooler_override_clamped"] is True
+    assert sizing["minconn_source"] == "clamped:modal_session_pooler_default"
+    assert sizing["maxconn_source"] == "clamped:modal_session_pooler_default"
+
+
+def test_resolve_pool_sizing_keeps_local_clamp_outside_modal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
+
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
+
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 16
+    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["session_pooler_override_clamped"] is False
+
+
 def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"fetch": 0, "reset": 0}
 
@@ -661,8 +693,8 @@ def test_build_pool_for_session_mode_supavisor_uses_conservative_defaults(monkey
 
     pg._build_pool_for_url("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
-    assert captured["minconn"] == 1
-    assert captured["maxconn"] == 2
+    assert captured["minconn"] == 4
+    assert captured["maxconn"] == 16
     options = captured["options"]
     assert "-c idle_in_transaction_session_timeout=60000" in options
     assert "-c statement_timeout=30000" in options

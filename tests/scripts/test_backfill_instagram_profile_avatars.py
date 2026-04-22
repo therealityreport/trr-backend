@@ -148,7 +148,13 @@ def test_main_apply_persists_backfilled_avatar_fields(monkeypatch, capsys) -> No
         "_mirror_instagram_profile_pics_for_post",
         lambda *_args, **_kwargs: {
             "hosted_owner_profile_pic_url": "https://cdn.test/avatar.jpg",
-            "hosted_tagged_profile_pics": {"andycohen": "https://cdn.test/andy.jpg"},
+            "hosted_tagged_profile_pics": {
+                "andycohen": {
+                    "hosted_url": "https://cdn.test/andy.jpg",
+                    "sha256": None,
+                    "mirrored_at": "2026-04-21T00:00:00+00:00",
+                }
+            },
             "profile_pic_mirror_status": "mirrored",
             "profile_pic_mirror_error": None,
         },
@@ -186,7 +192,13 @@ def test_main_apply_persists_backfilled_avatar_fields(monkeypatch, capsys) -> No
             "job_id": None,
             "account": "bravotv",
             "hosted_owner_profile_pic_url": "https://cdn.test/avatar.jpg",
-            "hosted_tagged_profile_pics": {"andycohen": "https://cdn.test/andy.jpg"},
+            "hosted_tagged_profile_pics": {
+                "andycohen": {
+                    "hosted_url": "https://cdn.test/andy.jpg",
+                    "sha256": None,
+                    "mirrored_at": "2026-04-21T00:00:00+00:00",
+                }
+            },
             "profile_pic_mirror_status": "mirrored",
         }
     ]

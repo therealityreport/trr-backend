@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
+from trr_backend.db import pg
 from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
 from trr_backend.socials.control_plane import (
     _resolve_runtime_version_stamp,
@@ -180,6 +181,44 @@ def _resolve_int_env(name: str, default: int, *, minimum: int, maximum: int) -> 
     return max(minimum, min(maximum, parsed))
 
 
+def _resolve_optional_positive_int(
+    value: int | None,
+    *,
+    env_name: str,
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    if value is not None:
+        return max(minimum, min(maximum, int(value)))
+    raw = (os.getenv(env_name) or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return None
+    return max(minimum, min(maximum, parsed))
+
+
+def _resolve_optional_positive_float(
+    value: float | None,
+    *,
+    env_name: str,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    if value is not None:
+        return max(minimum, min(maximum, float(value)))
+    raw = (os.getenv(env_name) or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return None
+    return max(minimum, min(maximum, parsed))
+
+
 def _default_claim_batch_size_for_stage(stage: str | None) -> int:
     # Queue claims mark jobs running up front; batching post claims creates false
     # stale-heartbeat jobs for the later entries while one worker processes the first.
@@ -188,13 +227,52 @@ def _default_claim_batch_size_for_stage(stage: str | None) -> int:
 
 def _claim_stage_candidates(stage: str | None) -> tuple[str | None, ...]:
     normalized_stage = (stage or "").strip().lower() or None
-    if normalized_stage == "comments":
-        # Keep comments draining first, but let otherwise-idle comments workers
-        # borrow post shards once the comment queue is empty.
-        return ("comments", "posts")
     if normalized_stage == "comments_scrapling":
         return ("comments_scrapling",)
+    if normalized_stage == "comments":
+        return ("comments", "posts")
     return (stage,)
+
+
+def _resolve_tandem_stage_groups(
+    *,
+    run_id: str,
+    platform: str | None,
+    posts_workers: int,
+    comments_workers: int,
+    media_workers: int,
+) -> list[tuple[str, str, int]]:
+    normalized_platform = (platform or "").strip().lower() or None
+    run_row = pg.fetch_one(
+        """
+        select config
+        from social.scrape_runs
+        where id = %s::uuid
+        limit 1
+        """,
+        [run_id],
+    ) or {}
+    run_config = _metadata_dict(run_row.get("config"))
+    run_platforms = [
+        str(item or "").strip().lower()
+        for item in list(run_config.get("platforms") or [])
+        if str(item or "").strip()
+    ]
+    effective_platform = normalized_platform or (run_platforms[0] if len(run_platforms) == 1 else None)
+    pipeline_ingest_mode = str(run_config.get("pipeline_ingest_mode") or "").strip().lower()
+
+    if pipeline_ingest_mode == "shared_account_catalog_backfill" and effective_platform == "instagram":
+        return [
+            ("shared_account_posts", "posts", posts_workers),
+            ("comments_scrapling", "comments", comments_workers),
+            ("media_mirror", "media", media_workers),
+        ]
+
+    return [
+        ("posts", "posts", posts_workers),
+        ("comments", "comments", comments_workers),
+        ("media_mirror", "media", media_workers),
+    ]
 
 
 def _claim_jobs_for_stage_candidates(
@@ -443,10 +521,28 @@ def parse_args() -> argparse.Namespace:
         help="Worker count for comments stage in --tandem mode (default: 1)",
     )
     parser.add_argument(
+        "--media-workers",
+        type=int,
+        default=1,
+        help="Worker count for media stage in --tandem mode (default: 1)",
+    )
+    parser.add_argument(
         "--platform",
         choices=list(SOCIAL_SUPPORTED_PLATFORMS),
         default=None,
         help="Optional platform filter when claiming jobs",
+    )
+    parser.add_argument(
+        "--max-jobs-per-invocation",
+        type=int,
+        default=None,
+        help="Optional queue-mode cap on processed jobs before the worker exits",
+    )
+    parser.add_argument(
+        "--max-run-seconds",
+        type=float,
+        default=None,
+        help="Optional queue-mode wall-clock cap before the worker exits",
     )
     return parser.parse_args()
 
@@ -473,6 +569,8 @@ def _spawn_child_worker(
     platform: str | None = None,
     run_id: str | None = None,
     once: bool = False,
+    max_jobs_per_invocation: int | None = None,
+    max_run_seconds: float | None = None,
 ) -> subprocess.Popen:
     cmd = [
         sys.executable,
@@ -489,6 +587,10 @@ def _spawn_child_worker(
         cmd.extend(["--interval", str(interval)])
         if once:
             cmd.append("--once")
+        if max_jobs_per_invocation is not None:
+            cmd.extend(["--max-jobs-per-invocation", str(max_jobs_per_invocation)])
+        if max_run_seconds is not None:
+            cmd.extend(["--max-run-seconds", str(max_run_seconds)])
     if stage:
         cmd.extend(["--stage", stage])
     if platform:
@@ -526,16 +628,39 @@ def _stop_process(proc: subprocess.Popen, *, force: bool) -> None:
             return
 
 
+def _resolve_child_wait_timeout_seconds(max_run_seconds: float | None = None) -> float:
+    if max_run_seconds is not None:
+        return max(30.0, float(max_run_seconds) + 30.0)
+    raw = (os.getenv("SOCIAL_WORKER_CHILD_WAIT_TIMEOUT_SECONDS") or "").strip()
+    try:
+        parsed = float(raw) if raw else 1830.0
+    except ValueError:
+        parsed = 1830.0
+    return max(30.0, min(86400.0, parsed))
+
+
 def _wait_for_children(
     children: list[subprocess.Popen],
     *,
     context_label: str,
+    wait_timeout_seconds: float | None = None,
     terminate_grace_seconds: float = 5.0,
 ) -> int:
     exit_code = 0
+    deadline = time.monotonic() + max(0.0, wait_timeout_seconds) if wait_timeout_seconds is not None else None
     try:
         for proc in children:
-            rc = _wait_process(proc)
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            rc = _wait_process(proc, timeout=remaining)
+            if rc is None and _poll_process(proc) is None:
+                exit_code = exit_code or 124
+                logger.error(
+                    "%s child wait timed out after %.1fs; terminating remaining workers",
+                    context_label,
+                    float(wait_timeout_seconds or 0.0),
+                )
+                _stop_process(proc, force=False)
+                break
             if rc is None:
                 continue
             if rc != 0 and exit_code == 0:
@@ -576,6 +701,18 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     logger.info("Starting socials worker: worker_id=%s", worker_id)
+    max_jobs_per_invocation = _resolve_optional_positive_int(
+        getattr(args, "max_jobs_per_invocation", None),
+        env_name="SOCIAL_WORKER_MAX_JOBS_PER_INVOCATION",
+        minimum=1,
+        maximum=10_000,
+    )
+    max_run_seconds = _resolve_optional_positive_float(
+        getattr(args, "max_run_seconds", None),
+        env_name="SOCIAL_WORKER_MAX_RUN_SECONDS",
+        minimum=1.0,
+        maximum=86_400.0,
+    )
     if _requires_media_mirror_s3_preflight(stage=stage_filter, platform=platform_filter):
         try:
             ensure_media_mirror_s3_ready()
@@ -601,9 +738,15 @@ def main() -> int:
                     stage=stage_filter,
                     platform=platform_filter,
                     once=bool(args.once),
+                    max_jobs_per_invocation=max_jobs_per_invocation,
+                    max_run_seconds=max_run_seconds,
                 )
             )
-        return _wait_for_children(children, context_label="queue fanout")
+        return _wait_for_children(
+            children,
+            context_label="queue fanout",
+            wait_timeout_seconds=_resolve_child_wait_timeout_seconds(max_run_seconds),
+        )
 
     if platform_filter:
         worker_supported_platforms = [platform_filter]
@@ -628,24 +771,31 @@ def main() -> int:
                     "Recovered %d stale running job(s) before executing run_id=%s",
                     len(stale_jobs),
                     args.run_id,
-                )
+            )
             if args.tandem:
                 posts_workers = max(0, int(args.posts_workers))
                 comments_workers = max(0, int(args.comments_workers))
-                if posts_workers + comments_workers == 0:
+                media_workers = max(0, int(args.media_workers))
+                if posts_workers + comments_workers + media_workers == 0:
                     logger.error("No workers requested for tandem mode")
                     return 2
+                stage_groups = _resolve_tandem_stage_groups(
+                    run_id=args.run_id,
+                    platform=platform_filter,
+                    posts_workers=posts_workers,
+                    comments_workers=comments_workers,
+                    media_workers=media_workers,
+                )
                 logger.info(
-                    "Executing run_id=%s in tandem mode (posts=%d comments=%d)",
+                    "Executing run_id=%s in tandem mode (%s)",
                     args.run_id,
-                    posts_workers,
-                    comments_workers,
+                    ", ".join(f"{label}={count}" for _stage, label, count in stage_groups if count > 0),
                 )
                 children: list[subprocess.Popen] = []
 
-                def _spawn_group(stage: str, count: int) -> None:
+                def _spawn_group(stage: str, label: str, count: int) -> None:
                     for index in range(count):
-                        child_worker_id = f"{worker_id}:{stage}:p{index + 1}"
+                        child_worker_id = f"{worker_id}:{label}:p{index + 1}"
                         children.append(
                             _spawn_child_worker(
                                 worker_id=child_worker_id,
@@ -653,12 +803,19 @@ def main() -> int:
                                 stage=stage,
                                 platform=platform_filter,
                                 run_id=args.run_id,
+                                max_jobs_per_invocation=max_jobs_per_invocation,
+                                max_run_seconds=max_run_seconds,
                             )
                         )
 
-                _spawn_group("posts", posts_workers)
-                _spawn_group("comments", comments_workers)
-                return _wait_for_children(children, context_label="tandem run")
+                for stage_name, label, count in stage_groups:
+                    if count > 0:
+                        _spawn_group(stage_name, label, count)
+                return _wait_for_children(
+                    children,
+                    context_label="tandem run",
+                    wait_timeout_seconds=_resolve_child_wait_timeout_seconds(max_run_seconds),
+                )
             if args.parallel > 1:
                 logger.info(
                     "Executing run_id=%s with %d parallel workers",
@@ -675,9 +832,15 @@ def main() -> int:
                             stage=stage_filter,
                             platform=platform_filter,
                             run_id=args.run_id,
+                            max_jobs_per_invocation=max_jobs_per_invocation,
+                            max_run_seconds=max_run_seconds,
                         )
                     )
-                return _wait_for_children(children, context_label="parallel run")
+                return _wait_for_children(
+                    children,
+                    context_label="parallel run",
+                    wait_timeout_seconds=_resolve_child_wait_timeout_seconds(max_run_seconds),
+                )
             logger.info(
                 "Executing specific run_id=%s stage=%s platform=%s",
                 args.run_id,
@@ -722,7 +885,23 @@ def main() -> int:
         last_stale_recovery_at = 0.0
         last_summary_reconcile_at = 0.0
         last_sync_orchestrator_at = 0.0
+        queue_started_at = time.monotonic()
         while True:
+            if max_jobs_per_invocation is not None and processed >= max_jobs_per_invocation:
+                logger.info(
+                    "Worker max jobs reached: processed=%d max_jobs_per_invocation=%d",
+                    processed,
+                    max_jobs_per_invocation,
+                )
+                break
+            if max_run_seconds is not None and (time.monotonic() - queue_started_at) >= max_run_seconds:
+                logger.info(
+                    "Worker max runtime reached: processed=%d max_run_seconds=%.1f elapsed=%.1f",
+                    processed,
+                    max_run_seconds,
+                    time.monotonic() - queue_started_at,
+                )
+                break
             started = datetime.now(tz=UTC)
             now_mono = time.monotonic()
             if now_mono - last_stale_recovery_at >= stale_recovery_interval:

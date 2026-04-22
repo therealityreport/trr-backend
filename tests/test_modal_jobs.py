@@ -270,6 +270,9 @@ def test_build_social_image_base_adds_browser_runtime_when_requested() -> None:
 
 def test_run_social_job_uses_browser_capable_image_binding() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_job"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_posts_job"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_media_job"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_comments_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"] is modal_jobs._browser_image
 
 
@@ -288,7 +291,7 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     )
     monkeypatch.setitem(
         sys.modules,
-        "trr_backend.repositories.social_season_analytics",
+        "trr_backend.socials.control_plane",
         types.SimpleNamespace(
             is_queue_enabled=lambda: True,
             get_worker_auth_capabilities=lambda: {"instagram_authenticated": True, "twitter_authenticated": False},

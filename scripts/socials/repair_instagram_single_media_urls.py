@@ -151,6 +151,7 @@ def _repair_candidate_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "id": str(row.get("id") or "").strip(),
         "shortcode": str(row.get("shortcode") or "").strip(),
         "old_media_urls": media_urls,
+        "legacy_media_urls": media_urls,
         "new_media_urls": [primary_url],
     }
 
@@ -196,11 +197,22 @@ def _apply_repairs(repairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = pg.execute_returning(
             """
             update social.instagram_posts
-            set media_urls = %s::jsonb
+            set
+              media_urls = %s::jsonb,
+              raw_data = coalesce(raw_data, '{}'::jsonb) || %s::jsonb
             where id::text = %s
             returning id::text as id, shortcode
             """,
-            [media_urls_json, row_id],
+            [
+                media_urls_json,
+                json.dumps(
+                    {
+                        "legacy_media_urls": repair.get("legacy_media_urls") or [],
+                        "repair_reason": "single_media_repair",
+                    }
+                ),
+                row_id,
+            ],
         )
         updated.extend(result)
     return updated

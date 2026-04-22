@@ -170,6 +170,9 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_GOOGLE_NEWS_FUNCTION": "run_google_news_sync",
     "TRR_MODAL_REDDIT_REFRESH_FUNCTION": "run_reddit_refresh",
     "TRR_MODAL_SOCIAL_JOB_FUNCTION": "run_social_job",
+    "TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION": "run_social_posts_job",
+    "TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION": "run_social_media_job",
+    "TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION": "run_social_comments_job",
     "TRR_MODAL_SOCIAL_RECOVERY_FUNCTION": "sweep_social_dispatch_queue",
     "TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION": "probe_social_remote_auth",
     "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
@@ -216,6 +219,9 @@ _vision_image = (
 _browser_image = _build_social_image_base(include_browser_runtime=True)
 _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_social_job": _browser_image,
+    "run_social_posts_job": _browser_image,
+    "run_social_media_job": _browser_image,
+    "run_social_comments_job": _browser_image,
     "run_socialblade_scrape": _browser_image,
     "run_admin_vision": _vision_image,
 }
@@ -481,6 +487,58 @@ def probe_getty_remote_access() -> dict[str, object]:
     return _probe_getty_remote_access()
 
 
+def _execute_social_job(job_id: str, *, worker_prefix: str) -> dict[str, object]:
+    from trr_backend.socials.control_plane import claim_and_process_social_job
+
+    worker_id = f"{worker_prefix}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    result = claim_and_process_social_job(job_id=job_id, worker_id=worker_id)
+    return {
+        "job_id": job_id,
+        "claimed": bool(result.get("claimed")),
+        "worker_id": worker_id,
+        "job": result.get("job"),
+    }
+
+
+@app.function(
+    name=str(os.getenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION") or "run_social_posts_job").strip()
+    or "run_social_posts_job",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_posts_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=2 * 60 * 60,
+    max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+)
+def run_social_posts_job(job_id: str) -> dict[str, object]:
+    return _execute_social_job(job_id, worker_prefix="modal:social-posts")
+
+
+@app.function(
+    name=str(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION") or "run_social_media_job").strip()
+    or "run_social_media_job",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_media_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=2 * 60 * 60,
+    max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+)
+def run_social_media_job(job_id: str) -> dict[str, object]:
+    return _execute_social_job(job_id, worker_prefix="modal:social-media")
+
+
+@app.function(
+    name=str(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION") or "run_social_comments_job").strip()
+    or "run_social_comments_job",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=2 * 60 * 60,
+    max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+)
+def run_social_comments_job(job_id: str) -> dict[str, object]:
+    return _execute_social_job(job_id, worker_prefix="modal:social-comments")
+
+
 @app.function(
     image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],
     secrets=_secrets,
@@ -489,16 +547,7 @@ def probe_getty_remote_access() -> dict[str, object]:
     max_containers=_SOCIAL_CONCURRENCY_LIMIT,
 )
 def run_social_job(job_id: str) -> dict[str, object]:
-    from trr_backend.socials.control_plane import claim_and_process_social_job
-
-    worker_id = f"modal:social:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    result = claim_and_process_social_job(job_id=job_id, worker_id=worker_id)
-    return {
-        "job_id": job_id,
-        "claimed": bool(result.get("claimed")),
-        "worker_id": worker_id,
-        "job": result.get("job"),
-    }
+    return _execute_social_job(job_id, worker_prefix="modal:social")
 
 
 @app.function(

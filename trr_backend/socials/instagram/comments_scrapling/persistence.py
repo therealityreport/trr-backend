@@ -162,62 +162,75 @@ def persist_instagram_comments_for_post(
     job_id: str | None,
     is_complete: bool,
     source_scope: str = "bravo",
+    conn: Any | None = None,
 ) -> PersistedInstagramComments:
+    if conn is None:
+        with pg.db_connection() as managed_conn:
+            return persist_instagram_comments_for_post(
+                account_handle=account_handle,
+                shortcode=shortcode,
+                comments=comments,
+                run_id=run_id,
+                job_id=job_id,
+                is_complete=is_complete,
+                source_scope=source_scope,
+                conn=managed_conn,
+            )
+
     repo = _load_repo_helpers()
-    with pg.db_connection() as conn:
-        post_row = _materialize_instagram_post_for_comments(
-            repo=repo,
-            account_handle=account_handle,
-            shortcode=shortcode,
+    post_row = _materialize_instagram_post_for_comments(
+        repo=repo,
+        account_handle=account_handle,
+        shortcode=shortcode,
+        conn=conn,
+    )
+    observed_comment_ids: set[str] = set()
+    persist_stats = repo._new_comment_persist_stats()
+    comments_upserted = 0
+    comments_marked_missing = 0
+    post_id = str(post_row.get("id") or "").strip()
+    season_id = str(post_row.get("season_id") or "").strip() or None
+
+    if season_id:
+        context = repo.get_season_context(season_id, conn=conn)
+        comments_upserted = repo._batch_upsert_instagram_comments(
+            context,
+            job_id=job_id,
+            run_id=run_id,
+            account=account_handle,
+            post_id=post_id,
+            comments=comments,
+            observed_comment_ids=observed_comment_ids,
+            persist_stats=persist_stats,
+            source_scope=source_scope,
             conn=conn,
         )
-        observed_comment_ids: set[str] = set()
-        persist_stats = repo._new_comment_persist_stats()
-        comments_upserted = 0
-        comments_marked_missing = 0
-        post_id = str(post_row.get("id") or "").strip()
-        season_id = str(post_row.get("season_id") or "").strip() or None
+    else:
+        comments_upserted = _persist_without_season_context(
+            repo=repo,
+            post_id=post_id,
+            account_handle=account_handle,
+            comments=comments,
+            run_id=run_id,
+            job_id=job_id,
+            observed_comment_ids=observed_comment_ids,
+            persist_stats=persist_stats,
+            conn=conn,
+        )
+    if is_complete:
+        comments_marked_missing = repo._mark_missing_comments_for_anchor(
+            platform="instagram",
+            anchor_id=post_id,
+            observed_comment_ids=observed_comment_ids,
+            conn=conn,
+        )
+        repo._reconcile_post_comment_count(
+            platform="instagram",
+            post_db_id=post_id,
+            conn=conn,
+        )
 
-        if season_id:
-            context = repo.get_season_context(season_id, conn=conn)
-            comments_upserted = repo._batch_upsert_instagram_comments(
-                context,
-                job_id=job_id,
-                run_id=run_id,
-                account=account_handle,
-                post_id=post_id,
-                comments=comments,
-                observed_comment_ids=observed_comment_ids,
-                persist_stats=persist_stats,
-                source_scope=source_scope,
-                conn=conn,
-            )
-        else:
-            comments_upserted = _persist_without_season_context(
-                repo=repo,
-                post_id=post_id,
-                account_handle=account_handle,
-                comments=comments,
-                run_id=run_id,
-                job_id=job_id,
-                observed_comment_ids=observed_comment_ids,
-                persist_stats=persist_stats,
-                conn=conn,
-            )
-        if is_complete:
-            comments_marked_missing = repo._mark_missing_comments_for_anchor(
-                platform="instagram",
-                anchor_id=post_id,
-                observed_comment_ids=observed_comment_ids,
-                conn=conn,
-            )
-            repo._reconcile_post_comment_count(
-                platform="instagram",
-                post_db_id=post_id,
-                conn=conn,
-            )
-
-        stored_total = repo._count_stored_comments([post_id], "instagram", conn=conn).get(post_id, 0)
+    stored_total = repo._count_stored_comments([post_id], "instagram", conn=conn).get(post_id, 0)
     return PersistedInstagramComments(
         post_id=post_id,
         stored_total_comments=int(stored_total or 0),
@@ -308,7 +321,11 @@ def _persist_without_season_context(
             for payload in batch:
                 parent_external_id = str(payload.pop("_parent_external_id", "") or "").strip()
                 payload["parent_comment_id"] = ext_to_db.get(parent_external_id)
-        rows = repo._pg_upsert_many("instagram_comments", batch, conflict_col="comment_id", conn=conn) if batch else []
+        rows = (
+            repo._pg_upsert_many("instagram_comments", batch, conflict_col=["post_id", "comment_id"], conn=conn)
+            if batch
+            else []
+        )
         for row in rows:
             ext_id = str(row.get("comment_id") or "").strip()
             db_id = str(row.get("id") or "").strip()

@@ -142,7 +142,13 @@ def test_repair_platform_apply_updates_rows(monkeypatch: pytest.MonkeyPatch) -> 
         "https://pub.example.r2.dev/social/instagram/a/media-02.jpg",
     ]
     tagged_profile_pics = json.loads(str(update_params[4]))
-    assert tagged_profile_pics == {"bravo": "https://pub.example.r2.dev/social/instagram/profile-pics/bravo/a.jpg"}
+    assert tagged_profile_pics == {
+        "bravo": {
+            "hosted_url": "https://pub.example.r2.dev/social/instagram/profile-pics/bravo/a.jpg",
+            "sha256": None,
+            "mirrored_at": None,
+        }
+    }
 
 
 def test_parse_platforms_rejects_invalid_platforms() -> None:

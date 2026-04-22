@@ -120,6 +120,40 @@ def test_inspect_modal_function_call_returns_unknown_on_inspection_failure(
     assert payload["error"] == "boom"
 
 
+def test_modal_social_job_function_name_for_stage_routes_three_backfill_lanes() -> None:
+    assert modal_dispatch.modal_social_job_function_name_for_stage("shared_account_posts") == "run_social_posts_job"
+    assert modal_dispatch.modal_social_job_function_name_for_stage("media_mirror") == "run_social_media_job"
+    assert modal_dispatch.modal_social_job_function_name_for_stage("comments_scrapling") == "run_social_comments_job"
+
+
+def test_modal_social_job_function_names_dedupes_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(modal_dispatch, "modal_social_job_function_name", lambda: "run_social_job")
+    monkeypatch.setattr(modal_dispatch, "modal_social_posts_job_function_name", lambda: "run_social_job")
+    monkeypatch.setattr(modal_dispatch, "modal_social_media_job_function_name", lambda: "run_social_media_job")
+    monkeypatch.setattr(modal_dispatch, "modal_social_comments_job_function_name", lambda: "run_social_comments_job")
+
+    assert modal_dispatch.modal_social_job_function_names() == [
+        "run_social_job",
+        "run_social_media_job",
+        "run_social_comments_job",
+    ]
+
+
+def test_dispatch_social_job_uses_stage_specific_function(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_spawn_named_modal_function(**kwargs):
+        captured.update(kwargs)
+        return {"dispatched": True, "call_id": "fc-123"}
+
+    monkeypatch.setattr(modal_dispatch, "_spawn_named_modal_function", _fake_spawn_named_modal_function)
+
+    modal_dispatch.dispatch_social_job(job_id="job-1", stage="comments_scrapling")
+
+    assert captured["function_name"] == "run_social_comments_job"
+    assert captured["kwargs"] == {"job_id": "job-1"}
+
+
 def test_inspect_modal_function_call_only_requires_modal_app_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -402,7 +402,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             dispatch_blocked_failure_count=0,
             dispatch_blocked_first_seen_at=None,
         )
-        dispatch_result = legacy.dispatch_social_job(job_id=job_id)
+        dispatch_result = legacy.dispatch_social_job(job_id=job_id, stage=stage)
         if dispatch_result.get("dispatched"):
             legacy._touch_job_dispatch_metadata(
                 job_id,

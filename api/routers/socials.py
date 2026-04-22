@@ -346,6 +346,122 @@ def _start_runs_in_background(
     background_tasks.add_task(_runner)
 
 
+def _start_catalog_backfill_finalize_in_background(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    source_scope: str,
+    date_start: datetime | None,
+    date_end: datetime | None,
+    initiated_by: str | None,
+    allow_local_dev_inline_bypass: bool,
+    execution_preference: str,
+    selected_tasks: list[str] | None,
+    launch_group_id: str | None,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import finalize_social_account_catalog_backfill_launch
+
+    normalized_platform = str(platform or "").strip().lower()
+    normalized_account = str(account_handle or "").strip().lower()
+    normalized_run_id = str(run_id or "").strip()
+    normalized_launch_group_id = str(launch_group_id or "").strip() or None
+
+    if not normalized_run_id:
+        return
+
+    def _runner() -> None:
+        logger.info(
+            "[catalog-launch] finalize_start platform=%s account=%s run_id=%s launch_group_id=%s",
+            normalized_platform,
+            normalized_account,
+            normalized_run_id,
+            normalized_launch_group_id,
+        )
+        try:
+            finalize_social_account_catalog_backfill_launch(
+                platform=normalized_platform,
+                account_handle=normalized_account,
+                run_id=normalized_run_id,
+                source_scope=source_scope,
+                date_start=date_start,
+                date_end=date_end,
+                initiated_by=initiated_by,
+                allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
+                execution_preference=execution_preference,
+                selected_tasks=selected_tasks,
+                launch_group_id=normalized_launch_group_id,
+            )
+            _clear_account_profile_caches()
+        except Exception:  # noqa: BLE001
+            _clear_account_profile_caches()
+            logger.exception(
+                "[catalog-launch] finalize_thread_failed platform=%s account=%s run_id=%s launch_group_id=%s",
+                normalized_platform,
+                normalized_account,
+                normalized_run_id,
+                normalized_launch_group_id,
+            )
+
+    Thread(
+        target=_runner,
+        name=f"catalog-finalize:{normalized_platform}:{normalized_account[:24]}",
+        daemon=True,
+    ).start()
+
+
+def _cancel_catalog_run_in_background(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    cancelled_by: str | None,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import (
+        cancel_social_account_catalog_run,
+        reconcile_cancelled_shared_run,
+    )
+
+    normalized_platform = str(platform or "").strip().lower()
+    normalized_account = str(account_handle or "").strip().lower()
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return
+
+    def _runner() -> None:
+        logger.info(
+            "[catalog-cancel] finalize_start platform=%s account=%s run_id=%s",
+            normalized_platform,
+            normalized_account,
+            normalized_run_id,
+        )
+        try:
+            cancel_social_account_catalog_run(
+                platform=normalized_platform,
+                account_handle=normalized_account,
+                run_id=normalized_run_id,
+                cancelled_by=cancelled_by,
+                reconcile_summary=False,
+            )
+        finally:
+            try:
+                reconcile_cancelled_shared_run(normalized_run_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[catalog-cancel] reconcile_failed platform=%s account=%s run_id=%s",
+                    normalized_platform,
+                    normalized_account,
+                    normalized_run_id,
+                )
+            _clear_account_profile_caches()
+
+    Thread(
+        target=_runner,
+        name=f"catalog-cancel:{normalized_platform}:{normalized_account[:24]}",
+        daemon=True,
+    ).start()
+
+
 def _normalize_run_summary_payload(summary: Any) -> dict[str, Any]:
     payload = dict(summary) if isinstance(summary, dict) else {}
     if not payload:
@@ -4397,7 +4513,7 @@ async def post_social_account_comments_scrape_route(
     except SocialIngestConflictError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": exc.code, "message": str(exc), **exc.detail},
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
         ) from exc
     except SocialIngestValidationError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -4848,20 +4964,23 @@ def post_social_account_catalog_run_cancel_route(
     user: InternalAdminUser,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
-        cancel_social_account_catalog_run,
-        reconcile_cancelled_shared_run,
+        request_cancel_social_account_catalog_run,
     )
 
     try:
-        result = cancel_social_account_catalog_run(
+        result = request_cancel_social_account_catalog_run(
             platform=platform,
             account_handle=account_handle,
             run_id=str(run_id),
             cancelled_by=(user or {}).get("email"),
-            reconcile_summary=False,
         )
-        background_tasks.add_task(reconcile_cancelled_shared_run, str(run_id))
-        _clear_account_profile_caches()
+        background_tasks.add_task(
+            _cancel_catalog_run_in_background,
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            cancelled_by=(user or {}).get("email"),
+        )
         return result
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
@@ -5000,6 +5119,7 @@ async def post_social_account_catalog_backfill_route(
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
         _normalize_catalog_backfill_window,
+        begin_social_account_catalog_backfill_launch,
         launch_social_account_catalog_backfill,
     )
 
@@ -5019,24 +5139,57 @@ async def post_social_account_catalog_backfill_route(
             date_start=date_start,
             date_end=date_end,
         )
-        result = await run_in_threadpool(
-            launch_social_account_catalog_backfill,
-            platform=platform,
-            account_handle=account_handle,
-            source_scope=payload.source_scope,
-            date_start=date_start,
-            date_end=date_end,
-            initiated_by=(user or {}).get("email"),
-            inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
-            allow_local_dev_inline_bypass=used_inline_fallback,
-            execution_preference=payload.execution_preference,
-            selected_tasks=payload.selected_tasks,
+        use_async_instagram_kickoff = (
+            platform == "instagram"
+            and queue_enabled
+            and not used_inline_fallback
+            and list(payload.selected_tasks or []) != ["comments"]
         )
+        if use_async_instagram_kickoff:
+            result = await run_in_threadpool(
+                begin_social_account_catalog_backfill_launch,
+                platform=platform,
+                account_handle=account_handle,
+                source_scope=payload.source_scope,
+                date_start=date_start,
+                date_end=date_end,
+                initiated_by=(user or {}).get("email"),
+                allow_local_dev_inline_bypass=used_inline_fallback,
+                execution_preference=payload.execution_preference,
+                selected_tasks=payload.selected_tasks,
+            )
+            _start_catalog_backfill_finalize_in_background(
+                platform=platform,
+                account_handle=account_handle,
+                run_id=str(result.get("run_id") or ""),
+                source_scope=payload.source_scope,
+                date_start=date_start,
+                date_end=date_end,
+                initiated_by=(user or {}).get("email"),
+                allow_local_dev_inline_bypass=used_inline_fallback,
+                execution_preference=payload.execution_preference,
+                selected_tasks=payload.selected_tasks,
+                launch_group_id=str(result.get("launch_group_id") or ""),
+            )
+        else:
+            result = await run_in_threadpool(
+                launch_social_account_catalog_backfill,
+                platform=platform,
+                account_handle=account_handle,
+                source_scope=payload.source_scope,
+                date_start=date_start,
+                date_end=date_end,
+                initiated_by=(user or {}).get("email"),
+                inline_worker_id=None if queue_enabled else f"api-background:catalog:{platform}",
+                allow_local_dev_inline_bypass=used_inline_fallback,
+                execution_preference=payload.execution_preference,
+                selected_tasks=payload.selected_tasks,
+            )
         _clear_account_profile_caches()
     except SocialIngestConflictError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": exc.code, "message": str(exc), **exc.detail},
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
         ) from exc
     except SocialIngestValidationError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -5182,7 +5335,7 @@ async def post_social_account_catalog_sync_recent_route(
     except SocialIngestConflictError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": exc.code, "message": str(exc), **exc.detail},
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
         ) from exc
     except SocialIngestValidationError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -5249,7 +5402,7 @@ async def post_social_account_catalog_sync_newer_route(
     except SocialIngestConflictError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": exc.code, "message": str(exc), **exc.detail},
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
         ) from exc
     except SocialIngestValidationError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -5319,7 +5472,7 @@ async def post_social_account_catalog_resume_tail_route(
     except SocialIngestConflictError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": exc.code, "message": str(exc), **exc.detail},
+            detail={"code": exc.code, "message": str(exc), **jsonable_encoder(exc.detail)},
         ) from exc
     except SocialIngestValidationError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
