@@ -13,14 +13,33 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
+from trr_backend.socials._scrapling_http_utils import (
+    env_truthy as _env_truthy,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    extract_response_cookies as _extract_response_cookies,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    resolve_positive_float_env as _resolve_positive_float_env,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    resolve_positive_int_env as _resolve_positive_int_env,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    response_text as _response_text,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    safe_location as _safe_location,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    status_code as _status_code,
+)
 from trr_backend.socials.instagram.comments_scrapling.proxy import CommentsProxyConfig
 from trr_backend.socials.instagram.constants import COMMENT_REPLIES_URL, COMMENTS_URL
 from trr_backend.socials.instagram.permalink_metadata import _shortcode_to_media_id
@@ -32,6 +51,7 @@ _COMMENT_PAGINATION_MAX_PAGES_DEFAULT = 25
 _REPLY_PAGINATION_MAX_PAGES_DEFAULT = 10
 _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT = 30.0
 _REPLY_PAGINATION_MAX_SECONDS_DEFAULT = 20.0
+_COMMENT_REQUEST_DELAY_DEFAULT = 0.25
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,95 +68,9 @@ _API_HEADER_KEYS_TO_STRIP = frozenset(
 )
 
 
-def _env_truthy(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _resolve_positive_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(minimum, min(maximum, value))
-
-
-def _resolve_positive_float_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return max(minimum, min(maximum, value))
-
-
 def _auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
-
-
-def _response_text(response: Any) -> str:
-    text = getattr(response, "text", "")
-    if callable(text):
-        try:
-            return str(text() or "")
-        except Exception:  # noqa: BLE001
-            return ""
-    return str(text or "")
-
-
-def _status_code(response: Any) -> int:
-    """Read status from both httpx (.status_code) and Scrapling (.status)."""
-    raw = getattr(response, "status_code", getattr(response, "status", 0))
-    try:
-        return int(raw or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _safe_location(response: Any) -> str:
-    """Extract sanitized Location header path (no query string, no credentials)."""
-    headers = getattr(response, "headers", None) or {}
-    raw = ""
-    try:
-        raw = str(headers.get("location") or headers.get("Location") or "")
-    except Exception:  # noqa: BLE001
-        return ""
-    if not raw:
-        return ""
-    try:
-        parsed = urlparse(raw)
-        return str(parsed.path or "/").lower()
-    except Exception:  # noqa: BLE001
-        return raw.split("?")[0].lower()
-
-
-def _extract_response_cookies(response: Any) -> dict[str, str]:
-    """Pull cookies from a Scrapling/httpx response object."""
-    cookies_attr = getattr(response, "cookies", None)
-    if cookies_attr is None:
-        return {}
-    result: dict[str, str] = {}
-    try:
-        if isinstance(cookies_attr, dict):
-            for k, v in cookies_attr.items():
-                result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "items"):
-            for k, v in cookies_attr.items():
-                result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "jar"):
-            for cookie in cookies_attr.jar:
-                result[str(cookie.name)] = str(cookie.value)
-    except Exception:  # noqa: BLE001
-        pass
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +122,14 @@ class InstagramCommentsScraplingFetcher:
         self._request_count = 0
         self._warmup_cookie_delta: dict[str, str] = {}
         self._selected_proxy_fingerprint: str = proxy_config.fingerprint if proxy_config else "none"
+        self._proxy_session_mode: str = proxy_config.session_mode if proxy_config else "none"
+        self._api_delay_seconds = _resolve_positive_float_env(
+            "SOCIAL_INSTAGRAM_COMMENT_DELAY_SEC",
+            _COMMENT_REQUEST_DELAY_DEFAULT,
+            minimum=0.0,
+            maximum=30.0,
+        )
+        self._last_api_request_started_at = 0.0
 
         # Browser fetcher (for warmup only).
         try:
@@ -211,6 +153,8 @@ class InstagramCommentsScraplingFetcher:
             "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
             "warmup_cookie_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
+            "proxy_session_mode": self._proxy_session_mode,
+            "api_delay_seconds": self._api_delay_seconds,
             "transport": "httpx_after_browser_warmup",
             "request_count": self._request_count,
         }
@@ -484,14 +428,20 @@ class InstagramCommentsScraplingFetcher:
     # -------------------------------------------------------------------
 
     def _merge_warmup_cookies(self, response: Any) -> None:
-        """In-place mutation of self._raw_cookies + parser sync.
-
-        Critical: must NOT rebind self._raw_cookies — the parser holds a
-        shared reference from __init__. In-place update ensures the parser
-        sees updated csrftoken when _get_headers() runs for API calls.
-        """
+        """Record warmup cookie delta and sync the live request state."""
         new_cookies = _extract_response_cookies(response)
         self._warmup_cookie_delta = dict(new_cookies)
+        self._sync_response_cookies(response)
+
+    def _sync_response_cookies(self, response: Any) -> None:
+        """Keep the lightweight transport and parser headers in sync.
+
+        httpx updates its own cookie jar automatically, but the parser keeps a
+        separate mutable cookie dict that drives future request headers. Mirror
+        response cookies into both so later API calls keep using the freshest
+        `csrftoken` / session state.
+        """
+        new_cookies = _extract_response_cookies(response)
         for name, value in new_cookies.items():
             self._raw_cookies[name] = value
             if hasattr(self._parser, "cookies") and isinstance(self._parser.cookies, dict):
@@ -563,10 +513,21 @@ class InstagramCommentsScraplingFetcher:
         """Plain HTTP GET via httpx. Used for comments/replies JSON API calls."""
         if self._http_client is None:
             await self._rebuild_http_client()
+        await self._pace_api_requests()
         self._request_count += 1
         headers = self._parser._get_headers(referer)
         clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None
-        return await self._http_client.get(url, params=clean_params, headers=headers)  # type: ignore[union-attr]
+        response = await self._http_client.get(url, params=clean_params, headers=headers)  # type: ignore[union-attr]
+        self._sync_response_cookies(response)
+        return response
+
+    async def _pace_api_requests(self) -> None:
+        if self._api_delay_seconds <= 0:
+            return
+        remaining = (self._last_api_request_started_at + self._api_delay_seconds) - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        self._last_api_request_started_at = time.monotonic()
 
     # -------------------------------------------------------------------
     # JSON response handling with retry/backoff

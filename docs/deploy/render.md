@@ -48,3 +48,13 @@ Also verify:
 - Better Stack ingestion from the Render API process
 - Modal jobs triggered from the Render host
 - object-storage reads/writes using the `OBJECT_STORAGE_*` contract
+
+## Workspace Startup Boundary
+
+`make dev` and `make preflight` may verify this Render contract, but they do not mutate Render. Render remains verify-only in the workspace startup flow:
+
+- no Render API create/update calls
+- no blueprint apply
+- no secret/env mutation
+
+If startup reports `render_contract_mismatch`, fix `render.yaml` or these docs, then rerun `make status` / `make preflight`.

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from api import deps as deps_mod
 from api.routers import admin_person_profile as mod
 
 
@@ -56,6 +57,82 @@ def test_load_related_shows_for_person_falls_back_to_v_show_cast(monkeypatch: py
     assert "FROM core.v_show_cast" in fetch_all_calls[1]
 
 
+def test_load_person_uses_direct_pg_fetch_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    person_id = str(uuid4())
+    person_row = {
+        "id": person_id,
+        "full_name": "Heather Gay",
+        "external_ids": {},
+        "birthday": {},
+        "gender": {},
+        "biography": {},
+        "place_of_birth": {},
+        "homepage": {},
+        "profile_image_url": {},
+        "alternative_names": {},
+    }
+    fetch_one_calls: list[tuple[str, list[object] | None, object | None]] = []
+
+    def _fake_fetch_one(query: str, params: list[object] | None = None, *, conn=None) -> dict[str, object]:
+        fetch_one_calls.append((query, params, conn))
+        return person_row
+
+    monkeypatch.setattr(mod.pg, "fetch_one", _fake_fetch_one)
+
+    row = mod._load_person(person_id=person_id)
+
+    assert row == person_row
+    assert len(fetch_one_calls) == 1
+    query, params, conn = fetch_one_calls[0]
+    assert "from core.people" in query.lower()
+    assert "external_ids" in query.lower()
+    assert params == [person_id]
+    assert conn is None
+
+
+def test_load_approved_person_links_uses_direct_pg_fetch_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    person_id = str(uuid4())
+    show_ids = [str(uuid4()), str(uuid4())]
+    approved_links = [
+        {
+            "show_id": show_ids[0],
+            "link_kind": "imdb",
+            "url": "https://www.imdb.com/name/nm123",
+            "status": "approved",
+            "label": "IMDb",
+            "metadata": {"source": "seed"},
+        }
+    ]
+    fetch_all_calls: list[tuple[str, list[object] | None, object | None]] = []
+
+    def _fake_fetch_all(query: str, params: list[object] | None = None, *, conn=None) -> list[dict[str, object]]:
+        fetch_all_calls.append((query, params, conn))
+        return approved_links
+
+    monkeypatch.setattr(mod.pg, "fetch_all", _fake_fetch_all)
+
+    rows = mod._load_approved_person_links(person_id=person_id, show_ids=show_ids)
+
+    assert rows == approved_links
+    assert len(fetch_all_calls) == 1
+    query, params, conn = fetch_all_calls[0]
+    assert "from core.entity_links" in query.lower()
+    assert "entity_type = 'person'" in query.lower()
+    assert "status = 'approved'" in query.lower()
+    assert params == [person_id, show_ids]
+    assert conn is None
+
+
+def test_get_supabase_admin_client_warns_and_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = object()
+    monkeypatch.setattr(deps_mod, "get_postgrest_admin_client", lambda: sentinel)
+
+    with pytest.warns(DeprecationWarning, match="get_postgrest_admin_client"):
+        client = deps_mod.get_supabase_admin_client()
+
+    assert client is sentinel
+
+
 def test_refresh_credits_for_related_shows_fans_out_per_show(monkeypatch: pytest.MonkeyPatch) -> None:
     cast_calls: list[list[str]] = []
     episode_calls: list[list[str]] = []
@@ -82,7 +159,7 @@ def test_run_person_profile_refresh_keeps_going_when_one_source_fails(monkeypatc
     monkeypatch.setattr(
         mod,
         "_load_person",
-        lambda db, *, person_id: {
+        lambda *, person_id: {
             "id": person_id,
             "full_name": "Heather Gay",
             "external_ids": {},
@@ -131,7 +208,7 @@ def test_run_person_profile_refresh_counts_only_successful_credit_updates(
     monkeypatch.setattr(
         mod,
         "_load_person",
-        lambda db, *, person_id: {
+        lambda *, person_id: {
             "id": person_id,
             "full_name": "Heather Gay",
             "external_ids": {},
@@ -180,7 +257,7 @@ def test_run_person_profile_refresh_reports_missing_sources_as_skips(
     monkeypatch.setattr(
         mod,
         "_load_person",
-        lambda db, *, person_id: {
+        lambda *, person_id: {
             "id": person_id,
             "full_name": "Andy Cohen",
             "external_ids": {},

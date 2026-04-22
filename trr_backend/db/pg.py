@@ -36,10 +36,11 @@ if TYPE_CHECKING:
 
 DEFAULT_POOL_MINCONN = 2
 DEFAULT_POOL_MAXCONN = 24
-DEFAULT_SESSION_POOLER_MINCONN = 4
-DEFAULT_SESSION_POOLER_MAXCONN = 16
-DEFAULT_MODAL_SESSION_POOLER_MINCONN = 1
-DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 4
+DEFAULT_SESSION_POOLER_MINCONN = 2
+DEFAULT_SESSION_POOLER_MAXCONN = 8
+DEFAULT_MODAL_SESSION_POOLER_MINCONN = 2
+DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 8
+LOCAL_SESSION_POOLER_MAX_CEILING = 16
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
 DEFAULT_QUERY_TRANSIENT_ATTEMPTS = 3
@@ -55,9 +56,12 @@ DEFAULT_WRITE_SEARCH_PATH = "public, core, firebase_surveys"
 
 _pool: ThreadedConnectionPool | None = None
 _active_pool_dsn: str | None = None
+_named_pools: dict[str, ThreadedConnectionPool] = {}
+_named_active_pool_dsns: dict[str, str] = {}
 _pool_lock = Lock()
 _pool_creation_count = 0
-_retired_pools: dict[int, ThreadedConnectionPool] = {}
+_named_pool_creation_counts: dict[str, int] = {}
+_retired_pools: dict[tuple[str, int], ThreadedConnectionPool] = {}
 _checkout_sequence = 0
 _checkout_lock = Lock()
 _checked_out_connections: dict[int, dict[str, Any]] = {}
@@ -72,6 +76,51 @@ class DatabaseServiceUnavailableError(RuntimeError):
     def __init__(self, message: str, *, reason: str = "database_unavailable") -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class AdvisoryLockUnavailable(RuntimeError):
+    """Raised when a session-scoped advisory lock cannot be acquired."""
+
+    def __init__(self, lock_key: int) -> None:
+        super().__init__(f"advisory lock unavailable: {lock_key}")
+        self.lock_key = lock_key
+
+
+def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
+    if pool_name == "social_profile":
+        return "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
+    return "TRR_DB_POOL_MINCONN", "TRR_DB_POOL_MAXCONN"
+
+
+def _active_pool_ref(pool_name: str) -> tuple[ThreadedConnectionPool | None, str | None]:
+    if pool_name == "default":
+        return _pool, _active_pool_dsn
+    return _named_pools.get(pool_name), _named_active_pool_dsns.get(pool_name)
+
+
+def _set_active_pool_ref(pool_name: str, pool: ThreadedConnectionPool | None, dsn: str | None) -> None:
+    global _pool, _active_pool_dsn
+    if pool_name == "default":
+        _pool = pool
+        _active_pool_dsn = dsn
+        return
+    if pool is None:
+        _named_pools.pop(pool_name, None)
+        _named_active_pool_dsns.pop(pool_name, None)
+        return
+    _named_pools[pool_name] = pool
+    if dsn is not None:
+        _named_active_pool_dsns[pool_name] = dsn
+
+
+def _next_pool_creation_count(pool_name: str) -> int:
+    global _pool_creation_count
+    if pool_name == "default":
+        _pool_creation_count += 1
+        return _pool_creation_count
+    next_count = _named_pool_creation_counts.get(pool_name, 0) + 1
+    _named_pool_creation_counts[pool_name] = next_count
+    return next_count
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -220,38 +269,35 @@ def _is_statement_timeout_error(error: Exception) -> bool:
     return "canceling statement due to statement timeout" in message
 
 
-def _resolve_pool_sizing(url: str) -> dict[str, Any]:
+def _resolve_pool_sizing(
+    url: str,
+    *,
+    minconn_env_name: str = "TRR_DB_POOL_MINCONN",
+    maxconn_env_name: str = "TRR_DB_POOL_MAXCONN",
+    pool_name: str = "default",
+) -> dict[str, Any]:
     session_pooler = _is_supavisor_session_pooler_url(url)
     default_minconn = DEFAULT_SESSION_POOLER_MINCONN if session_pooler else DEFAULT_POOL_MINCONN
     default_maxconn = DEFAULT_SESSION_POOLER_MAXCONN if session_pooler else DEFAULT_POOL_MAXCONN
-    minconn_overridden = _env_has_value("TRR_DB_POOL_MINCONN")
-    maxconn_overridden = _env_has_value("TRR_DB_POOL_MAXCONN")
-    minconn = _env_int("TRR_DB_POOL_MINCONN", default_minconn)
-    maxconn = _env_int("TRR_DB_POOL_MAXCONN", default_maxconn)
+    minconn_overridden = _env_has_value(minconn_env_name)
+    maxconn_overridden = _env_has_value(maxconn_env_name)
+    minconn = _env_int(minconn_env_name, default_minconn)
+    maxconn = _env_int(maxconn_env_name, default_maxconn)
     requested_minconn = minconn
     requested_maxconn = maxconn
-    minconn_source = "env:TRR_DB_POOL_MINCONN" if minconn_overridden else "default"
-    maxconn_source = "env:TRR_DB_POOL_MAXCONN" if maxconn_overridden else "default"
+    minconn_source = f"env:{minconn_env_name}" if minconn_overridden else "default"
+    maxconn_source = f"env:{maxconn_env_name}" if maxconn_overridden else "default"
     session_pooler_override_clamped = False
     modal_session_pooler_override_clamped = False
-    if session_pooler and _is_local_or_dev_runtime():
-        if minconn > DEFAULT_SESSION_POOLER_MINCONN:
-            minconn = DEFAULT_SESSION_POOLER_MINCONN
-            minconn_source = "clamped:session_pooler_default"
+    if session_pooler and _is_local_or_dev_runtime() and maxconn > LOCAL_SESSION_POOLER_MAX_CEILING:
+        maxconn = LOCAL_SESSION_POOLER_MAX_CEILING
+        maxconn_source = "clamped:local_session_pooler_ceiling"
+        session_pooler_override_clamped = True
+    if minconn > maxconn:
+        minconn = maxconn
+        if session_pooler and _is_local_or_dev_runtime():
+            minconn_source = "clamped:local_session_pooler_ceiling"
             session_pooler_override_clamped = True
-        if maxconn > DEFAULT_SESSION_POOLER_MAXCONN:
-            maxconn = DEFAULT_SESSION_POOLER_MAXCONN
-            maxconn_source = "clamped:session_pooler_default"
-            session_pooler_override_clamped = True
-    if session_pooler and _is_modal_container_runtime():
-        if minconn > DEFAULT_MODAL_SESSION_POOLER_MINCONN:
-            minconn = DEFAULT_MODAL_SESSION_POOLER_MINCONN
-            minconn_source = "clamped:modal_session_pooler_default"
-            modal_session_pooler_override_clamped = True
-        if maxconn > DEFAULT_MODAL_SESSION_POOLER_MAXCONN:
-            maxconn = DEFAULT_MODAL_SESSION_POOLER_MAXCONN
-            maxconn_source = "clamped:modal_session_pooler_default"
-            modal_session_pooler_override_clamped = True
     maxconn = max(minconn, maxconn)
     return {
         "session_pooler": session_pooler,
@@ -263,6 +309,8 @@ def _resolve_pool_sizing(url: str) -> dict[str, Any]:
         "maxconn": maxconn,
         "requested_minconn": requested_minconn,
         "requested_maxconn": requested_maxconn,
+        "minconn_env_name": minconn_env_name,
+        "maxconn_env_name": maxconn_env_name,
         "minconn_source": minconn_source,
         "maxconn_source": maxconn_source,
         "session_pooler_override_clamped": session_pooler_override_clamped,
@@ -284,8 +332,14 @@ def _resolve_application_name() -> dict[str, str]:
     return {"application_name": DEFAULT_DB_APPLICATION_NAME, "application_name_source": "default"}
 
 
-def _build_pool_for_url(url: str) -> ThreadedConnectionPool:
-    sizing = _resolve_pool_sizing(url)
+def _build_pool_for_url(url: str, *, pool_name: str = "default") -> ThreadedConnectionPool:
+    minconn_env_name, maxconn_env_name = _pool_size_env_names(pool_name)
+    sizing = _resolve_pool_sizing(
+        url,
+        minconn_env_name=minconn_env_name,
+        maxconn_env_name=maxconn_env_name,
+        pool_name=pool_name,
+    )
     minconn = int(sizing["minconn"])
     maxconn = int(sizing["maxconn"])
     app_name = _resolve_application_name()
@@ -482,64 +536,72 @@ def _checked_out_count_for_pool(pool: ThreadedConnectionPool) -> int:
         return sum(1 for metadata in _checked_out_connections.values() if metadata.get("pool_id") == pool_id)
 
 
-def _retire_pool_locked(pool: ThreadedConnectionPool) -> None:
-    global _pool, _active_pool_dsn
+def _retire_pool_locked(pool: ThreadedConnectionPool, *, pool_name: str) -> None:
+    active_pool, _active_dsn = _active_pool_ref(pool_name)
 
-    if _pool is pool:
-        _pool = None
-        _active_pool_dsn = None
+    if active_pool is pool:
+        _set_active_pool_ref(pool_name, None, None)
 
     checked_out = _checked_out_count_for_pool(pool)
     in_use, available = _pool_counts(pool)
     if checked_out > 0:
-        _retired_pools[id(pool)] = pool
+        _retired_pools[(pool_name, id(pool))] = pool
         logger.info(
-            "[db-pool] retire_pool pending_checkouts=%s in_use=%s available=%s",
+            "[db-pool] retire_pool pool_name=%s pending_checkouts=%s in_use=%s available=%s",
+            pool_name,
             checked_out,
             in_use,
             available,
         )
         return
 
-    _retired_pools.pop(id(pool), None)
+    _retired_pools.pop((pool_name, id(pool)), None)
     _close_pool_quietly(pool)
 
 
-def _finalize_retired_pool(pool: ThreadedConnectionPool) -> None:
+def _finalize_retired_pool(pool: ThreadedConnectionPool, *, pool_name: str) -> None:
     with _pool_lock:
-        pool_id = id(pool)
-        retired_pool = _retired_pools.get(pool_id)
+        pool_key = (pool_name, id(pool))
+        retired_pool = _retired_pools.get(pool_key)
         if retired_pool is None:
             return
         if _checked_out_count_for_pool(retired_pool) > 0:
             return
-        _retired_pools.pop(pool_id, None)
+        _retired_pools.pop(pool_key, None)
         _close_pool_quietly(retired_pool)
 
 
-def _get_pool() -> ThreadedConnectionPool:
-    global _pool, _active_pool_dsn, _pool_creation_count
-    if _pool is not None:
-        return _pool
+def _get_pool(*, pool_name: str = "default") -> ThreadedConnectionPool:
+    active_pool, _active_dsn = _active_pool_ref(pool_name)
+    if active_pool is not None:
+        return active_pool
 
     with _pool_lock:
-        if _pool is not None:
-            return _pool
+        active_pool, _active_dsn = _active_pool_ref(pool_name)
+        if active_pool is not None:
+            return active_pool
 
         init_errors: list[Exception] = []
         candidate_details = resolve_database_url_candidate_details()
         for index, candidate_detail in enumerate(candidate_details):
             candidate = str(candidate_detail["url"])
-            sizing = _resolve_pool_sizing(candidate)
+            minconn_env_name, maxconn_env_name = _pool_size_env_names(pool_name)
+            sizing = _resolve_pool_sizing(
+                candidate,
+                minconn_env_name=minconn_env_name,
+                maxconn_env_name=maxconn_env_name,
+                pool_name=pool_name,
+            )
             app_name = _resolve_application_name()
             try:
                 logger.info(
                     (
-                        "[db-pool] init_attempt=%s source=%s host_class=%s connection_class=%s host=%s port=%s "
+                        "[db-pool] init_attempt=%s pool_name=%s source=%s host_class=%s connection_class=%s host=%s port=%s "
                         "application_name=%s application_name_source=%s minconn=%s maxconn=%s "
                         "minconn_source=%s maxconn_source=%s"
                     ),
                     index,
+                    pool_name,
                     candidate_detail["source"],
                     candidate_detail["host_class"],
                     candidate_detail["connection_class"],
@@ -552,15 +614,16 @@ def _get_pool() -> ThreadedConnectionPool:
                     sizing["minconn_source"],
                     sizing["maxconn_source"],
                 )
-                _pool = _build_pool_for_url(candidate)
-                _pool_creation_count += 1
-                _active_pool_dsn = candidate
+                selected_pool = _build_pool_for_url(candidate, pool_name=pool_name)
+                pool_creation_count = _next_pool_creation_count(pool_name)
+                _set_active_pool_ref(pool_name, selected_pool, candidate)
                 logger.info(
                     (
-                        "[db-pool] init_selected source=%s host_class=%s connection_class=%s host=%s port=%s "
+                        "[db-pool] init_selected pool_name=%s source=%s host_class=%s connection_class=%s host=%s port=%s "
                         "application_name=%s application_name_source=%s minconn=%s maxconn=%s "
                         "minconn_source=%s maxconn_source=%s pool_creations=%s"
                     ),
+                    pool_name,
                     candidate_detail["source"],
                     candidate_detail["host_class"],
                     candidate_detail["connection_class"],
@@ -572,20 +635,23 @@ def _get_pool() -> ThreadedConnectionPool:
                     sizing["maxconn"],
                     sizing["minconn_source"],
                     sizing["maxconn_source"],
-                    _pool_creation_count,
+                    pool_creation_count,
                 )
                 if sizing["using_tiny_session_defaults"]:
                     logger.warning(
                         (
-                            "[db-pool] session_pooler_tiny_defaults source=%s host=%s port=%s "
-                            "minconn=%s maxconn=%s; set TRR_DB_POOL_MINCONN/TRR_DB_POOL_MAXCONN "
+                            "[db-pool] session_pooler_tiny_defaults pool_name=%s source=%s host=%s port=%s "
+                            "minconn=%s maxconn=%s; set %s/%s "
                             "for local high-concurrency social admin work"
                         ),
+                        pool_name,
                         candidate_detail["source"],
                         candidate_detail["host"],
                         candidate_detail["port"],
                         sizing["minconn"],
                         sizing["maxconn"],
+                        sizing["minconn_env_name"],
+                        sizing["maxconn_env_name"],
                     )
                 elif sizing["session_pooler"] and (
                     bool(sizing.get("modal_session_pooler_override_clamped"))
@@ -596,10 +662,11 @@ def _get_pool() -> ThreadedConnectionPool:
                     if bool(sizing.get("modal_session_pooler_override_clamped")):
                         logger.warning(
                             (
-                                "[db-pool] clamped_modal_session_pool_override source=%s host=%s port=%s "
+                                "[db-pool] clamped_modal_session_pool_override pool_name=%s source=%s host=%s port=%s "
                                 "requested_minconn=%s requested_maxconn=%s effective_minconn=%s "
                                 "effective_maxconn=%s modal_default_minconn=%s modal_default_maxconn=%s"
                             ),
+                            pool_name,
                             candidate_detail["source"],
                             candidate_detail["host"],
                             candidate_detail["port"],
@@ -613,10 +680,11 @@ def _get_pool() -> ThreadedConnectionPool:
                     elif bool(sizing.get("session_pooler_override_clamped")):
                         logger.warning(
                             (
-                                "[db-pool] clamped_session_pool_override source=%s host=%s port=%s "
+                                "[db-pool] clamped_session_pool_override pool_name=%s source=%s host=%s port=%s "
                                 "requested_minconn=%s requested_maxconn=%s effective_minconn=%s "
                                 "effective_maxconn=%s default_minconn=%s default_maxconn=%s"
                             ),
+                            pool_name,
                             candidate_detail["source"],
                             candidate_detail["host"],
                             candidate_detail["port"],
@@ -630,9 +698,10 @@ def _get_pool() -> ThreadedConnectionPool:
                     else:
                         logger.warning(
                             (
-                                "[db-pool] oversized_session_pool_override source=%s host=%s port=%s "
+                                "[db-pool] oversized_session_pool_override pool_name=%s source=%s host=%s port=%s "
                                 "minconn=%s maxconn=%s default_minconn=%s default_maxconn=%s"
                             ),
+                            pool_name,
                             candidate_detail["source"],
                             candidate_detail["host"],
                             candidate_detail["port"],
@@ -641,11 +710,12 @@ def _get_pool() -> ThreadedConnectionPool:
                             sizing["default_minconn"],
                             sizing["default_maxconn"],
                         )
-                return _pool
+                return selected_pool
             except Exception as error:
                 init_errors.append(error)
                 logger.warning(
-                    "[db-pool] init_failed source=%s host_class=%s host=%s port=%s error=%s",
+                    "[db-pool] init_failed pool_name=%s source=%s host_class=%s host=%s port=%s error=%s",
+                    pool_name,
                     candidate_detail["source"],
                     candidate_detail["host_class"],
                     candidate_detail["host"],
@@ -671,15 +741,19 @@ def _get_pool() -> ThreadedConnectionPool:
         )
 
 
-def reset_pool(*, expected_pool: ThreadedConnectionPool | None = None) -> None:
+def reset_pool(
+    *,
+    expected_pool: ThreadedConnectionPool | None = None,
+    pool_name: str = "default",
+) -> None:
     """Reset the shared pool; used for transient transport recovery."""
     with _pool_lock:
-        current_pool = _pool
+        current_pool, _current_dsn = _active_pool_ref(pool_name)
         if current_pool is None:
             return
         if expected_pool is not None and current_pool is not expected_pool:
             return
-        _retire_pool_locked(current_pool)
+        _retire_pool_locked(current_pool, pool_name=pool_name)
 
 
 def close_pool() -> None:
@@ -687,22 +761,31 @@ def close_pool() -> None:
     global _pool, _active_pool_dsn
     with _pool_lock:
         active_pool = _pool
+        named_pools = list(_named_pools.values())
         retired_pools = list(_retired_pools.values())
         _retired_pools.clear()
         _pool = None
         _active_pool_dsn = None
+        _named_pools.clear()
+        _named_active_pool_dsns.clear()
+        _named_pool_creation_counts.clear()
 
     if active_pool is not None:
         _close_pool_quietly(active_pool)
+    for named_pool in named_pools:
+        if named_pool is active_pool:
+            continue
+        _close_pool_quietly(named_pool)
     for retired_pool in retired_pools:
         if retired_pool is active_pool:
             continue
         _close_pool_quietly(retired_pool)
 
 
-def current_pool_dsn() -> str | None:
+def current_pool_dsn(*, pool_name: str = "default") -> str | None:
     """Return the currently active pool DSN for diagnostics."""
-    return _active_pool_dsn
+    _active_pool, active_dsn = _active_pool_ref(pool_name)
+    return active_dsn
 
 
 def _should_retry_query(error: Exception, *, attempt: int) -> bool:
@@ -734,13 +817,17 @@ def _run_with_transient_retry(operation: Callable[[], T]) -> T:
     raise RuntimeError("unreachable")
 
 
-def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, connection_type, int]:
+def _get_connection_with_retry(
+    *,
+    label: str,
+    pool_name: str = "default",
+) -> tuple[ThreadedConnectionPool, connection_type, int]:
     acquire_attempts = _env_int("TRR_DB_POOL_ACQUIRE_ATTEMPTS", DEFAULT_POOL_ACQUIRE_ATTEMPTS, minimum=1)
     acquire_sleep_seconds = _env_int("TRR_DB_POOL_ACQUIRE_SLEEP_MS", DEFAULT_POOL_ACQUIRE_SLEEP_MS, minimum=1) / 1000.0
     last_error: Exception | None = None
 
     for attempt in range(2):
-        pool = _get_pool()
+        pool = _get_pool(pool_name=pool_name)
         for acquire_attempt in range(acquire_attempts):
             acquire_started_at = time.perf_counter()
             logger.info(
@@ -783,7 +870,7 @@ def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, c
                     time.sleep(acquire_sleep_seconds)
                     continue
                 if _should_retry_query(error, attempt=attempt):
-                    reset_pool(expected_pool=pool)
+                    reset_pool(expected_pool=pool, pool_name=pool_name)
                     break
                 raise
         else:
@@ -796,7 +883,7 @@ def _get_connection_with_retry(*, label: str) -> tuple[ThreadedConnectionPool, c
 
 @contextmanager
 def db_connection(*, label: str = "write"):
-    pool, conn, checkout_id = _get_connection_with_retry(label=label)
+    pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name="default")
     try:
         # Pin search_path for the duration of this transaction so pooled connections
         # cannot inherit a prior caller's SET search_path. psycopg2 starts the
@@ -837,12 +924,12 @@ def db_connection(*, label: str = "write"):
             except PoolError as error:
                 if "pool is closed" not in _error_message(error):
                     raise
-        _finalize_retired_pool(pool)
+        _finalize_retired_pool(pool, pool_name="default")
 
 
 @contextmanager
-def db_read_connection(*, label: str = "read"):
-    pool, conn, checkout_id = _get_connection_with_retry(label=label)
+def db_read_connection(*, label: str = "read", pool_name: str = "default"):
+    pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name=pool_name)
     previous_autocommit = getattr(conn, "autocommit", False)
     autocommit_restore_failed = False
     try:
@@ -889,7 +976,7 @@ def db_read_connection(*, label: str = "read"):
             except PoolError as error:
                 if "pool is closed" not in _error_message(error):
                     raise
-        _finalize_retired_pool(pool)
+        _finalize_retired_pool(pool, pool_name=pool_name)
 
 
 @contextmanager
@@ -906,10 +993,39 @@ def db_cursor(*, conn: connection_type | None = None, label: str = "write-cursor
 
 
 @contextmanager
-def db_read_cursor(*, label: str = "read-cursor"):
+def db_read_cursor(*, conn: connection_type | None = None, label: str = "read-cursor"):
+    if conn is not None:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            yield cur
+        return
+
     with db_read_connection(label=label) as managed_conn:
         with managed_conn.cursor(cursor_factory=RealDictCursor) as cur:
             yield cur
+
+
+@contextmanager
+def advisory_session_lock(
+    lock_key: int,
+    *,
+    label: str,
+    pool_name: str = "default",
+):
+    """Hold a session-scoped advisory lock on a single pooled connection."""
+    with db_read_connection(label=label, pool_name=pool_name) as conn:
+        with db_read_cursor(conn=conn, label=label) as cur:
+            cur.execute("select pg_try_advisory_lock(%s) as locked", [lock_key])
+            row = cur.fetchone() or {}
+        if not bool(row.get("locked")):
+            raise AdvisoryLockUnavailable(lock_key)
+        try:
+            yield conn
+        finally:
+            try:
+                with db_read_cursor(conn=conn, label=label) as cur:
+                    cur.execute("select pg_advisory_unlock(%s)", [lock_key])
+            except Exception:
+                logger.exception("[db-pool] advisory_unlock_failed label=%s key=%s", label, lock_key)
 
 
 def fetch_all_with_cursor(
@@ -932,7 +1048,16 @@ def fetch_one_with_cursor(
     return dict(row) if row else None
 
 
-def fetch_all(query: str, params: Iterable[Any] | None = None) -> list[dict[str, Any]]:
+def fetch_all(
+    query: str,
+    params: Iterable[Any] | None = None,
+    *,
+    conn: connection_type | None = None,
+) -> list[dict[str, Any]]:
+    if conn is not None:
+        with db_read_cursor(conn=conn, label="fetch_all") as cur:
+            return fetch_all_with_cursor(cur, query, params)
+
     def _run() -> list[dict[str, Any]]:
         with db_read_cursor(label="fetch_all") as cur:
             return fetch_all_with_cursor(cur, query, params)
@@ -940,7 +1065,16 @@ def fetch_all(query: str, params: Iterable[Any] | None = None) -> list[dict[str,
     return _run_with_transient_retry(_run)
 
 
-def fetch_one(query: str, params: Iterable[Any] | None = None) -> dict[str, Any] | None:
+def fetch_one(
+    query: str,
+    params: Iterable[Any] | None = None,
+    *,
+    conn: connection_type | None = None,
+) -> dict[str, Any] | None:
+    if conn is not None:
+        with db_read_cursor(conn=conn, label="fetch_one") as cur:
+            return fetch_one_with_cursor(cur, query, params)
+
     def _run() -> dict[str, Any] | None:
         with db_read_cursor(label="fetch_one") as cur:
             return fetch_one_with_cursor(cur, query, params)
@@ -948,7 +1082,17 @@ def fetch_one(query: str, params: Iterable[Any] | None = None) -> dict[str, Any]
     return _run_with_transient_retry(_run)
 
 
-def execute(query: str, params: Iterable[Any] | None = None) -> None:
+def execute(
+    query: str,
+    params: Iterable[Any] | None = None,
+    *,
+    conn: connection_type | None = None,
+) -> None:
+    if conn is not None:
+        with db_cursor(conn=conn, label="execute") as cur:
+            cur.execute(query, params or [])
+        return
+
     def _run() -> None:
         with db_cursor() as cur:
             cur.execute(query, params or [])
@@ -959,7 +1103,15 @@ def execute(query: str, params: Iterable[Any] | None = None) -> None:
 def execute_returning(
     query: str,
     params: Iterable[Any] | None = None,
+    *,
+    conn: connection_type | None = None,
 ) -> list[dict[str, Any]]:
+    if conn is not None:
+        with db_cursor(conn=conn, label="execute_returning") as cur:
+            cur.execute(query, params or [])
+            rows = cur.fetchall()
+            return [dict(row) for row in rows]
+
     def _run() -> list[dict[str, Any]]:
         with db_cursor() as cur:
             cur.execute(query, params or [])

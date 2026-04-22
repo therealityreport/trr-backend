@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +31,9 @@ from trr_backend.socials._scrapling_http_utils import (
 )
 from trr_backend.socials._scrapling_http_utils import (
     extract_response_cookies as _extract_response_cookies,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    resolve_positive_float_env as _resolve_positive_float_env,
 )
 from trr_backend.socials._scrapling_http_utils import (
     response_text as _response_text,
@@ -57,6 +61,7 @@ logger = logging.getLogger("socials.instagram.posts_scrapling.fetcher")
 
 _IG_APP_ID = "936619743392459"
 _FRIENDLY_NAME = "PolarisProfilePostsTabContentQuery_connection"
+_POSTS_REQUEST_DELAY_DEFAULT = 0.15
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -294,7 +299,15 @@ class InstagramPostsScraplingFetcher:
         self._request_count = 0
         self._warmup_cookie_delta: dict[str, str] = {}
         self._selected_proxy_fingerprint: str = proxy_config.fingerprint if proxy_config else "none"
+        self._proxy_session_mode: str = proxy_config.session_mode if proxy_config else "none"
         self._page_tokens: dict[str, str] = {}
+        self._api_delay_seconds = _resolve_positive_float_env(
+            "SOCIAL_INSTAGRAM_DELAY_SEC",
+            _POSTS_REQUEST_DELAY_DEFAULT,
+            minimum=0.0,
+            maximum=30.0,
+        )
+        self._last_api_request_started_at = 0.0
 
         # Browser fetcher (for warmup only).
         try:
@@ -318,7 +331,9 @@ class InstagramPostsScraplingFetcher:
             "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
             "warmup_cookie_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
+            "proxy_session_mode": self._proxy_session_mode,
             "page_tokens_found": list(self._page_tokens.keys()),
+            "api_delay_seconds": self._api_delay_seconds,
             "request_count": self._request_count,
             "transport": "httpx_after_browser_warmup",
         }
@@ -466,10 +481,19 @@ class InstagramPostsScraplingFetcher:
     # -------------------------------------------------------------------
 
     def _merge_warmup_cookies(self, response: Any) -> None:
-        """In-place mutation of self._raw_cookies."""
+        """Record warmup cookie delta and sync future request headers."""
         new_cookies = _extract_response_cookies(response)
         self._warmup_cookie_delta = dict(new_cookies)
-        for name, value in new_cookies.items():
+        self._sync_response_cookies(response)
+
+    def _sync_response_cookies(self, response: Any) -> None:
+        """Mirror response cookies into the header-building state.
+
+        The httpx client updates its own cookie jar automatically, but the
+        GraphQL headers read from `self._raw_cookies`. Keep both aligned so a
+        rotated `csrftoken` or `ds_user_id` is visible on the next request.
+        """
+        for name, value in _extract_response_cookies(response).items():
             self._raw_cookies[name] = value
 
     async def _rebuild_http_client(self) -> None:
@@ -531,8 +555,19 @@ class InstagramPostsScraplingFetcher:
         """Plain HTTP POST via httpx. Used for GraphQL posts-page calls."""
         if self._http_client is None:
             await self._rebuild_http_client()
+        await self._pace_api_requests()
         self._request_count += 1
-        return await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
+        response = await self._http_client.post(url, data=data, headers=headers)  # type: ignore[union-attr]
+        self._sync_response_cookies(response)
+        return response
+
+    async def _pace_api_requests(self) -> None:
+        if self._api_delay_seconds <= 0:
+            return
+        remaining = (self._last_api_request_started_at + self._api_delay_seconds) - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        self._last_api_request_started_at = time.monotonic()
 
     # -------------------------------------------------------------------
     # JSON response handling with retry/backoff

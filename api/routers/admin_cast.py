@@ -4,7 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.auth import AdminUser
 from api.deps import SupabaseAdminClient, get_list_result
@@ -30,6 +30,82 @@ class ShowCastOverridePatch(BaseModel):
     billing_order_override: int | None = None
     notes_override: str | None = None
     tags_override: list[str] | None = None
+
+
+class CastSummaryBatchRequest(BaseModel):
+    show_ids: list[str] = Field(..., min_length=1, max_length=200)
+
+
+class CastSummaryMember(BaseModel):
+    person_id: str
+    full_name: str | None = None
+
+
+class CastSummaryShow(BaseModel):
+    show_id: str
+    cast_members: list[CastSummaryMember]
+
+
+class CastSummaryBatchResponse(BaseModel):
+    shows: list[CastSummaryShow]
+
+
+def _group_cast_summary_rows(
+    show_ids: list[str],
+    rows: list[dict[str, Any]],
+) -> CastSummaryBatchResponse:
+    ordered_show_ids = list(dict.fromkeys(show_ids))
+    cast_members_by_show_id: dict[str, list[CastSummaryMember]] = {
+        show_id: [] for show_id in ordered_show_ids
+    }
+
+    for row in rows:
+        show_id = str(row.get("show_id") or "").strip()
+        person_id = str(row.get("person_id") or "").strip()
+        if not show_id or not person_id or show_id not in cast_members_by_show_id:
+            continue
+
+        full_name_value = row.get("full_name")
+        full_name = full_name_value.strip() if isinstance(full_name_value, str) else None
+        cast_members_by_show_id[show_id].append(
+            CastSummaryMember(person_id=person_id, full_name=full_name)
+        )
+
+    return CastSummaryBatchResponse(
+        shows=[
+            CastSummaryShow(
+                show_id=show_id,
+                cast_members=cast_members_by_show_id.get(show_id, []),
+            )
+            for show_id in ordered_show_ids
+        ]
+    )
+
+
+@router.post("/shows/cast-summary", response_model=CastSummaryBatchResponse)
+def get_admin_cast_summary(
+    payload: CastSummaryBatchRequest,
+    _: AdminUser,
+) -> CastSummaryBatchResponse:
+    show_ids = [show_id.strip() for show_id in payload.show_ids if show_id.strip()]
+    if not show_ids:
+        raise HTTPException(status_code=400, detail="show_ids must include at least one id")
+
+    rows = pg.fetch_all(
+        """
+        SELECT DISTINCT
+            sc.show_id::text AS show_id,
+            sc.person_id::text AS person_id,
+            COALESCE(po.full_name_override, p.full_name) AS full_name
+        FROM core.v_show_cast sc
+        JOIN core.people p ON p.id = sc.person_id
+        LEFT JOIN core.people_overrides po ON po.person_id = sc.person_id
+        WHERE sc.show_id::text = ANY(%s::text[])
+        ORDER BY sc.show_id::text, COALESCE(po.full_name_override, p.full_name)
+        """,
+        [show_ids],
+    )
+    return _group_cast_summary_rows(show_ids, rows)
 
 
 @router.get("/shows/{show_id}/cast")

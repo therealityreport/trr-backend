@@ -23,6 +23,13 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from scripts._workspace_runtime_env import apply_workspace_runtime_env
+from trr_backend.modal_dispatch import (
+    modal_social_comments_job_function_name,
+    modal_social_job_function_names,
+    modal_social_job_function_name,
+    modal_social_media_job_function_name,
+    modal_social_posts_job_function_name,
+)
 
 
 def _load_get_app_objects() -> Callable[..., dict[str, Any]]:
@@ -86,6 +93,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Optionally run the deployed Getty remote access probe on Modal.",
     )
+    parser.add_argument(
+        "--strict-probes",
+        action="store_true",
+        help="Treat advisory probe failures as a non-zero CLI exit.",
+    )
     return parser.parse_args()
 
 
@@ -142,7 +154,27 @@ def list_app_descriptions(*, modal_environment: str = "") -> set[str]:
     return descriptions
 
 
+def social_jobs_enabled() -> bool:
+    raw = str(os.getenv("SOCIAL_QUEUE_ENABLED") or "").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+def required_social_function_names(*, enabled: bool | None = None) -> tuple[str, ...]:
+    social_jobs_are_enabled = enabled if enabled is not None else social_jobs_enabled()
+    if not social_jobs_are_enabled:
+        return ()
+    return (
+        modal_social_job_function_name(),
+        modal_social_posts_job_function_name(),
+        modal_social_media_job_function_name(),
+        modal_social_comments_job_function_name(),
+    )
+
+
 def expected_function_names() -> tuple[str, ...]:
+    social_function_names = required_social_function_names()
     return (
         str(os.getenv("TRR_MODAL_API_FUNCTION") or DEFAULT_API_FUNCTION).strip() or DEFAULT_API_FUNCTION,
         str(os.getenv("TRR_MODAL_ADMIN_OPERATION_FUNCTION") or "run_admin_operation_v2").strip()
@@ -155,19 +187,13 @@ def expected_function_names() -> tuple[str, ...]:
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION).strip()
         or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION,
-        str(os.getenv("TRR_MODAL_SOCIAL_JOB_FUNCTION") or "run_social_job").strip() or "run_social_job",
-        str(os.getenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION") or "run_social_posts_job").strip()
-        or "run_social_posts_job",
-        str(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION") or "run_social_media_job").strip()
-        or "run_social_media_job",
-        str(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION") or "run_social_comments_job").strip()
-        or "run_social_comments_job",
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
         or "sweep_social_dispatch_queue",
         str(os.getenv("TRR_MODAL_VISION_FUNCTION") or "run_admin_vision").strip() or "run_admin_vision",
         str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
         or "run_socialblade_scrape",
         "heartbeat_remote_executors",
+        *social_function_names,
     )
 
 
@@ -276,6 +302,7 @@ def verify_modal_readiness(
     probe_remote_auth_platform: str | None = None,
     probe_getty_remote_access: bool = False,
 ) -> dict[str, Any]:
+    social_jobs_are_enabled = social_jobs_enabled()
     secret_names = list_secret_names(modal_environment=modal_environment)
     app_descriptions = list_app_descriptions(modal_environment=modal_environment)
     app_function_handles: dict[str, Any] = {}
@@ -305,6 +332,7 @@ def verify_modal_readiness(
 
     function_results: list[dict[str, Any]] = []
     missing_functions: list[str] = []
+    resolved_function_names: set[str] = set()
     for function_name in function_names:
         function_handle = app_function_handles.get(function_name)
         if function_handle is None:
@@ -314,6 +342,8 @@ def verify_modal_readiness(
             ok, error = hydrate_function_handle(function_handle)
         if not ok:
             missing_functions.append(function_name)
+        else:
+            resolved_function_names.add(function_name)
         function_results.append(
             {
                 "name": function_name,
@@ -321,6 +351,13 @@ def verify_modal_readiness(
                 "error": error,
             }
         )
+
+    required_social_functions = list(required_social_function_names(enabled=social_jobs_are_enabled))
+    missing_required_social_functions = [
+        function_name
+        for function_name in required_social_functions
+        if function_name and function_name not in resolved_function_names
+    ]
 
     api_name = api_function_name()
     api_web_url: str | None = None
@@ -379,28 +416,49 @@ def verify_modal_readiness(
                     "reason": "probe_payload_invalid",
                 }
 
-    probe_ready = True
-    if remote_auth_probe is not None:
-        probe_ready = probe_ready and bool(remote_auth_probe.get("ready"))
-    if getty_remote_probe is not None:
-        probe_ready = probe_ready and bool(getty_remote_probe.get("ready"))
+    blocking_probe_failures: list[str] = []
+    advisory_probe_failures: list[str] = []
+    if remote_auth_probe is not None and not bool(remote_auth_probe.get("ready")):
+        blocking_probe_failures.append(
+            str(remote_auth_probe.get("reason") or "remote_auth_probe_failed").strip() or "remote_auth_probe_failed"
+        )
+    if getty_remote_probe is not None and not bool(getty_remote_probe.get("ready")):
+        advisory_probe_failures.append(
+            str(getty_remote_probe.get("reason") or "getty_remote_probe_failed").strip() or "getty_remote_probe_failed"
+        )
+
+    core_ok = (
+        app_found
+        and not missing_secrets
+        and not missing_functions
+        and not missing_required_social_functions
+        and not missing_web_endpoints
+        and not blocking_probe_failures
+    )
 
     return {
-        "ok": app_found and not missing_secrets and not missing_functions and not missing_web_endpoints and probe_ready,
+        "ok": core_ok,
+        "core_ok": core_ok,
         "modal_environment": modal_environment or None,
         "app_name": app_name,
         "app_found": app_found,
         "app_lookup_error": app_lookup_error,
         "runtime_secret_name": runtime_secret_name,
         "social_secret_name": social_secret_name,
+        "social_jobs_enabled": social_jobs_are_enabled,
+        "configured_social_function_names": modal_social_job_function_names(),
+        "required_social_function_names": required_social_functions,
         "missing_secrets": missing_secrets,
         "function_results": function_results,
         "missing_functions": missing_functions,
+        "missing_required_social_functions": missing_required_social_functions,
         "api_function_name": api_name,
         "api_web_url": api_web_url,
         "missing_web_endpoints": missing_web_endpoints,
         "remote_auth_probe": remote_auth_probe,
         "getty_remote_probe": getty_remote_probe,
+        "blocking_probe_failures": blocking_probe_failures,
+        "advisory_probe_failures": advisory_probe_failures,
     }
 
 
@@ -412,10 +470,17 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
     if summary.get("app_lookup_error"):
         print(f"  App lookup error: {summary['app_lookup_error']}")
     print(f"  Named secrets: {summary['runtime_secret_name']}, {summary['social_secret_name']}")
+    print(f"  Social jobs enabled: {'yes' if summary['social_jobs_enabled'] else 'no'}")
+    print("  Required social functions: " + ", ".join(summary["required_social_function_names"]))
+    print("  Configured social functions: " + ", ".join(summary["configured_social_function_names"]))
     if summary["missing_secrets"]:
         print("  Missing secrets: " + ", ".join(summary["missing_secrets"]))
     else:
         print("  Missing secrets: none")
+    if summary["missing_required_social_functions"]:
+        print("  Missing required social functions: " + ", ".join(summary["missing_required_social_functions"]))
+    else:
+        print("  Missing required social functions: none")
     print("  Function resolution:")
     for result in summary["function_results"]:
         status = "ok" if result["resolved"] else "missing"
@@ -433,6 +498,9 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
         probe = summary["getty_remote_probe"]
         probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
         print(f"  Getty remote probe: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}")
+    if summary.get("advisory_probe_failures"):
+        print("  Advisory probe failures: " + ", ".join(summary["advisory_probe_failures"]))
+    print(f"  Core ready: {'yes' if summary.get('core_ok') else 'no'}")
     print(f"  Ready: {'yes' if summary['ok'] else 'no'}")
 
 
@@ -452,7 +520,8 @@ def main() -> int:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:
         _print_text_summary(summary)
-    return 0 if summary["ok"] else 1
+    advisory_failures = list(summary.get("advisory_probe_failures") or [])
+    return 0 if summary["ok"] and (not args.strict_probes or not advisory_failures) else 1
 
 
 if __name__ == "__main__":

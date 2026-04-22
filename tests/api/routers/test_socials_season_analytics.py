@@ -470,6 +470,30 @@ def test_get_social_account_profile_posts_forwards_search(client: TestClient, mo
     assert mocked.call_args.kwargs["search"] == "#BravoCon"
 
 
+def test_get_social_account_profile_posts_forwards_comments_only(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [],
+        "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 1},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_posts",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/posts?page=1&page_size=25&comments_only=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["comments_only"] is True
+
+
 def test_get_social_account_catalog_posts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
@@ -1017,6 +1041,7 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
     worker_guard.assert_called_once_with(required_execution_backend="modal", platform="tiktok")
     assert mocked.call_args.kwargs["platform"] == "tiktok"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
 
 
 def test_post_social_account_catalog_remediate_drift_cancels_and_requeues(
@@ -1786,6 +1811,50 @@ def test_post_social_account_catalog_repair_auth_route(
     assert body["resume_stage"] == "posts"
     assert mocked_request.call_args.kwargs["platform"] == "instagram"
     assert mocked_request.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked_request.call_args.kwargs["run_id"] == run_id
+    assert mocked_execute.called
+
+
+def test_post_social_account_catalog_repair_auth_route_for_tiktok_cookie_refresh(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    run_id = "12345678-1234-1234-1234-123456789099"
+    expected = {
+        "run_id": run_id,
+        "status": "accepted",
+        "repair_status": "running",
+        "operational_state": "blocked_auth",
+        "repair_action": "cookie_refresh",
+        "resume_stage": "discovery",
+    }
+
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.request_social_account_catalog_run_auth_repair",
+            return_value=expected,
+        ) as mocked_request,
+        patch(
+            "trr_backend.repositories.social_season_analytics.execute_social_account_catalog_run_auth_repair",
+            return_value={"ok": True},
+        ) as mocked_execute,
+    ):
+        response = client.post(
+            f"/api/v1/admin/socials/profiles/tiktok/bravowwhl/catalog/runs/{run_id}/repair-auth",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == run_id
+    assert body["repair_status"] == "running"
+    assert body["repair_action"] == "cookie_refresh"
+    assert body["resume_stage"] == "discovery"
+    assert mocked_request.call_args.kwargs["platform"] == "tiktok"
+    assert mocked_request.call_args.kwargs["account_handle"] == "bravowwhl"
     assert mocked_request.call_args.kwargs["run_id"] == run_id
     assert mocked_execute.called
 
@@ -4537,6 +4606,26 @@ def test_get_social_account_profile_comments_returns_503_when_database_unavailab
     body = response.json()
     assert body["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
     assert body["detail"]["reason"] == "database_configuration"
+
+
+def test_get_social_account_profile_comments_forwards_post_source_id(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_comments",
+        return_value={"items": [], "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 1}},
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments?page=1&page_size=25&post_source_id=DVfQnTcjsCA",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["post_source_id"] == "DVfQnTcjsCA"
 
 
 def test_post_social_account_comments_scrape_returns_modal_error_when_modal_dispatch_unavailable(

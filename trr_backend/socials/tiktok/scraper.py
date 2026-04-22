@@ -254,10 +254,16 @@ class TikTokScraper:
         self,
         cookies: dict | None = None,
         *,
+        direct_comment_api_enabled_override: bool | None = None,
         http_client_name: str | None = None,
         proxy_urls: list[str] | tuple[str, ...] | None = None,
     ):
         self.cookies = cookies or {}
+        self._direct_comment_api_enabled_override = (
+            bool(direct_comment_api_enabled_override)
+            if direct_comment_api_enabled_override is not None
+            else None
+        )
         self._http_client_name_input = (
             str(http_client_name or os.getenv("SOCIAL_TIKTOK_HTTP_CLIENT") or "").strip().lower() or DEFAULT_HTTP_CLIENT
         )
@@ -410,6 +416,8 @@ class TikTokScraper:
         return str(os.getenv(env_name) or "").strip().lower() in _TRUTHY_ENV_VALUES
 
     def _direct_comment_api_experiment_enabled(self) -> bool:
+        if self._direct_comment_api_enabled_override is not None:
+            return self._direct_comment_api_enabled_override
         return self._env_flag_enabled("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT")
 
     def _should_fallback_to_api_after_ytdlp_failure(self, error_code: str | None) -> bool:

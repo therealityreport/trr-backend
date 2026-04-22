@@ -94,6 +94,26 @@ def assert_core_schema_exists(db: DbSession) -> None:
     raise DatabasePreflightError(f"Database preflight failed: {combined}")
 
 
+def assert_core_schema_exists_sql(connection) -> None:  # noqa: ANN001
+    """Verify that the connected database exposes the core schema via direct SQL."""
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("select exists (select 1 from information_schema.schemata where schema_name = 'core')")
+            row = cursor.fetchone()
+    except Exception as exc:  # noqa: BLE001
+        raise DatabasePreflightError(f"Database preflight failed: {exc}") from exc
+
+    schema_exists = bool(row[0]) if row else False
+    if not schema_exists:
+        raise DatabasePreflightError(
+            "Database preflight failed: schema `core` does not exist.\n"
+            "This likely means you're connected to the wrong database.\n"
+            "Check TRR_DB_URL / TRR_DB_FALLBACK_URL environment variables.\n"
+            "Runtime paths use direct Postgres access; do not troubleshoot this through PostgREST exposed schemas."
+        )
+
+
 def assert_migration_safe(*, require_core_schema: bool = True) -> None:
     """
     Standalone check for migration tooling that may still use raw Postgres URLs.

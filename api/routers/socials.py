@@ -915,6 +915,8 @@ def _account_profile_cache_key(
     page_size: int | None = None,
     search: str | None = None,
     window: str | None = None,
+    comments_only: bool | None = None,
+    post_source_id: str | None = None,
     extra: tuple[Any, ...] | None = None,
 ) -> tuple[Any, ...]:
     return (
@@ -925,6 +927,8 @@ def _account_profile_cache_key(
         page_size,
         str(search or "").strip().lower() or None,
         str(window or "").strip().lower() or None,
+        None if comments_only is None else bool(comments_only),
+        str(post_source_id or "").strip() or None,
         *(extra or ()),
     )
 
@@ -4341,6 +4345,7 @@ def get_social_account_profile_posts_route(
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
     search: str | None = Query(default=None),
+    comments_only: bool = Query(default=False),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_posts
@@ -4352,6 +4357,7 @@ def get_social_account_profile_posts_route(
         page=page,
         page_size=page_size,
         search=search,
+        comments_only=comments_only,
     )
     cached_payload = _get_ttl_cached_payload(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK, cache_key)
     if cached_payload is not None:
@@ -4363,6 +4369,7 @@ def get_social_account_profile_posts_route(
             page=page,
             page_size=page_size,
             search=search,
+            comments_only=comments_only,
         )
         _set_ttl_cached_payload(
             _ACCOUNT_PROFILE_POSTS_CACHE,
@@ -4385,6 +4392,7 @@ def get_social_account_profile_comments_route(
     account_handle: str,
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
+    post_source_id: str | None = Query(default=None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_comments
@@ -4396,6 +4404,7 @@ def get_social_account_profile_comments_route(
         account_handle=account_handle,
         page=page,
         page_size=page_size,
+        post_source_id=post_source_id,
     )
     cached_payload = _get_ttl_cached_payload(
         _ACCOUNT_PROFILE_POSTS_CACHE,
@@ -4413,6 +4422,7 @@ def get_social_account_profile_comments_route(
                 "account_handle": account_handle,
                 "page": page,
                 "page_size": page_size,
+                "post_source_id": post_source_id,
             },
         )
         return cached_payload
@@ -4422,6 +4432,7 @@ def get_social_account_profile_comments_route(
             account_handle=account_handle,
             page=page,
             page_size=page_size,
+            post_source_id=post_source_id,
         )
         _set_ttl_cached_payload(
             _ACCOUNT_PROFILE_POSTS_CACHE,
@@ -4441,6 +4452,7 @@ def get_social_account_profile_comments_route(
                 "account_handle": account_handle,
                 "page": page,
                 "page_size": page_size,
+                "post_source_id": post_source_id,
             },
         )
         return payload

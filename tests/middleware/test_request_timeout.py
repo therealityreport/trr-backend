@@ -71,6 +71,19 @@ class TestRequestTimeoutMiddleware:
         response = client.get("/api/v1/admin/socials/live-status/stream")
         assert response.status_code == 200
 
+    def test_social_profile_posts_endpoint_exempt(self):
+        """Shared profile posts reads use the proxy timeout tiers instead of the generic backend wall clock."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.get("/api/v1/admin/socials/profiles/tiktok/bravotv/posts")
+        async def posts_endpoint():
+            await asyncio.sleep(1)  # Would timeout if not exempt
+            return {"items": [], "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 1}}
+
+        client = TestClient(app)
+        response = client.get("/api/v1/admin/socials/profiles/tiktok/bravotv/posts?comments_only=true")
+        assert response.status_code == 200
+
     def test_unknown_stream_endpoint_not_exempt(self):
         """Arbitrary /stream paths should not bypass the timeout."""
         app = _make_app(timeout_seconds=0.1)

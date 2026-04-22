@@ -139,6 +139,32 @@ def test_modal_social_job_function_names_dedupes_names(monkeypatch: pytest.Monke
     ]
 
 
+def test_modal_dispatch_config_exposes_comments_lane_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "main")
+    monkeypatch.setattr(modal_dispatch, "modal_social_job_function_name", lambda: "run_social_job")
+    monkeypatch.setattr(modal_dispatch, "modal_social_posts_job_function_name", lambda: "run_social_posts_job")
+    monkeypatch.setattr(modal_dispatch, "modal_social_media_job_function_name", lambda: "run_social_media_job")
+    monkeypatch.setattr(modal_dispatch, "modal_social_comments_job_function_name", lambda: "run_social_comments_job")
+
+    config = modal_dispatch.modal_dispatch_config()
+
+    assert config["app_name"] == "trr-backend-jobs"
+    assert config["modal_environment"] == "main"
+    assert config["social_required_function_names"] == [
+        "run_social_job",
+        "run_social_posts_job",
+        "run_social_media_job",
+        "run_social_comments_job",
+    ]
+    assert config["social_job_function_names"] == [
+        "run_social_job",
+        "run_social_posts_job",
+        "run_social_media_job",
+        "run_social_comments_job",
+    ]
+
+
 def test_dispatch_social_job_uses_stage_specific_function(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -152,6 +178,62 @@ def test_dispatch_social_job_uses_stage_specific_function(monkeypatch: pytest.Mo
 
     assert captured["function_name"] == "run_social_comments_job"
     assert captured["kwargs"] == {"job_id": "job-1"}
+
+
+def test_spawn_named_modal_function_includes_drift_visible_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeCall:
+        object_id = "fc-123"
+
+    class _FakeFunction:
+        def spawn(self, **_kwargs: object) -> _FakeCall:
+            return _FakeCall()
+
+    fake_modal = types.SimpleNamespace(
+        Function=types.SimpleNamespace(
+            from_name=lambda _app_name, _function_name: _FakeFunction(),
+        )
+    )
+
+    monkeypatch.setattr(modal_dispatch, "modal_dispatch_ready", lambda *, function_name: (True, None))
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "main")
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+
+    payload = modal_dispatch._spawn_named_modal_function(
+        function_name="run_social_comments_job",
+        log_label="social ingest",
+        kwargs={"job_id": "job-1"},
+        dispatcher_name="social",
+    )
+
+    assert payload["dispatched"] is True
+    assert payload["app_name"] == "trr-backend-jobs"
+    assert payload["function_name"] == "run_social_comments_job"
+    assert payload["modal_environment"] == "main"
+    assert payload["execution_metadata"]["execution_backend_canonical"] == "modal"
+    assert payload["dispatch_config"]["social_comments_job_function"] == "run_social_comments_job"
+
+
+def test_spawn_named_modal_function_includes_metadata_when_preflight_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(modal_dispatch, "modal_dispatch_ready", lambda *, function_name: (False, "modal_disabled"))
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "main")
+
+    payload = modal_dispatch._spawn_named_modal_function(
+        function_name="run_social_comments_job",
+        log_label="social ingest",
+        kwargs={"job_id": "job-1"},
+        dispatcher_name="social",
+    )
+
+    assert payload["dispatched"] is False
+    assert payload["reason"] == "modal_disabled"
+    assert payload["app_name"] == "trr-backend-jobs"
+    assert payload["function_name"] == "run_social_comments_job"
+    assert payload["modal_environment"] == "main"
+    assert payload["dispatch_config"]["app_name"] == "trr-backend-jobs"
 
 
 def test_inspect_modal_function_call_only_requires_modal_app_name(

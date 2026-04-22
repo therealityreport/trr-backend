@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 
 import trr_backend.repositories.social_season_analytics as social_repo
@@ -212,3 +214,45 @@ def test_update_run_summary_prefers_incremental_counter_columns(monkeypatch: pyt
     assert summary["items_found_total"] == 77
     assert summary["stage_counts"]["posts"]["active"] == 1
     assert any("select total_jobs" in call for call in calls)
+
+
+def test_finalize_run_status_reuses_lock_connection_for_all_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_conn = object()
+    seen_fetch_conns: list[object | None] = []
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None):
+        del params
+        seen_fetch_conns.append(conn)
+        normalized = " ".join(sql.split()).lower()
+        if "select status, config from social.scrape_runs" in normalized:
+            return {"status": "running", "config": {"pipeline_ingest_mode": "manual"}}
+        raise AssertionError(f"Unexpected query: {normalized}")
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_update_run_summary",
+        lambda *_args, **_kwargs: {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}},
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_run_job_status_breakdown",
+        lambda *_args, **_kwargs: {"running_jobs": 0, "queued_jobs": 0, "cancelling_jobs": 0},
+    )
+    monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
+    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(run_lifecycle.legacy, "_shared_catalog_fetch_has_terminal_error", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+
+    run_lifecycle._finalize_run_status("run-1")
+
+    assert seen_fetch_conns == [lock_conn]

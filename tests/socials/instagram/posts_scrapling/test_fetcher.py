@@ -126,6 +126,47 @@ def test_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
     assert "warmup_cookie_delta" not in meta
 
 
+def test_runtime_metadata_reports_delay_and_proxy_session_mode(_mock_scrapling):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+    from trr_backend.socials.instagram.posts_scrapling.proxy import PostsProxyConfig
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing"},
+        browser_account_id="test",
+        proxy_config=PostsProxyConfig(
+            browser_proxy="http://proxy:8080",
+            api_proxy_url="http://proxy:8080",
+            proxy_rotator=None,
+            fingerprint="proxy:8080:explicit",
+            session_mode="explicit",
+        ),
+    )
+
+    meta = fetcher.runtime_metadata
+    assert meta["proxy_session_mode"] == "explicit"
+    assert meta["api_delay_seconds"] >= 0
+
+
+def test_sync_response_cookies_updates_direct_request_state(_mock_scrapling):
+    from unittest.mock import MagicMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing", "csrftoken": "old", "ds_user_id": "1"},
+        browser_account_id="test",
+    )
+    response = MagicMock()
+    response.cookies = {"csrftoken": "fresh-csrf", "ds_user_id": "2"}
+
+    fetcher._sync_response_cookies(response)
+
+    assert fetcher._raw_cookies["csrftoken"] == "fresh-csrf"
+    assert fetcher._raw_cookies["ds_user_id"] == "2"
+
+
 def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     """After a successful warmup, an info log with event=warmup_success should fire."""
     import asyncio

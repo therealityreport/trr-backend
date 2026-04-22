@@ -877,3 +877,146 @@ def test_wait_for_children_times_out_and_terminates_hung_child(monkeypatch) -> N
 
 def test_resolve_child_wait_timeout_adds_grace_to_max_run_seconds() -> None:
     assert worker._resolve_child_wait_timeout_seconds(180.0) == 210.0  # noqa: SLF001
+
+
+def test_resolve_worker_execution_limits_uses_task8_defaults_and_new_env_names(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_EXECUTE_RUN_MAX_JOBS", raising=False)
+    monkeypatch.delenv("SOCIAL_EXECUTE_RUN_MAX_SECONDS", raising=False)
+    monkeypatch.delenv("SOCIAL_WORKER_MAX_JOBS_PER_INVOCATION", raising=False)
+    monkeypatch.delenv("SOCIAL_WORKER_MAX_RUN_SECONDS", raising=False)
+
+    args = SimpleNamespace(max_jobs_per_invocation=None, max_run_seconds=None)
+
+    assert worker._resolve_worker_execution_limits(args) == (1000, 1800.0)  # noqa: SLF001
+
+    monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_JOBS", "25")
+    monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_SECONDS", "90")
+
+    assert worker._resolve_worker_execution_limits(args) == (25, 90.0)  # noqa: SLF001
+
+
+def test_resolve_worker_execution_limits_prefers_cli_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_JOBS", "25")
+    monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_SECONDS", "90")
+
+    args = SimpleNamespace(max_jobs_per_invocation=4, max_run_seconds=12.5)
+
+    assert worker._resolve_worker_execution_limits(args) == (4, 12.5)  # noqa: SLF001
+
+
+def test_execute_run_with_caps_stops_after_job_cap(monkeypatch) -> None:
+    claim_calls: list[dict[str, object]] = []
+    process_calls: list[str] = []
+    finalize_calls: list[tuple[str, bool]] = []
+    jobs = [
+        {"id": "job-1", "run_id": "run-1", "platform": "instagram", "config": {"stage": "posts"}},
+        {"id": "job-2", "run_id": "run-1", "platform": "instagram", "config": {"stage": "posts"}},
+        {"id": "job-3", "run_id": "run-1", "platform": "instagram", "config": {"stage": "posts"}},
+    ]
+
+    monkeypatch.setattr(worker.social_repo, "_set_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker.social_repo,
+        "_finalize_run_status",
+        lambda run_id, force_recompute=False: finalize_calls.append((run_id, force_recompute)) or {},
+    )
+    monkeypatch.setattr(worker.social_repo, "_fetch_next_preclaimed_job", lambda **_kwargs: None)
+    monkeypatch.setattr(worker.social_repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "claim_next_queued_jobs",
+        lambda **kwargs: claim_calls.append(dict(kwargs)) or ([jobs.pop(0)] if jobs else []),
+    )
+    monkeypatch.setattr(
+        worker,
+        "process_claimed_job",
+        lambda job, **_kwargs: process_calls.append(str(job.get("id") or "")) or job,
+    )
+
+    def _fake_fetch_one(sql: str, params=None):  # noqa: ANN001
+        if "select status from social.scrape_runs" in sql:
+            return {"status": "running"}
+        if "from social.scrape_runs" in sql:
+            return {"id": "run-1", "status": "running", "config": {}}
+        raise AssertionError(sql)
+
+    monkeypatch.setattr(worker.pg, "fetch_one", _fake_fetch_one)
+
+    payload = worker._execute_run_with_caps(  # noqa: SLF001
+        run_id="run-1",
+        worker_id="worker-1",
+        stage="posts",
+        platform="instagram",
+        max_jobs_per_invocation=2,
+        max_run_seconds=1800.0,
+    )
+
+    assert process_calls == ["job-1", "job-2"]
+    assert [call["limit"] for call in claim_calls] == [1, 1]
+    assert finalize_calls == [("run-1", False)]
+    assert payload["id"] == "run-1"
+
+
+def test_execute_run_with_caps_stops_after_runtime_cap(monkeypatch) -> None:
+    finalize_calls: list[str] = []
+    monotonic_values = iter([100.0, 100.2])
+
+    monkeypatch.setattr(worker.social_repo, "_set_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        worker.social_repo,
+        "_finalize_run_status",
+        lambda run_id, force_recompute=False: finalize_calls.append(run_id) or {},
+    )
+    monkeypatch.setattr(
+        worker,
+        "claim_next_queued_jobs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("claim loop should stop before claiming")),
+    )
+    monkeypatch.setattr(worker.time, "monotonic", lambda: next(monotonic_values))
+
+    monkeypatch.setattr(
+        worker.pg,
+        "fetch_one",
+        lambda sql, params=None: {"id": "run-1", "status": "running", "config": {}}
+        if "from social.scrape_runs" in sql
+        else {"status": "running"},
+    )
+
+    payload = worker._execute_run_with_caps(  # noqa: SLF001
+        run_id="run-1",
+        worker_id="worker-1",
+        stage="posts",
+        platform="instagram",
+        max_jobs_per_invocation=1000,
+        max_run_seconds=0.1,
+    )
+
+    assert finalize_calls == ["run-1"]
+    assert payload["id"] == "run-1"
+
+
+def test_spawn_child_worker_propagates_caps_for_run_id_children(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_popen(cmd, cwd=None, env=None):  # noqa: ANN001
+        captured["cmd"] = list(cmd)
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return SimpleNamespace(pid=1234)
+
+    monkeypatch.setattr(worker.subprocess, "Popen", _fake_popen)
+
+    worker._spawn_child_worker(  # noqa: SLF001
+        worker_id="worker-1:p1",
+        interval=5.0,
+        stage="comments_scrapling",
+        platform="instagram",
+        run_id="run-1",
+        max_jobs_per_invocation=25,
+        max_run_seconds=90.0,
+    )
+
+    cmd = captured["cmd"]
+    assert "--run-id" in cmd
+    assert "--max-jobs-per-invocation" in cmd
+    assert "--max-run-seconds" in cmd

@@ -8,7 +8,7 @@ create unique index if not exists scrape_jobs_active_comment_media_mirror_uniq
         nullif(config->>'comment_db_id', ''),
         case
           when coalesce(config->>'post_id', '') <> '' and coalesce(config->>'comment_id', '') <> ''
-            then concat(config->>'post_id', ':', config->>'comment_id')
+            then (config->>'post_id') || ':' || (config->>'comment_id')
           else null
         end
       )

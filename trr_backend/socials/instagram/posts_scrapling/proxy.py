@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse
 
+from trr_backend.socials._scrapling_http_utils import env_truthy, resolve_positive_int_env
+from trr_backend.socials.instagram._proxy_sessions import apply_decodo_session_affinity
+
 
 @dataclass(slots=True)
 class PostsProxyConfig:
@@ -30,6 +33,7 @@ class PostsProxyConfig:
     api_proxy_url: str | None
     proxy_rotator: Any | None
     fingerprint: str
+    session_mode: str = "rotating"
 
 
 def _build_proxy_rotator(browser_proxy: str | dict[str, str] | None) -> Any | None:
@@ -64,6 +68,7 @@ def select_posts_proxy() -> PostsProxyConfig | None:
             api_proxy_url=first_url,
             proxy_rotator=_build_proxy_rotator(first_url),
             fingerprint=f"{parsed.hostname or 'unknown'}:{parsed.port or 0}:explicit",
+            session_mode="explicit",
         )
 
     # 2. DECODO credentials.
@@ -72,17 +77,28 @@ def select_posts_proxy() -> PostsProxyConfig | None:
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds
+            sticky_username, session_mode = apply_decodo_session_affinity(
+                username,
+                use_sticky_proxy=env_truthy("SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY", False),
+                session_ttl_seconds=resolve_positive_int_env(
+                    "SOCIAL_INSTAGRAM_POSTS_PROXY_SESSION_TTL_SECONDS",
+                    600,
+                    minimum=60,
+                    maximum=86_400,
+                ),
+            )
             browser_dict = {
                 "server": f"http://{gateway}",
-                "username": username,
+                "username": sticky_username,
                 "password": password,
             }
-            api_url = f"http://{quote(username, safe='')}:{quote(password, safe='')}@{gateway}"
+            api_url = f"http://{quote(sticky_username, safe='')}:{quote(password, safe='')}@{gateway}"
             return PostsProxyConfig(
                 browser_proxy=browser_dict,
                 api_proxy_url=api_url,
                 proxy_rotator=_build_proxy_rotator(browser_dict),
                 fingerprint=f"{gateway}:decodo",
+                session_mode=session_mode,
             )
 
     # 3. No proxy — local dev mode.

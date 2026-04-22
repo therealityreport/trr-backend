@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException
@@ -16,23 +17,41 @@ Client = DbSession
 
 def get_supabase_client() -> Client:
     """
-    Returns a DB session for public read operations.
+    Returns a PostgREST-backed DB session for SDK-style public read operations.
+
+    Prefer `trr_backend.db.pg` for direct database reads and writes.
     """
     return get_db_session()
 
 
-def get_supabase_admin_client() -> Client:
+def get_postgrest_admin_client() -> Client:
     """
-    Returns a DB session for admin operations.
+    Returns a PostgREST-backed DB session for admin service-role operations.
+
+    Prefer `trr_backend.db.pg` for direct database reads and writes.
     """
     from trr_backend.db.admin import create_supabase_admin_client
 
     return create_supabase_admin_client()
 
 
+def get_supabase_admin_client() -> Client:
+    """
+    Deprecated alias for `get_postgrest_admin_client`.
+    """
+    warnings.warn(
+        "get_supabase_admin_client is deprecated; use get_postgrest_admin_client for PostgREST "
+        "surfaces and trr_backend.db.pg for direct database access.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return get_postgrest_admin_client()
+
+
 # Type aliases for dependency injection
 SupabaseClient = Annotated[Client, Depends(get_supabase_client)]
-SupabaseAdminClient = Annotated[Client, Depends(get_supabase_admin_client)]
+PostgrestAdminClient = Annotated[Client, Depends(get_postgrest_admin_client)]
+SupabaseAdminClient = PostgrestAdminClient
 
 
 class SupabaseError(Exception):

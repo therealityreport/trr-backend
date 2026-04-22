@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import types
 from dataclasses import dataclass
@@ -147,6 +148,42 @@ def test_mirror_url_to_s3_fails_for_oversized_assets(monkeypatch: pytest.MonkeyP
     assert result.error == "asset_too_large"
 
 
+def test_mirror_url_to_s3_rejects_non_image_bytes_for_image_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    class _FakeResponse:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            yield b"<html>not an image</html>"
+
+    upload_mock = MagicMock()
+    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    result = s3_mirror.mirror_url_to_s3(
+        "https://images.example.com/file.jpg",
+        s3_client=MagicMock(),
+        bucket="bucket",
+    )
+
+    assert result.status == "failed"
+    assert result.error == "asset_wrong_content_type"
+    upload_mock.assert_not_called()
+
+
 @dataclass
 class _FakeBotoSession:
     kwargs: dict[str, object]
@@ -247,6 +284,12 @@ def test_get_s3_client_uses_endpoint_url_for_r2(monkeypatch: pytest.MonkeyPatch)
     assert client["aws_access_key_id"] == "key"
     assert client["aws_secret_access_key"] == "secret"
     assert client["region_name"] == "auto"
+    assert isinstance(client["config"], Config)
+    assert client["config"].signature_version == "s3v4"
+    assert client["config"].connect_timeout == 10
+    assert client["config"].read_timeout == 90
+    assert client["config"].retries == {"max_attempts": 3, "mode": "standard"}
+    assert client["config"].s3 == {"addressing_style": "path"}
 
 
 def test_mirror_urls_to_s3_isolates_failures_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1120,9 +1163,15 @@ def test_mirror_url_to_s3_falls_back_to_ytdlp_for_twitter_video(monkeypatch: pyt
     fake_proc.stdout = ytdlp_payload
     fake_proc.stderr = ""
     subprocess_calls: list[list[str]] = []
+    batch_paths: list[str] = []
 
     def _fake_subprocess_run(cmd, **kwargs):  # noqa: ANN001, ARG005
         subprocess_calls.append(cmd)
+        batch_path = cmd[cmd.index("--batch-file") + 1]
+        batch_paths.append(batch_path)
+        assert os.path.exists(batch_path) is True
+        with open(batch_path, "r", encoding="utf-8") as handle:
+            assert handle.read().strip() == tweet_url
         return fake_proc
 
     monkeypatch.setattr(s3_mirror.subprocess, "run", _fake_subprocess_run)
@@ -1140,8 +1189,101 @@ def test_mirror_url_to_s3_falls_back_to_ytdlp_for_twitter_video(monkeypatch: pyt
     # yt-dlp should have been called exactly once
     assert len(subprocess_calls) == 1
     assert "yt-dlp" in subprocess_calls[0][0]
-    assert tweet_url in subprocess_calls[0]
+    assert "--batch-file" in subprocess_calls[0]
+    assert tweet_url not in subprocess_calls[0]
+    assert batch_paths and all(not os.path.exists(path) for path in batch_paths)
     upload_mock.assert_called_once()
+
+
+def test_mirror_url_to_s3_accepts_ytdlp_retry_when_object_already_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    expired_url = "https://video.twimg.com/ext_tw_video/12345/pu/vid/old.mp4?tag=12&token=expired"
+    fresh_url = "https://video.twimg.com/ext_tw_video/12345/pu/vid/fresh.mp4?tag=12&token=new"
+    tweet_url = "https://x.com/user/status/9999"
+    fake_s3 = MagicMock()
+
+    class _FakeResponse403:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            import requests as _req
+
+            resp = _req.models.Response()
+            resp.status_code = 403
+            raise _req.exceptions.HTTPError(response=resp)
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            return iter([])
+
+    class _FakeResponseOK:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            yield b"fresh-video-bytes"
+
+    def _fake_get(*args, **kwargs):  # noqa: ANN001, ARG005
+        url = args[0] if args else kwargs.get("url", "")
+        if url == expired_url:
+            return _FakeResponse403()
+        if url == fresh_url:
+            return _FakeResponseOK()
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(s3_mirror.requests, "get", _fake_get)
+    monkeypatch.setattr(s3_mirror.shutil, "which", lambda cmd: "/usr/local/bin/yt-dlp" if cmd == "yt-dlp" else None)
+
+    ytdlp_payload = json.dumps({"url": fresh_url})
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.stdout = ytdlp_payload
+    fake_proc.stderr = ""
+
+    def _fake_subprocess_run(cmd, **kwargs):  # noqa: ANN001, ARG005
+        batch_path = cmd[cmd.index("--batch-file") + 1]
+        with open(batch_path, "r", encoding="utf-8") as handle:
+            assert handle.read().strip() == tweet_url
+        return fake_proc
+
+    monkeypatch.setattr(s3_mirror.subprocess, "run", _fake_subprocess_run)
+    monkeypatch.setattr(
+        s3_mirror,
+        "_head_object",
+        lambda _client, _bucket, key: {"ETag": "etag", "Key": key},
+    )
+    upload_mock = MagicMock()
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    result = s3_mirror.mirror_url_to_s3(
+        expired_url,
+        s3_client=fake_s3,
+        bucket="bucket",
+        tweet_url=tweet_url,
+    )
+
+    assert result.status == "skipped"
+    assert result.error is None
+    assert result.hosted_url is not None and result.hosted_url.startswith("https://cdn.example.com/media/")
+    upload_mock.assert_not_called()
 
 
 def test_mirror_url_to_s3_no_ytdlp_fallback_without_tweet_url(monkeypatch: pytest.MonkeyPatch) -> None:

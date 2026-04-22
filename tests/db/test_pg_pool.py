@@ -13,13 +13,14 @@ from trr_backend.db import pg
 
 
 class _FakeConnection:
-    def __init__(self) -> None:
+    def __init__(self, *, query_results: list[dict[str, object] | None] | None = None) -> None:
         self.commit_calls = 0
         self.rollback_calls = 0
         self._autocommit = False
         self.closed = False
         self.transaction_status = TRANSACTION_STATUS_IDLE
         self.executed_sql: list[str] = []
+        self.query_results = list(query_results or [])
 
     @property
     def autocommit(self) -> bool:
@@ -43,7 +44,8 @@ class _FakeConnection:
     def get_backend_pid(self) -> int:
         return 12345
 
-    def cursor(self):
+    def cursor(self, *args, **kwargs):
+        del args, kwargs
         return _FakeCursor(self)
 
 
@@ -57,8 +59,14 @@ class _FakeCursor:
     def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
         return None
 
-    def execute(self, sql: str) -> None:
+    def execute(self, sql: str, params=None) -> None:
+        del params
         self._connection.executed_sql.append(sql)
+
+    def fetchone(self) -> dict[str, object] | None:
+        if not self._connection.query_results:
+            return None
+        return self._connection.query_results.pop(0)
 
 
 class _FakePool:
@@ -85,6 +93,21 @@ class _FakePool:
 
     def closeall(self) -> None:
         self.closeall_calls += 1
+
+
+class _FakeThreadedPool(_FakePool):
+    def __init__(self, *, lock_result: dict[str, object] | None = None) -> None:
+        super().__init__()
+        self.connection = _FakeConnection(query_results=[lock_result or {"locked": True}])
+        self.last_connection = self.connection
+
+    @property
+    def getconn_count(self) -> int:
+        return self.getconn_calls
+
+    @property
+    def putconn_count(self) -> int:
+        return self.putconn_calls
 
 
 class _FakePoolClosedOnGetconn(_FakePool):
@@ -189,6 +212,56 @@ def test_db_read_connection_uses_autocommit_and_returns_clean_connection(
     assert fake_pool.connection.autocommit is False
 
 
+def test_db_read_connection_uses_social_profile_pool_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePool()
+    created: list[tuple[int, int]] = []
+
+    def _pool_factory(*, minconn, maxconn, **_kwargs):
+        created.append((minconn, maxconn))
+        return fake_pool
+
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "1")
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN", "2")
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
+
+    with pg.db_read_connection(label="social-profile-summary", pool_name="social_profile"):
+        pass
+
+    assert created == [(1, 2)]
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+
+
+def test_resolve_pool_sizing_honors_local_social_profile_session_pooler_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "1")
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN", "4")
+
+    sizing = pg._resolve_pool_sizing(
+        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
+        minconn_env_name="TRR_SOCIAL_PROFILE_DB_POOL_MINCONN",
+        maxconn_env_name="TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN",
+        pool_name="social_profile",
+    )
+
+    assert sizing["requested_minconn"] == 1
+    assert sizing["requested_maxconn"] == 4
+    assert sizing["minconn"] == 1
+    assert sizing["maxconn"] == 4
+    assert sizing["session_pooler_override_clamped"] is False
+    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["maxconn_source"] == "env:TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
+
+
 def test_db_read_connection_discards_closed_connection_on_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -208,6 +281,37 @@ def test_db_read_connection_discards_closed_connection_on_return(
     assert fake_pool.putconn_calls == 1
     assert fake_pool.closed_putconn_calls == 1
     assert fake_pool.connection.closed is True
+
+
+def test_advisory_session_lock_uses_one_connection_for_lock_and_unlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakeThreadedPool()
+    monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": fake_pool)
+
+    with pg.advisory_session_lock(lock_key=123, label="test"):
+        pass
+
+    assert fake_pool.getconn_count == 1
+    assert fake_pool.putconn_count == 1
+    assert fake_pool.last_connection.executed_sql == [
+        "select pg_try_advisory_lock(%s) as locked",
+        "select pg_advisory_unlock(%s)",
+    ]
+
+
+def test_advisory_session_lock_raises_when_lock_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pool = _FakeThreadedPool(lock_result={"locked": False})
+    monkeypatch.setattr(pg, "_get_pool", lambda pool_name="default": fake_pool)
+
+    with pytest.raises(pg.AdvisoryLockUnavailable):
+        with pg.advisory_session_lock(lock_key=123, label="test"):
+            pass
+
+    assert fake_pool.getconn_count == 1
+    assert fake_pool.putconn_count == 1
 
 
 def test_db_connection_rolls_back_and_returns_connection_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,7 +512,7 @@ def test_get_pool_logs_effective_session_pooler_defaults_warning(
         with pg.db_connection():
             pass
 
-    assert "minconn=4 maxconn=16" in caplog.text
+    assert "minconn=2 maxconn=8" in caplog.text
     assert "minconn_source=default maxconn_source=default" in caplog.text
     assert "application_name=trr-backend" in caplog.text
     assert "session_pooler_tiny_defaults" in caplog.text
@@ -421,11 +525,11 @@ def test_resolve_pool_sizing_keeps_production_session_defaults_conservative(monk
 
     sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
-    assert sizing["minconn"] == 4
-    assert sizing["maxconn"] == 16
+    assert sizing["minconn"] == 2
+    assert sizing["maxconn"] == 8
 
 
-def test_resolve_pool_sizing_clamps_local_session_pooler_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_pool_sizing_caps_local_session_pooler_overrides_at_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("TRR_DB_POOL_MINCONN", "6")
     monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "20")
@@ -434,10 +538,71 @@ def test_resolve_pool_sizing_clamps_local_session_pooler_overrides(monkeypatch: 
 
     assert sizing["requested_minconn"] == 6
     assert sizing["requested_maxconn"] == 20
-    assert sizing["minconn"] == 4
+    assert sizing["minconn"] == 6
     assert sizing["maxconn"] == 16
     assert sizing["session_pooler_override_clamped"] is True
-    assert sizing["maxconn_source"] == "clamped:session_pooler_default"
+    assert sizing["maxconn_source"] == "clamped:local_session_pooler_ceiling"
+
+
+def test_resolve_pool_sizing_clamps_modal_social_profile_session_pooler_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("MODAL_TASK_ID", "ta-123")
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "4")
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN", "8")
+
+    sizing = pg._resolve_pool_sizing(
+        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
+        minconn_env_name="TRR_SOCIAL_PROFILE_DB_POOL_MINCONN",
+        maxconn_env_name="TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN",
+        pool_name="social_profile",
+    )
+
+    assert sizing["requested_minconn"] == 4
+    assert sizing["requested_maxconn"] == 8
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 8
+    assert sizing["session_pooler_override_clamped"] is False
+    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["maxconn_source"] == "env:TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
+
+
+def test_get_pool_logs_oversized_session_pool_override_for_local_social_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session_pooler_dsn = "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    fake_pool = _FakePool()
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "1")
+    monkeypatch.setenv("TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN", "4")
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (
+            {
+                "url": session_pooler_dsn,
+                "source": "TRR_DB_URL",
+                "host_class": "pooler",
+                "connection_class": "session",
+                "host": "aws-1-us-east-1.pooler.supabase.com",
+                "port": 5432,
+                "database": "postgres",
+            },
+        ),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", lambda *args, **kwargs: fake_pool)
+
+    with caplog.at_level("INFO", logger="trr_backend.db.pg"):
+        with pg.db_read_connection(label="social-profile-summary", pool_name="social_profile"):
+            pass
+
+    assert "oversized_session_pool_override" not in caplog.text
+    assert "pool_name=social_profile" in caplog.text
+    assert "minconn=1 maxconn=4" in caplog.text
+    assert "clamped_session_pool_override" not in caplog.text
 
 
 def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,11 +615,11 @@ def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides(monkeypatch: 
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
-    assert sizing["minconn"] == 1
-    assert sizing["maxconn"] == 4
-    assert sizing["modal_session_pooler_override_clamped"] is True
-    assert sizing["minconn_source"] == "clamped:modal_session_pooler_default"
-    assert sizing["maxconn_source"] == "clamped:modal_session_pooler_default"
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 16
+    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["minconn_source"] == "env:TRR_DB_POOL_MINCONN"
+    assert sizing["maxconn_source"] == "env:TRR_DB_POOL_MAXCONN"
 
 
 def test_resolve_pool_sizing_keeps_local_clamp_outside_modal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -693,8 +858,8 @@ def test_build_pool_for_session_mode_supavisor_uses_conservative_defaults(monkey
 
     pg._build_pool_for_url("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
-    assert captured["minconn"] == 4
-    assert captured["maxconn"] == 16
+    assert captured["minconn"] == 2
+    assert captured["maxconn"] == 8
     options = captured["options"]
     assert "-c idle_in_transaction_session_timeout=60000" in options
     assert "-c statement_timeout=30000" in options

@@ -51,6 +51,26 @@ def test_normalize_hosted_tagged_profile_pics_accepts_string_and_object_values()
     assert payload["cohen"]["sha256"] == "abc"
 
 
+def test_instagram_post_avatar_urls_reads_object_shaped_tagged_entries() -> None:
+    urls = social_repo._instagram_post_avatar_urls(  # noqa: SLF001
+        {
+            "hosted_owner_profile_pic_url": "https://cdn.test/owner.jpg",
+            "hosted_tagged_profile_pics": {
+                "friend": {
+                    "hosted_url": "https://cdn.test/friend.jpg",
+                    "sha256": "abc123",
+                    "mirrored_at": "2026-04-21T00:00:00+00:00",
+                }
+            },
+        }
+    )
+
+    assert urls == {
+        "https://cdn.test/owner.jpg",
+        "https://cdn.test/friend.jpg",
+    }
+
+
 def test_get_post_comments_instagram_filters_missing_comments_and_includes_media_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
