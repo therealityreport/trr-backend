@@ -164,6 +164,23 @@ def test_select_comments_proxy_fingerprint_stays_log_safe_under_sticky_mode(monk
     assert "secret" not in config.fingerprint
 
 
+def test_select_comments_proxy_preserves_preconfigured_sticky_username(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
+    monkeypatch.setenv("DECODO_USERNAME", "user-username-session-fixed123-sessionduration-30")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    config = select_comments_proxy(session_key="bravotv")
+
+    assert config is not None
+    assert isinstance(config.browser_proxy, dict)
+    assert config.browser_proxy["username"] == "user-username-session-fixed123-sessionduration-30"
+    assert config.session_mode == "sticky_preconfigured"
+
+
 def test_resolve_comments_scrapling_session_reuses_instagram_auth_session(monkeypatch) -> None:
     fake_session = SimpleNamespace(
         cookies={"sessionid": "session-cookie", "csrftoken": "csrf-cookie"},
@@ -247,14 +264,14 @@ def test_comments_fetcher_runtime_metadata_never_exposes_sticky_username(monkeyp
     assert meta["selected_proxy_fingerprint"] == "gate.decodo.com:7000:decodo"
 
 
-def test_job_runner_passes_account_handle_as_proxy_session_key(monkeypatch) -> None:
+def test_job_runner_uses_resolved_browser_account_id_as_proxy_session_key(monkeypatch) -> None:
     captured: dict[str, str | None] = {}
 
     monkeypatch.setattr(
         "trr_backend.socials.instagram.comments_scrapling.job_runner.resolve_comments_scrapling_session",
         lambda **_kwargs: SimpleNamespace(
             cookies=[],
-            browser_account_id="bravotv",
+            browser_account_id="shared-auth",
             auth_session=SimpleNamespace(cookies={}, metadata={}),
         ),
     )
@@ -329,4 +346,4 @@ def test_job_runner_passes_account_handle_as_proxy_session_key(monkeypatch) -> N
         }
     )
 
-    assert captured["session_key"] == "bravotv"
+    assert captured["session_key"] == "shared-auth"

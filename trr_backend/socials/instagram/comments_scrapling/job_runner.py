@@ -101,7 +101,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             browser_account_id=account_handle,
             caller_context=f"comments_scrapling:{mode}:{account_handle}",
         )
-        proxy_config = select_comments_proxy(session_key=account_handle)
+        proxy_session_key = str(session.browser_account_id or account_handle).strip().lower().lstrip("@")
+        proxy_config = select_comments_proxy(session_key=proxy_session_key or account_handle)
         fetcher = InstagramCommentsScraplingFetcher(
             cookies=session.cookies,
             raw_cookies=session.auth_session.cookies,
