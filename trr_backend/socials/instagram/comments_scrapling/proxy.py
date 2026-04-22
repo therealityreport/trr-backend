@@ -1,7 +1,7 @@
 """Proxy selection for the Instagram comments Scrapling lane.
 
 Public API:
-    select_comments_proxy() -> CommentsProxyConfig | None
+    select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyConfig | None
 
 Everything else is internal. Callers (job_runner, CLI) use only
 select_comments_proxy(). ProxyRotator construction and URL building
@@ -14,6 +14,9 @@ import os
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse
+
+from trr_backend.socials._scrapling_http_utils import env_truthy, resolve_positive_int_env
+from trr_backend.socials.instagram._proxy_sessions import apply_decodo_session_affinity
 
 
 @dataclass(slots=True)
@@ -32,6 +35,7 @@ class CommentsProxyConfig:
     api_proxy_url: str | None
     proxy_rotator: Any | None
     fingerprint: str
+    session_mode: str = "rotating"
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +104,7 @@ def _decodo_env() -> tuple[str, str, str] | None:
 # ---------------------------------------------------------------------------
 
 
-def select_comments_proxy() -> CommentsProxyConfig | None:
+def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyConfig | None:
     """Single entry point for all proxy needs. Returns None when no proxy
     is configured (local-dev cookies-only mode).
 
@@ -122,6 +126,7 @@ def select_comments_proxy() -> CommentsProxyConfig | None:
             api_proxy_url=first_url,
             proxy_rotator=rotator,
             fingerprint=_fingerprint_from_url(first_url),
+            session_mode="explicit",
         )
 
     # 2. Decodo provider (default when env has credentials).
@@ -130,18 +135,30 @@ def select_comments_proxy() -> CommentsProxyConfig | None:
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds
+            sticky_username, session_mode = apply_decodo_session_affinity(
+                username,
+                use_sticky_proxy=env_truthy("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", False),
+                session_ttl_seconds=resolve_positive_int_env(
+                    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS",
+                    600,
+                    minimum=60,
+                    maximum=86_400,
+                ),
+                session_id=session_key,
+            )
             browser_dict: dict[str, str] = {
                 "server": f"http://{gateway}",
-                "username": username,
+                "username": sticky_username,
                 "password": password,
             }
-            api_url = f"http://{quote(username, safe='')}:{quote(password, safe='')}@{gateway}"
+            api_url = f"http://{quote(sticky_username, safe='')}:{quote(password, safe='')}@{gateway}"
             rotator = _build_proxy_rotator(browser_dict)
             return CommentsProxyConfig(
                 browser_proxy=browser_dict,
                 api_proxy_url=api_url,
                 proxy_rotator=rotator,
                 fingerprint=_fingerprint_from_gateway(gateway, "decodo"),
+                session_mode=session_mode,
             )
 
     # 3. No proxy configured — local dev mode.
