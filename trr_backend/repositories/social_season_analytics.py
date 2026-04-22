@@ -15809,6 +15809,14 @@ def _pg_upsert_many(
     if missing_conflict_cols:
         raise ValueError(f"conflict columns {missing_conflict_cols!r} missing in payload for table {table}")
 
+    deduped_payloads: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for payload in payloads:
+        key = tuple(payload.get(column) for column in conflict_cols)
+        if key in deduped_payloads:
+            deduped_payloads.pop(key)
+        deduped_payloads[key] = payload
+    payloads = list(deduped_payloads.values())
+
     updates = [column for column in columns if column not in conflict_cols]
     if not updates:
         raise ValueError(f"table {table} upsert payload must include at least one non-conflict column")

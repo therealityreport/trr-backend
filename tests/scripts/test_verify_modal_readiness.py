@@ -38,12 +38,18 @@ def test_expected_function_names_includes_reddit_runtime_probe(monkeypatch: pyte
     monkeypatch.delenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION", raising=False)
+    monkeypatch.delenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION", raising=False)
+    monkeypatch.delenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION", raising=False)
+    monkeypatch.delenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION", raising=False)
 
     function_names = cli.expected_function_names()
 
     assert "probe_reddit_refresh_runtime" in function_names
     assert "probe_social_remote_auth" in function_names
     assert "probe_getty_remote_access" in function_names
+    assert "run_social_posts_job" in function_names
+    assert "run_social_media_job" in function_names
+    assert "run_social_comments_job" in function_names
 
 
 def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pytest.MonkeyPatch) -> None:

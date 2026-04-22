@@ -81,6 +81,53 @@ def modal_social_job_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIAL_JOB_FUNCTION") or "run_social_job").strip()
 
 
+def modal_social_posts_job_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION") or "run_social_posts_job").strip()
+
+
+def modal_social_media_job_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION") or "run_social_media_job").strip()
+
+
+def modal_social_comments_job_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_SOCIAL_COMMENTS_JOB_FUNCTION") or "run_social_comments_job").strip()
+
+
+def modal_social_job_function_name_for_stage(stage: str | None) -> str:
+    normalized_stage = str(stage or "").strip().lower()
+    if normalized_stage in {"comments", "comments_scrapling"}:
+        return modal_social_comments_job_function_name() or modal_social_job_function_name()
+    if normalized_stage in {"media_mirror", "comment_media_mirror"}:
+        return modal_social_media_job_function_name() or modal_social_job_function_name()
+    if normalized_stage in {
+        "",
+        "any",
+        "posts",
+        "shared_account_discovery",
+        "shared_account_posts",
+        "post_classify",
+        "season_materialize",
+        "analytics_refresh",
+    }:
+        return modal_social_posts_job_function_name() or modal_social_job_function_name()
+    return modal_social_job_function_name()
+
+
+def modal_social_job_function_names() -> list[str]:
+    names = [
+        modal_social_job_function_name(),
+        modal_social_posts_job_function_name(),
+        modal_social_media_job_function_name(),
+        modal_social_comments_job_function_name(),
+    ]
+    deduped: list[str] = []
+    for name in names:
+        normalized = str(name or "").strip()
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
 def modal_social_recovery_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
 
@@ -114,6 +161,9 @@ def modal_dispatch_config() -> dict[str, str]:
         "reddit_refresh_function": modal_reddit_refresh_function_name(),
         "reddit_runtime_probe_function": modal_reddit_runtime_probe_function_name(),
         "social_job_function": modal_social_job_function_name(),
+        "social_posts_job_function": modal_social_posts_job_function_name(),
+        "social_media_job_function": modal_social_media_job_function_name(),
+        "social_comments_job_function": modal_social_comments_job_function_name(),
         "social_recovery_function": modal_social_recovery_function_name(),
         "socialblade_function": modal_socialblade_function_name(),
     }
@@ -540,9 +590,9 @@ def dispatch_reddit_refresh(*, run_id: str) -> bool:
     return bool(result.get("dispatched"))
 
 
-def dispatch_social_job(*, job_id: str) -> dict[str, Any]:
+def dispatch_social_job(*, job_id: str, stage: str | None = None) -> dict[str, Any]:
     return _spawn_named_modal_function(
-        function_name=modal_social_job_function_name(),
+        function_name=modal_social_job_function_name_for_stage(stage),
         log_label="social ingest",
         kwargs={"job_id": job_id},
         dispatcher_name="social",

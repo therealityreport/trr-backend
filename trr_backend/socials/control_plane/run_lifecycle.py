@@ -145,6 +145,7 @@ def _maybe_start_deferred_comments_followup(
     if str(followup.get("platform") or "").strip().lower() != "instagram":
         return
 
+    attached_followups = legacy._normalize_attached_followups(run_config.get("attached_followups"))
     now_iso = legacy._iso(legacy._now_utc())
     try:
         comments_result = legacy.start_social_account_comments_scrape(
@@ -163,6 +164,14 @@ def _maybe_start_deferred_comments_followup(
         _merge_run_config(
             run_id,
             config_updates={
+                "attached_followups": {
+                    **attached_followups,
+                    "comments": legacy._build_attached_comments_followup(
+                        run_id=str((comments_result or {}).get("run_id") or "").strip() or None,
+                        status=str((comments_result or {}).get("status") or "").strip().lower() or "pending",
+                        source="deferred_after_catalog",
+                    ),
+                },
                 "deferred_comments_followup": {
                     **followup,
                     "state": "started",
@@ -176,19 +185,28 @@ def _maybe_start_deferred_comments_followup(
                     )
                     or legacy._metadata_dict(followup.get("created_by_runtime_version"))
                     or dict(legacy._resolve_runtime_version_stamp()),
-                }
+                },
             },
         )
     except Exception as exc:  # noqa: BLE001
         _merge_run_config(
             run_id,
             config_updates={
+                "attached_followups": {
+                    **attached_followups,
+                    "comments": legacy._build_attached_comments_followup(
+                        run_id=str(followup.get("comments_run_id") or "").strip() or None,
+                        status="failed",
+                        source="deferred_after_catalog",
+                        state="failed",
+                    ),
+                },
                 "deferred_comments_followup": {
                     **followup,
                     "state": "failed",
                     "failed_at": now_iso,
                     "error_message": str(exc),
-                }
+                },
             },
         )
         legacy.logger.exception(

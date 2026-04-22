@@ -135,7 +135,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         max_comments=max_comments_per_post,
                         fetch_replies=fetch_replies,
                     )
-                    if result.auth_failed:
+                    if result.auth_failed and not result.comments:
                         raise CommentsScraplingRuntimeError(
                             f"Instagram auth failed while fetching comments for {shortcode}.",
                             error_code="instagram_comments_auth_failed",
@@ -162,6 +162,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         source_scope=source_scope,
                         conn=persist_conn,
                     )
+                    persist_conn.commit()
                     processed_posts += 1
                     comments_fetched += len(result.comments)
                     comments_upserted += persisted.comments_upserted
