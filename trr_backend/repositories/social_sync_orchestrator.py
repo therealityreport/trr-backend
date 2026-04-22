@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from threading import Thread
 from typing import Any, Literal
@@ -245,10 +246,32 @@ def _retry_backoff_seconds(attempt: int, *, base_delay_seconds: int) -> int:
     return max(1, int(base_delay_seconds)) * (2 ** max(0, normalized_attempt - 1))
 
 
-def _fetch_sync_session_row(sync_session_id: str) -> dict[str, Any] | None:
+def _call_with_optional_conn(
+    loader,
+    /,
+    *args: Any,
+    conn: Any | None = None,
+    **kwargs: Any,
+) -> Any:
+    if conn is None:
+        return loader(*args, **kwargs)
+    try:
+        return loader(*args, conn=conn, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'conn'" not in str(exc):
+            raise
+        return loader(*args, **kwargs)
+
+
+def _fetch_sync_session_row(
+    sync_session_id: str,
+    *,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
     if not _sync_sessions_ready():
         return None
-    return pg.fetch_one(
+    return _call_with_optional_conn(
+        pg.fetch_one,
         """
         select
           s.id::text as id,
@@ -283,25 +306,31 @@ def _fetch_sync_session_row(sync_session_id: str) -> dict[str, Any] | None:
         where s.id = %s::uuid
         """,
         [sync_session_id],
+        conn=conn,
     )
 
 
-def _fetch_sync_session_lock(sync_session_id: str) -> tuple[int, bool]:
-    lock_key = int(hashlib.md5(f"sync-session:{sync_session_id}".encode()).hexdigest()[:15], 16) % (2**31)
-    locked_row = pg.fetch_one("select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
-    return lock_key, bool(locked_row.get("locked"))
+def _sync_session_lock_key(sync_session_id: str) -> int:
+    return int(hashlib.md5(f"sync-session:{sync_session_id}".encode()).hexdigest()[:15], 16) % (2**31)
 
 
-def _release_sync_session_lock(lock_key: int) -> None:
+@contextmanager
+def _hold_sync_session_lock(sync_session_id: str):
     try:
-        pg.fetch_one("select pg_advisory_unlock(%s)", [lock_key])
-    except Exception:  # noqa: BLE001
-        logger.debug("Failed to release sync-session lock=%s", lock_key, exc_info=True)
+        with pg.advisory_session_lock(_sync_session_lock_key(sync_session_id), label="sync-session-lock") as conn:
+            yield conn
+    except pg.AdvisoryLockUnavailable:
+        yield None
 
 
-def _update_sync_session(sync_session_id: str, **fields: Any) -> dict[str, Any]:
+def _update_sync_session(
+    sync_session_id: str,
+    *,
+    conn: Any | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
     if not fields:
-        row = _fetch_sync_session_row(sync_session_id)
+        row = _fetch_sync_session_row(sync_session_id, conn=conn)
         if row is None:
             raise ValueError("sync_session_not_found")
         return row
@@ -315,7 +344,8 @@ def _update_sync_session(sync_session_id: str, **fields: Any) -> dict[str, Any]:
         else:
             params.append(value)
     params.extend([_now_utc(), sync_session_id])
-    row = pg.fetch_one(
+    row = _call_with_optional_conn(
+        pg.fetch_one,
         f"""
         update social.sync_sessions
         set
@@ -325,10 +355,11 @@ def _update_sync_session(sync_session_id: str, **fields: Any) -> dict[str, Any]:
         returning id::text
         """,
         params,
+        conn=conn,
     )
     if not row:
         raise ValueError("sync_session_not_found")
-    updated = _fetch_sync_session_row(sync_session_id)
+    updated = _fetch_sync_session_row(sync_session_id, conn=conn)
     if updated is None:
         raise ValueError("sync_session_not_found")
     return updated
@@ -357,11 +388,16 @@ def _append_pass_history(
     return history
 
 
-def _current_run_payload(current_run_id: str | None) -> dict[str, Any] | None:
+def _current_run_payload(
+    current_run_id: str | None,
+    *,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
     normalized = str(current_run_id or "").strip()
     if not normalized:
         return None
-    row = pg.fetch_one(
+    row = _call_with_optional_conn(
+        pg.fetch_one,
         """
         select
           id::text as id,
@@ -377,6 +413,7 @@ def _current_run_payload(current_run_id: str | None) -> dict[str, Any] | None:
         where id = %s::uuid
         """,
         [normalized],
+        conn=conn,
     )
     if not row:
         return None
@@ -395,8 +432,9 @@ def _current_run_payload(current_run_id: str | None) -> dict[str, Any] | None:
     }
 
 
-def _run_error_codes(run_id: str) -> set[str]:
-    rows = pg.fetch_all(
+def _run_error_codes(run_id: str, *, conn: Any | None = None) -> set[str]:
+    rows = _call_with_optional_conn(
+        pg.fetch_all,
         """
         select
           upper(
@@ -411,14 +449,15 @@ def _run_error_codes(run_id: str) -> set[str]:
           and status in ('failed', 'retrying')
         """,
         [run_id],
+        conn=conn,
     )
     return {
         str(row.get("error_code") or "").strip().upper() for row in rows if str(row.get("error_code") or "").strip()
     }
 
 
-def _has_retryable_errors(run_id: str) -> bool:
-    return bool(_run_error_codes(run_id) & SYNC_RETRYABLE_ERROR_CODES)
+def _has_retryable_errors(run_id: str, *, conn: Any | None = None) -> bool:
+    return bool(_run_error_codes(run_id, conn=conn) & SYNC_RETRYABLE_ERROR_CODES)
 
 
 def _build_avatar_coverage_snapshot(
@@ -996,22 +1035,27 @@ def _build_missing_detail_target_groups(
     source_scope: str,
     date_start: datetime,
     date_end: datetime,
+    conn: Any | None = None,
 ) -> dict[str, dict[str, list[str]]]:
     social_repo = _social_repo()
-    target_accounts_by_platform = social_repo._target_accounts_by_platform(  # noqa: SLF001
+    target_accounts_by_platform = _call_with_optional_conn(
+        social_repo._target_accounts_by_platform,  # noqa: SLF001
         season_id,
         source_scope=source_scope,
-        context=social_repo.get_season_context(season_id),
+        context=_call_with_optional_conn(social_repo.get_season_context, season_id, conn=conn),
+        conn=conn,
     )
     completed_avatar_rows = (
-        pg.fetch_all(
+        _call_with_optional_conn(
+            pg.fetch_all,
             """
             select platform, account_handle, source_url, status
             from social.avatar_registry
             where status in ('mirrored', 'unsupported')
-            """
+            """,
+            conn=conn,
         )
-        if social_repo._relation_exists("social.avatar_registry")  # noqa: SLF001
+        if _call_with_optional_conn(social_repo._relation_exists, "social.avatar_registry", conn=conn)  # noqa: SLF001
         else []
     )
     completed_avatar_keys = {
@@ -1060,7 +1104,8 @@ def _build_missing_detail_target_groups(
         params: list[Any] = [season_id, date_start, date_end]
         if account_handles:
             params.append(account_handles)
-        rows = pg.fetch_all(
+        rows = _call_with_optional_conn(
+            pg.fetch_all,
             f"""
             select
               p.{source_id_column}::text as source_id,
@@ -1074,6 +1119,7 @@ def _build_missing_detail_target_groups(
             limit 5000
             """,
             params,
+            conn=conn,
         )
         for row in rows:
             source_id = str(row.get("source_id") or "").strip()
@@ -1106,8 +1152,15 @@ def _build_missing_detail_target_groups(
                 if mention_gap:
                     _add_group_target("avatars", platform, source_id)
         comment_media_rows: list[dict[str, Any]] = []
-        if platform == "instagram" and social_repo._column_exists("social", "instagram_comments", "media_urls"):  # noqa: SLF001
-            comment_media_rows = pg.fetch_all(
+        if platform == "instagram" and _call_with_optional_conn(  # noqa: SLF001
+            social_repo._column_exists,
+            "social",
+            "instagram_comments",
+            "media_urls",
+            conn=conn,
+        ):
+            comment_media_rows = _call_with_optional_conn(
+                pg.fetch_all,
                 f"""
                 select distinct p.shortcode::text as source_id
                 from social.instagram_comments c
@@ -1121,13 +1174,15 @@ def _build_missing_detail_target_groups(
                     coalesce(c.media_mirror_status, '') in ('pending', 'partial', 'failed')
                     or jsonb_array_length(coalesce(c.hosted_media_urls, '[]'::jsonb))
                        < jsonb_array_length(coalesce(c.media_urls, '[]'::jsonb))
-                  )
+                )
                 limit 5000
                 """,
                 params,
+                conn=conn,
             )
         elif platform == "tiktok":
-            comment_media_rows = pg.fetch_all(
+            comment_media_rows = _call_with_optional_conn(
+                pg.fetch_all,
                 f"""
                 select distinct p.video_id::text as source_id
                 from social.tiktok_comments c
@@ -1141,13 +1196,15 @@ def _build_missing_detail_target_groups(
                     coalesce(c.media_mirror_status, '') in ('pending', 'partial', 'failed')
                     or jsonb_array_length(coalesce(c.hosted_media_urls, '[]'::jsonb))
                        < jsonb_array_length(coalesce(c.media_urls, '[]'::jsonb))
-                  )
+                )
                 limit 5000
                 """,
                 params,
+                conn=conn,
             )
         elif platform == "twitter":
-            comment_media_rows = pg.fetch_all(
+            comment_media_rows = _call_with_optional_conn(
+                pg.fetch_all,
                 f"""
                 select distinct root.tweet_id::text as source_id
                 from social.twitter_tweets c
@@ -1163,13 +1220,15 @@ def _build_missing_detail_target_groups(
                     coalesce(c.media_mirror_status, '') in ('pending', 'partial', 'failed')
                     or jsonb_array_length(coalesce(c.hosted_media_urls, '[]'::jsonb))
                        < jsonb_array_length(coalesce(c.media_urls, '[]'::jsonb))
-                  )
+                )
                 limit 5000
                 """,
                 params,
+                conn=conn,
             )
         elif platform == "facebook":
-            comment_media_rows = pg.fetch_all(
+            comment_media_rows = _call_with_optional_conn(
+                pg.fetch_all,
                 f"""
                 select distinct p.post_id::text as source_id
                 from social.facebook_comments c
@@ -1183,13 +1242,15 @@ def _build_missing_detail_target_groups(
                     coalesce(c.media_mirror_status, '') in ('pending', 'partial', 'failed')
                     or jsonb_array_length(coalesce(c.hosted_media_urls, '[]'::jsonb))
                        < jsonb_array_length(coalesce(c.media_urls, '[]'::jsonb))
-                  )
+                )
                 limit 5000
                 """,
                 params,
+                conn=conn,
             )
         elif platform == "threads":
-            comment_media_rows = pg.fetch_all(
+            comment_media_rows = _call_with_optional_conn(
+                pg.fetch_all,
                 f"""
                 select distinct p.post_id::text as source_id
                 from social.meta_threads_comments c
@@ -1203,17 +1264,21 @@ def _build_missing_detail_target_groups(
                     coalesce(c.media_mirror_status, '') in ('pending', 'partial', 'failed')
                     or jsonb_array_length(coalesce(c.hosted_media_urls, '[]'::jsonb))
                        < jsonb_array_length(coalesce(c.media_urls, '[]'::jsonb))
-                  )
+                )
                 limit 5000
                 """,
                 params,
+                conn=conn,
             )
-        if platform == "instagram" and social_repo._column_exists(  # noqa: SLF001
+        if platform == "instagram" and _call_with_optional_conn(  # noqa: SLF001
+            social_repo._column_exists,
             "social",
             "instagram_comments",
             "author_profile_pic_url",
+            conn=conn,
         ):
-            verified_avatar_rows = pg.fetch_all(
+            verified_avatar_rows = _call_with_optional_conn(
+                pg.fetch_all,
                 f"""
                 select distinct
                   p.shortcode::text as source_id,
@@ -1230,6 +1295,7 @@ def _build_missing_detail_target_groups(
                 limit 5000
                 """,
                 params,
+                conn=conn,
             )
             for avatar_row in verified_avatar_rows:
                 root_source_id = str(avatar_row.get("source_id") or "").strip()
@@ -1262,6 +1328,7 @@ def _build_missing_detail_targets(
     source_scope: str,
     date_start: datetime,
     date_end: datetime,
+    conn: Any | None = None,
 ) -> dict[str, list[str]]:
     return _build_missing_detail_target_groups(
         season_id=season_id,
@@ -1269,6 +1336,7 @@ def _build_missing_detail_targets(
         source_scope=source_scope,
         date_start=date_start,
         date_end=date_end,
+        conn=conn,
     )["details"]
 
 
@@ -1279,12 +1347,15 @@ def _build_missing_comment_targets(
     source_scope: str,
     date_start: datetime,
     date_end: datetime,
+    conn: Any | None = None,
 ) -> dict[str, list[str]]:
     social_repo = _social_repo()
-    target_accounts_by_platform = social_repo._target_accounts_by_platform(  # noqa: SLF001
+    target_accounts_by_platform = _call_with_optional_conn(
+        social_repo._target_accounts_by_platform,  # noqa: SLF001
         season_id,
         source_scope=source_scope,
-        context=social_repo.get_season_context(season_id),
+        context=_call_with_optional_conn(social_repo.get_season_context, season_id, conn=conn),
+        conn=conn,
     )
     source_id_column_by_platform = social_repo.PLATFORM_SOURCE_ID_COLUMN
     posted_at_column_by_platform = social_repo.PLATFORM_POSTED_AT_COLUMN
@@ -1343,7 +1414,8 @@ def _build_missing_comment_targets(
               ) cc on cc.join_post_id = p.id
             """
             params = [season_id, season_id, date_start, date_end] + ([account_handles] if account_handles else [])
-        rows = pg.fetch_all(
+        rows = _call_with_optional_conn(
+            pg.fetch_all,
             f"""
             select
               p.{source_id_column}::text as source_id
@@ -1358,6 +1430,7 @@ def _build_missing_comment_targets(
             limit 5000
             """,
             params,
+            conn=conn,
         )
         source_ids = [
             str(row.get("source_id") or "").strip() for row in rows if str(row.get("source_id") or "").strip()
@@ -1449,9 +1522,10 @@ def _start_sync_pass(
     pass_attempt: int,
     pass_sequence: int,
     follow_up_reason: str,
+    conn: Any | None = None,
 ) -> dict[str, Any]:
     social_repo = _social_repo()
-    session = _fetch_sync_session_row(sync_session_id)
+    session = _fetch_sync_session_row(sync_session_id, conn=conn)
     if session is None:
         raise ValueError("sync_session_not_found")
     sync_config = dict(session.get("sync_config") or {})
@@ -1470,6 +1544,7 @@ def _start_sync_pass(
             source_scope=source_scope,
             date_start=date_start,
             date_end=date_end,
+            conn=conn,
         )
     elif pass_kind == "details_refresh":
         source_ids_by_platform = _build_missing_detail_targets(
@@ -1478,6 +1553,7 @@ def _start_sync_pass(
             source_scope=source_scope,
             date_start=date_start,
             date_end=date_end,
+            conn=conn,
         )
     pass_config = _base_config_for_pass(
         sync_config=sync_config,
@@ -1539,6 +1615,7 @@ def _start_sync_pass(
     )
     updated = _update_sync_session(
         sync_session_id,
+        conn=conn,
         status="pass_running",
         current_pass_kind=pass_kind,
         current_pass_attempt=int(pass_attempt),
@@ -1786,56 +1863,88 @@ def get_sync_session(sync_session_id: str) -> dict[str, Any]:
     return _serialize_sync_session(row)
 
 
+def _load_sync_session_evaluation_state(
+    sync_session_id: str,
+    *,
+    conn: Any,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    row = _fetch_sync_session_row(sync_session_id, conn=conn)
+    if row is None:
+        raise ValueError("sync_session_not_found")
+    status = str(row.get("status") or "").strip().lower()
+    if status in SYNC_TERMINAL_STATUSES:
+        return row, None
+    current_run = _current_run_payload(str(row.get("current_run_id") or ""), conn=conn)
+    if current_run is None:
+        if status == "cancelling":
+            row = _update_sync_session(
+                sync_session_id,
+                conn=conn,
+                status="cancelled",
+                cancelled_at=_now_utc(),
+                follow_up_reason="cancelled",
+            )
+        return row, None
+    run_status = str(current_run.get("status") or "").strip().lower()
+    now_utc = _now_utc()
+    next_pass_available_at = _coerce_dt(row.get("next_pass_available_at"))
+    if run_status in {"queued", "pending", "retrying", "running"}:
+        return row, None
+    if next_pass_available_at is not None and next_pass_available_at > now_utc:
+        return row, None
+
+    session_platforms = _normalize_platforms(row.get("platforms"))
+    date_start = _coerce_dt(row.get("date_start"))
+    date_end = _coerce_dt(row.get("date_end"))
+    if date_start is None or date_end is None:
+        raise ValueError("invalid_sync_session")
+    return row, {
+        "status": status,
+        "current_run": current_run,
+        "run_status": run_status,
+        "now_utc": now_utc,
+        "next_pass_available_at": next_pass_available_at,
+        "session_platforms": session_platforms,
+        "date_start": date_start,
+        "date_end": date_end,
+    }
+
+
 def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
     row = _fetch_sync_session_row(sync_session_id)
     if row is None:
         raise ValueError("sync_session_not_found")
     if str(row.get("status") or "") in SYNC_TERMINAL_STATUSES:
         return _serialize_sync_session(row)
-    lock_key, locked = _fetch_sync_session_lock(sync_session_id)
-    if not locked:
-        return _serialize_sync_session(row)
-    try:
-        row = _fetch_sync_session_row(sync_session_id)
-        if row is None:
-            raise ValueError("sync_session_not_found")
-        status = str(row.get("status") or "")
-        if status in SYNC_TERMINAL_STATUSES:
+    with _hold_sync_session_lock(sync_session_id) as lock_conn:
+        if lock_conn is None:
             return _serialize_sync_session(row)
-        current_run = _current_run_payload(str(row.get("current_run_id") or ""))
-        if current_run is None:
-            if status == "cancelling":
-                row = _update_sync_session(
-                    sync_session_id,
-                    status="cancelled",
-                    cancelled_at=_now_utc(),
-                    follow_up_reason="cancelled",
-                )
+        row, state = _load_sync_session_evaluation_state(sync_session_id, conn=lock_conn)
+        if state is None:
             return _serialize_sync_session(row)
-        run_status = str(current_run.get("status") or "").strip().lower()
-        active_run_statuses = {"queued", "pending", "retrying", "running"}
-        now_utc = _now_utc()
-        next_pass_available_at = _coerce_dt(row.get("next_pass_available_at"))
-        if run_status in active_run_statuses:
+    completeness_snapshot = _build_completeness_snapshot(
+        season_id=str(row.get("season_id") or ""),
+        source_scope=str(row.get("source_scope") or "bravo"),
+        platforms=list(state["session_platforms"]),
+        date_start=state["date_start"],
+        date_end=state["date_end"],
+    )
+    with _hold_sync_session_lock(sync_session_id) as lock_conn:
+        if lock_conn is None:
+            latest = _fetch_sync_session_row(sync_session_id)
+            return _serialize_sync_session(latest or row)
+        row, state = _load_sync_session_evaluation_state(sync_session_id, conn=lock_conn)
+        if state is None:
             return _serialize_sync_session(row)
-        if next_pass_available_at is not None and next_pass_available_at > now_utc:
-            return _serialize_sync_session(row)
-
-        session_platforms = _normalize_platforms(row.get("platforms"))
-        date_start = _coerce_dt(row.get("date_start"))
-        date_end = _coerce_dt(row.get("date_end"))
-        if date_start is None or date_end is None:
-            raise ValueError("invalid_sync_session")
-        completeness_snapshot = _build_completeness_snapshot(
-            season_id=str(row.get("season_id") or ""),
-            source_scope=str(row.get("source_scope") or "bravo"),
-            platforms=session_platforms,
-            date_start=date_start,
-            date_end=date_end,
-        )
+        status = str(state["status"])
+        current_run = dict(state["current_run"])
+        run_status = str(state["run_status"])
+        now_utc = state["now_utc"]
+        next_pass_available_at = _coerce_dt(state["next_pass_available_at"])
         if completeness_snapshot.get("up_to_date"):
             row = _update_sync_session(
                 sync_session_id,
+                conn=lock_conn,
                 status="completed",
                 completeness_snapshot=completeness_snapshot,
                 completed_at=now_utc,
@@ -1849,6 +1958,7 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
         if run_status == "cancelled" or status == "cancelling":
             row = _update_sync_session(
                 sync_session_id,
+                conn=lock_conn,
                 status="cancelled",
                 completeness_snapshot=completeness_snapshot,
                 cancelled_at=now_utc,
@@ -1856,7 +1966,7 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
             )
             return _serialize_sync_session(row)
 
-        if run_status == "failed" and _has_retryable_errors(str(current_run.get("id") or "")):
+        if run_status == "failed" and _has_retryable_errors(str(current_run.get("id") or ""), conn=lock_conn):
             max_attempts = max(1, int(row.get("max_attempts_per_kind") or 3))
             if current_pass_attempt < max_attempts:
                 due_at = now_utc + timedelta(
@@ -1867,6 +1977,7 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
                 )
                 row = _update_sync_session(
                     sync_session_id,
+                    conn=lock_conn,
                     status="pass_evaluating",
                     completeness_snapshot=completeness_snapshot,
                     next_pass_available_at=due_at,
@@ -1881,10 +1992,12 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
                 pass_attempt=current_pass_attempt + 1,
                 pass_sequence=int(row.get("pass_sequence") or 0) + 1,
                 follow_up_reason="retry_after_backoff",
+                conn=lock_conn,
             )
-            session = get_sync_session(sync_session_id)
-            session["current_run_id"] = kickoff.get("run_id")
-            return session
+            updated_row = _fetch_sync_session_row(sync_session_id, conn=lock_conn) or row
+            payload = _serialize_sync_session(updated_row)
+            payload["current_run_id"] = kickoff.get("run_id")
+            return payload
 
         if next_pass_kind and next_pass_kind != current_pass_kind:
             kickoff = _start_sync_pass(
@@ -1893,22 +2006,23 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
                 pass_attempt=1,
                 pass_sequence=int(row.get("pass_sequence") or 0) + 1,
                 follow_up_reason="coverage_gap",
+                conn=lock_conn,
             )
-            session = get_sync_session(sync_session_id)
-            session["current_run_id"] = kickoff.get("run_id")
-            return session
+            updated_row = _fetch_sync_session_row(sync_session_id, conn=lock_conn) or row
+            payload = _serialize_sync_session(updated_row)
+            payload["current_run_id"] = kickoff.get("run_id")
+            return payload
 
         final_status = "failed" if run_status == "failed" else "completed"
         row = _update_sync_session(
             sync_session_id,
+            conn=lock_conn,
             status=final_status,
             completeness_snapshot=completeness_snapshot,
             completed_at=now_utc if final_status == "completed" else None,
             follow_up_reason="incomplete_after_passes" if final_status == "failed" else "completed",
         )
         return _serialize_sync_session(row)
-    finally:
-        _release_sync_session_lock(lock_key)
 
 
 def tick_sync_orchestrator(*, limit: int = 20) -> dict[str, Any]:

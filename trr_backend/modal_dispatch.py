@@ -153,9 +153,10 @@ def modal_execution_metadata() -> dict[str, str]:
     }
 
 
-def modal_dispatch_config() -> dict[str, str]:
+def modal_dispatch_config() -> dict[str, Any]:
     return {
         "app_name": modal_app_name(),
+        "modal_environment": modal_environment_name(),
         "admin_function": modal_admin_function_name(),
         "google_news_function": modal_google_news_function_name(),
         "reddit_refresh_function": modal_reddit_refresh_function_name(),
@@ -164,6 +165,13 @@ def modal_dispatch_config() -> dict[str, str]:
         "social_posts_job_function": modal_social_posts_job_function_name(),
         "social_media_job_function": modal_social_media_job_function_name(),
         "social_comments_job_function": modal_social_comments_job_function_name(),
+        "social_job_function_names": modal_social_job_function_names(),
+        "social_required_function_names": [
+            modal_social_job_function_name(),
+            modal_social_posts_job_function_name(),
+            modal_social_media_job_function_name(),
+            modal_social_comments_job_function_name(),
+        ],
         "social_recovery_function": modal_social_recovery_function_name(),
         "socialblade_function": modal_socialblade_function_name(),
     }
@@ -208,6 +216,8 @@ def resolve_modal_function(function_name: str) -> dict[str, Any]:
         "app_name": app_name,
         "function_name": normalized_function,
         "modal_environment": environment_name,
+        "dispatch_config": modal_dispatch_config(),
+        "execution_metadata": modal_execution_metadata(),
     }
     if not ready:
         return payload
@@ -459,6 +469,9 @@ def _spawn_named_modal_function(
     supported_platforms: list[str] | None = None,
 ) -> dict[str, Any]:
     ready, reason = modal_dispatch_ready(function_name=function_name)
+    app_name = modal_app_name()
+    normalized_function = str(function_name or "").strip()
+    environment_name = modal_environment_name()
     if not ready:
         _record_dispatcher_heartbeat(
             dispatcher_name=dispatcher_name,
@@ -469,6 +482,9 @@ def _spawn_named_modal_function(
                 "last_dispatch_error_code": reason,
                 "last_dispatch_blocked_reason": reason,
                 "last_dispatch_error_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+                "last_dispatch_app_name": app_name,
+                "last_dispatch_function": normalized_function,
+                "last_dispatch_modal_environment": environment_name,
             },
             supported_platforms=supported_platforms,
         )
@@ -477,10 +493,14 @@ def _spawn_named_modal_function(
             "reason": reason,
             "reason_code": reason,
             "call_id": None,
+            "app_name": app_name,
+            "function_name": normalized_function,
+            "modal_environment": environment_name,
+            "log_label": log_label,
+            "execution_metadata": modal_execution_metadata(),
+            "dispatch_config": modal_dispatch_config(),
         }
 
-    app_name = modal_app_name()
-    normalized_function = str(function_name or "").strip()
     try:
         import modal
 
@@ -500,14 +520,17 @@ def _spawn_named_modal_function(
                 "last_dispatch_function": normalized_function,
                 "last_dispatch_call_id": call_id,
                 "last_dispatch_kwargs": kwargs,
+                "last_dispatch_app_name": app_name,
+                "last_dispatch_modal_environment": environment_name,
             },
             supported_platforms=supported_platforms,
         )
         logger.info(
-            "Dispatched %s job to Modal: app=%s function=%s kwargs=%s call_id=%s",
+            "Dispatched %s job to Modal: app=%s function=%s environment=%s kwargs=%s call_id=%s",
             log_label,
             app_name,
             normalized_function,
+            environment_name or "default",
             kwargs,
             call_id,
         )
@@ -516,6 +539,12 @@ def _spawn_named_modal_function(
             "reason": None,
             "reason_code": None,
             "call_id": call_id,
+            "app_name": app_name,
+            "function_name": normalized_function,
+            "modal_environment": environment_name,
+            "log_label": log_label,
+            "execution_metadata": modal_execution_metadata(),
+            "dispatch_config": modal_dispatch_config(),
         }
     except Exception as exc:  # noqa: BLE001
         reason_code = _classify_modal_resolution_error(str(exc))
@@ -537,14 +566,17 @@ def _spawn_named_modal_function(
                 "last_dispatch_label": log_label,
                 "last_dispatch_function": normalized_function,
                 "last_dispatch_kwargs": kwargs,
+                "last_dispatch_app_name": app_name,
+                "last_dispatch_modal_environment": environment_name,
             },
             supported_platforms=supported_platforms,
         )
         logger.exception(
-            "Failed to dispatch %s job to Modal: app=%s function=%s kwargs=%s",
+            "Failed to dispatch %s job to Modal: app=%s function=%s environment=%s kwargs=%s",
             log_label,
             app_name,
             normalized_function,
+            environment_name or "default",
             kwargs,
         )
         return {
@@ -552,6 +584,12 @@ def _spawn_named_modal_function(
             "reason": str(exc),
             "reason_code": reason_code,
             "call_id": None,
+            "app_name": app_name,
+            "function_name": normalized_function,
+            "modal_environment": environment_name,
+            "log_label": log_label,
+            "execution_metadata": modal_execution_metadata(),
+            "dispatch_config": modal_dispatch_config(),
         }
 
 

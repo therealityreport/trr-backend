@@ -122,9 +122,23 @@ def _build_runtime_meta(
     }
 
 
-def _resolve_join_timeout_seconds(*, platform: str, runtime_config: CrawleeRuntimeConfig) -> float:
+def _resolve_join_timeout_seconds(
+    *,
+    platform: str,
+    runtime_config: CrawleeRuntimeConfig,
+    config: dict[str, Any] | None = None,
+) -> float:
     platform_suffix = (platform or "").strip().upper()
-    default_timeout_seconds = max(30.0, min(900.0, float(max(1, int(runtime_config.max_retries))) * 120.0))
+    max_scrape_seconds_raw = None if not isinstance(config, dict) else config.get("max_scrape_seconds")
+    try:
+        max_scrape_seconds = float(max_scrape_seconds_raw) if max_scrape_seconds_raw is not None else None
+    except (TypeError, ValueError):
+        max_scrape_seconds = None
+    if max_scrape_seconds is not None and max_scrape_seconds > 0:
+        default_timeout_seconds = max(30.0, min(3600.0, max_scrape_seconds + 30.0))
+    else:
+        attempt_budget = max(1, int(runtime_config.max_retries)) + 1
+        default_timeout_seconds = max(30.0, min(3600.0, float(attempt_budget) * 120.0))
     raw = (
         os.getenv(f"SOCIAL_CRAWLEE_JOIN_TIMEOUT_SECONDS_{platform_suffix}")
         or os.getenv("SOCIAL_CRAWLEE_JOIN_TIMEOUT_SECONDS")
@@ -165,9 +179,11 @@ def _run_coroutine(coro: Any, *, join_timeout_seconds: float | None = None) -> A
             except Exception:  # noqa: BLE001
                 pass
 
-    thread = Thread(target=_thread_main, daemon=True)
+    effective_join_timeout_seconds = None if join_timeout_seconds is None else max(0.01, float(join_timeout_seconds))
+
+    thread = Thread(target=_thread_main, daemon=False)
     thread.start()
-    thread.join(timeout=join_timeout_seconds)
+    thread.join(timeout=effective_join_timeout_seconds)
     if thread.is_alive():
         loop = payload.get("loop")
         task = payload.get("task")
@@ -177,11 +193,15 @@ def _run_coroutine(coro: Any, *, join_timeout_seconds: float | None = None) -> A
             except Exception:  # noqa: BLE001
                 pass
         thread.join(timeout=1.0)
-        raise TimeoutError(f"Crawlee runtime coroutine exceeded join timeout ({join_timeout_seconds}s)")
+        raise TimeoutError(
+            f"Crawlee runtime coroutine exceeded join timeout ({effective_join_timeout_seconds}s)"
+        )
     if "error" in payload:
         raise payload["error"]
     if payload.get("cancelled"):
-        raise TimeoutError(f"Crawlee runtime coroutine exceeded join timeout ({join_timeout_seconds}s)")
+        raise TimeoutError(
+            f"Crawlee runtime coroutine exceeded join timeout ({effective_join_timeout_seconds}s)"
+        )
     return payload.get("result")
 
 
@@ -459,5 +479,35 @@ def execute_platform_stage_with_crawlee(
             },
         )
 
-    join_timeout_seconds = _resolve_join_timeout_seconds(platform=platform, runtime_config=runtime_config)
-    return _run_coroutine(_execute_with_queue(), join_timeout_seconds=join_timeout_seconds)
+    join_timeout_seconds = _resolve_join_timeout_seconds(
+        platform=platform,
+        runtime_config=runtime_config,
+        config=config,
+    )
+    try:
+        return _run_coroutine(_execute_with_queue(), join_timeout_seconds=join_timeout_seconds)
+    except TimeoutError as exc:
+        timeout_counters = _RuntimeCounters(
+            requests_total=1,
+            crawlee_request_count=1,
+            crawlee_session_pool_used=True,
+        )
+        raise CrawleeRuntimeError(
+            f"crawlee_stage_failed:{platform}:{stage}:crawlee_coroutine_timed_out",
+            error_code="crawlee_coroutine_timed_out",
+            error_class=type(exc).__name__,
+            retryable=False,
+            runtime_metadata={
+                "crawler_runtime": _build_runtime_meta(
+                    platform=platform,
+                    stage=stage,
+                    request_key=request_key,
+                    request_mode=request_mode,
+                    runtime_config=runtime_config,
+                    crawlee_status=crawlee_status,
+                    counters=timeout_counters,
+                ),
+                "auth_context": build_auth_context(auth_preflight),
+                "join_timeout_seconds": join_timeout_seconds,
+            },
+        ) from exc

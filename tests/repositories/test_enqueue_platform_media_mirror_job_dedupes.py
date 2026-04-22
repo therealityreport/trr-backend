@@ -14,18 +14,29 @@ def _fake_db_cursor(conn=None):  # noqa: ANN001
 
 def test_enqueue_platform_media_mirror_job_is_global_across_runs_for_same_post(monkeypatch) -> None:
     created_ids: list[str | None] = []
+    db_calls: list[tuple[str, tuple[object, ...], str]] = []
     state = {"job_id": None}
     lock = threading.Lock()
 
     def _fake_fetch_one_with_cursor(_cur, sql, params):  # noqa: ANN001
         normalized_sql = " ".join(str(sql).lower().split())
         if "insert into social.scrape_jobs" in normalized_sql:
+            db_calls.append(("insert", tuple(params), normalized_sql))
+            assert "on conflict (platform, (config->>'post_id'))" in normalized_sql
+            assert "status in ('queued', 'pending', 'retrying', 'running')" in normalized_sql
+            assert "coalesce(config->>'stage', metadata->>'stage', job_type) = 'media_mirror'" in normalized_sql
             with lock:
                 if state["job_id"] is None:
                     state["job_id"] = "job-1"
                     return {"id": "job-1"}
             return None
         if "from social.scrape_jobs" in normalized_sql:
+            db_calls.append(("lookup", tuple(params), normalized_sql))
+            assert "platform = %s" in normalized_sql
+            assert "config->>'post_id' = %s" in normalized_sql
+            assert "coalesce(config->>'stage', metadata->>'stage', job_type) = %s" in normalized_sql
+            assert "run_id" not in normalized_sql
+            assert list(params) == ["instagram", "media_mirror", "post-1"]
             return {"id": state["job_id"]}
         raise AssertionError(sql)
 
@@ -69,4 +80,6 @@ def test_enqueue_platform_media_mirror_job_is_global_across_runs_for_same_post(m
     for thread in threads:
         thread.join()
 
+    assert db_calls[0][0] == "insert"
+    assert any(call[0] == "lookup" for call in db_calls)
     assert len({job_id for job_id in created_ids if job_id}) == 1

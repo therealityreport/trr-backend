@@ -2,6 +2,8 @@
 
 ## Scope
 
+> This runbook applies only to `TRR-Backend/supabase/migrations`. The TRR-APP migration runner is app-local and atomic; shared-schema writes from TRR-APP are not permitted. Manual `psql` history work on shared schema must be performed from this repo.
+
 Use this runbook when `supabase db push` or `supabase migration list` fails because remote migration versions do not match local files.
 
 Example failure:

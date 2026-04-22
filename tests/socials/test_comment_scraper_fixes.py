@@ -3899,6 +3899,41 @@ def test_tiktok_fetch_comments_is_parked_by_default(
     assert "tiktok_comments_direct_api_parked" in caplog.text
 
 
+def test_tiktok_fetch_comments_override_enables_direct_api_without_env_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TikTokScraper(
+        cookies={"sessionid": "token"},
+        direct_comment_api_enabled_override=True,
+    )
+    monkeypatch.delenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", raising=False)
+
+    monkeypatch.setattr(
+        scraper.session,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("override_active")),
+    )
+
+    with pytest.raises(RuntimeError, match="override_active"):
+        scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)
+
+
+def test_tiktok_fetch_comments_override_disabled_keeps_direct_api_parked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = TikTokScraper(
+        cookies={"sessionid": "token"},
+        direct_comment_api_enabled_override=False,
+    )
+    monkeypatch.setenv("SOCIAL_TIKTOK_ENABLE_DIRECT_COMMENT_API_EXPERIMENT", "1")
+
+    comments = scraper.fetch_comments("123", username="acct", fetch_replies=False, delay=0)
+
+    assert comments == []
+    assert scraper.last_comment_fetch_reason == "direct_api_parked"
+    assert scraper.last_comment_fetch_meta["reason"] == "direct_api_parked"
+
+
 def test_twitter_scrape_emits_progress_callback(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = TwitterScraper(cookies={"ct0": "token"})
     events: list[dict[str, int | str]] = []

@@ -279,6 +279,32 @@ def test_rebuild_http_client_closes_existing_async_client() -> None:
     assert fetcher._http_client is not stale_client
 
 
+def test_sync_response_cookies_updates_parser_headers() -> None:
+    fetcher = _build_fetcher()
+    response = _mock_httpx_response(status_code=200, json_data={"status": "ok"})
+    response.cookies = {"csrftoken": "fresh-csrf-token", "sessionid": "fresh-session"}
+
+    fetcher._sync_response_cookies(response)
+
+    headers = fetcher._parser._get_headers("https://www.instagram.com/p/ABC/")
+    csrf_header = headers.get("x-csrftoken") or headers.get("X-CSRFToken") or ""
+    assert csrf_header == "fresh-csrf-token"
+    assert fetcher._raw_cookies["sessionid"] == "fresh-session"
+
+
+def test_pace_api_requests_honors_comment_delay() -> None:
+    fetcher = _build_fetcher()
+    fetcher._api_delay_seconds = 0.25
+    fetcher._last_api_request_started_at = 10.0
+    sleep_mock = AsyncMock()
+
+    with patch("trr_backend.socials.instagram.comments_scrapling.fetcher.time.monotonic", return_value=10.10):
+        with patch("trr_backend.socials.instagram.comments_scrapling.fetcher.asyncio.sleep", sleep_mock):
+            asyncio.run(fetcher._pace_api_requests())
+
+    sleep_mock.assert_awaited_once_with(pytest.approx(0.15, abs=0.01))
+
+
 # ---------------------------------------------------------------------------
 # 3xx redirect handling
 # ---------------------------------------------------------------------------
@@ -430,6 +456,24 @@ def test_selected_proxy_identical_across_transports() -> None:
     assert fetcher._selected_proxy_fingerprint == "gate.decodo.com:7000:decodo"
 
 
+def test_select_comments_proxy_decodo_sticky_session(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("DECODO_USERNAME", "user1")
+    monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
+
+    from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
+
+    result = select_comments_proxy()
+    assert result is not None
+    assert result.session_mode == "sticky"
+    assert "-session-" in result.browser_proxy["username"]
+    assert "-sessionduration-10" in result.browser_proxy["username"]
+    assert "sessionduration-10" in result.api_proxy_url
+
+
 # ---------------------------------------------------------------------------
 # Partial-progress persistence (job_runner integration)
 # ---------------------------------------------------------------------------
@@ -491,7 +535,7 @@ def test_job_runner_partial_progress_persists_before_error(monkeypatch: pytest.M
     fake_session.browser_account_id = "testaccount"
 
     monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: fake_fetcher)
 
@@ -570,7 +614,7 @@ def test_job_runner_marks_uncapped_success_complete(monkeypatch: pytest.MonkeyPa
     fake_session.browser_account_id = "testaccount"
 
     monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
@@ -647,7 +691,7 @@ def test_job_runner_keeps_capped_success_incomplete_when_local_cap_is_hit(monkey
     fake_session.browser_account_id = "testaccount"
 
     monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
@@ -725,7 +769,7 @@ def test_job_runner_completed_metadata_reports_final_request_count(monkeypatch: 
     fake_session.browser_account_id = "testaccount"
 
     monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
@@ -810,7 +854,7 @@ def test_job_runner_persists_partial_success_when_auth_failed_but_comments_prese
     fake_session.browser_account_id = "testaccount"
 
     monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
@@ -891,7 +935,7 @@ def test_job_runner_reuses_one_db_connection_for_all_post_persists(monkeypatch: 
     fake_session.browser_account_id = "testaccount"
 
     monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(shared_conn))
@@ -964,7 +1008,7 @@ def test_job_runner_commits_each_post_persist(monkeypatch: pytest.MonkeyPatch) -
             comment_media_mirror_job_enqueue_errors=0,
         ),
     )
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(shared_conn))
@@ -1037,7 +1081,7 @@ def test_job_runner_returns_degraded_summary_when_final_job_read_hits_db_saturat
             comment_media_mirror_job_enqueue_errors=0,
         ),
     )
-    monkeypatch.setattr(jr, "select_comments_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
     monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
     monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
     monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)

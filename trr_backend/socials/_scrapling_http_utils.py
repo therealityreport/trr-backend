@@ -27,6 +27,30 @@ def env_truthy(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def resolve_positive_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Parse an env var as a bounded positive integer, falling back to default."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def resolve_positive_float_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    """Parse an env var as a bounded positive float, falling back to default."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
 def response_text(response: Any) -> str:
     """Extract body text from a response object. Handles both the str attribute
     that httpx uses and the zero-arg callable some test mocks return."""

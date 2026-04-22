@@ -154,7 +154,7 @@ Do not treat local cookie files as proof that remote Instagram backfills are
 ready. Full shared-account Instagram backfill is only considered ready when all
 of the following are true:
 
-- `scripts/modal/verify_modal_readiness.py --json` returns `ok: true`
+- `scripts/modal/verify_modal_readiness.py --json` returns `ok: true` for core Modal readiness
 - `scripts/modal/verify_modal_readiness.py --probe-remote-auth instagram --json` returns:
   - `remote_auth_probe.platform = "instagram"`
   - `remote_auth_probe.ready = true`

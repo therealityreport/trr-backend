@@ -66,6 +66,17 @@ Safety rules:
 - Never run destructive replay or reset verification against production or other long-lived shared persistent databases.
 - Use `make schema-docs-reset-check` only as an explicit local Docker fallback when you intentionally need a fully local replay.
 
+## make dev Runtime Reconcile
+
+The workspace `make dev` path now runs a startup reconcile phase before it launches `TRR-Backend` and `TRR-APP`.
+
+- Hosted Supabase is boot-critical. Startup may auto-apply pending migrations only when the pending set is a contiguous local suffix, every version is listed in `scripts/dev/runtime_reconcile_migration_allowlist.txt`, and the count is within `WORKSPACE_RUNTIME_DB_MAX_AUTO_APPLY`.
+- Startup will never auto-run `supabase migration repair`, rewrite migration history, or trigger schema-doc generation/checks.
+- Modal is boot-critical in the default profile. Startup may auto-apply named secrets and redeploy `trr_backend.modal_jobs` when readiness fails or the tracked runtime fingerprint changes.
+- Render and Decodo checks are verify-only and surface as advisories in `make status`.
+
+If startup blocks on remote/local migration history drift, use `docs/runbooks/supabase_migration_history_repair.md` before rerunning `make dev`.
+
 ## Common Commands
 
 ```bash

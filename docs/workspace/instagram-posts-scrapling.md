@@ -24,7 +24,10 @@
 | `DECODO_USERNAME` / `DECODO_PASSWORD` / `DECODO_GATEWAY` | Proxy creds | Optional; no-proxy in local dev |
 | `SOCIAL_INSTAGRAM_POSTS_PROXY_URLS` | Explicit proxy list | Takes precedence over DECODO |
 | `SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER` | Override provider | Default: `decodo` |
+| `SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY` | Pin one Decodo session across warmup + GraphQL | Default: `false` |
+| `SOCIAL_INSTAGRAM_POSTS_PROXY_SESSION_TTL_SECONDS` | Sticky-session lifetime for generated Decodo usernames | Default: `600` |
 | `SOCIAL_INSTAGRAM_POSTS_HEADLESS` | Browser headless toggle | Default: `true` |
+| `SOCIAL_INSTAGRAM_DELAY_SEC` | Delay between direct GraphQL requests after warmup | Default: `0.15` |
 | `TRR_DB_URL` | Postgres URL | Required. `TRR_DB_FALLBACK_URL` remains an optional explicit fallback only. |
 
 ## Invocation

@@ -8,6 +8,7 @@ import jwt
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.testclient import TestClient
 
+import api.auth as api_auth
 from api.auth import (
     CurrentUser,
     get_current_user,
@@ -197,6 +198,21 @@ def test_require_internal_admin_rejects_matching_shared_secret_header_when_fallb
     assert response.json()["detail"] == "Authentication required. Please provide a valid access token."
 
 
+def test_raw_secret_fallback_requires_strict_truthy_flag(monkeypatch):
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_SHARED_SECRET", "internal-secret-32-bytes-minimum")
+    monkeypatch.setenv("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", "enabled")
+    request = api_auth.Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/auth/internal-admin",
+            "headers": [(b"x-trr-internal-admin-secret", b"internal-secret-32-bytes-minimum")],
+        }
+    )
+
+    assert api_auth._raw_internal_admin_fallback_matches(request) is False
+
+
 def test_require_internal_admin_rejects_non_allowlisted_user_token(monkeypatch):
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     monkeypatch.setenv("SUPABASE_PROJECT_REF", "project123")
@@ -253,6 +269,12 @@ def test_require_admin_accepts_service_role_when_enabled(monkeypatch):
     response = client.get("/auth/admin", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     assert response.json() == {"user_id": "service_role:project123", "role": "service_role"}
+
+
+def test_service_role_flag_requires_strict_truthy_value(monkeypatch):
+    monkeypatch.setenv("TRR_ADMIN_ALLOW_SERVICE_ROLE", "enabled")
+
+    assert api_auth._service_role_allowed("TRR_ADMIN_ALLOW_SERVICE_ROLE") is False
 
 
 def test_require_internal_admin_rejects_service_role_by_default(monkeypatch):

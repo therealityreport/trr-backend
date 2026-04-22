@@ -1,12 +1,12 @@
 # Instagram Comments Scrapling Lane — Operator Runbook
 
-Last reviewed: 2026-04-15
+Last reviewed: 2026-04-22
 
 This document covers the standalone Instagram comments scraper built on
-[Scrapling](https://github.com/D4Vinci/Scrapling) v0.4+. It runs as a
-dedicated worker lane (`instagram_comments_scrapling`) alongside the existing
-Instagram posts pipeline and writes to the shared `social.instagram_comments`
-table. No schema forks, no second scheduler.
+[Scrapling](https://github.com/D4Vinci/Scrapling) v0.4+. It uses the
+`instagram_comments_scrapling` lane for the non-Modal path, but queued runs
+switch to Modal when the remote executor is enabled. All paths write to the
+shared `social.instagram_comments` table. No schema forks, no second scheduler.
 
 ---
 
@@ -15,10 +15,15 @@ table. No schema forks, no second scheduler.
 ```
 UI (/social/:platform/:handle/comments)
   └─ POST /api/v1/admin/socials/profiles/:platform/:account_handle/comments/scrape
-       └─ enqueues job with config.required_worker_lane="instagram_comments_scrapling"
-            └─ comments worker (wrapper over shared scripts/socials/worker.py)
-                 └─ InstagramCommentsScraplingFetcher → StealthyFetcher (Patchright)
-                      └─ persists into social.instagram_comments (shared table)
+       └─ start_social_account_comments_scrape(...)
+            ├─ queue enabled + Modal remote executor enabled
+            │    └─ enqueues job with config.required_execution_backend="modal"
+            │         └─ Modal social dispatcher / run_social_comments_job
+            └─ local dev inline bypass or Modal not required
+                 └─ enqueues job with config.required_worker_lane="instagram_comments_scrapling"
+                      └─ comments worker (wrapper over shared scripts/socials/worker.py)
+                           └─ InstagramCommentsScraplingFetcher → StealthyFetcher (Patchright)
+                                └─ persists into social.instagram_comments (shared table)
 ```
 
 Key identities:
@@ -64,13 +69,14 @@ Required only for **production** runs; local dev works with cookies alone.
 ```bash
 # Proxy (Decodo default; swap provider by changing _PROVIDER + _URLS)
 SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER=decodo
-SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS=            # comma-separated URLs, overrides provider
+SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS=            # explicit URLs bypass Decodo username shaping
 SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY=false
-SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS=600
+SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS=600  # seconds; converts/clamps to whole minutes
 
 # Run caps (defense against runaway jobs)
 SOCIAL_INSTAGRAM_COMMENTS_MAX_POSTS_PER_RUN=50
 SOCIAL_INSTAGRAM_COMMENTS_MAX_COMMENTS_PER_POST=200
+SOCIAL_INSTAGRAM_COMMENT_DELAY_SEC=0.25         # pacing between direct API requests after warmup
 
 # Browser mode (false for visual debugging)
 SOCIAL_INSTAGRAM_COMMENTS_HEADLESS=true
@@ -84,6 +90,13 @@ DECODO_GATEWAY=gate.decodo.com:7000
 TRR_SOCIAL_INGEST_WORKER_ENABLED=1
 TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING=1    # default 0 — opt in explicitly
 ```
+
+Proxy behavior:
+- `SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY=true` only affects the Decodo username:password path.
+- When enabled, the proxy builder appends `session-<id>-sessionduration-<minutes>` parameters to the username so browser warmup and `httpx` share one sticky upstream.
+- `SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS` is converted to whole minutes and clamped to Decodo's supported `1..1440` minute range.
+- `SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS` keeps highest precedence and bypasses all Decodo username shaping.
+- Sticky-session support in this change is intentionally comments-lane-only; posts-lane parity is a separate decision.
 
 ---
 
@@ -104,12 +117,15 @@ TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING=1 \
 
 ### Production (Modal)
 
-Modal deploy is driven by `trr_backend/modal_jobs.py`. The social browser
+Current Modal defaults come from `trr_backend/modal_jobs.py`, including
+`TRR_REMOTE_EXECUTOR=modal` and `TRR_MODAL_ENABLED=1`. The social browser
 image already installs Scrapling + browser binaries (see the
-`_SOCIAL_BROWSER_SETUP_COMMANDS` constant which now includes both
+`_SOCIAL_BROWSER_SETUP_COMMANDS` constant which includes both
 `playwright install chromium` and `scrapling install`). Deploy via the
-standard modal pipeline; no lane-specific Modal config is required beyond
-ensuring the comments worker process is launched with the env vars above.
+standard Modal pipeline; no dedicated comments worker lane is required in
+this path because the queued job is dispatched against the Modal executor.
+The comments-specific env vars above still need to be present in the Modal
+runtime so warmup, proxy shaping, and fetch caps match local behavior.
 
 ---
 
@@ -132,22 +148,29 @@ Patchright window, the cookie state, and the requests being made.
 
 ## Known failure modes and remediation
 
-### 1. `SOCIAL_WORKER_UNAVAILABLE` from the comments-scrape route
+### 1. `SOCIAL_WORKER_UNAVAILABLE` or `SOCIAL_MODAL_EXECUTOR_REQUIRED`
 
-**Symptom.** Comments tab shows "No Instagram comments worker is online..."
+**Symptom.** Comments tab shows either local worker-lane unavailability or
+Modal-executor-required copy, depending on the queue/runtime mode.
 
-**Cause.** Nothing is heartbeating the `instagram_comments_scrapling` lane.
+**Cause.**
+- `SOCIAL_WORKER_UNAVAILABLE`: the non-Modal `instagram_comments_scrapling`
+  lane is required and nothing is heartbeating it.
+- `SOCIAL_MODAL_EXECUTOR_REQUIRED`: queue mode is routing the job to Modal,
+  but the Modal executor/runtime is not available.
 
-**Fix.** Start the worker. For local dev:
+**Fix.**
+For local dev or any non-Modal lane path, start the worker:
 ```bash
 TRR_SOCIAL_INGEST_WORKER_ENABLED=1 \
 TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING=1 \
   ./scripts/start_remote_job_workers.sh
 ```
-For production: ensure the Modal deployment manifest sets
-`TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING>=1`. Never work around this by
-dropping the lane-enforcement check — the check is what prevents the main
-posts worker from silently stealing Scrapling jobs it can't run.
+For Modal-backed production, verify `TRR_REMOTE_EXECUTOR=modal`,
+`TRR_MODAL_ENABLED=1`, and the current Modal deployment/runtime health.
+Never work around either enforcement path by dropping the runtime checks —
+they are what prevent jobs from being routed into an executor that cannot
+actually run the comments scraper.
 
 ### 2. `instagram_comments_auth_failed`
 

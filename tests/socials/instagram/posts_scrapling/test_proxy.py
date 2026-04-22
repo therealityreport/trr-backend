@@ -41,6 +41,25 @@ def test_select_posts_proxy_decodo(monkeypatch):
     assert result.browser_proxy["password"] == "p@ss!"
     assert "p%40ss%21" in result.api_proxy_url
     assert result.fingerprint == "gate.decodo.com:7000:decodo"
+    assert result.session_mode == "rotating"
+
+
+def test_select_posts_proxy_decodo_sticky_session(monkeypatch):
+    """Sticky session env should scope both browser and http transports to one proxy identity."""
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("DECODO_USERNAME", "user1")
+    monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_SESSION_TTL_SECONDS", "600")
+    from trr_backend.socials.instagram.posts_scrapling.proxy import select_posts_proxy
+
+    result = select_posts_proxy()
+    assert result is not None
+    assert result.session_mode == "sticky"
+    assert "-session-" in result.browser_proxy["username"]
+    assert "-sessionduration-10" in result.browser_proxy["username"]
+    assert "sessionduration-10" in result.api_proxy_url
 
 
 def test_resolve_posts_scrapling_session(monkeypatch):

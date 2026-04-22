@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -647,3 +648,21 @@ def test_serialize_sync_session_includes_platform_diagnostics(monkeypatch) -> No
     assert payload["platform_diagnostics"]["twitter"]["coverage_by_dimension"]["comments"]["reported_replies"] == 6
     assert payload["platform_diagnostics"]["twitter"]["coverage_by_dimension"]["comments"]["saved_quotes"] == 2
     assert payload["platform_diagnostics"]["twitter"]["queue_cap"] == 2
+
+
+def test_hold_sync_session_lock_uses_single_connection(monkeypatch) -> None:
+    seen_connections: list[object] = []
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        conn = object()
+        seen_connections.append(conn)
+        yield conn
+
+    monkeypatch.setattr(orchestrator.pg, "advisory_session_lock", fake_advisory_lock)
+
+    with orchestrator._hold_sync_session_lock("abc-123") as conn:
+        assert conn is seen_connections[0]
+
+    assert len(seen_connections) == 1

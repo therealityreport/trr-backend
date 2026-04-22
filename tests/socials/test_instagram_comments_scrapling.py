@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+import hashlib
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+from trr_backend.socials.instagram.comments_scrapling.fetcher import (
+    InstagramCommentsFetchResult,
+    InstagramCommentsScraplingFetcher,
+)
+from trr_backend.socials.instagram.comments_scrapling.job_runner import (
+    run_instagram_comments_scrapling_job,
+)
 from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
 from trr_backend.socials.instagram.comments_scrapling.session import resolve_comments_scrapling_session
 
@@ -84,6 +93,94 @@ def test_select_comments_proxy_returns_none_when_no_proxy_configured(monkeypatch
     assert select_comments_proxy() is None
 
 
+def test_select_comments_proxy_adds_decodo_sticky_session_and_duration(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
+    monkeypatch.setenv("DECODO_USERNAME", "user-username")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    config = select_comments_proxy(session_key="bravotv")
+
+    expected_token = hashlib.sha256("bravotv".encode("utf-8")).hexdigest()[:16]
+    expected_suffix = f"-session-{expected_token}-sessionduration-10"
+
+    assert config is not None
+    assert isinstance(config.browser_proxy, dict)
+    assert config.browser_proxy["username"] == f"user-username{expected_suffix}"
+    assert expected_suffix in config.api_proxy_url
+    assert config.fingerprint == "gate.decodo.com:7000:decodo"
+
+
+def test_select_comments_proxy_ignores_sticky_env_for_explicit_proxy_urls(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", "http://user:pass@proxy-one:8000")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "1800")
+    monkeypatch.setenv("DECODO_USERNAME", "ignored-user")
+    monkeypatch.setenv("DECODO_PASSWORD", "ignored-pass")
+
+    config = select_comments_proxy(session_key="bravotv")
+
+    assert config is not None
+    assert config.browser_proxy == "http://user:pass@proxy-one:8000"
+    assert config.api_proxy_url == "http://user:pass@proxy-one:8000"
+    assert config.fingerprint == "proxy-one:8000:explicit"
+
+
+def test_select_comments_proxy_clamps_invalid_or_large_ttl_to_supported_minutes(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "999999")
+    monkeypatch.setenv("DECODO_USERNAME", "user-username")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    config = select_comments_proxy(session_key="bravotv")
+
+    assert config is not None
+    assert isinstance(config.browser_proxy, dict)
+    assert "-sessionduration-1440" in config.browser_proxy["username"]
+    assert "-sessionduration-1440" in config.api_proxy_url
+
+
+def test_select_comments_proxy_fingerprint_stays_log_safe_under_sticky_mode(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
+    monkeypatch.setenv("DECODO_USERNAME", "user-username")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    config = select_comments_proxy(session_key="bravotv")
+
+    assert config is not None
+    assert config.fingerprint == "gate.decodo.com:7000:decodo"
+    assert "session-" not in config.fingerprint
+    assert "user-username" not in config.fingerprint
+    assert "secret" not in config.fingerprint
+
+
+def test_select_comments_proxy_preserves_preconfigured_sticky_username(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
+    monkeypatch.setenv("DECODO_USERNAME", "user-username-session-fixed123-sessionduration-30")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    config = select_comments_proxy(session_key="bravotv")
+
+    assert config is not None
+    assert isinstance(config.browser_proxy, dict)
+    assert config.browser_proxy["username"] == "user-username-session-fixed123-sessionduration-30"
+    assert config.session_mode == "sticky_preconfigured"
+
+
 def test_resolve_comments_scrapling_session_reuses_instagram_auth_session(monkeypatch) -> None:
     fake_session = SimpleNamespace(
         cookies={"sessionid": "session-cookie", "csrftoken": "csrf-cookie"},
@@ -141,3 +238,112 @@ def test_comments_fetcher_runtime_metadata_never_exposes_cookie_values(monkeypat
     assert meta.get("warmup_cookie_names") == ["csrftoken", "sessionid"]
     assert meta.get("warmup_cookie_count") == 2
     assert "warmup_cookie_delta" not in meta
+
+
+def test_comments_fetcher_runtime_metadata_never_exposes_sticky_username(monkeypatch) -> None:
+    mock_fetcher_cls = MagicMock()
+    mock_module = MagicMock()
+    mock_module.StealthyFetcher = mock_fetcher_cls
+    mock_module.ProxyRotator = MagicMock()
+    monkeypatch.setitem(__import__("sys").modules, "scrapling.fetchers", mock_module)
+
+    fetcher = InstagramCommentsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing-cookie"},
+        browser_account_id="test",
+    )
+    fetcher._warmup_cookie_delta = {"sessionid": "new-sensitive-value"}
+    fetcher._selected_proxy_fingerprint = "gate.decodo.com:7000:decodo"
+
+    meta = fetcher.runtime_metadata
+    serialized = repr(meta)
+
+    assert "session-" not in serialized
+    assert "user-username" not in serialized
+    assert "secret" not in serialized
+    assert meta["selected_proxy_fingerprint"] == "gate.decodo.com:7000:decodo"
+
+
+def test_job_runner_uses_resolved_browser_account_id_as_proxy_session_key(monkeypatch) -> None:
+    captured: dict[str, str | None] = {}
+
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.resolve_comments_scrapling_session",
+        lambda **_kwargs: SimpleNamespace(
+            cookies=[],
+            browser_account_id="shared-auth",
+            auth_session=SimpleNamespace(cookies={}, metadata={}),
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.select_comments_proxy",
+        lambda *, session_key=None: captured.setdefault("session_key", session_key) or None,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.InstagramCommentsScraplingFetcher",
+        lambda **_kwargs: SimpleNamespace(
+            warmup=AsyncMock(),
+            aclose=AsyncMock(),
+            runtime_metadata={},
+            fetch_comments_for_shortcode=AsyncMock(
+                return_value=InstagramCommentsFetchResult(
+                    comments=[],
+                    fetch_failed=False,
+                    auth_failed=False,
+                    fetch_reason=None,
+                    request_count=0,
+                    retryable=False,
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.persist_instagram_comments_for_post",
+        lambda **_kwargs: SimpleNamespace(
+            comments_upserted=0,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.db_connection",
+        lambda **_kwargs: nullcontext(SimpleNamespace(commit=lambda: None)),
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics._touch_job_heartbeat",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics._emit_job_progress",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics._finish_job",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics._finalize_run_status",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        lambda *_args, **_kwargs: {},
+    )
+
+    run_instagram_comments_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "status": "queued",
+            "config": {
+                "account": "bravotv",
+                "stage": "comments_scrapling",
+                "mode": "profile",
+                "source_scope": "bravo",
+                "target_source_ids": ["ABC12345"],
+            },
+        }
+    )
+
+    assert captured["session_key"] == "shared-auth"

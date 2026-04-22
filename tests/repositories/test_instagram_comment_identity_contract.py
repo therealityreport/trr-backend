@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import pytest
+
+from trr_backend.db import pg
 from trr_backend.repositories import social_season_analytics as social_repo
+
+
+@pytest.fixture()
+def live_test_db():
+    try:
+        with pg.db_connection(label="live-test-db") as conn:
+            yield conn
+    except pg.DatabaseServiceUnavailableError:
+        pytest.skip("live test DB is unavailable in this workspace")
 
 
 def test_upsert_instagram_comment_tree_uses_composite_conflict_cols(monkeypatch) -> None:
@@ -90,15 +102,17 @@ def test_platform_comment_context_row_for_media_mirror_uses_post_scoped_identity
 
 
 def test_enqueue_platform_comment_media_mirror_job_uses_post_scoped_lookup_for_instagram(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, list[object]] = {"sql": [], "params": []}
 
     @contextmanager
     def _fake_db_cursor(conn=None):  # noqa: ANN001
         yield object()
 
     def _fake_fetch_one_with_cursor(_cur, sql, params):  # noqa: ANN001
-        captured["sql"] = sql
-        captured["params"] = params
+        captured["sql"].append(sql)
+        captured["params"].append(params)
+        if len(captured["sql"]) == 1:
+            return None
         return {"id": "job-1"}
 
     monkeypatch.setattr(social_repo.pg, "db_cursor", _fake_db_cursor)
@@ -121,7 +135,7 @@ def test_enqueue_platform_comment_media_mirror_job_uses_post_scoped_lookup_for_i
         source_scope="bravo",
         account="bravotv",
         comment_row={
-            "id": "55555555-5555-5555-5555-555555555555",
+            "id": "",
             "comment_id": "comment-1",
             "post_id": "66666666-6666-6666-6666-666666666666",
             "media_urls": ["https://cdn.example.com/comment.jpg"],
@@ -130,12 +144,29 @@ def test_enqueue_platform_comment_media_mirror_job_uses_post_scoped_lookup_for_i
     )
 
     assert mirror_job_id == "job-1"
-    assert "config->>'post_id' = %s" in str(captured["sql"]).lower()
-    assert captured["params"] == [
+    assert len(captured["sql"]) == 2
+    assert "insert into social.scrape_jobs" in str(captured["sql"][0]).lower()
+    assert "config->>'post_id' = %s" in str(captured["sql"][1]).lower()
+    assert captured["params"][1] == [
         "instagram",
         social_repo.COMMENT_MEDIA_MIRROR_STAGE,
         "comment-1",
         "66666666-6666-6666-6666-666666666666",
-        "44444444-4444-4444-4444-444444444444",
-        "44444444-4444-4444-4444-444444444444",
     ]
+
+
+def test_instagram_comments_post_comment_unique_constraint_exists(live_test_db) -> None:
+    with live_test_db.cursor() as cur:
+        cur.execute(
+            """
+            select c.conname
+              from pg_constraint c
+              join pg_class t on t.oid = c.conrelid
+              join pg_namespace n on n.oid = t.relnamespace
+             where n.nspname = 'social'
+               and t.relname = 'instagram_comments'
+               and c.conname = 'instagram_comments_post_comment_unique'
+            """
+        )
+        constraint_names = [str(row[0]).strip() for row in cur.fetchall()]
+    assert "instagram_comments_post_comment_unique" in constraint_names

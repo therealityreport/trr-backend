@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -277,9 +278,16 @@ def get_object_storage_client():
     config = get_hosted_media_storage_config()
     session = _build_boto3_session(config)
     client_kwargs: dict[str, Any] = {"region_name": config.region}
+    client_config_kwargs: dict[str, Any] = {
+        "connect_timeout": 10,
+        "read_timeout": 90,
+        "retries": {"max_attempts": 3, "mode": "standard"},
+    }
     if config.endpoint_url:
         client_kwargs["endpoint_url"] = config.endpoint_url
-        client_kwargs["config"] = Config(signature_version="s3v4", s3={"addressing_style": "path"})
+        client_config_kwargs["signature_version"] = "s3v4"
+        client_config_kwargs["s3"] = {"addressing_style": "path"}
+    client_kwargs["config"] = Config(**client_config_kwargs)
     if config.access_key_id and config.secret_access_key:
         client_kwargs["aws_access_key_id"] = config.access_key_id
         client_kwargs["aws_secret_access_key"] = config.secret_access_key
@@ -940,21 +948,34 @@ def _resolve_twitter_video_via_ytdlp(tweet_url: str) -> str | None:
 
     Returns the resolved URL string, or ``None`` on any failure.
     """
-    if not shutil.which("yt-dlp"):
+    ytdlp_bin = os.getenv("SOCIAL_MEDIA_MIRROR_YTDLP_BIN", "yt-dlp")
+    if not shutil.which(ytdlp_bin):
         _log.debug("yt-dlp not found on PATH; skipping Twitter video fallback")
         return None
 
-    cmd = [
-        "yt-dlp",
-        "--dump-single-json",
-        "--no-playlist",
-        "--skip-download",
-        "--format",
-        "best[ext=mp4]/best",
-        tweet_url,
-    ]
+    batch_path: str | None = None
 
     try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            prefix="yt-dlp-",
+            suffix=".txt",
+            encoding="utf-8",
+            delete=False,
+        ) as batch_file:
+            batch_file.write(tweet_url)
+            batch_file.write("\n")
+            batch_path = batch_file.name
+        cmd = [
+            ytdlp_bin,
+            "--batch-file",
+            batch_path,
+            "--dump-single-json",
+            "--no-playlist",
+            "--skip-download",
+            "--format",
+            "best[ext=mp4]/best",
+        ]
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -965,6 +986,12 @@ def _resolve_twitter_video_via_ytdlp(tweet_url: str) -> str | None:
     except Exception as exc:  # noqa: BLE001
         _log.warning("yt-dlp subprocess failed for %s: %s", tweet_url, exc)
         return None
+    finally:
+        if batch_path:
+            try:
+                os.remove(batch_path)
+            except OSError:
+                pass
 
     if proc.returncode != 0:
         message = (proc.stderr or proc.stdout or "").strip()[:240]
@@ -1105,7 +1132,7 @@ def mirror_url_to_s3(
                     max_bytes=max_bytes_limit,
                     tweet_url=None,  # prevent infinite recursion
                 )
-                if result.status == "mirrored":
+                if result.hosted_url and result.status in {"mirrored", "skipped"}:
                     return MirrorResult(
                         source_url=source_url,  # preserve original
                         hosted_url=result.hosted_url,
@@ -1155,7 +1182,25 @@ def mirror_url_to_s3(
 
     data = b"".join(data_parts)
     sha256 = digest.hexdigest()
+    sniffed_image_content_type = _sniff_image_content_type(data[:4096])
     ext = infer_media_extension(source_url, content_type)
+    if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}:
+        if sniffed_image_content_type is None:
+            return MirrorResult(
+                source_url=source_url,
+                hosted_url=None,
+                hosted_key=None,
+                sha256=sha256,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                status="failed",
+                error="asset_wrong_content_type",
+            )
+        if not _is_image_content_type(content_type):
+            content_type = sniffed_image_content_type
+            ext = infer_media_extension(source_url, content_type)
+    elif sniffed_image_content_type and not content_type:
+        content_type = sniffed_image_content_type
     key = build_shared_media_s3_key(sha256, ext)
 
     try:

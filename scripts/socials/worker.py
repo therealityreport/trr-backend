@@ -17,13 +17,13 @@ import time
 from datetime import UTC, datetime
 
 from trr_backend.db import pg
+from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.repositories.social_sync_orchestrator import tick_sync_orchestrator
 from trr_backend.socials.control_plane import (
     _resolve_runtime_version_stamp,
     cancel_claimed_job_before_processing,
     claim_next_queued_jobs,
     ensure_media_mirror_s3_ready,
-    execute_run,
     get_worker_auth_capabilities,
     mark_worker_stopped,
     process_claimed_job,
@@ -36,6 +36,8 @@ from trr_backend.utils.env import load_env
 
 logger = logging.getLogger("socials.worker")
 _UNSET = object()
+_TASK8_EXECUTE_RUN_MAX_JOBS_DEFAULT = 1000
+_TASK8_EXECUTE_RUN_MAX_SECONDS_DEFAULT = 1800.0
 
 
 def _worker_lane_from_env() -> str | None:
@@ -184,39 +186,51 @@ def _resolve_int_env(name: str, default: int, *, minimum: int, maximum: int) -> 
 def _resolve_optional_positive_int(
     value: int | None,
     *,
-    env_name: str,
+    env_names: str | tuple[str, ...],
+    default: int | None = None,
     minimum: int,
     maximum: int,
 ) -> int | None:
     if value is not None:
         return max(minimum, min(maximum, int(value)))
-    raw = (os.getenv(env_name) or "").strip()
-    if not raw:
+    names = (env_names,) if isinstance(env_names, str) else env_names
+    for env_name in names:
+        raw = (os.getenv(env_name) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = int(raw)
+        except ValueError:
+            continue
+        return max(minimum, min(maximum, parsed))
+    if default is None:
         return None
-    try:
-        parsed = int(raw)
-    except ValueError:
-        return None
-    return max(minimum, min(maximum, parsed))
+    return max(minimum, min(maximum, int(default)))
 
 
 def _resolve_optional_positive_float(
     value: float | None,
     *,
-    env_name: str,
+    env_names: str | tuple[str, ...],
+    default: float | None = None,
     minimum: float,
     maximum: float,
 ) -> float | None:
     if value is not None:
         return max(minimum, min(maximum, float(value)))
-    raw = (os.getenv(env_name) or "").strip()
-    if not raw:
+    names = (env_names,) if isinstance(env_names, str) else env_names
+    for env_name in names:
+        raw = (os.getenv(env_name) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = float(raw)
+        except ValueError:
+            continue
+        return max(minimum, min(maximum, parsed))
+    if default is None:
         return None
-    try:
-        parsed = float(raw)
-    except ValueError:
-        return None
-    return max(minimum, min(maximum, parsed))
+    return max(minimum, min(maximum, float(default)))
 
 
 def _default_claim_batch_size_for_stage(stage: str | None) -> int:
@@ -317,6 +331,125 @@ def _normalize_reason_counts(value: object) -> dict[str, int]:
         for reason, count in payload.items()
         if str(reason).strip() and _normalize_non_negative_int(count) > 0
     }
+
+
+def _resolve_worker_execution_limits(args: argparse.Namespace) -> tuple[int | None, float | None]:
+    max_jobs_per_invocation = _resolve_optional_positive_int(
+        getattr(args, "max_jobs_per_invocation", None),
+        env_names=("SOCIAL_EXECUTE_RUN_MAX_JOBS", "SOCIAL_WORKER_MAX_JOBS_PER_INVOCATION"),
+        default=_TASK8_EXECUTE_RUN_MAX_JOBS_DEFAULT,
+        minimum=1,
+        maximum=10_000,
+    )
+    max_run_seconds = _resolve_optional_positive_float(
+        getattr(args, "max_run_seconds", None),
+        env_names=("SOCIAL_EXECUTE_RUN_MAX_SECONDS", "SOCIAL_WORKER_MAX_RUN_SECONDS"),
+        default=_TASK8_EXECUTE_RUN_MAX_SECONDS_DEFAULT,
+        minimum=1.0,
+        maximum=86_400.0,
+    )
+    return max_jobs_per_invocation, max_run_seconds
+
+
+def _fetch_run_result(run_id: str) -> dict[str, object]:
+    return (
+        pg.fetch_one(
+            """
+        select
+          id::text,
+          season_id::text as season_id,
+          show_id::text as show_id,
+          source_scope,
+          status,
+          config,
+          summary,
+          created_at,
+          started_at,
+          completed_at,
+          cancelled_at
+        from social.scrape_runs
+        where id = %s
+        """,
+            [run_id],
+        )
+        or {}
+    )
+
+
+def _execute_run_with_caps(
+    *,
+    run_id: str,
+    worker_id: str | None = None,
+    stage: str | None = None,
+    platform: str | None = None,
+    max_jobs_per_invocation: int | None = None,
+    max_run_seconds: float | None = None,
+) -> dict[str, object]:
+    social_repo._set_run_status(run_id, "running")
+    claim_stage_candidates = _claim_stage_candidates(stage)
+    run_started_at = time.monotonic()
+    processed = 0
+    claimed_jobs: list[dict[str, object]] = []
+
+    try:
+        while True:
+            if max_jobs_per_invocation is not None and processed >= max_jobs_per_invocation:
+                logger.info(
+                    "Run execution max jobs reached: run_id=%s processed=%d max_jobs_per_invocation=%d",
+                    run_id,
+                    processed,
+                    max_jobs_per_invocation,
+                )
+                break
+            elapsed = time.monotonic() - run_started_at
+            if max_run_seconds is not None and elapsed >= max_run_seconds:
+                logger.info(
+                    "Run execution max runtime reached: run_id=%s processed=%d max_run_seconds=%.1f elapsed=%.1f",
+                    run_id,
+                    processed,
+                    max_run_seconds,
+                    elapsed,
+                )
+                break
+            if not claimed_jobs:
+                for claim_stage in claim_stage_candidates:
+                    claimed_jobs = claim_next_queued_jobs(
+                        worker_id=worker_id or "",
+                        run_id=run_id,
+                        stage=claim_stage,
+                        platform=platform,
+                        limit=1,
+                    )
+                    if claimed_jobs:
+                        break
+            job = claimed_jobs.pop(0) if claimed_jobs else None
+            if not job and worker_id:
+                for claim_stage in claim_stage_candidates:
+                    job = social_repo._fetch_next_preclaimed_job(
+                        worker_id=worker_id,
+                        run_id=run_id,
+                        stage=claim_stage,
+                        platform=platform,
+                    )
+                    if job:
+                        break
+            if not job:
+                break
+            run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
+            if str(run_state.get("status") or "").strip().lower() == "cancelled":
+                social_repo._finish_job(
+                    str(job.get("id") or ""),
+                    status="cancelled",
+                    items_found=0,
+                    metadata={"stage": "cancelled"},
+                )
+                continue
+            process_claimed_job(job, worker_id=worker_id)
+            processed += 1
+    finally:
+        social_repo._finalize_run_status(run_id)
+
+    return _fetch_run_result(run_id)
 
 
 def _persist_job_metadata(job_id: str, metadata: dict[str, object]) -> dict[str, object] | None:
@@ -536,13 +669,13 @@ def parse_args() -> argparse.Namespace:
         "--max-jobs-per-invocation",
         type=int,
         default=None,
-        help="Optional queue-mode cap on processed jobs before the worker exits",
+        help="Optional execution cap on processed jobs before the worker exits",
     )
     parser.add_argument(
         "--max-run-seconds",
         type=float,
         default=None,
-        help="Optional queue-mode wall-clock cap before the worker exits",
+        help="Optional execution wall-clock cap before the worker exits",
     )
     return parser.parse_args()
 
@@ -587,10 +720,10 @@ def _spawn_child_worker(
         cmd.extend(["--interval", str(interval)])
         if once:
             cmd.append("--once")
-        if max_jobs_per_invocation is not None:
-            cmd.extend(["--max-jobs-per-invocation", str(max_jobs_per_invocation)])
-        if max_run_seconds is not None:
-            cmd.extend(["--max-run-seconds", str(max_run_seconds)])
+    if max_jobs_per_invocation is not None:
+        cmd.extend(["--max-jobs-per-invocation", str(max_jobs_per_invocation)])
+    if max_run_seconds is not None:
+        cmd.extend(["--max-run-seconds", str(max_run_seconds)])
     if stage:
         cmd.extend(["--stage", stage])
     if platform:
@@ -701,18 +834,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     logger.info("Starting socials worker: worker_id=%s", worker_id)
-    max_jobs_per_invocation = _resolve_optional_positive_int(
-        getattr(args, "max_jobs_per_invocation", None),
-        env_name="SOCIAL_WORKER_MAX_JOBS_PER_INVOCATION",
-        minimum=1,
-        maximum=10_000,
-    )
-    max_run_seconds = _resolve_optional_positive_float(
-        getattr(args, "max_run_seconds", None),
-        env_name="SOCIAL_WORKER_MAX_RUN_SECONDS",
-        minimum=1.0,
-        maximum=86_400.0,
-    )
+    max_jobs_per_invocation, max_run_seconds = _resolve_worker_execution_limits(args)
     if _requires_media_mirror_s3_preflight(stage=stage_filter, platform=platform_filter):
         try:
             ensure_media_mirror_s3_ready()
@@ -848,7 +970,14 @@ def main() -> int:
                 platform_filter or "any",
             )
             heartbeat.set_state(status="working", run_id=args.run_id, stage=stage_filter or "any")
-            run_result = execute_run(args.run_id, worker_id=worker_id, stage=stage_filter, platform=platform_filter)
+            run_result = _execute_run_with_caps(
+                run_id=args.run_id,
+                worker_id=worker_id,
+                stage=stage_filter,
+                platform=platform_filter,
+                max_jobs_per_invocation=max_jobs_per_invocation,
+                max_run_seconds=max_run_seconds,
+            )
             heartbeat.set_state(
                 status="idle",
                 current_job_id=None,

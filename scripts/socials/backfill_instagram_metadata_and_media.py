@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -78,6 +79,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=24 * 7,
         help="Treat metadata older than this as stale (default: 168 hours).",
+    )
+    parser.add_argument(
+        "--commit-batch-size",
+        type=int,
+        default=100,
+        help="Commit successful persisted rows every N writes (default: 100).",
     )
     parser.add_argument("--dry-run", action="store_true", help="Do not persist updates.")
     return parser.parse_args()
@@ -188,6 +195,7 @@ def main() -> int:
     now_utc = datetime.now(tz=UTC)
     stale_before = now_utc - timedelta(hours=max(1, int(args.metadata_stale_hours)))
     rows = _load_candidate_rows(weeks=args.weeks, limit=args.limit)
+    commit_batch_size = max(1, int(getattr(args, "commit_batch_size", 100)))
 
     counters = BackfillCounters()
     context_cache: dict[str, social_repo.SeasonContext] = {}
@@ -199,100 +207,112 @@ def main() -> int:
         cookies = {}
     scraper = InstagramScraper(cookies=cookies)
 
-    for row in rows:
-        counters.scanned += 1
-        season_id = str(row.get("season_id") or "").strip()
-        if not season_id:
-            continue
-        context = context_cache.get(season_id)
-        if context is None:
-            try:
-                context = social_repo.get_season_context(season_id)
-            except Exception:
+    write_context = nullcontext(None) if args.dry_run else pg.db_connection(label="instagram-backfill-metadata-media")
+    with write_context as conn:
+        pending_commits = 0
+        for row in rows:
+            counters.scanned += 1
+            season_id = str(row.get("season_id") or "").strip()
+            if not season_id:
                 continue
-            context_cache[season_id] = context
-            try:
-                season_windows, _ = social_repo._resolve_week_windows(  # noqa: SLF001
-                    context,
-                    timezone="America/New_York",
-                    source_scope=args.source_scope,
-                    now_utc=now_utc,
-                )
-            except Exception:
-                season_windows = []
-            windows_cache[season_id] = season_windows
+            context = context_cache.get(season_id)
+            if context is None:
+                try:
+                    context = social_repo.get_season_context(season_id)
+                except Exception:
+                    continue
+                context_cache[season_id] = context
+                try:
+                    season_windows, _ = social_repo._resolve_week_windows(  # noqa: SLF001
+                        context,
+                        timezone="America/New_York",
+                        source_scope=args.source_scope,
+                        now_utc=now_utc,
+                    )
+                except Exception:
+                    season_windows = []
+                windows_cache[season_id] = season_windows
 
-        needs_metadata = _metadata_is_missing_or_stale(row, stale_before=stale_before)
-        needs_mirror = _mirror_is_missing(row)
-        if not needs_metadata and not needs_mirror:
-            continue
+            needs_metadata = _metadata_is_missing_or_stale(row, stale_before=stale_before)
+            needs_mirror = _mirror_is_missing(row)
+            if not needs_metadata and not needs_mirror:
+                continue
 
-        post = _BackfillPost(row)
+            post = _BackfillPost(row)
 
-        if needs_metadata:
-            social_repo._enrich_instagram_post_from_permalink(post=post, scraper=scraper, now_utc=now_utc)  # noqa: SLF001
-            _preserve_existing_reel_classification(row=row, post=post)
-            if not post.metadata_error and post.metadata_source:
-                counters.enriched += 1
+            if needs_metadata:
+                social_repo._enrich_instagram_post_from_permalink(post=post, scraper=scraper, now_utc=now_utc)  # noqa: SLF001
+                _preserve_existing_reel_classification(row=row, post=post)
+                if not post.metadata_error and post.metadata_source:
+                    counters.enriched += 1
 
-        upserted_row: dict[str, Any] | None = None
-        if needs_mirror:
-            week_index: int | None = None
-            post_ts = social_repo._coerce_dt(post.taken_at)  # noqa: SLF001
-            season_windows = windows_cache.get(season_id) or []
-            if post_ts and season_windows:
-                week_window = social_repo._week_for_timestamp(  # noqa: SLF001
-                    post_ts,
-                    windows=season_windows,
-                    timezone="America/New_York",
-                )
-                week_index = week_window.week_index if week_window else None
-            post.media_mirror_status = "pending"
-            post.media_mirror_error = None
+            upserted_row: dict[str, Any] | None = None
+            if needs_mirror:
+                week_index: int | None = None
+                post_ts = social_repo._coerce_dt(post.taken_at)  # noqa: SLF001
+                season_windows = windows_cache.get(season_id) or []
+                if post_ts and season_windows:
+                    week_window = social_repo._week_for_timestamp(  # noqa: SLF001
+                        post_ts,
+                        windows=season_windows,
+                        timezone="America/New_York",
+                    )
+                    week_index = week_window.week_index if week_window else None
+                post.media_mirror_status = "pending"
+                post.media_mirror_error = None
+                if args.dry_run:
+                    counters.mirror_jobs_enqueued += 1
+                    counters.mirrored += 1
+                else:
+                    upserted_row = social_repo._upsert_instagram_post(  # noqa: SLF001
+                        context,
+                        job_id="backfill-instagram-metadata-media",
+                        account=str(row.get("source_account") or row.get("username") or ""),
+                        post=post,
+                        conn=conn,
+                    )
+                    if not upserted_row:
+                        counters.partial += 1
+                        continue
+                    try:
+                        mirror_job_id = social_repo._enqueue_platform_media_mirror_job(  # noqa: SLF001
+                            context,
+                            platform="instagram",
+                            run_id=None,
+                            source_scope=args.source_scope,
+                            account=str(row.get("source_account") or row.get("username") or ""),
+                            post_row=upserted_row,
+                            week_index=week_index,
+                            parent_job_id="backfill-instagram-metadata-media",
+                            conn=conn,
+                        )
+                        if mirror_job_id:
+                            counters.mirror_jobs_enqueued += 1
+                            counters.mirrored += 1
+                        else:
+                            counters.partial += 1
+                    except Exception:
+                        counters.failed += 1
+                        counters.mirror_job_enqueue_failed += 1
+
             if args.dry_run:
-                counters.mirror_jobs_enqueued += 1
-                counters.mirrored += 1
-            else:
-                upserted_row = social_repo._upsert_instagram_post(  # noqa: SLF001
+                continue
+
+            if upserted_row is None:
+                social_repo._upsert_instagram_post(  # noqa: SLF001
                     context,
                     job_id="backfill-instagram-metadata-media",
                     account=str(row.get("source_account") or row.get("username") or ""),
                     post=post,
+                    conn=conn,
                 )
-                if not upserted_row:
-                    counters.partial += 1
-                    continue
-                try:
-                    mirror_job_id = social_repo._enqueue_platform_media_mirror_job(  # noqa: SLF001
-                        context,
-                        platform="instagram",
-                        run_id=None,
-                        source_scope=args.source_scope,
-                        account=str(row.get("source_account") or row.get("username") or ""),
-                        post_row=upserted_row,
-                        week_index=week_index,
-                        parent_job_id="backfill-instagram-metadata-media",
-                        conn=None,
-                    )
-                    if mirror_job_id:
-                        counters.mirror_jobs_enqueued += 1
-                        counters.mirrored += 1
-                    else:
-                        counters.partial += 1
-                except Exception:
-                    counters.failed += 1
-                    counters.mirror_job_enqueue_failed += 1
+            pending_commits += 1
+            if pending_commits >= commit_batch_size and conn is not None and hasattr(conn, "commit"):
+                conn.commit()
+                pending_commits = 0
 
-        if args.dry_run:
-            continue
-
-        if upserted_row is None:
-            social_repo._upsert_instagram_post(  # noqa: SLF001
-                context,
-                job_id="backfill-instagram-metadata-media",
-                account=str(row.get("source_account") or row.get("username") or ""),
-                post=post,
-            )
+        if pending_commits > 0 and conn is not None and hasattr(conn, "commit"):
+            conn.commit()
 
     print(
         json.dumps(

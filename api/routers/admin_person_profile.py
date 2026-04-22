@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.auth import InternalAdminUser
-from api.deps import SupabaseAdminClient
+from api.deps import PostgrestAdminClient
 from api.routers import admin_person_images, admin_show_bravo, admin_show_links
 from scripts.sync import sync_episode_appearances, sync_show_cast
 from trr_backend.db import pg
@@ -123,7 +123,7 @@ def _flatten_aliases(value: Any) -> list[str]:
     return ordered
 
 
-def _apply_people_patch(db: SupabaseAdminClient, *, person_id: str, patch: dict[str, Any]) -> None:
+def _apply_people_patch(db: PostgrestAdminClient, *, person_id: str, patch: dict[str, Any]) -> None:
     if not patch:
         return
     response = db.schema("core").table("people").update(patch).eq("id", person_id).execute()
@@ -131,23 +131,32 @@ def _apply_people_patch(db: SupabaseAdminClient, *, person_id: str, patch: dict[
         raise HTTPException(status_code=502, detail=f"Failed to update person {person_id}")
 
 
-def _load_person(db: SupabaseAdminClient, *, person_id: str) -> dict[str, Any]:
-    response = (
-        db.schema("core")
-        .table("people")
-        .select(
-            "id, full_name, external_ids, birthday, gender, biography, place_of_birth, homepage, "
-            "profile_image_url, alternative_names"
+def _load_person(*, person_id: str) -> dict[str, Any]:
+    try:
+        row = pg.fetch_one(
+            """
+            SELECT
+              id::text AS id,
+              full_name,
+              external_ids,
+              birthday,
+              gender,
+              biography,
+              place_of_birth,
+              homepage,
+              profile_image_url,
+              alternative_names
+            FROM core.people
+            WHERE id = %s::uuid
+            """,
+            [person_id],
         )
-        .eq("id", person_id)
-        .limit(1)
-        .execute()
-    )
-    if getattr(response, "error", None):
-        raise HTTPException(status_code=502, detail=f"Failed to read person {person_id}")
-    if not response.data:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read person %s via direct pg: %s", person_id, exc)
+        raise HTTPException(status_code=502, detail=f"Failed to read person {person_id}") from exc
+    if row is None:
         raise HTTPException(status_code=404, detail="Person not found")
-    return response.data[0]
+    return row
 
 
 def _load_related_shows_for_person(person_id: str) -> list[dict[str, Any]]:
@@ -184,26 +193,33 @@ def _load_related_shows_for_person(person_id: str) -> list[dict[str, Any]]:
 
 
 def _load_approved_person_links(
-    db: SupabaseAdminClient,
     *,
     person_id: str,
     show_ids: list[str],
 ) -> list[dict[str, Any]]:
     if not show_ids:
         return []
-    response = (
-        db.schema("core")
-        .table("entity_links")
-        .select("show_id, link_kind, url, status, label, metadata")
-        .eq("entity_type", "person")
-        .eq("entity_id", person_id)
-        .eq("status", "approved")
-        .in_("show_id", show_ids)
-        .execute()
-    )
-    if getattr(response, "error", None):
-        raise HTTPException(status_code=502, detail=f"Failed to read person links for {person_id}")
-    return list(response.data or [])
+    try:
+        return pg.fetch_all(
+            """
+            SELECT
+              show_id::text AS show_id,
+              link_kind,
+              url,
+              status,
+              label,
+              metadata
+            FROM core.entity_links
+            WHERE entity_type = 'person'
+              AND entity_id = %s::uuid
+              AND status = 'approved'
+              AND show_id = ANY(%s::uuid[])
+            """,
+            [person_id, show_ids],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read approved person links for %s via direct pg: %s", person_id, exc)
+        raise HTTPException(status_code=502, detail=f"Failed to read person links for {person_id}") from exc
 
 
 def _first_link_url(links: list[dict[str, Any]], kind: str) -> str | None:
@@ -217,7 +233,7 @@ def _first_link_url(links: list[dict[str, Any]], kind: str) -> str | None:
 
 
 def _discover_and_persist_person_links(
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     *,
     show_id: str,
     person_id: str,
@@ -278,7 +294,7 @@ def _tmdb_profile_patch(person: Mapping[str, Any], *, tmdb_row: Mapping[str, Any
 
 
 def _refresh_tmdb_profile(
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     *,
     person: dict[str, Any],
 ) -> tuple[int, int]:
@@ -396,7 +412,7 @@ def _fetch_imdb_person_profile(imdb_id: str) -> dict[str, Any] | None:
 
 
 def _refresh_imdb_profile(
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     *,
     person: dict[str, Any],
     approved_links: list[dict[str, Any]],
@@ -443,7 +459,7 @@ def _refresh_imdb_profile(
 
 
 def _refresh_fandom_profile(
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     *,
     person: dict[str, Any],
     approved_links: list[dict[str, Any]],
@@ -508,7 +524,7 @@ def _extract_wikipedia_profile_from_html(*, html: str, page_url: str) -> dict[st
 
 
 def _refresh_wikipedia_profile(
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     *,
     person: dict[str, Any],
     approved_links: list[dict[str, Any]],
@@ -537,7 +553,7 @@ def _refresh_wikipedia_profile(
 
 
 def _refresh_bravo_profile(
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     *,
     person: dict[str, Any],
     approved_links: list[dict[str, Any]],
@@ -589,7 +605,7 @@ def _refresh_bravo_profile(
                 social_links={str(key): str(value) for key, value in social_links.items() if isinstance(value, str)},
                 source="bravo",
             )
-    refreshed = _load_person(db, person_id=str(person["id"]))
+    refreshed = _load_person(person_id=str(person["id"]))
     person.update(refreshed)
     changed_fields = sum(1 for key, before_value in before_refresh.items() if refreshed.get(key) != before_value)
     return changed_fields, 0
@@ -624,7 +640,7 @@ def _run_person_profile_refresh(
     *,
     person_id: str,
     payload: RefreshProfileRequest,
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     actor: str,
     stage_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -644,7 +660,7 @@ def _run_person_profile_refresh(
             },
         )
 
-    person = _load_person(db, person_id=person_id)
+    person = _load_person(person_id=person_id)
     related_shows = _load_related_shows_for_person(person_id)
     show_ids = [str(row.get("show_id") or "").strip() for row in related_shows if str(row.get("show_id") or "").strip()]
     emit("load_context", "Loaded person context.", related_show_count=len(show_ids))
@@ -664,7 +680,7 @@ def _run_person_profile_refresh(
             )
             links_refreshed += _discover_and_persist_person_links(db, show_id=show_id, person_id=person_id, actor=actor)
 
-    approved_links = _load_approved_person_links(db, person_id=person_id, show_ids=show_ids)
+    approved_links = _load_approved_person_links(person_id=person_id, show_ids=show_ids)
     field_changes = 0
     aliases_added = 0
     source_failures: list[str] = []
@@ -733,7 +749,7 @@ def _build_refresh_profile_event_stream(
     *,
     person_id: str,
     payload: RefreshProfileRequest,
-    db: SupabaseAdminClient,
+    db: PostgrestAdminClient,
     actor: str,
 ) -> Iterator[str]:
     event_queue: SimpleQueue[tuple[str, dict[str, Any]]] = SimpleQueue()
@@ -821,7 +837,7 @@ def _build_refresh_profile_event_stream(
 def refresh_person_profile_stream(
     person_id: UUID,
     payload: RefreshProfileRequest = Body(default_factory=RefreshProfileRequest),
-    db: SupabaseAdminClient = None,
+    db: PostgrestAdminClient = None,
     admin: InternalAdminUser = None,
     request: Request = None,
 ) -> StreamingResponse:
@@ -855,7 +871,7 @@ def build_person_refresh_profile_operation_producer(
     *,
     request_payload: dict[str, Any],
     operation_id: str | None = None,
-    db: SupabaseAdminClient | None = None,
+    db: PostgrestAdminClient | None = None,
 ):
     from trr_backend.db.admin import create_supabase_admin_client
 

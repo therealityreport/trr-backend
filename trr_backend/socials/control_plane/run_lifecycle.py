@@ -7,6 +7,23 @@ from typing import Any
 import trr_backend.repositories.social_season_analytics as legacy
 
 
+def _call_with_optional_conn(
+    loader,
+    /,
+    *args: Any,
+    conn: Any | None = None,
+    **kwargs: Any,
+) -> Any:
+    if conn is None:
+        return loader(*args, **kwargs)
+    try:
+        return loader(*args, conn=conn, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'conn'" not in str(exc):
+            raise
+        return loader(*args, **kwargs)
+
+
 def _create_run(
     context: legacy.SeasonContext | None,
     *,
@@ -83,8 +100,9 @@ def _create_run(
     return run_id
 
 
-def _set_run_status(run_id: str, status: str) -> None:
-    legacy.pg.fetch_one(
+def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> None:
+    _call_with_optional_conn(
+        legacy.pg.fetch_one,
         """
         update social.scrape_runs
         set
@@ -105,15 +123,22 @@ def _set_run_status(run_id: str, status: str) -> None:
         returning id::text
         """,
         [status, status, status, status, run_id],
+        conn=conn,
     )
     legacy._invalidate_queue_status_cache()
     if status in {"completed", "failed", "cancelled"}:
         legacy._invalidate_week_detail_cache_after_run_terminal_status()
 
 
-def _merge_run_config(run_id: str, *, config_updates: dict[str, Any]) -> dict[str, Any]:
+def _merge_run_config(
+    run_id: str,
+    *,
+    config_updates: dict[str, Any],
+    conn: Any | None = None,
+) -> dict[str, Any]:
     row = (
-        legacy.pg.fetch_one(
+        _call_with_optional_conn(
+            legacy.pg.fetch_one,
             """
             update social.scrape_runs
             set config = coalesce(config, '{}'::jsonb) || %s::jsonb
@@ -121,6 +146,7 @@ def _merge_run_config(run_id: str, *, config_updates: dict[str, Any]) -> dict[st
             returning config
             """,
             [legacy._json_dumps(legacy._metadata_dict(config_updates)), run_id],
+            conn=conn,
         )
         or {}
     )
@@ -134,6 +160,7 @@ def _maybe_start_deferred_comments_followup(
     run_status: str,
     run_config: dict[str, Any],
     summary: dict[str, Any],
+    conn: Any | None = None,
 ) -> None:
     if str(run_status or "").strip().lower() != "completed":
         return
@@ -187,6 +214,7 @@ def _maybe_start_deferred_comments_followup(
                     or dict(legacy._resolve_runtime_version_stamp()),
                 },
             },
+            conn=conn,
         )
     except Exception as exc:  # noqa: BLE001
         _merge_run_config(
@@ -208,6 +236,7 @@ def _maybe_start_deferred_comments_followup(
                     "error_message": str(exc),
                 },
             },
+            conn=conn,
         )
         legacy.logger.exception(
             "Failed to auto-start deferred Instagram comments followup after run finalization: run=%s",
@@ -493,10 +522,16 @@ def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
     )
 
 
-def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
+def _update_run_summary(
+    run_id: str,
+    *,
+    force_recompute: bool = False,
+    conn: Any | None = None,
+) -> dict[str, Any]:
     if legacy._run_counter_columns_ready() and not force_recompute:
         row = (
-            legacy.pg.fetch_one(
+            _call_with_optional_conn(
+                legacy.pg.fetch_one,
                 """
                 select
                   total_jobs,
@@ -509,6 +544,7 @@ def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[s
                 where id = %s
                 """,
                 [run_id],
+                conn=conn,
             )
             or {}
         )
@@ -520,7 +556,8 @@ def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[s
             items_found_total=row.get("items_found_total"),
             stage_counts=row.get("stage_counts"),
         )
-        legacy.pg.fetch_one(
+        _call_with_optional_conn(
+            legacy.pg.fetch_one,
             """
             update social.scrape_runs
             set summary = %s::jsonb
@@ -528,12 +565,13 @@ def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[s
             returning id::text
             """,
             [legacy.json.dumps(summary), run_id],
+            conn=conn,
         )
         return summary
 
     summary = _recompute_run_summary_from_jobs(run_id)
     if legacy._run_counter_columns_ready():
-        with legacy.pg.db_connection() as conn:
+        if conn is not None:
             _persist_run_counters_and_summary(
                 conn=conn,
                 run_id=run_id,
@@ -544,8 +582,21 @@ def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[s
                 items_found_total=int(summary.get("items_found_total") or 0),
                 stage_counts=dict(summary.get("stage_counts") or {}),
             )
+        else:
+            with legacy.pg.db_connection() as managed_conn:
+                _persist_run_counters_and_summary(
+                    conn=managed_conn,
+                    run_id=run_id,
+                    total_jobs=int(summary.get("total_jobs") or 0),
+                    completed_jobs=int(summary.get("completed_jobs") or 0),
+                    failed_jobs=int(summary.get("failed_jobs") or 0),
+                    active_jobs=int(summary.get("active_jobs") or 0),
+                    items_found_total=int(summary.get("items_found_total") or 0),
+                    stage_counts=dict(summary.get("stage_counts") or {}),
+                )
     else:
-        legacy.pg.fetch_one(
+        _call_with_optional_conn(
+            legacy.pg.fetch_one,
             """
             update social.scrape_runs
             set summary = %s::jsonb
@@ -553,6 +604,7 @@ def _update_run_summary(run_id: str, *, force_recompute: bool = False) -> dict[s
             returning id::text
             """,
             [legacy.json.dumps(summary), run_id],
+            conn=conn,
         )
     return summary
 
@@ -595,9 +647,10 @@ def reconcile_run_summaries(*, run_ids: list[str] | None = None, limit: int = 10
     return {"reconciled_runs": len(reconciled), "run_ids": reconciled}
 
 
-def _run_job_status_breakdown(run_id: str) -> dict[str, int]:
+def _run_job_status_breakdown(run_id: str, *, conn: Any | None = None) -> dict[str, int]:
     row = (
-        legacy.pg.fetch_one(
+        _call_with_optional_conn(
+            legacy.pg.fetch_one,
             """
             select
               count(*) filter (where status = 'running')::int as running_jobs,
@@ -607,6 +660,7 @@ def _run_job_status_breakdown(run_id: str) -> dict[str, int]:
             where run_id = %s::uuid
             """,
             [run_id],
+            conn=conn,
         )
         or {}
     )
@@ -619,78 +673,94 @@ def _run_job_status_breakdown(run_id: str) -> dict[str, int]:
 
 def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
     lock_key = int(legacy.hashlib.md5(run_id.encode()).hexdigest()[:15], 16) % (2**31)
-    lock_row = legacy.pg.fetch_one("SELECT pg_try_advisory_lock(%s) AS locked", [lock_key])
-    got_lock = bool(lock_row and lock_row.get("locked"))
-    if not got_lock:
+    try:
+        with legacy.pg.advisory_session_lock(lock_key, label="run-finalize-lock") as lock_conn:
+            return _finalize_run_status_locked(run_id, lock_conn, force_recompute=force_recompute)
+    except legacy.pg.AdvisoryLockUnavailable:
         legacy.logger.debug("[finalize_run_status] skipped — another worker is finalizing run=%s", run_id[:8])
         current = legacy.pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
         return {"status": current.get("status", "running")}
-    try:
-        summary = _update_run_summary(run_id, force_recompute=force_recompute)
+
+
+def _finalize_run_status_locked(
+    run_id: str,
+    lock_conn: Any,
+    *,
+    force_recompute: bool = False,
+) -> dict[str, Any]:
+    summary = _update_run_summary(run_id, force_recompute=force_recompute, conn=lock_conn)
+    active_jobs = int(summary.get("active_jobs") or 0)
+    failed_jobs = int(summary.get("failed_jobs") or 0)
+    current = (
+        legacy.pg.fetch_one(
+            "select status, config from social.scrape_runs where id = %s",
+            [run_id],
+            conn=lock_conn,
+        )
+        or {}
+    )
+    if str(current.get("status")) == "cancelled":
+        return summary
+    current_config = legacy._metadata_dict(current.get("config"))
+    stage_counts = _normalize_stage_counts(legacy._metadata_dict(summary).get("stage_counts"))
+    classify_stage = legacy._metadata_dict(stage_counts.get(legacy.POST_CLASSIFY_STAGE))
+    classify_jobs_created = 0
+    if legacy._normalize_non_negative_int(classify_stage.get("total")) <= 0:
+        classify_jobs_created = _call_with_optional_conn(
+            legacy._maybe_enqueue_shared_catalog_classify_jobs_after_fetch,
+            run_id=run_id,
+            source_scope=str(current_config.get("source_scope") or "").strip() or "bravo",
+            run_config=current_config,
+            conn=lock_conn,
+        )
+    if classify_jobs_created > 0:
+        summary = _update_run_summary(run_id, force_recompute=True, conn=lock_conn)
         active_jobs = int(summary.get("active_jobs") or 0)
         failed_jobs = int(summary.get("failed_jobs") or 0)
-        current = legacy.pg.fetch_one("select status, config from social.scrape_runs where id = %s", [run_id]) or {}
-        if str(current.get("status")) == "cancelled":
-            return summary
-        current_config = legacy._metadata_dict(current.get("config"))
-        stage_counts = _normalize_stage_counts(legacy._metadata_dict(summary).get("stage_counts"))
-        classify_stage = legacy._metadata_dict(stage_counts.get(legacy.POST_CLASSIFY_STAGE))
-        classify_jobs_created = 0
-        if legacy._normalize_non_negative_int(classify_stage.get("total")) <= 0:
-            classify_jobs_created = legacy._maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
-                run_id=run_id,
-                source_scope=str(current_config.get("source_scope") or "").strip() or "bravo",
-                run_config=current_config,
+    status_breakdown = _run_job_status_breakdown(run_id, conn=lock_conn)
+    fetch_terminal_error = legacy._resolve_pipeline_ingest_mode(
+        current_config.get("pipeline_ingest_mode")
+    ) == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and _call_with_optional_conn(
+        legacy._shared_catalog_fetch_has_terminal_error,
+        run_id,
+        conn=lock_conn,
+    )
+    if status_breakdown["running_jobs"] > 0:
+        next_status = "running"
+    elif status_breakdown["cancelling_jobs"] > 0:
+        next_status = "cancelling"
+    elif active_jobs > 0 or status_breakdown["queued_jobs"] > 0:
+        next_status = "queued"
+    elif failed_jobs > 0 or fetch_terminal_error:
+        next_status = "failed"
+    else:
+        next_status = "completed"
+    _set_run_status(run_id, next_status, conn=lock_conn)
+    _maybe_start_deferred_comments_followup(
+        run_id=run_id,
+        run_status=next_status,
+        run_config=current_config,
+        summary=summary,
+        conn=lock_conn,
+    )
+    if _call_with_optional_conn(legacy._column_exists, "social", "scrape_runs", "sync_session_id", conn=lock_conn):
+        run_row = (
+            legacy.pg.fetch_one(
+                "select sync_session_id::text as sync_session_id from social.scrape_runs where id = %s::uuid",
+                [run_id],
+                conn=lock_conn,
             )
-        if classify_jobs_created > 0:
-            summary = _update_run_summary(run_id, force_recompute=True)
-            active_jobs = int(summary.get("active_jobs") or 0)
-            failed_jobs = int(summary.get("failed_jobs") or 0)
-        status_breakdown = _run_job_status_breakdown(run_id)
-        fetch_terminal_error = legacy._resolve_pipeline_ingest_mode(
-            current_config.get("pipeline_ingest_mode")
-        ) == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and legacy._shared_catalog_fetch_has_terminal_error(
-            run_id
+            or {}
         )
-        if status_breakdown["running_jobs"] > 0:
-            next_status = "running"
-        elif status_breakdown["cancelling_jobs"] > 0:
-            next_status = "cancelling"
-        elif active_jobs > 0 or status_breakdown["queued_jobs"] > 0:
-            next_status = "queued"
-        elif failed_jobs > 0 or fetch_terminal_error:
-            next_status = "failed"
-        else:
-            next_status = "completed"
-        _set_run_status(run_id, next_status)
-        _maybe_start_deferred_comments_followup(
-            run_id=run_id,
-            run_status=next_status,
-            run_config=current_config,
-            summary=summary,
-        )
-        if legacy._column_exists("social", "scrape_runs", "sync_session_id"):
-            run_row = (
-                legacy.pg.fetch_one(
-                    "select sync_session_id::text as sync_session_id from social.scrape_runs where id = %s::uuid",
-                    [run_id],
-                )
-                or {}
-            )
-            sync_session_id = str(run_row.get("sync_session_id") or "").strip()
-            if sync_session_id:
-                try:
-                    from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
+        sync_session_id = str(run_row.get("sync_session_id") or "").strip()
+        if sync_session_id:
+            try:
+                from trr_backend.repositories.social_sync_orchestrator import evaluate_sync_session
 
-                    evaluate_sync_session(sync_session_id)
-                except Exception:  # noqa: BLE001
-                    legacy.logger.exception(
-                        "Failed to evaluate sync session after run finalization: run=%s",
-                        run_id,
-                    )
-        return summary
-    finally:
-        try:
-            legacy.pg.fetch_one("SELECT pg_advisory_unlock(%s)", [lock_key])
-        except Exception:  # noqa: BLE001
-            legacy.logger.debug("[finalize_run_status] advisory unlock failed for run=%s", run_id[:8], exc_info=True)
+                evaluate_sync_session(sync_session_id)
+            except Exception:  # noqa: BLE001
+                legacy.logger.exception(
+                    "Failed to evaluate sync session after run finalization: run=%s",
+                    run_id,
+                )
+    return summary
