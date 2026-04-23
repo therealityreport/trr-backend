@@ -1,11 +1,38 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from scripts.dev import reconcile_runtime_db as cli
 from trr_backend.db.preflight import DatabasePreflightError
+
+
+def _read_runtime_reconcile_decisions(path: Path) -> tuple[set[str], set[str], str | None]:
+    auto_apply: set[str] = set()
+    manual_only: set[str] = set()
+    decision_required_after: str | None = None
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            comment = line[1:].strip()
+            lower_comment = comment.lower()
+            if lower_comment.startswith("manual:"):
+                version = comment.split(":", 1)[1].strip().split(maxsplit=1)[0]
+                if version:
+                    manual_only.add(version)
+            elif lower_comment.startswith("decision-required-after:"):
+                version = comment.split(":", 1)[1].strip().split(maxsplit=1)[0]
+                if version:
+                    decision_required_after = version
+            continue
+        auto_apply.add(line.split(maxsplit=1)[0])
+
+    return auto_apply, manual_only, decision_required_after
 
 
 def test_reconcile_runtime_db_blocks_without_runtime_db_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,3 +163,23 @@ def test_reconcile_runtime_db_auto_applies_safe_allowlisted_suffix(monkeypatch: 
 
     assert result["state"] == "fixed"
     assert result["applied_versions"] == ["20260422094500", "20260422111500"]
+
+
+def test_runtime_reconcile_tail_migrations_have_explicit_startup_decisions() -> None:
+    auto_apply, manual_only, decision_required_after = _read_runtime_reconcile_decisions(cli.ALLOWLIST_PATH)
+
+    assert decision_required_after, (
+        f"{cli.ALLOWLIST_PATH.name} must declare '# decision-required-after: <version>' so tail migrations "
+        "cannot skip an explicit startup decision."
+    )
+
+    decided_versions = auto_apply | manual_only
+    tail_versions = [
+        version for version in cli.read_local_versions() if version > decision_required_after
+    ]
+    undecided_tail = [version for version in tail_versions if version not in decided_versions]
+
+    assert not undecided_tail, (
+        "Tail migrations newer than the runtime-reconcile decision baseline must be explicitly marked "
+        f"for startup auto-apply or manual-only review in {cli.ALLOWLIST_PATH.name}: {undecided_tail}"
+    )

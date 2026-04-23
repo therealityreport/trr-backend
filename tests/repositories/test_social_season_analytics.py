@@ -639,6 +639,192 @@ def test_get_social_account_catalog_run_progress_exposes_resume_state(monkeypatc
     assert payload["resume_state"]["next_cursor"] == "cursor-2"
 
 
+def test_get_social_account_catalog_run_progress_uses_terminal_fast_path_for_completed_single_target_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "13385039-c22a-41cb-9ea5-a670353a689f"
+    run_row = {
+        "run_id": run_id,
+        "season_id": None,
+        "status": "completed",
+        "source_scope": "bravo",
+        "config": {
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "platforms": ["instagram"],
+            "accounts_override": ["thetraitorsus"],
+            "selected_tasks": ["catalog", "comments"],
+            "comments_run_id": "91b481c2-46a1-4124-b2a5-a670353a689f",
+            "expected_total_posts_by_account": {"instagram:thetraitorsus": 432},
+        },
+        "summary": {"total_jobs": 3, "completed_jobs": 3, "failed_jobs": 0, "active_jobs": 0},
+        "created_at": datetime(2026, 4, 23, 0, 0, tzinfo=UTC),
+        "started_at": datetime(2026, 4, 23, 0, 1, tzinfo=UTC),
+        "completed_at": datetime(2026, 4, 23, 0, 8, tzinfo=UTC),
+    }
+    job_rows = [
+        {
+            "id": "job-posts",
+            "platform": "instagram",
+            "job_type": social_repo.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "completed",
+            "items_found": 431,
+            "error_message": None,
+            "last_error_code": None,
+            "created_at": datetime(2026, 4, 23, 0, 1, tzinfo=UTC),
+            "started_at": datetime(2026, 4, 23, 0, 1, tzinfo=UTC),
+            "completed_at": datetime(2026, 4, 23, 0, 7, tzinfo=UTC),
+            "config": {"account": "thetraitorsus", "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE},
+            "metadata": {"activity": {"posts_checked": 431, "saved_posts": 431}},
+            "worker_id": "modal:posts",
+        }
+    ]
+
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_load_social_account_catalog_run_row", lambda **_kwargs: run_row)
+    monkeypatch.setattr(social_repo, "_load_social_account_catalog_jobs", lambda **_kwargs: job_rows)
+    monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_catalog_run_intent_metadata", lambda _config: {})
+    monkeypatch.setattr(social_repo, "_resolve_run_attached_followups", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_run_progress_runtime_versions",
+        lambda **_kwargs: pytest.fail("terminal fast path should skip runtime version health lookups"),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "recover_stale_unclaimed_dispatched_jobs",
+        lambda **_kwargs: pytest.fail("terminal fast path should skip stale-job recovery"),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "recover_dispatch_blocked_no_progress_jobs",
+        lambda **_kwargs: pytest.fail("terminal fast path should skip blocked-job recovery"),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_partition_progress",
+        lambda **_kwargs: pytest.fail("terminal fast path should skip partition progress"),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_frontier_progress",
+        lambda **_kwargs: pytest.fail("terminal fast path should skip frontier progress"),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_cached_live_profile_total_posts",
+        lambda *_args, **_kwargs: pytest.fail("terminal fast path should skip live profile refresh"),
+    )
+
+    payload = social_repo.get_social_account_catalog_run_progress("instagram", "thetraitorsus", run_id)
+
+    assert payload["run_state"] == "completed"
+    assert payload["discovery"] == {}
+    assert payload["frontier"] == {}
+    assert payload["post_progress"]["total_posts"] == 432
+
+
+def test_get_social_account_catalog_run_progress_keeps_full_path_for_active_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    calls = {"stale": 0, "blocked": 0, "frontier": 0}
+
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
+    monkeypatch.setattr(
+        social_repo,
+        "_load_social_account_catalog_run_row",
+        lambda **_kwargs: {
+            "run_id": run_id,
+            "season_id": None,
+            "status": "running",
+            "source_scope": "bravo",
+            "config": {
+                "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+                "platforms": ["instagram"],
+                "accounts_override": ["thetraitorsus"],
+            },
+            "summary": {"total_jobs": 2, "completed_jobs": 1, "failed_jobs": 0, "active_jobs": 1},
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_load_social_account_catalog_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-fetch",
+                "platform": "instagram",
+                "job_type": social_repo.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+                "status": "running",
+                "items_found": 1848,
+                "error_message": None,
+                "last_error_code": None,
+                "config": {"account": "thetraitorsus", "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE},
+                "metadata": {"activity": {"posts_checked": 1848, "saved_posts": 1848}},
+                "worker_id": "modal:fetch",
+            }
+        ],
+    )
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        social_repo,
+        "recover_stale_unclaimed_dispatched_jobs",
+        lambda **_kwargs: calls.__setitem__("stale", calls["stale"] + 1) or [],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "recover_dispatch_blocked_no_progress_jobs",
+        lambda **_kwargs: calls.__setitem__("blocked", calls["blocked"] + 1) or [],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_build_run_progress_snapshot_payload",
+        lambda **_kwargs: {
+            "run_status": "running",
+            "post_progress": {},
+            "stages": {},
+            "dispatch_health": {},
+            "worker_runtime": {},
+        },
+    )
+    monkeypatch.setattr(social_repo, "_catalog_run_intent_metadata", lambda _config: {})
+    monkeypatch.setattr(social_repo, "_resolve_run_attached_followups", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_shared_account_partition_progress", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_frontier_progress",
+        lambda **_kwargs: calls.__setitem__("frontier", calls["frontier"] + 1) or {"status": "running"},
+    )
+    monkeypatch.setattr(social_repo, "_load_shared_account_source_row", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_profile_contract",
+        lambda **_kwargs: {
+            "network_name": "Bravo",
+            "profile_kind": "shared_account",
+            "assignment_mode": "manual",
+            "assignment_rules": [],
+        },
+    )
+    monkeypatch.setattr(social_repo, "_queued_jobs_by_type", lambda _stages_payload: {})
+    monkeypatch.setattr(social_repo, "_shared_account_recovery_payload", lambda **_kwargs: {})
+    monkeypatch.setattr(social_repo, "_build_catalog_run_progress_alerts", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_shared_account_expected_total_posts_from_config", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts_cached_only", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_best_known_social_account_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
+
+    social_repo.get_social_account_catalog_run_progress("instagram", "thetraitorsus", run_id)
+
+    assert calls == {"stale": 1, "blocked": 1, "frontier": 1}
+
+
 def test_instagram_social_account_profile_dataset_rows_applies_limit_to_source_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7637,6 +7823,96 @@ def test_start_social_account_catalog_backfill_reuses_lock_connection_for_active
 
     assert exc_info.value.code == "SOCIAL_ACCOUNT_CATALOG_RUN_ALREADY_ACTIVE"
     assert exc_info.value.detail["run_id"] == "catalog-run-active-1"
+
+
+def test_reserve_social_account_catalog_launch_reopens_cursor_after_lock_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_conn = object()
+    cursor_labels: list[str] = []
+
+    class _Cursor:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.closed = False
+
+    @contextmanager
+    def _fake_db_connection(**_kwargs):
+        yield fake_conn
+
+    @contextmanager
+    def _fake_db_cursor(*, conn: Any | None = None, label: str = "write-cursor"):
+        assert conn is fake_conn
+        cursor = _Cursor(label)
+        cursor_labels.append(label)
+        try:
+            yield cursor
+        finally:
+            cursor.closed = True
+
+    def _fake_fetch_one_with_cursor(cur: Any, query: str, params: list[Any] | None = None) -> dict[str, Any]:
+        assert cur.closed is False
+        del params
+        normalized = " ".join(query.lower().split())
+        if "pg_try_advisory_lock" in normalized:
+            return {"locked": True}
+        if "insert into social.scrape_runs" in normalized:
+            return {"id": "catalog-run-123"}
+        if "pg_advisory_unlock" in normalized:
+            return {"unlocked": True}
+        raise AssertionError(f"Unexpected query: {normalized}")
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", _fake_db_connection)
+    monkeypatch.setattr(social_repo.pg, "db_cursor", _fake_db_cursor)
+    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", _fake_fetch_one_with_cursor)
+    monkeypatch.setattr(social_repo, "get_active_social_account_catalog_run", lambda *_args, **_kwargs: None)
+
+    payload = social_repo._reserve_social_account_catalog_launch(
+        platform="instagram",
+        account_handle="thetraitorsus",
+        source_scope="bravo",
+        initiated_by="codex@thereality.report",
+        placeholder_config={"launch_state": "pending"},
+        initial_status="queued",
+    )
+
+    assert payload["run_id"] == "catalog-run-123"
+    assert cursor_labels == [
+        "catalog-start-lock:instagram:thetraitorsus",
+        "catalog-start-lock:instagram:thetraitorsus",
+        "catalog-start-lock:instagram:thetraitorsus",
+    ]
+
+
+def test_start_social_account_catalog_backfill_existing_run_defers_initial_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_shared_account_catalog_requires_modal_executor",
+        lambda **_kwargs: False,
+    )
+
+    def _fake_ingest_shared_accounts(**kwargs):
+        captured.update(kwargs)
+        return {"run_id": kwargs["existing_run_id"], "status": "queued"}
+
+    monkeypatch.setattr(social_repo, "ingest_shared_accounts", _fake_ingest_shared_accounts)
+    monkeypatch.setattr(social_repo, "_merge_catalog_run_config", lambda *_args, **_kwargs: None)
+
+    payload = social_repo.start_social_account_catalog_backfill(
+        "instagram",
+        "thetraitorsus",
+        existing_run_id="catalog-run-123",
+    )
+
+    assert payload["run_id"] == "catalog-run-123"
+    assert captured["existing_run_id"] == "catalog-run-123"
+    assert captured["defer_initial_dispatch"] is True
 
 
 def test_target_accounts_by_platform_uses_direct_targets_query(monkeypatch) -> None:

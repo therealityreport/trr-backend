@@ -12,6 +12,8 @@ Supabase-first data pipeline and API for reality TV show/cast metadata.
 
 Python 3.11+ is required.
 
+- Workspace policy contract: `AGENTS.md` is canonical for each repo entrypoint, only `/Users/thomashulihan/Projects/TRR/CLAUDE.md`, `/Users/thomashulihan/Projects/TRR/TRR-Backend/CLAUDE.md`, and `/Users/thomashulihan/Projects/TRR/TRR-APP/CLAUDE.md` are validated symlink entrypoints to their matching `AGENTS.md` files, and `/Users/thomashulihan/Projects/TRR/TRR Workspace Brain/CLAUDE.md`, `/Users/thomashulihan/Projects/TRR/TRR-Backend/TRR Backend Brain/CLAUDE.md`, and `/Users/thomashulihan/Projects/TRR/TRR-APP/TRR App Brain/CLAUDE.md` are outside `scripts/check-policy.sh`.
+
 1. **Create venv + install deps**
    ```bash
    python3.11 -m venv .venv
@@ -71,6 +73,7 @@ Safety rules:
 The workspace `make dev` path now runs a startup reconcile phase before it launches `TRR-Backend` and `TRR-APP`.
 
 - Hosted Supabase is boot-critical. Startup may auto-apply pending migrations only when the pending set is a contiguous local suffix, every version is listed in `scripts/dev/runtime_reconcile_migration_allowlist.txt`, and the count is within `WORKSPACE_RUNTIME_DB_MAX_AUTO_APPLY`.
+- `scripts/dev/runtime_reconcile_migration_allowlist.txt` is also the decision ledger for new tail migrations: add a plain version line when startup auto-apply is approved, or record `# manual: <version>` when startup should keep blocking until an operator applies it deliberately.
 - Startup will never auto-run `supabase migration repair`, rewrite migration history, or trigger schema-doc generation/checks.
 - Modal is boot-critical in the default profile. Startup may auto-apply named secrets and redeploy `trr_backend.modal_jobs` when readiness fails or the tracked runtime fingerprint changes.
 - Render and Decodo checks are verify-only and surface as advisories in `make status`.
