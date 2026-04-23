@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -34390,6 +34390,24 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     }
 
 
+def _dispatch_due_social_jobs_in_background(*, run_id: str) -> None:
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return
+
+    def _runner() -> None:
+        try:
+            dispatch_due_social_jobs(run_id=normalized_run_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("[modal-dispatch] background dispatch failed run_id=%s", normalized_run_id)
+
+    Thread(
+        target=_runner,
+        name=f"dispatch-social-jobs:{normalized_run_id[:24]}",
+        daemon=True,
+    ).start()
+
+
 def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, Any]:
     claimed = _claim_job_by_id(job_id=job_id, worker_id=worker_id)
     if not claimed:
@@ -36059,6 +36077,7 @@ def ingest_shared_accounts(
     tiktok_direct_comment_api_override: bool = False,
     launch_group_id: str | None = None,
     existing_run_id: str | None = None,
+    defer_initial_dispatch: bool = False,
 ) -> dict[str, Any]:
     _assert_social_queue_schema_ready()
     if source_scope not in SUPPORTED_SCOPES:
@@ -36615,7 +36634,10 @@ def ingest_shared_accounts(
     else:
         summary = _update_run_summary(run_id)
     if is_queue_enabled() and is_modal_remote_executor_enabled():
-        dispatch_due_social_jobs(run_id=run_id)
+        if defer_initial_dispatch:
+            _dispatch_due_social_jobs_in_background(run_id=run_id)
+        else:
+            dispatch_due_social_jobs(run_id=run_id)
     return {
         "run_id": run_id,
         "status": initial_job_status,
@@ -38988,6 +39010,545 @@ def _best_known_social_account_total_posts(
     return max(candidates or [0])
 
 
+def _can_fast_path_terminal_catalog_progress(
+    *,
+    run_row: Mapping[str, Any],
+    configured_platforms: set[str],
+    configured_accounts: set[str],
+    normalized_platform: str,
+    normalized_account: str,
+) -> bool:
+    run_status = str(run_row.get("status") or "").strip().lower()
+    return (
+        run_status in {"completed", "cancelled"}
+        and (not configured_platforms or configured_platforms == {normalized_platform})
+        and (not configured_accounts or configured_accounts == {normalized_account})
+    )
+
+
+def _build_terminal_catalog_run_progress_payload(
+    *,
+    run_row: Mapping[str, Any],
+    job_rows: list[dict[str, Any]],
+    run_id: str,
+    run_config: Mapping[str, Any],
+    platform: str,
+    account_handle: str,
+    recent_log_limit: int,
+) -> dict[str, Any]:
+    safe_recent_log_limit = max(1, min(int(recent_log_limit), 100))
+    stages_payload: dict[str, dict[str, int]] = {
+        key: {
+            "jobs_total": 0,
+            "jobs_completed": 0,
+            "jobs_failed": 0,
+            "jobs_active": 0,
+            "jobs_running": 0,
+            "jobs_waiting": 0,
+            "scraped_count": 0,
+            "saved_count": 0,
+        }
+        for key in _RUN_PROGRESS_STAGE_BUCKETS
+    }
+    per_handle_buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    handle_stage_summary: dict[tuple[str, str], dict[str, dict[str, int]]] = {}
+    active_worker_ids: set[str] = set()
+    recent_entries: list[dict[str, Any]] = []
+    completed_posts = 0
+    matched_posts = 0
+    total_posts: int | None = None
+
+    for row in job_rows:
+        config = _metadata_dict(row.get("config"))
+        metadata = _metadata_dict(row.get("metadata"))
+        activity = _metadata_dict(metadata.get("activity"))
+        row_platform = _normalize_platform_name(row.get("platform")) or "unknown"
+        status = str(row.get("status") or "").strip().lower() or "unknown"
+        stage = _run_progress_stage_from_row(row)
+        stage_bucket = _run_progress_stage_bucket(stage)
+        row_account_handle = _run_progress_account_handle(config, metadata)
+        scraped_count, saved_count = _run_progress_stage_counters(metadata, row.get("items_found"))
+        stage_payload = stages_payload[stage_bucket]
+        stage_payload["jobs_total"] += 1
+        if status == "completed":
+            stage_payload["jobs_completed"] += 1
+        elif status == "failed":
+            stage_payload["jobs_failed"] += 1
+        elif status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES:
+            stage_payload["jobs_active"] += 1
+            if status == "running":
+                stage_payload["jobs_running"] += 1
+            else:
+                stage_payload["jobs_waiting"] += 1
+        stage_payload["scraped_count"] += scraped_count
+        stage_payload["saved_count"] += saved_count
+
+        if stage_bucket in {"posts", SHARED_ACCOUNT_POSTS_STAGE}:
+            retrieval_meta = _metadata_dict(metadata.get("retrieval_meta"))
+            retrieval_persist = _metadata_dict(retrieval_meta.get("persist_counters"))
+            activity_posts_checked = _normalize_non_negative_int(activity.get("posts_checked"))
+            if activity_posts_checked <= 0:
+                activity_posts_checked = max(
+                    _normalize_non_negative_int(retrieval_meta.get("posts_checked")),
+                    _normalize_non_negative_int((metadata.get("stage_counters") or {}).get("posts")),
+                    _normalize_non_negative_int(row.get("items_found")),
+                )
+            completed_posts += activity_posts_checked
+
+            activity_matched_posts = _normalize_non_negative_int(activity.get("matched_posts"))
+            if activity_matched_posts <= 0:
+                activity_matched_posts = max(
+                    _normalize_non_negative_int(retrieval_persist.get("posts_upserted")),
+                    _normalize_non_negative_int((metadata.get("persist_counters") or {}).get("posts_upserted")),
+                    _normalize_non_negative_int(row.get("items_found")),
+                )
+            matched_posts += activity_matched_posts
+
+            activity_total_posts = _normalize_non_negative_int(activity.get("total_posts"))
+            if activity_total_posts <= 0:
+                activity_total_posts = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
+            if activity_total_posts <= 0:
+                activity_total_posts = _normalize_non_negative_int(config.get("expected_total_posts"))
+            if activity_total_posts > 0:
+                total_posts = max(total_posts or 0, activity_total_posts)
+
+        key = (row_platform, row_account_handle, stage)
+        handle_bucket = per_handle_buckets.get(key)
+        if handle_bucket is None:
+            handle_bucket = {
+                "platform": row_platform,
+                "account_handle": row_account_handle,
+                "stage": stage,
+                "jobs_total": 0,
+                "jobs_completed": 0,
+                "jobs_failed": 0,
+                "jobs_active": 0,
+                "jobs_running": 0,
+                "jobs_waiting": 0,
+                "scraped_count": 0,
+                "saved_count": 0,
+                "runner_lanes": set(),
+                "has_started": False,
+                "next_stage": None,
+            }
+            per_handle_buckets[key] = handle_bucket
+        handle_bucket["jobs_total"] += 1
+        if status == "completed":
+            handle_bucket["jobs_completed"] += 1
+        elif status == "failed":
+            handle_bucket["jobs_failed"] += 1
+        elif status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES:
+            handle_bucket["jobs_active"] += 1
+            if status == "running":
+                handle_bucket["jobs_running"] += 1
+            else:
+                handle_bucket["jobs_waiting"] += 1
+        handle_bucket["scraped_count"] += scraped_count
+        handle_bucket["saved_count"] += saved_count
+        runner_lane = str(config.get("runner_lane") or "").strip().upper()
+        if runner_lane:
+            cast("set[str]", handle_bucket["runner_lanes"]).add(runner_lane)
+        if status not in {"queued", "pending"}:
+            handle_bucket["has_started"] = True
+
+        handle_key = (row_platform, row_account_handle)
+        stage_summary = handle_stage_summary.setdefault(handle_key, {})
+        if stage not in stage_summary:
+            stage_summary[stage] = {
+                "jobs_total": 0,
+                "jobs_completed": 0,
+                "jobs_active": 0,
+                "jobs_waiting": 0,
+            }
+        stage_summary[stage]["jobs_total"] += 1
+        if status == "completed":
+            stage_summary[stage]["jobs_completed"] += 1
+        elif status in _RUN_PROGRESS_ACTIVE_JOB_STATUSES:
+            stage_summary[stage]["jobs_active"] += 1
+            if status != "running":
+                stage_summary[stage]["jobs_waiting"] += 1
+
+        worker_id = str(row.get("worker_id") or "").strip()
+        if status == "running" and worker_id:
+            active_worker_ids.add(worker_id)
+
+        timestamp = _coerce_dt(row.get("completed_at") or row.get("started_at") or row.get("created_at"))
+        ts_for_sort = timestamp if isinstance(timestamp, datetime) else None
+        ts_label = (
+            ts_for_sort.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p")
+            if ts_for_sort is not None
+            else "--:--"
+        )
+        platform_label = row_platform.capitalize() if row_platform != "twitter" else "Twitter/X"
+        stage_label = _format_run_progress_stage_label(stage)
+        account_label = f" @{row_account_handle}" if row_account_handle and row_account_handle != "unknown" else ""
+        parts = [f"{ts_label} · {platform_label}{account_label} {stage_label} {status}"]
+        if scraped_count > 0:
+            parts.append(f"scraped {scraped_count}")
+        if saved_count > 0:
+            parts.append(f"saved {saved_count}")
+        activity_summary = _format_run_progress_activity_summary(metadata)
+        if activity_summary:
+            parts.append(activity_summary)
+        if status == "failed":
+            error_message = str(row.get("error_message") or "").strip()
+            if error_message:
+                parts.append(error_message[:180])
+        non_zero_signal = (
+            scraped_count > 0 or saved_count > 0 or _normalize_non_negative_int(row.get("items_found")) > 0
+        )
+        recent_entries.append(
+            {
+                "id": str(row.get("id") or ""),
+                "timestamp": _iso(timestamp),
+                "platform": row_platform,
+                "account_handle": row_account_handle,
+                "stage": stage,
+                "status": status,
+                "non_zero_signal": non_zero_signal,
+                "line": " · ".join(part for part in parts if part),
+                "sort_ts_epoch": int(ts_for_sort.timestamp()) if ts_for_sort is not None else 0,
+            }
+        )
+
+    recent_entries.sort(
+        key=lambda entry: (
+            0 if bool(entry.get("non_zero_signal")) else 1,
+            -int(entry.get("sort_ts_epoch") or 0),
+        )
+    )
+    trimmed_recent = [
+        {
+            "id": entry.get("id"),
+            "timestamp": entry.get("timestamp"),
+            "platform": entry.get("platform"),
+            "account_handle": entry.get("account_handle"),
+            "stage": entry.get("stage"),
+            "status": entry.get("status"),
+            "line": entry.get("line"),
+        }
+        for entry in recent_entries[:safe_recent_log_limit]
+    ]
+
+    stage_sort_order = {
+        "posts": 0,
+        "comments": 1,
+        "media_mirror": 2,
+        "comment_media_mirror": 3,
+        SHARED_ACCOUNT_DISCOVERY_STAGE: 4,
+        SHARED_ACCOUNT_POSTS_STAGE: 5,
+        POST_CLASSIFY_STAGE: 6,
+        SEASON_MATERIALIZE_STAGE: 7,
+        ANALYTICS_REFRESH_STAGE: 8,
+        "other": 99,
+    }
+    next_stage_by_handle: dict[tuple[str, str], str | None] = {}
+    for handle_key, stage_summary in handle_stage_summary.items():
+        ordered_stages = sorted(
+            stage_summary.items(),
+            key=lambda item: (stage_sort_order.get(item[0], 50), item[0]),
+        )
+        next_stage: str | None = None
+        for stage_name, counts in ordered_stages:
+            if int(counts.get("jobs_active") or 0) > 0 or int(counts.get("jobs_waiting") or 0) > 0:
+                next_stage = stage_name
+                break
+            if int(counts.get("jobs_completed") or 0) < int(counts.get("jobs_total") or 0):
+                next_stage = stage_name
+                break
+        next_stage_by_handle[handle_key] = next_stage
+    for key, handle_bucket in per_handle_buckets.items():
+        handle_bucket["runner_lanes"] = sorted(cast("set[str]", handle_bucket.get("runner_lanes") or set()))
+        handle_bucket["next_stage"] = next_stage_by_handle.get((key[0], key[1]))
+    per_handle_payload = sorted(
+        per_handle_buckets.values(),
+        key=lambda item: (
+            str(item.get("platform") or ""),
+            str(item.get("account_handle") or ""),
+            str(item.get("stage") or ""),
+        ),
+    )
+
+    def _observed_runtime_versions_from_job_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        def _runtime_version_from_worker_identity(row: Mapping[str, Any]) -> dict[str, Any] | None:
+            worker_id = str(row.get("worker_id") or "").strip().lower()
+            if not worker_id:
+                return None
+            if worker_id.startswith(("api-background:", "local-script:", "debug-inline:")):
+                return {
+                    "label": f"local:{worker_id}",
+                    "execution_backend": "local",
+                    "worker_id": worker_id,
+                }
+            return None
+
+        versions: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = _metadata_dict(row.get("metadata"))
+            runtime_candidates = [
+                _runtime_version_from_worker_identity(row),
+                _metadata_dict(_metadata_dict(metadata.get("retrieval_meta")).get("runtime_version")),
+                _metadata_dict(metadata.get("runtime_version")),
+            ]
+            for runtime_version in runtime_candidates:
+                if not isinstance(runtime_version, Mapping):
+                    continue
+                normalized_runtime = _metadata_dict(runtime_version)
+                if not any(_runtime_version_identity(normalized_runtime).values()):
+                    continue
+                if any(_runtime_versions_equivalent(existing, normalized_runtime) for existing in versions):
+                    continue
+                versions.append(normalized_runtime)
+        return versions[:5]
+
+    effective_run_status = _derive_run_progress_status(run_row.get("status"), job_rows)
+    effective_runner_strategy, effective_runner_count, effective_partition_strategy = (
+        _resolve_run_progress_worker_runtime(run_config, job_rows)
+    )
+    observed_runtime_versions = _observed_runtime_versions_from_job_rows(job_rows)
+    runtime_version = observed_runtime_versions[0] if observed_runtime_versions else None
+    required_runtime_version = _metadata_dict(run_config.get("required_runtime_version"))
+    replacement_run_id = str(run_config.get("replacement_run_id") or "").strip() or None
+    auto_requeue_status = str(run_config.get("auto_requeue_status") or "").strip().lower() or None
+    superseded_by_runtime_version = _metadata_dict(run_config.get("superseded_by_runtime_version"))
+    payload = {
+        "season_id": str(run_row.get("season_id") or ""),
+        "run_id": str(run_row.get("run_id") or run_id),
+        "run_status": effective_run_status,
+        "source_scope": str(run_row.get("source_scope") or ""),
+        "created_at": _iso(_coerce_dt(run_row.get("created_at"))),
+        "started_at": _iso(_coerce_dt(run_row.get("started_at"))),
+        "completed_at": _iso(_coerce_dt(run_row.get("completed_at"))),
+        "stages": stages_payload,
+        "per_handle": per_handle_payload,
+        "recent_log": trimmed_recent,
+        "worker_runtime": {
+            "runner_strategy": effective_runner_strategy,
+            "runner_count": effective_runner_count,
+            "partition_strategy": effective_partition_strategy,
+            "frontier_strategy": (
+                (effective_partition_strategy.strip().lower() == CATALOG_FULL_HISTORY_FRONTIER_STRATEGY)
+                and CATALOG_FULL_HISTORY_FRONTIER_STRATEGY
+            )
+            or None,
+            "scheduler_lanes": _catalog_backfill_run_scheduler_lanes(effective_runner_count),
+            "active_workers_now": len(active_worker_ids),
+            "worker_ids_sample": sorted(active_worker_ids)[:12],
+            "runtime_version": runtime_version,
+            "required_runtime_version": required_runtime_version or None,
+            "runtime_version_pin_mismatch": bool(required_runtime_version)
+            and not _runtime_version_satisfies_requirement(required_runtime_version, runtime_version),
+            "runtime_versions_observed": observed_runtime_versions,
+            "runtime_version_drift": len(observed_runtime_versions) > 1,
+            "replacement_run_id": replacement_run_id,
+            "auto_requeue_status": auto_requeue_status,
+            "runtime_superseded": bool(replacement_run_id)
+            and auto_requeue_status in {"queued", "running"}
+            and str(run_row.get("status") or "").strip().lower() == "cancelled",
+            "superseded_by_runtime_version": superseded_by_runtime_version or None,
+        },
+        "post_progress": {
+            "completed_posts": completed_posts,
+            "matched_posts": matched_posts,
+            "total_posts": total_posts,
+        },
+        "runtime_version": runtime_version,
+        "dispatch_health": _build_run_dispatch_health(job_rows),
+        "summary": _metadata_dict(run_row.get("summary")),
+        "updated_at": _iso(_now_utc()),
+    }
+    payload.update(_catalog_run_intent_metadata(run_config))
+    payload["launch_group_id"] = str(run_config.get("launch_group_id") or "").strip() or None
+    payload["launch_state"] = str(run_config.get("launch_state") or "").strip().lower() or None
+    payload["selected_tasks"] = _normalize_optional_social_account_catalog_backfill_selected_tasks(
+        run_config.get("selected_tasks")
+    )
+    payload["effective_selected_tasks"] = (
+        _normalize_optional_social_account_catalog_backfill_selected_tasks(run_config.get("effective_selected_tasks"))
+        or payload["selected_tasks"]
+    )
+    payload["comments_run_id"] = str(run_config.get("comments_run_id") or "").strip() or None
+    payload["attached_followups"] = _resolve_run_attached_followups(
+        run_config=run_config,
+        run_id=run_id,
+        run_status=str(run_row.get("status") or "").strip().lower() or None,
+        comments_run_id=payload["comments_run_id"],
+    )
+    payload["resume_state"] = run_config.get("resume_state") if isinstance(run_config.get("resume_state"), dict) else None
+    payload["partition_strategy"] = str(run_config.get("partition_strategy") or "").strip().lower() or None
+    payload["discovery"] = {}
+    payload["frontier"] = {}
+    payload["shared_profile"] = {}
+    payload["network_name"] = None
+    payload["profile_kind"] = None
+    payload["assignment_mode"] = None
+    payload["assignment_rules"] = []
+    stages_payload = _metadata_dict(payload.get("stages"))
+    dispatch_health = _metadata_dict(payload.get("dispatch_health"))
+    worker_runtime_payload = _metadata_dict(payload.get("worker_runtime"))
+    post_progress = _metadata_dict(payload.get("post_progress"))
+    completed_posts = _normalize_non_negative_int(post_progress.get("completed_posts"))
+    total_posts = max(
+        _shared_account_expected_total_posts_from_config(
+            run_config,
+            platform=platform,
+            account_handle=account_handle,
+        ),
+        _normalize_non_negative_int(post_progress.get("total_posts")),
+    )
+    if total_posts > 0:
+        post_progress["total_posts"] = total_posts
+    completion_gap_posts = max(total_posts - completed_posts, 0) if total_posts > 0 else 0
+    payload["post_progress"] = post_progress
+    payload["expected_total_posts"] = total_posts or None
+    payload["source_total_posts_current"] = None
+    payload["completion_gap_posts"] = completion_gap_posts
+    payload["completion_gap_reason"] = "fetch_incomplete" if completion_gap_posts > 0 else None
+    payload["queued_jobs_by_type"] = _queued_jobs_by_type(stages_payload)
+    payload["recovery"] = {}
+    payload["capacity_waiting"] = (
+        _normalize_non_negative_int(dispatch_health.get("modal_pending_jobs"))
+        + _normalize_non_negative_int(dispatch_health.get("modal_running_unclaimed_jobs"))
+    ) > 0
+    payload["active_transport"] = str(worker_runtime_payload.get("active_transport") or "").strip().lower() or None
+    payload["required_execution_backend"] = (
+        str(run_config.get("required_execution_backend") or "").strip().lower() or None
+    )
+    payload["allow_local_dev_inline_bypass"] = bool(run_config.get("allow_local_dev_inline_bypass"))
+    replacement_run_id = str(run_config.get("replacement_run_id") or "").strip() or None
+    auto_requeue_status = str(run_config.get("auto_requeue_status") or "").strip().lower() or None
+    cancel_reason: str | None = str(run_config.get("cancel_reason") or "").strip().lower() or None
+    last_error_code: str | None = None
+    last_error_message: str | None = None
+    for row in job_rows:
+        row_metadata = _metadata_dict(row.get("metadata"))
+        if cancel_reason is None:
+            cancel_reason = str(row_metadata.get("cancel_reason") or "").strip().lower() or None
+        if last_error_code is None:
+            last_error_code = str(row.get("last_error_code") or "").strip().lower() or None
+        if last_error_message is None:
+            last_error_message = str(row.get("error_message") or "").strip() or None
+        if cancel_reason and last_error_code and last_error_message:
+            break
+    observed_runtime_versions = list(worker_runtime_payload.get("runtime_versions_observed") or [])
+    effective_runtime = (
+        _metadata_dict(observed_runtime_versions[0])
+        if observed_runtime_versions
+        else _metadata_dict(worker_runtime_payload.get("runtime_version"))
+    )
+    effective_execution_backend = str(effective_runtime.get("execution_backend") or "").strip().lower() or None
+    persist_counters = _run_progress_persist_counters(job_rows)
+    last_transport_response = _catalog_run_last_transport_response(
+        frontier_progress={},
+        job_rows=job_rows,
+    )
+    payload["cancel_reason"] = cancel_reason
+    payload["last_error_code"] = last_error_code
+    payload["last_error_message"] = last_error_message
+    payload["effective_execution_backend"] = effective_execution_backend
+    payload["persist_counters"] = persist_counters
+    if last_transport_response:
+        payload["last_transport_response"] = last_transport_response
+    posts_stage = _metadata_dict(stages_payload.get(SHARED_ACCOUNT_POSTS_STAGE))
+    classify_stage = _metadata_dict(stages_payload.get(POST_CLASSIFY_STAGE))
+    posts_total = _normalize_non_negative_int(posts_stage.get("jobs_total"))
+    posts_completed = _normalize_non_negative_int(posts_stage.get("jobs_completed"))
+    posts_failed = _normalize_non_negative_int(posts_stage.get("jobs_failed"))
+    posts_active = _normalize_non_negative_int(posts_stage.get("jobs_active"))
+    posts_waiting = _normalize_non_negative_int(posts_stage.get("jobs_waiting"))
+    classify_total = _normalize_non_negative_int(classify_stage.get("jobs_total"))
+    classify_completed = _normalize_non_negative_int(classify_stage.get("jobs_completed"))
+    classify_failed = _normalize_non_negative_int(classify_stage.get("jobs_failed"))
+    classify_active = _normalize_non_negative_int(classify_stage.get("jobs_active"))
+    classify_waiting = _normalize_non_negative_int(classify_stage.get("jobs_waiting"))
+    dismissed_terminal_classify_cancel = (
+        str(run_row.get("status") or "").strip().lower() == "completed"
+        and bool(str(run_config.get(_RUN_FAILURE_DISMISSED_AT_KEY) or "").strip())
+        and classify_total > 0
+        and classify_active <= 0
+        and classify_waiting <= 0
+        and any(
+            _run_progress_stage_from_row(row) == POST_CLASSIFY_STAGE
+            and str(row.get("status") or "").strip().lower() == "cancelled"
+            for row in job_rows
+        )
+    )
+    payload["scrape_complete"] = (
+        posts_total > 0
+        and posts_completed >= posts_total
+        and posts_failed <= 0
+        and posts_active <= 0
+        and posts_waiting <= 0
+    )
+    payload["classify_incomplete"] = (
+        (not dismissed_terminal_classify_cancel)
+        and classify_total > 0
+        and (classify_completed + classify_failed < classify_total or classify_active > 0 or classify_waiting > 0)
+    )
+    if (
+        str(payload.get("run_status") or "").strip().lower() == "completed"
+        and _normalize_non_negative_int(post_progress.get("completed_posts")) <= 0
+        and _normalize_non_negative_int(stages_payload.get(SHARED_ACCOUNT_DISCOVERY_STAGE, {}).get("jobs_completed"))
+        > 0
+        and _normalize_non_negative_int(stages_payload.get(SHARED_ACCOUNT_POSTS_STAGE, {}).get("jobs_total")) <= 0
+    ):
+        payload["run_status"] = "failed"
+    payload["run_state"] = _derive_catalog_run_state(
+        run_status=str(payload.get("run_status") or ""),
+        scrape_complete=bool(payload.get("scrape_complete")),
+        classify_incomplete=bool(payload.get("classify_incomplete")),
+        stages_payload=stages_payload,
+        frontier_progress={},
+        recovery={},
+    )
+    payload["alerts"] = _build_catalog_run_progress_alerts(
+        platform=platform,
+        frontier_progress={},
+        payload=payload,
+        recovery={},
+    )
+    payload["operational_state"] = (
+        "runtime_superseded"
+        if replacement_run_id and auto_requeue_status in {"queued", "running"}
+        else payload.get("run_state")
+    )
+    payload["repair_action"] = None
+    payload["repair_status"] = None
+    payload["repairable_reason"] = None
+    payload["auto_resume_pending"] = bool(run_config.get(_RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY))
+    payload["resume_stage"] = None
+    payload["repair_environment"] = {}
+    payload["run_diagnostics"] = {
+        "cancel_reason": cancel_reason,
+        "last_error_code": last_error_code,
+        "last_error_message": last_error_message,
+        "posts_upserted": _normalize_non_negative_int(persist_counters.get("posts_upserted")),
+        "posts_skipped": _normalize_non_negative_int(persist_counters.get("posts_skipped")),
+        "posts_skipped_by_reason": _metadata_dict(persist_counters.get("posts_skipped_by_reason")),
+        "silent_drop_detected": bool(persist_counters.get("silent_drop_detected")),
+        "frontier_auth_reason": None,
+        "frontier_stop_reason": None,
+        "declared_runner_strategy": str(run_config.get("runner_strategy") or "").strip().lower() or None,
+        "effective_runner_strategy": str(worker_runtime_payload.get("runner_strategy") or "").strip().lower() or None,
+        "declared_partition_strategy": str(run_config.get("partition_strategy") or "").strip().lower() or None,
+        "effective_partition_strategy": (
+            str(worker_runtime_payload.get("partition_strategy") or "").strip().lower() or None
+        ),
+        "effective_execution_backend": effective_execution_backend,
+        "required_execution_backend": payload.get("required_execution_backend"),
+        "allow_local_dev_inline_bypass": bool(payload.get("allow_local_dev_inline_bypass")),
+        "catalog_oldest_post_at": None,
+        "oldest_posted_at_seen": None,
+        "newest_posted_at_seen": None,
+        "last_transport_response": payload.get("last_transport_response"),
+        "strategy_mismatch": False,
+        "runtime_version_drift": bool(worker_runtime_payload.get("runtime_version_drift")),
+        "replacement_run_id": replacement_run_id,
+        "auto_requeue_status": auto_requeue_status,
+    }
+    return payload
+
+
 def get_social_account_catalog_run_progress(
     platform: str,
     account_handle: str,
@@ -39000,7 +39561,6 @@ def get_social_account_catalog_run_progress(
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
         raise ValueError("Catalog backfill is not supported for this platform.")
-    _assert_social_account_profile_exists(normalized_platform, normalized_account)
     if not _relation_exists("social.scrape_runs") or not _relation_exists("social.scrape_jobs"):
         raise ValueError("social_ingest_queue_schema_missing")
     features = _scrape_jobs_features()
@@ -39031,14 +39591,6 @@ def get_social_account_catalog_run_progress(
         raise ValueError("run_not_found")
     if configured_accounts and normalized_account not in configured_accounts:
         raise ValueError("run_not_found")
-
-    recover_stale_unclaimed_dispatched_jobs(
-        run_id=run_id,
-        platform=normalized_platform,
-        account_handle=normalized_account,
-        limit=25,
-    )
-    recover_dispatch_blocked_no_progress_jobs(limit=25)
 
     job_rows = _load_social_account_catalog_jobs(
         run_id=run_id,
@@ -39087,6 +39639,32 @@ def get_social_account_catalog_run_progress(
                 run_row = refreshed_run_row
     else:
         summary_override = computed_summary
+
+    if _can_fast_path_terminal_catalog_progress(
+        run_row=run_row,
+        configured_platforms=configured_platforms,
+        configured_accounts=configured_accounts,
+        normalized_platform=normalized_platform,
+        normalized_account=normalized_account,
+    ):
+        return _build_terminal_catalog_run_progress_payload(
+            run_row=run_row,
+            job_rows=job_rows,
+            run_id=run_id,
+            run_config=run_config,
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            recent_log_limit=safe_recent_log_limit,
+        )
+
+    _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    recover_stale_unclaimed_dispatched_jobs(
+        run_id=run_id,
+        platform=normalized_platform,
+        account_handle=normalized_account,
+        limit=25,
+    )
+    recover_dispatch_blocked_no_progress_jobs(limit=25)
 
     payload = _build_run_progress_snapshot_payload(
         run_row=run_row,
@@ -56859,42 +57437,43 @@ def _reserve_social_account_catalog_launch(
                 items_found_total=0,
                 stage_counts={},
             )
-            run_row = pg.fetch_one_with_cursor(
-                cur,
-                """
-                insert into social.scrape_runs (
-                  season_id,
-                  show_id,
-                  source_scope,
-                  status,
-                  initiated_by,
-                  config,
-                  summary,
-                  started_at
+            with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                run_row = pg.fetch_one_with_cursor(
+                    cur,
+                    """
+                    insert into social.scrape_runs (
+                      season_id,
+                      show_id,
+                      source_scope,
+                      status,
+                      initiated_by,
+                      config,
+                      summary,
+                      started_at
+                    )
+                    values (
+                      %s,
+                      %s,
+                      %s,
+                      %s,
+                      %s,
+                      %s::jsonb,
+                      %s::jsonb,
+                      case when %s = 'running' then now() else null end
+                    )
+                    returning id::text as id
+                    """,
+                    [
+                        None,
+                        None,
+                        source_scope,
+                        initial_status,
+                        initiated_by,
+                        json.dumps(dict(_metadata_dict(placeholder_config))),
+                        json.dumps(initial_summary),
+                        initial_status,
+                    ],
                 )
-                values (
-                  %s,
-                  %s,
-                  %s,
-                  %s,
-                  %s,
-                  %s::jsonb,
-                  %s::jsonb,
-                  case when %s = 'running' then now() else null end
-                )
-                returning id::text as id
-                """,
-                [
-                    None,
-                    None,
-                    source_scope,
-                    initial_status,
-                    initiated_by,
-                    json.dumps(dict(_metadata_dict(placeholder_config))),
-                    json.dumps(initial_summary),
-                    initial_status,
-                ],
-            )
             run_id = str((run_row or {}).get("id") or "").strip()
             if not run_id and "locked" in (run_row or {}):
                 run_id = ""
@@ -57099,6 +57678,7 @@ def start_social_account_catalog_backfill(
             tiktok_direct_comment_api_override=tiktok_direct_comment_api_override,
             launch_group_id=launch_group_id,
             existing_run_id=run_id,
+            defer_initial_dispatch=not reserved_here,
         )
         if run_id:
             _merge_catalog_run_config(

@@ -33,11 +33,21 @@ def _fake_db_connection_fail(**_kwargs):
     raise ConnectionError("database unreachable")
 
 
+@contextmanager
+def _fake_db_read_connection_ok(**_kwargs):
+    conn = MagicMock()
+    yield conn
+
+
+def _fake_db_read_connection_fail(**_kwargs):
+    raise ConnectionError("database unreachable")
+
+
 # -- tests ------------------------------------------------------------------
 
 
 def test_health_connected():
-    with patch.object(_real_pg, "db_connection", _fake_db_connection_ok):
+    with patch.object(_real_pg, "db_read_connection", _fake_db_read_connection_ok):
         resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
@@ -47,13 +57,28 @@ def test_health_connected():
 
 
 def test_health_degraded():
-    with patch.object(_real_pg, "db_connection", _fake_db_connection_fail):
+    with patch.object(_real_pg, "db_read_connection", _fake_db_read_connection_fail):
         resp = client.get("/health")
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "degraded"
     assert body["service"] == "trr-backend"
     assert body["database"] == "unreachable"
+
+
+def test_health_uses_health_read_pool() -> None:
+    calls: list[tuple[str, str]] = []
+
+    @contextmanager
+    def _tracking_db_read_connection(*, label: str, pool_name: str):
+        calls.append((label, pool_name))
+        yield MagicMock()
+
+    with patch.object(_real_pg, "db_read_connection", _tracking_db_read_connection):
+        resp = client.get("/health")
+
+    assert resp.status_code == 200
+    assert calls == [("health-probe", "health")]
 
 
 def test_health_live():

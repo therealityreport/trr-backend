@@ -529,6 +529,21 @@ class InstagramCommentsScraplingFetcher:
             await asyncio.sleep(remaining)
         self._last_api_request_started_at = time.monotonic()
 
+    async def _recover_homepage_redirect(self, *, referer: str) -> bool:
+        recovery_url = str(referer or "").strip() or "https://www.instagram.com/"
+        try:
+            recovery_response = await self._fetch_page(recovery_url, referer=recovery_url)
+        except Exception:  # noqa: BLE001
+            logger.warning("Instagram homepage redirect recovery warmup failed for %s", recovery_url, exc_info=True)
+            return False
+        status_code = _status_code(recovery_response)
+        text = _response_text(recovery_response)
+        if status_code >= 400 or 300 <= status_code < 400 or _auth_failure_text(text):
+            return False
+        self._merge_warmup_cookies(recovery_response)
+        await self._rebuild_http_client()
+        return True
+
     # -------------------------------------------------------------------
     # JSON response handling with retry/backoff
     # -------------------------------------------------------------------
@@ -563,6 +578,7 @@ class InstagramCommentsScraplingFetcher:
         failures (429 / 5xx / transport timeout).
         """
         attempt = 0
+        homepage_redirect_recovery_attempted = False
         last_transient_reason: str | None = None
         while True:
             attempt += 1
@@ -601,9 +617,16 @@ class InstagramCommentsScraplingFetcher:
                     location,
                     reason,
                 )
+                auth_redirect = any(token in location for token in ("login", "challenge", "checkpoint"))
+                if reason == "redirect_to_homepage":
+                    if not homepage_redirect_recovery_attempted:
+                        homepage_redirect_recovery_attempted = True
+                        if await self._recover_homepage_redirect(referer=referer):
+                            continue
+                    auth_redirect = True
                 return {
                     "failed": True,
-                    "auth_failed": any(token in location for token in ("login", "challenge", "checkpoint")),
+                    "auth_failed": auth_redirect,
                     "reason": reason,
                     "retryable": False,
                     "payload": None,

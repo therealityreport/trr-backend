@@ -1,1 +1,1 @@
-trr-backend-brain/BRAIN.md
+AGENTS.md

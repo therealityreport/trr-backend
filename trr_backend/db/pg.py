@@ -89,6 +89,8 @@ class AdvisoryLockUnavailable(RuntimeError):
 def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
     if pool_name == "social_profile":
         return "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
+    if pool_name == "health":
+        return "TRR_HEALTH_DB_POOL_MINCONN", "TRR_HEALTH_DB_POOL_MAXCONN"
     return "TRR_DB_POOL_MINCONN", "TRR_DB_POOL_MAXCONN"
 
 

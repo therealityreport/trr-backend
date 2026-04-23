@@ -1,1 +1,5 @@
-# One migration version per line.
+# Startup runtime-reconcile decisions for tail migrations.
+# Plain version lines are approved for bounded startup auto-apply.
+# Comment lines with `manual: <version>` record deliberate manual-only decisions.
+# decision-required-after: 20260422153000
+20260422170000

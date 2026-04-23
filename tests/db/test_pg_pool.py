@@ -237,6 +237,31 @@ def test_db_read_connection_uses_social_profile_pool_sizing(monkeypatch: pytest.
     assert fake_pool.putconn_calls == 1
 
 
+def test_db_read_connection_uses_health_pool_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePool()
+    created: list[tuple[int, int]] = []
+
+    def _pool_factory(*, minconn, maxconn, **_kwargs):
+        created.append((minconn, maxconn))
+        return fake_pool
+
+    monkeypatch.setenv("TRR_HEALTH_DB_POOL_MINCONN", "1")
+    monkeypatch.setenv("TRR_HEALTH_DB_POOL_MAXCONN", "2")
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
+
+    with pg.db_read_connection(label="health-probe", pool_name="health"):
+        pass
+
+    assert created == [(1, 2)]
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+
+
 def test_resolve_pool_sizing_honors_local_social_profile_session_pooler_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

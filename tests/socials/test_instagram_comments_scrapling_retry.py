@@ -361,19 +361,52 @@ def test_3xx_redirect_to_challenge() -> None:
     assert result["reason"] == "redirect_to_checkpoint"
 
 
-def test_3xx_redirect_to_homepage() -> None:
+def test_3xx_redirect_to_homepage_rewarms_permalink_and_retries_once() -> None:
     fetcher = _build_fetcher()
-    fetcher._fetch_api = AsyncMock(return_value=_mock_httpx_response(status_code=302, location="/"))
+    fetcher._fetch_api = AsyncMock(
+        side_effect=[
+            _mock_httpx_response(status_code=302, location="/"),
+            _mock_httpx_response(status_code=200, json_data={"status": "ok", "comments": []}),
+        ]
+    )
+    fetcher._fetch_page = AsyncMock(return_value=_mock_httpx_response(status_code=200))
+    fetcher._rebuild_http_client = AsyncMock()
 
     result = asyncio.run(
         fetcher._fetch_json_response(
             "https://www.instagram.com/api/v1/media/1/comments/",
-            referer="https://www.instagram.com/p/ABC/",
+            referer="https://www.instagram.com/p/DXXAP-Ekb59/",
+        )
+    )
+
+    assert fetcher._fetch_api.await_count == 2
+    fetcher._fetch_page.assert_awaited_once_with(
+        "https://www.instagram.com/p/DXXAP-Ekb59/",
+        referer="https://www.instagram.com/p/DXXAP-Ekb59/",
+    )
+    assert result["failed"] is False
+
+
+def test_3xx_redirect_to_homepage_marks_auth_failed_after_recovery_retry() -> None:
+    fetcher = _build_fetcher()
+    fetcher._fetch_api = AsyncMock(
+        side_effect=[
+            _mock_httpx_response(status_code=302, location="/"),
+            _mock_httpx_response(status_code=302, location="/"),
+        ]
+    )
+    fetcher._fetch_page = AsyncMock(return_value=_mock_httpx_response(status_code=200))
+    fetcher._rebuild_http_client = AsyncMock()
+
+    result = asyncio.run(
+        fetcher._fetch_json_response(
+            "https://www.instagram.com/api/v1/media/1/comments/",
+            referer="https://www.instagram.com/p/DXXAP-Ekb59/",
         )
     )
 
     assert result["failed"] is True
-    assert result["auth_failed"] is False
+    assert result["auth_failed"] is True
     assert result["reason"] == "redirect_to_homepage"
 
 

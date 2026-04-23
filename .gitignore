@@ -112,6 +112,9 @@ pk-*.pem
 # Local dumps
 backup_before_*.sql
 
+TRR Backend Brain/sessions/
+.loom-backup/
+
 # Social media scraping
 scripts/socials/**/instagram_cookies.json
 scripts/socials/**/twitter_cookies.json

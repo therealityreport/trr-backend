@@ -404,11 +404,10 @@ def health():
     Returns 200 when the database is reachable, 503 when degraded.
     """
     try:
-        with pg.db_connection(label="health-probe") as conn:
+        with pg.db_read_connection(label="health-probe", pool_name="health") as conn:
             with conn.cursor() as cur:
-                # SET LOCAL is transaction-scoped — safe for pooled connections
-                cur.execute("SET LOCAL statement_timeout = '3000'")
                 cur.execute("SELECT 1")
+                cur.fetchone()
         return {
             "status": "healthy",
             "service": "trr-backend",
