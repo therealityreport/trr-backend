@@ -97,6 +97,165 @@ def _build_fetcher(*, platform: str = "instagram") -> SocialBladeScraplingFetche
     )
 
 
+def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = _build_fetcher(platform="instagram")
+    captured: dict[str, object] = {}
+
+    async def fake_async_fetch(url: str, **kwargs: object):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return _DummyResponse(text=SOCIALBLADE_HTML, cookies={"sbid": "warm-cookie"})
+
+    monkeypatch.setattr(fetcher._fetcher, "async_fetch", fake_async_fetch)
+
+    response = __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/instagram/user/thetraitorsus"))
+
+    assert response.cookies["sbid"] == "warm-cookie"
+    assert captured["url"] == "https://socialblade.com/instagram/user/thetraitorsus"
+    assert "init_script" not in captured["kwargs"]
+    assert callable(captured["kwargs"]["page_action"])
+
+
+def test_scrapling_fetcher_extracts_browser_captured_sixty_day_history_and_daily_chart() -> None:
+    history_rows = [
+        {"date": "2026-02-24T00:00:00.000Z", "followers": 137168, "following": 27, "media_count": 309},
+        {"date": "2026-02-25T00:00:00.000Z", "followers": 137943, "following": 27, "media_count": 312},
+    ]
+    daily_deltas = [
+        {"date": "2026-02-24T00:00:00.000Z", "followers": 775},
+        {"date": "2026-02-25T00:00:00.000Z", "followers": 98},
+    ]
+    capture = {
+        "user": {"id": "creator-1", "followers": "137943"},
+        "responses": {
+            "history60": {
+                "status": 200,
+                "text": _trpc_batch_payload(
+                    {
+                        "id": "creator-1",
+                        "followers": "137943",
+                        "following": 27,
+                        "media_count": 312,
+                        "engagement_rate": 2.62,
+                        "average_likes": 1234,
+                        "average_comments": 56,
+                        "grade": "B+",
+                        "ranks": {"sb": 39828, "followers": 318818, "engagement_rate": 46796},
+                    },
+                    history_rows,
+                ),
+            },
+            "dailyDeltas": {
+                "status": 200,
+                "text": _trpc_batch_payload(daily_deltas),
+            },
+        },
+    }
+    html = f"""
+    <html>
+      <body>
+        <script id="trr-socialblade-capture" type="application/json">{json.dumps(capture)}</script>
+      </body>
+    </html>
+    """
+
+    payload = SocialBladeScraplingFetcher._extract_captured_instagram_payload(html)
+
+    assert payload["user"]["id"] == "creator-1"
+    assert payload["history_rows"] == history_rows
+    assert payload["daily_deltas"] == daily_deltas
+
+
+def test_scrapling_fetcher_prefers_browser_captured_history_over_http_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = _build_fetcher(platform="instagram")
+    history_rows = [
+        {"date": "2026-02-24T00:00:00.000Z", "followers": 137168, "following": 27, "media_count": 309},
+        {"date": "2026-02-25T00:00:00.000Z", "followers": 137943, "following": 27, "media_count": 312},
+    ]
+    daily_deltas = [
+        {"date": "2026-02-24T00:00:00.000Z", "followers": 775},
+        {"date": "2026-02-25T00:00:00.000Z", "followers": 98},
+    ]
+    user_payload = {
+        "id": "creator-1",
+        "followers": "137943",
+        "following": 27,
+        "media_count": 312,
+        "engagement_rate": 2.62,
+        "average_likes": 1234,
+        "average_comments": 56,
+        "grade": "B+",
+        "ranks": {"sb": 39828, "followers": 318818, "engagement_rate": 46796},
+    }
+    capture = {
+        "user": user_payload,
+        "responses": {
+            "history60": {"status": 200, "text": _trpc_batch_payload(user_payload, history_rows)},
+            "dailyDeltas": {"status": 200, "text": _trpc_batch_payload(daily_deltas)},
+        },
+    }
+    html = SOCIALBLADE_HTML.replace(
+        "</body>",
+        f'<script id="trr-socialblade-capture" type="application/json">{json.dumps(capture)}</script></body>',
+    )
+
+    async def fake_fetch_page(_url: str):
+        fetcher._request_count += 1
+        return _DummyResponse(text=html, cookies={"sbid": "warm-cookie"})
+
+    async def fake_fetch_http(*_args, **_kwargs):
+        raise AssertionError("http search should not run when browser capture succeeded")
+
+    monkeypatch.setattr(fetcher, "_fetch_page", fake_fetch_page)
+    monkeypatch.setattr(fetcher, "_fetch_http", fake_fetch_http)
+
+    payload = __import__("asyncio").run(fetcher.scrape("thetraitorsus"))
+
+    assert payload["history_source"] == "page_trpc_capture"
+    assert payload["profile_stats"]["followers"] == 137943
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 2
+    assert payload["daily_total_followers_chart"]["total_data_points"] == 2
+    assert payload["runtime_metadata"]["fallback_chain"] == ["scrapling_warmup", "instagram_page_trpc_capture"]
+
+
+def test_scrapling_fetcher_expands_socialblade_metric_table_columns() -> None:
+    table = SocialBladeScraplingFetcher._extract_table_data(
+        """
+        <table>
+          <tr><th>Date</th><th>followers</th><th>following</th><th>media count</th></tr>
+          <tr><td>Sat 2026-04-11</td><td>78</td><td>171,945</td><td>--</td><td>27</td><td>1</td><td>427</td></tr>
+        </table>
+        """
+    )
+
+    assert table == {
+        "headers": [
+            "Date",
+            "Followers Delta",
+            "Followers Total",
+            "Following Delta",
+            "Following Total",
+            "Media Count Delta",
+            "Media Count Total",
+        ],
+        "data": [
+            {
+                "Date": "Sat 2026-04-11",
+                "Followers Delta": "78",
+                "Followers Total": "171,945",
+                "Following Delta": "--",
+                "Following Total": "27",
+                "Media Count Delta": "1",
+                "Media Count Total": "427",
+            }
+        ],
+    }
+
+
 def test_scrapling_fetcher_bridges_warmup_cookies_into_authenticated_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     fetcher = _build_fetcher(platform="instagram")
 

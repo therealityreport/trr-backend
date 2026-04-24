@@ -12,6 +12,28 @@ def test_parse_args_defaults() -> None:
     assert args.account == "bravotv"
     assert args.source_scope == "bravo"
     assert args.action == "backfill"
+    assert args.selected_tasks == []
+
+
+def test_parse_args_accepts_selected_tasks() -> None:
+    args = cli.parse_args(
+        [
+            "--platform",
+            "instagram",
+            "--account",
+            "bravotv",
+            "--action",
+            "backfill",
+            "--selected-task",
+            "post_details",
+            "--selected-task",
+            "comments",
+            "--selected-task",
+            "media",
+        ]
+    )
+
+    assert args.selected_tasks == ["post_details", "comments", "media"]
 
 
 def test_main_dispatches_backfill(monkeypatch, capsys) -> None:
@@ -46,6 +68,59 @@ def test_main_dispatches_backfill(monkeypatch, capsys) -> None:
 
     assert cli.main() == 0
     assert "run-backfill-1" in capsys.readouterr().out
+
+
+def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="instagram",
+            account="bravotv",
+            source_scope="bravo",
+            action="backfill",
+            selected_tasks=["post_details", "comments", "media"],
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _launch(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "run_id": "catalog-run-1",
+            "catalog_run_id": "catalog-run-1",
+            "comments_run_id": "comments-run-1",
+            "status": "queued",
+        }
+
+    executed: list[tuple[str, str]] = []
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(launch_social_account_catalog_backfill=_launch),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.socials.control_plane",
+        SimpleNamespace(
+            execute_run_with_inline_worker_registration=lambda run_id, **kwargs: executed.append(
+                (run_id, kwargs["worker_id"])
+            )
+        ),
+    )
+
+    assert cli.main() == 0
+    assert captured["selected_tasks"] == ["post_details", "comments", "media"]
+    assert captured["allow_local_dev_inline_bypass"] is True
+    assert executed == [
+        ("catalog-run-1", "local-script:catalog:instagram:1"),
+        ("comments-run-1", "local-script:catalog:instagram:2"),
+    ]
+    assert "catalog-run-1" in capsys.readouterr().out
 
 
 def test_main_dispatches_sync_newer(monkeypatch, capsys) -> None:

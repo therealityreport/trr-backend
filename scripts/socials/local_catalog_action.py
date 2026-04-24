@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 SUPPORTED_SOURCE_SCOPES = ("bravo", "creator", "community")
 SUPPORTED_ACTIONS = ("backfill", "sync_recent", "sync_newer", "fill_missing_posts", "fill_missing_photos")
+SUPPORTED_SELECTED_TASKS = ("post_details", "comments", "media")
 LOCAL_SCRIPT_LABEL = "local-script:local_catalog_action.py"
 
 
@@ -40,6 +41,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=SUPPORTED_ACTIONS,
         help="Catalog action to run locally",
     )
+    parser.add_argument(
+        "--selected-task",
+        dest="selected_tasks",
+        action="append",
+        choices=SUPPORTED_SELECTED_TASKS,
+        default=[],
+        help="Backfill task to run. Repeat for post_details, comments, and media.",
+    )
     return parser.parse_args(argv if argv is not None else sys.argv[1:])
 
 
@@ -61,16 +70,33 @@ def _inline_worker_id(platform: str) -> str:
     return f"local-script:catalog:{normalized}"
 
 
+def _payload_run_ids(payload: dict[str, Any]) -> list[str]:
+    ordered = [
+        str(payload.get("catalog_run_id") or "").strip(),
+        str(payload.get("comments_run_id") or "").strip(),
+        str(payload.get("run_id") or "").strip(),
+    ]
+    seen: set[str] = set()
+    run_ids: list[str] = []
+    for run_id in ordered:
+        if not run_id or run_id in seen:
+            continue
+        seen.add(run_id)
+        run_ids.append(run_id)
+    return run_ids
+
+
 def _execute_run(payload: dict[str, Any], worker_id: str, control_plane: Any) -> int:
-    run_id = str(payload.get("run_id") or "").strip()
-    if not run_id:
+    run_ids = _payload_run_ids(payload)
+    if not run_ids:
         print("Catalog action did not return a run_id.", file=sys.stderr)
         return 1
-    control_plane.execute_run_with_inline_worker_registration(
-        run_id,
-        worker_id=f"{worker_id}:1",
-    )
-    print(json.dumps({"run_id": run_id, "status": "completed"}, sort_keys=True))
+    for index, run_id in enumerate(run_ids, start=1):
+        control_plane.execute_run_with_inline_worker_registration(
+            run_id,
+            worker_id=f"{worker_id}:{index}",
+        )
+    print(json.dumps({"run_id": run_ids[0], "executed_run_ids": run_ids, "status": "completed"}, sort_keys=True))
     return 0
 
 
@@ -82,9 +108,23 @@ def _start_backfill(
     source_scope: str,
     worker_id: str,
     scope: str,
+    selected_tasks: list[str] | None = None,
     date_start: str | None = None,
     date_end: str | None = None,
 ) -> dict[str, Any]:
+    normalized_selected_tasks = [str(task).strip() for task in (selected_tasks or []) if str(task).strip()]
+    if normalized_selected_tasks:
+        return analytics_repo.launch_social_account_catalog_backfill(
+            platform=platform,
+            account_handle=account,
+            source_scope=source_scope,
+            date_start=date_start,
+            date_end=date_end,
+            initiated_by=LOCAL_SCRIPT_LABEL,
+            inline_worker_id=worker_id,
+            allow_local_dev_inline_bypass=True,
+            selected_tasks=normalized_selected_tasks,
+        )
     return analytics_repo.start_social_account_catalog_backfill(
         platform=platform,
         account_handle=account,
@@ -167,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_scope=args.source_scope,
                 worker_id=worker_id,
                 scope="full_history",
+                selected_tasks=list(getattr(args, "selected_tasks", []) or []),
             )
         elif args.action == "sync_recent":
             payload = analytics_repo.sync_recent_social_account_catalog(

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import socket
 import subprocess
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from trr_backend.repositories import social_season_analytics as social_repo
@@ -216,6 +218,85 @@ def _open_socialblade_repair_tab(cdp_url: str) -> bool:
         return False
 
 
+def _cdp_http_json(cdp_url: str, path: str, *, method: str = "GET") -> dict[str, Any]:
+    parsed = urlparse(cdp_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError("Invalid Chrome CDP URL")
+
+    request = Request(
+        f"{parsed.scheme}://{parsed.netloc}{path}",
+        method=method,
+    )
+    with urlopen(request, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def _cdp_send_command(websocket: Any, command_id: int, method: str, params: dict[str, Any] | None = None) -> Any:
+    await websocket.send(json.dumps({"id": command_id, "method": method, "params": params or {}}))
+    while True:
+        message = json.loads(await websocket.recv())
+        if message.get("id") != command_id:
+            continue
+        if message.get("error"):
+            raise RuntimeError(str(message["error"].get("message") or message["error"]))
+        return message.get("result")
+
+
+async def _export_socialblade_cookies_via_cdp_protocol_async(cdp_url: str) -> dict[str, str]:
+    import websockets
+
+    validation_url = _socialblade_validation_url()
+    target = _cdp_http_json(cdp_url, f"/json/new?{quote(validation_url, safe=':/?&=%')}", method="PUT")
+    target_id = str(target.get("id") or "").strip()
+    websocket_url = str(target.get("webSocketDebuggerUrl") or "").strip()
+    if not websocket_url:
+        raise RuntimeError("Managed Chrome did not expose a page websocket for SocialBlade cookie export")
+
+    try:
+        async with websockets.connect(websocket_url, open_timeout=10, close_timeout=2) as websocket:
+            command_id = 1
+            await _cdp_send_command(websocket, command_id, "Page.enable")
+            command_id += 1
+            await _cdp_send_command(websocket, command_id, "Network.enable")
+            command_id += 1
+            await asyncio.sleep(3)
+            body_result = await _cdp_send_command(
+                websocket,
+                command_id,
+                "Runtime.evaluate",
+                {
+                    "expression": "document.body ? document.body.innerText : ''",
+                    "returnByValue": True,
+                },
+            )
+            command_id += 1
+            body_text = str(((body_result or {}).get("result") or {}).get("value") or "")
+            if _body_text_matches_access_denied(body_text):
+                raise RuntimeError("Managed Chrome SocialBlade session is blocked by Cloudflare")
+
+            cookie_result = await _cdp_send_command(
+                websocket,
+                command_id,
+                "Network.getCookies",
+                {"urls": [validation_url]},
+            )
+            cookies = cookie_payload(cookie_result.get("cookies") or [], domains=SOCIALBLADE_COOKIE_DOMAINS)
+            if not cookies.get("cf_clearance"):
+                raise RuntimeError("Managed Chrome does not have a usable SocialBlade Cloudflare clearance cookie")
+            write_cookie_file(socialblade_cookie_file_path(), cookies)
+            return cookies
+    finally:
+        if target_id:
+            try:
+                _cdp_http_json(cdp_url, f"/json/close/{target_id}")
+            except Exception:
+                pass
+
+
+def _export_socialblade_cookies_via_cdp_protocol(cdp_url: str) -> dict[str, str]:
+    return asyncio.run(_export_socialblade_cookies_via_cdp_protocol_async(cdp_url))
+
+
 def _render_visible_cookie_refresh_error(exc: Exception, *, cdp_url: str, auto_launched: bool) -> str:
     detail = str(exc).strip() or type(exc).__name__
     if "usable SocialBlade Cloudflare clearance cookie" in detail or "blocked by Cloudflare" in detail:
@@ -244,29 +325,46 @@ def export_socialblade_cookies_from_shared_chrome(*, cdp_url: str | None = None)
 
     resolved_cdp_url = cdp_url or _socialblade_shared_chrome_cdp_url()
     validation_url = _socialblade_validation_url()
+    use_cdp_protocol_fallback = False
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.connect_over_cdp(resolved_cdp_url)
         try:
-            if not browser.contexts:
-                raise RuntimeError("Managed Chrome did not expose any browser contexts")
-            context = browser.contexts[0]
-            page = context.new_page()
+            browser = playwright.chromium.connect_over_cdp(resolved_cdp_url)
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc)
+            if "Browser.setDownloadBehavior" in detail or "context management is not supported" in detail:
+                use_cdp_protocol_fallback = True
+                browser = None
+            else:
+                raise
+        if browser is not None:
             try:
-                page.goto(validation_url, wait_until="domcontentloaded", timeout=45_000)
-                page.wait_for_timeout(3_000)
-                body_text = _body_text(page)
-                if _body_text_matches_access_denied(body_text):
-                    raise RuntimeError("Managed Chrome SocialBlade session is blocked by Cloudflare")
-                cookies = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
-                if not cookies.get("cf_clearance"):
-                    raise RuntimeError("Managed Chrome does not have a usable SocialBlade Cloudflare clearance cookie")
-                write_cookie_file(socialblade_cookie_file_path(), cookies)
-                return cookies
+                if not browser.contexts:
+                    raise RuntimeError("Managed Chrome did not expose any browser contexts")
+                context = browser.contexts[0]
+                page = context.new_page()
+                try:
+                    page.goto(validation_url, wait_until="domcontentloaded", timeout=45_000)
+                    page.wait_for_timeout(3_000)
+                    body_text = _body_text(page)
+                    if _body_text_matches_access_denied(body_text):
+                        raise RuntimeError("Managed Chrome SocialBlade session is blocked by Cloudflare")
+                    cookies = cookie_payload(context.cookies(), domains=SOCIALBLADE_COOKIE_DOMAINS)
+                    if not cookies.get("cf_clearance"):
+                        raise RuntimeError(
+                            "Managed Chrome does not have a usable SocialBlade Cloudflare clearance cookie"
+                        )
+                    write_cookie_file(socialblade_cookie_file_path(), cookies)
+                    return cookies
+                finally:
+                    page.close()
             finally:
-                page.close()
-        finally:
-            browser.close()
+                browser.close()
+
+    if use_cdp_protocol_fallback:
+        return _export_socialblade_cookies_via_cdp_protocol(resolved_cdp_url)
+
+    raise RuntimeError("Managed Chrome cookie export failed")
 
 
 def refresh_socialblade_cookies(

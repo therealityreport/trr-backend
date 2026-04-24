@@ -280,6 +280,30 @@ def test_build_total_followers_chart_from_daily_deltas_reconstructs_totals() -> 
     }
 
 
+def test_followers_chart_from_table_accepts_spaced_weekday_dates() -> None:
+    chart = _followers_chart_from_table(
+        {
+            "headers": ["Date", "Followers Total"],
+            "data": [
+                {"Date": "Sat 2026-04-11", "Followers Total": "171,945"},
+                {"Date": "Sun 2026-04-12", "Followers Total": "171,999"},
+            ],
+        },
+        metric_label="Followers",
+    )
+
+    assert chart == {
+        "frequency": "daily",
+        "metric": "total_followers",
+        "total_data_points": 2,
+        "date_range": {"from": "2026-04-11", "to": "2026-04-12"},
+        "data": [
+            {"date": "2026-04-11", "followers": 171945},
+            {"date": "2026-04-12", "followers": 171999},
+        ],
+    }
+
+
 def test_scrape_context_retries_412_in_visible_shared_browser(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyContext:
         def add_init_script(self, _script: str) -> None:
@@ -343,6 +367,46 @@ def test_scrape_context_retries_412_in_visible_shared_browser(monkeypatch: pytes
         "username": "heathergay",
         "platform": "instagram",
         "history_source": "authenticated_api",
+        "stats_refreshed": True,
+    }
+
+
+def test_scrape_socialblade_uses_visible_browser_retry_when_scrapling_page_data_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_scrapling(*_args, **_kwargs):
+        raise RuntimeError("SocialBlade scrape failed: incomplete profile stats or daily metrics data")
+
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._run_scrapling_socialblade_fetch",
+        fake_run_scrapling,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper.scrape_socialblade_with_shared_browser_session",
+        lambda handle, platform="instagram", playwright=None: {
+            "username": handle,
+            "platform": platform,
+            "history_source": "visible_browser",
+            "stats_refreshed": True,
+        },
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._refresh_socialblade_cookies_via_login",
+        lambda: (_ for _ in ()).throw(AssertionError("login fallback should not run before visible retry")),
+    )
+
+    payload = scrape_socialblade(
+        "thetraitorsus",
+        {"cf_clearance": "token"},
+        platform="instagram",
+        allow_login_fallback=True,
+        allow_visible_browser_retry=True,
+    )
+
+    assert payload == {
+        "username": "thetraitorsus",
+        "platform": "instagram",
+        "history_source": "visible_browser",
         "stats_refreshed": True,
     }
 
