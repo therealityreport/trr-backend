@@ -55552,6 +55552,7 @@ def start_social_account_comments_scrape(
     allow_local_dev_inline_bypass: bool = False,
     comments_enable_media_followups: bool = False,
     launch_group_id: str | None = None,
+    dispatch_immediately: bool = True,
 ) -> dict[str, Any]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -55712,7 +55713,7 @@ def start_social_account_comments_scrape(
                 worker_id=inline_worker_id,
                 preclaim=bool(inline_worker_id),
             )
-            if queue_enabled:
+            if queue_enabled and dispatch_immediately:
                 dispatch_due_social_jobs(run_id=run_id)
             return {
                 "run_id": run_id,

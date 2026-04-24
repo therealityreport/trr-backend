@@ -4699,6 +4699,91 @@ def test_post_social_account_comments_scrape_accepts_all_saved_posts_profile_syn
     assert scrape_mock.call_args.kwargs["max_posts"] is None
     assert scrape_mock.call_args.kwargs["max_comments_per_post"] is None
     assert scrape_mock.call_args.kwargs["refresh_policy"] == "all_saved_posts"
+    assert scrape_mock.call_args.kwargs["dispatch_immediately"] is True
+
+
+def test_post_social_account_comments_scrape_queue_dispatches_in_background(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            return_value={
+                "queue_enabled": True,
+                "used_inline_fallback": False,
+                "requires_modal_executor": True,
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            return_value={"run_id": "comments-run-queued-1", "status": "queued"},
+        ) as scrape_mock,
+        patch(
+            "trr_backend.repositories.social_season_analytics._dispatch_due_social_jobs_in_background"
+        ) as dispatch_mock,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"mode": "profile", "source_scope": "bravo", "refresh_policy": "all_saved_posts"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "comments-run-queued-1"
+    scrape_mock.assert_called_once()
+    assert scrape_mock.call_args.kwargs["dispatch_immediately"] is False
+    dispatch_mock.assert_called_once_with(run_id="comments-run-queued-1")
+
+
+def test_post_social_account_comments_scrape_background_dispatch_exception_keeps_response_200(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    class SynchronousThread:
+        def __init__(self, *, target: Any, name: str | None = None, daemon: bool | None = None) -> None:
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            self._target()
+
+    with (
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            return_value={
+                "queue_enabled": True,
+                "used_inline_fallback": False,
+                "requires_modal_executor": True,
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            return_value={"run_id": "comments-run-queued-2", "status": "queued"},
+        ) as scrape_mock,
+        patch(
+            "trr_backend.repositories.social_season_analytics.dispatch_due_social_jobs",
+            side_effect=RuntimeError("dispatch failed"),
+        ) as dispatch_mock,
+        patch("trr_backend.repositories.social_season_analytics.Thread", SynchronousThread),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"mode": "profile", "source_scope": "bravo", "refresh_policy": "all_saved_posts"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "comments-run-queued-2"
+    assert scrape_mock.call_args.kwargs["dispatch_immediately"] is False
+    dispatch_mock.assert_called_once_with(run_id="comments-run-queued-2")
 
 
 def test_ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled(

@@ -4527,6 +4527,7 @@ async def post_social_account_comments_scrape_route(
         SocialIngestConflictError,
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
+        _dispatch_due_social_jobs_in_background,
         start_social_account_comments_scrape,
     )
 
@@ -4551,8 +4552,11 @@ async def post_social_account_comments_scrape_route(
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:comments:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
+            dispatch_immediately=not queue_enabled,
         )
         _clear_account_profile_caches()
+        if queue_enabled and result.get("run_id"):
+            background_tasks.add_task(_dispatch_due_social_jobs_in_background, run_id=str(result["run_id"]))
         if not queue_enabled and result.get("run_id"):
             _start_runs_in_background(
                 [str(result["run_id"])],

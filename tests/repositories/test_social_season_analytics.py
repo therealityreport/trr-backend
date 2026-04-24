@@ -5539,6 +5539,72 @@ def test_start_social_account_comments_scrape_uses_modal_execution_backend_witho
     assert dispatch_calls == [{"run_id": "comments-run-1"}]
 
 
+def test_start_social_account_comments_scrape_can_defer_queue_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_runs: list[dict[str, Any]] = []
+    created_jobs: list[dict[str, Any]] = []
+    dispatch_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one_with_cursor",
+        lambda *_args, **kwargs: (
+            {"locked": True}
+            if "pg_try_advisory_lock" in (kwargs.get("query") or (_args[1] if len(_args) > 1 else ""))
+            else {"unlocked": True}
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "get_active_social_account_comments_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(social_repo, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_comment_target_shortcodes",
+        lambda *_args, **_kwargs: ["C123"],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: created_runs.append(dict(kwargs.get("config") or {})) or "comments-run-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs.get("config") or {})) or "comments-job-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "dispatch_due_social_jobs",
+        lambda **kwargs: dispatch_calls.append(dict(kwargs)) or {"dispatched_job_ids": []},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "assert_worker_available_when_queue_enabled",
+        lambda **_kwargs: None,
+    )
+
+    payload = social_repo.start_social_account_comments_scrape(
+        "instagram",
+        "bravotv",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+        dispatch_immediately=False,
+    )
+
+    assert payload["run_id"] == "comments-run-1"
+    assert payload["required_worker_lane"] is None
+    assert payload["required_execution_backend"] == "modal"
+    assert created_runs[0]["required_worker_lane"] is None
+    assert created_runs[0]["required_execution_backend"] == "modal"
+    assert created_jobs[0]["required_worker_lane"] is None
+    assert created_jobs[0]["required_execution_backend"] == "modal"
+    assert dispatch_calls == []
+
+
 def test_ingest_shared_accounts_instagram_details_refresh_only_creates_direct_posts_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
