@@ -346,7 +346,7 @@ def _start_runs_in_background(
     background_tasks.add_task(_runner)
 
 
-def _start_catalog_backfill_finalize_in_background(
+def _finalize_catalog_backfill_launch_task(
     *,
     platform: str,
     account_handle: str,
@@ -370,7 +370,7 @@ def _start_catalog_backfill_finalize_in_background(
     if not normalized_run_id:
         return
 
-    def _runner() -> None:
+    try:
         logger.info(
             "[catalog-launch] finalize_start platform=%s account=%s run_id=%s launch_group_id=%s",
             normalized_platform,
@@ -378,36 +378,64 @@ def _start_catalog_backfill_finalize_in_background(
             normalized_run_id,
             normalized_launch_group_id,
         )
-        try:
-            finalize_social_account_catalog_backfill_launch(
-                platform=normalized_platform,
-                account_handle=normalized_account,
-                run_id=normalized_run_id,
-                source_scope=source_scope,
-                date_start=date_start,
-                date_end=date_end,
-                initiated_by=initiated_by,
-                allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
-                execution_preference=execution_preference,
-                selected_tasks=selected_tasks,
-                launch_group_id=normalized_launch_group_id,
-            )
-            _clear_account_profile_caches()
-        except Exception:  # noqa: BLE001
-            _clear_account_profile_caches()
-            logger.exception(
-                "[catalog-launch] finalize_thread_failed platform=%s account=%s run_id=%s launch_group_id=%s",
-                normalized_platform,
-                normalized_account,
-                normalized_run_id,
-                normalized_launch_group_id,
-            )
+        finalize_social_account_catalog_backfill_launch(
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            run_id=normalized_run_id,
+            source_scope=source_scope,
+            date_start=date_start,
+            date_end=date_end,
+            initiated_by=initiated_by,
+            allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
+            execution_preference=execution_preference,
+            selected_tasks=selected_tasks,
+            launch_group_id=normalized_launch_group_id,
+        )
+    except Exception:
+        logger.exception(
+            "[catalog-launch] finalize_background_task_failed platform=%s account=%s run_id=%s launch_group_id=%s",
+            normalized_platform,
+            normalized_account,
+            normalized_run_id,
+            normalized_launch_group_id,
+        )
+        raise
+    finally:
+        _clear_account_profile_caches()
 
-    Thread(
-        target=_runner,
-        name=f"catalog-finalize:{normalized_platform}:{normalized_account[:24]}",
-        daemon=True,
-    ).start()
+
+def _queue_catalog_backfill_finalize_task(
+    *,
+    background_tasks: BackgroundTasks,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+    source_scope: str,
+    date_start: datetime | None,
+    date_end: datetime | None,
+    initiated_by: str | None,
+    allow_local_dev_inline_bypass: bool,
+    execution_preference: str,
+    selected_tasks: list[str] | None,
+    launch_group_id: str | None,
+) -> None:
+    if not str(run_id or "").strip():
+        return
+
+    background_tasks.add_task(
+        _finalize_catalog_backfill_launch_task,
+        platform=platform,
+        account_handle=account_handle,
+        run_id=run_id,
+        source_scope=source_scope,
+        date_start=date_start,
+        date_end=date_end,
+        initiated_by=initiated_by,
+        allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
+        execution_preference=execution_preference,
+        selected_tasks=selected_tasks,
+        launch_group_id=launch_group_id,
+    )
 
 
 def _cancel_catalog_run_in_background(
@@ -4282,6 +4310,37 @@ def get_social_account_profile_socialblade_route(
     return data
 
 
+def _refresh_social_account_profile_socialblade(
+    *,
+    normalized_platform: str,
+    safe_handle: str,
+    force: bool,
+) -> dict[str, Any]:
+    from trr_backend.socials.socialblade.auth import (
+        load_socialblade_cookies_from_sources,
+        refresh_socialblade_cookies,
+    )
+    from trr_backend.socials.socialblade.scraper import scrape_socialblade
+    from trr_backend.socials.socialblade.service import refresh_and_persist_socialblade
+
+    refresh_socialblade_cookies("account_page_refresh", allow_headless_fallback=False)
+    cookies = load_socialblade_cookies_from_sources()
+    return refresh_and_persist_socialblade(
+        person_id=None,
+        platform=normalized_platform,
+        handle=safe_handle,
+        scraper=lambda normalized_handle: scrape_socialblade(
+            normalized_handle,
+            cookies,
+            platform=normalized_platform,
+            allow_login_fallback=False,
+            allow_visible_browser_retry=normalized_platform == "instagram",
+        ),
+        source="account_page",
+        force=force,
+    )
+
+
 @router.post("/profiles/{platform}/{account_handle}/socialblade/refresh")
 async def refresh_social_account_profile_socialblade_route(
     platform: str,
@@ -4289,14 +4348,8 @@ async def refresh_social_account_profile_socialblade_route(
     body: SocialBladeProfileRefreshRequest,
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    from trr_backend.socials.socialblade.auth import (
-        load_socialblade_cookies_from_sources,
-        refresh_socialblade_cookies,
-    )
-    from trr_backend.socials.socialblade.scraper import scrape_socialblade
     from trr_backend.socials.socialblade.service import (
         SocialBladeRefreshError,
-        refresh_and_persist_socialblade,
         sanitize_socialblade_handle,
         sanitize_socialblade_platform,
     )
@@ -4310,21 +4363,10 @@ async def refresh_social_account_profile_socialblade_route(
         raise HTTPException(status_code=400, detail="Invalid handle")
 
     try:
-        refresh_socialblade_cookies("account_page_refresh", allow_headless_fallback=False)
-        cookies = load_socialblade_cookies_from_sources()
         return await run_in_threadpool(
-            refresh_and_persist_socialblade,
-            person_id=None,
-            platform=normalized_platform,
-            handle=safe_handle,
-            scraper=lambda normalized_handle: scrape_socialblade(
-                normalized_handle,
-                cookies,
-                platform=normalized_platform,
-                allow_login_fallback=normalized_platform == "instagram",
-                allow_visible_browser_retry=normalized_platform == "instagram",
-            ),
-            source="account_page",
+            _refresh_social_account_profile_socialblade,
+            normalized_platform=normalized_platform,
+            safe_handle=safe_handle,
             force=body.force,
         )
     except SocialBladeRefreshError as exc:
@@ -5170,7 +5212,8 @@ async def post_social_account_catalog_backfill_route(
                 execution_preference=payload.execution_preference,
                 selected_tasks=payload.selected_tasks,
             )
-            _start_catalog_backfill_finalize_in_background(
+            _queue_catalog_backfill_finalize_task(
+                background_tasks=background_tasks,
                 platform=platform,
                 account_handle=account_handle,
                 run_id=str(result.get("run_id") or ""),

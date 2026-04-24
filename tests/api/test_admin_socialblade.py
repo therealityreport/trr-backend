@@ -286,7 +286,11 @@ def test_account_socialblade_refresh_route_uses_platform_specific_scraper(monkey
 
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(auth_module, "refresh_socialblade_cookies", lambda *args, **kwargs: {"cf_clearance": "token"})
+    def fake_refresh_cookies(*args, **kwargs):
+        captured["cookie_refresh_threadpool_started"] = "threadpool_func" in captured
+        return {"cf_clearance": "token"}
+
+    monkeypatch.setattr(auth_module, "refresh_socialblade_cookies", fake_refresh_cookies)
     monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
 
     def fake_scrape_socialblade(
@@ -333,8 +337,14 @@ def test_account_socialblade_refresh_route_uses_platform_specific_scraper(monkey
 
     assert response.status_code == 200
     assert response.json()["platform"] == "youtube"
-    assert captured["threadpool_func"] is fake_refresh_and_persist_socialblade
+    assert captured["threadpool_func"] is router_module._refresh_social_account_profile_socialblade
     assert captured["threadpool_kwargs"] == {
+        "normalized_platform": "youtube",
+        "safe_handle": "bravo",
+        "force": True,
+    }
+    assert captured["cookie_refresh_threadpool_started"] is True
+    assert captured["refresh_kwargs"] == {
         "person_id": None,
         "platform": "youtube",
         "handle": "bravo",
@@ -348,6 +358,67 @@ def test_account_socialblade_refresh_route_uses_platform_specific_scraper(monkey
         "platform": "youtube",
         "allow_login_fallback": False,
         "allow_visible_browser_retry": False,
+    }
+
+
+def test_account_socialblade_refresh_route_uses_visible_retry_without_login_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.routers.socials as router_module
+    import trr_backend.socials.socialblade.auth as auth_module
+    import trr_backend.socials.socialblade.scraper as scraper_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(auth_module, "refresh_socialblade_cookies", lambda *args, **kwargs: {"cf_clearance": "token"})
+    monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
+
+    def fake_scrape_socialblade(
+        handle: str,
+        cookies,
+        *,
+        platform: str,
+        allow_login_fallback: bool,
+        allow_visible_browser_retry: bool,
+    ):
+        captured["scraper"] = {
+            "handle": handle,
+            "cookies": cookies,
+            "platform": platform,
+            "allow_login_fallback": allow_login_fallback,
+            "allow_visible_browser_retry": allow_visible_browser_retry,
+        }
+        return {
+            "username": handle,
+            "account_handle": handle,
+            "platform": platform,
+            "scraped_at": "2026-04-08T12:00:00Z",
+        }
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        return kwargs["scraper"](kwargs["handle"])
+
+    async def fake_run_in_threadpool(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(scraper_module, "scrape_socialblade", fake_scrape_socialblade)
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(router_module, "run_in_threadpool", fake_run_in_threadpool)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/socials/profiles/instagram/@thetraitorsus/socialblade/refresh",
+        json={"force": True},
+    )
+
+    assert response.status_code == 200
+    assert captured["scraper"] == {
+        "handle": "thetraitorsus",
+        "cookies": {"cf_clearance": "token"},
+        "platform": "instagram",
+        "allow_login_fallback": False,
+        "allow_visible_browser_retry": True,
     }
 
 

@@ -60,7 +60,15 @@ def response_text(response: Any) -> str:
             return str(text() or "")
         except Exception:  # noqa: BLE001
             return ""
-    return str(text or "")
+    if text:
+        return str(text)
+
+    body = getattr(response, "body", None)
+    if isinstance(body, bytes):
+        return body.decode("utf-8", errors="replace")
+    if isinstance(body, str):
+        return body
+    return ""
 
 
 def status_code(response: Any) -> int:

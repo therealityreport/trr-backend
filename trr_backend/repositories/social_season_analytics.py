@@ -27720,26 +27720,52 @@ def _catalog_recent_runs(
               from social.scrape_runs r
               where coalesce(r.config->>'pipeline_ingest_mode', '') = %s
                 and {run_failure_not_dismissed_sql}
-                and exists (
-                  select 1
-                  from social.scrape_jobs j
-                  where j.run_id = r.id
-                    and j.platform = %s
+                and (
+                  exists (
+                    select 1
+                    from social.scrape_jobs j
+                    where j.run_id = r.id
+                      and j.platform = %s
+                      and lower(
+                        coalesce(
+                          nullif(j.config->>'account', ''),
+                          nullif(j.metadata->>'account', ''),
+                          ''
+                        )
+                      ) = %s
+                      and lower(
+                        coalesce(
+                          nullif(j.config->>'stage', ''),
+                          nullif(j.metadata->>'stage', ''),
+                          nullif(j.job_type, ''),
+                          'unknown'
+                        )
+                      ) = any(%s::text[])
+                  )
+                  or (
+                    (
+                      lower(coalesce(r.config->>'launch_state', '')) = 'pending'
+                      or lower(coalesce(r.config->>'launch_task_resolution_pending', 'false')) = 'true'
+                    )
                     and lower(
                       coalesce(
-                        nullif(j.config->>'account', ''),
-                        nullif(j.metadata->>'account', ''),
+                        nullif(r.config->>'platform', ''),
+                        nullif(r.config->'platforms'->>0, ''),
                         ''
                       )
                     ) = %s
-                    and lower(
-                      coalesce(
-                        nullif(j.config->>'stage', ''),
-                        nullif(j.metadata->>'stage', ''),
-                        nullif(j.job_type, ''),
-                        'unknown'
-                      )
-                    ) = any(%s::text[])
+                    and ltrim(
+                      lower(
+                        coalesce(
+                          nullif(r.config->>'account_handle', ''),
+                          nullif(r.config->>'account', ''),
+                          nullif(r.config->'accounts_override'->>0, ''),
+                          ''
+                        )
+                      ),
+                      '@'
+                    ) = %s
+                  )
                 )
             )
             select
@@ -27814,19 +27840,49 @@ def _catalog_recent_runs(
             list(ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES),
             normalized_platform,
             normalized_account,
+            normalized_platform,
+            normalized_account,
             list(ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES),
             normalized_platform,
             normalized_account,
             list(ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES),
             safe_limit,
         ]
-        if conn is None:
-            rows = pg.fetch_all(sql, params)
-        else:
+        def _fetch_recent_rows() -> list[dict[str, Any]]:
+            if conn is None:
+                return [dict(row) for row in pg.fetch_all(sql, params)]
             with pg.db_cursor(conn=conn, label="catalog_recent_runs") as cur:
-                rows = pg.fetch_all_with_cursor(cur, sql, params)
+                return [dict(row) for row in pg.fetch_all_with_cursor(cur, sql, params)]
 
-        normalized_rows = [dict(row) for row in rows]
+        normalized_rows = _fetch_recent_rows()
+        pending_without_jobs: list[dict[str, Any]] = []
+        for row in normalized_rows:
+            if str(row.get("job_id") or "").strip():
+                continue
+            run_config = _metadata_dict(row.get("run_config"))
+            launch_state = str(run_config.get("launch_state") or "").strip().lower()
+            task_pending = _catalog_launch_task_resolution_pending(run_config.get("launch_task_resolution_pending"))
+            if launch_state == "finalizing" and not _catalog_launch_finalizing_is_stale(run_config):
+                continue
+            if launch_state == "pending" or task_pending:
+                pending_without_jobs.append(row)
+        if pending_without_jobs:
+            for row in pending_without_jobs:
+                try:
+                    recover_pending_social_account_catalog_launch(
+                        platform=normalized_platform,
+                        account_handle=normalized_account,
+                        run_id=str(row.get("run_id") or "").strip(),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "[catalog-launch] recent_runs_recovery_failed platform=%s account=%s run_id=%s",
+                        normalized_platform,
+                        normalized_account,
+                        str(row.get("run_id") or "").strip() or None,
+                        exc_info=True,
+                    )
+            normalized_rows = _fetch_recent_rows()
         preloaded_run_ids: set[str] = set()
         preloaded_job_ids: set[str] = set()
         preloaded_media_run_ids: set[str] = set()
@@ -28034,6 +28090,90 @@ def _load_social_account_catalog_progress_rows(
 ) -> list[dict[str, Any]]:
     del run_id, platform, account_handle
     return []
+
+
+def _repair_finalizing_catalog_launch_after_jobs(
+    *,
+    run_row: Mapping[str, Any],
+    job_rows: Sequence[Mapping[str, Any]],
+    platform: str,
+    account_handle: str,
+) -> dict[str, Any] | None:
+    if not job_rows:
+        return None
+    run_config = _metadata_dict(run_row.get("config"))
+    launch_state = str(run_config.get("launch_state") or "").strip().lower()
+    if launch_state != "finalizing" or not _catalog_launch_task_resolution_pending(
+        run_config.get("launch_task_resolution_pending")
+    ):
+        return None
+
+    run_id = str(run_row.get("run_id") or run_row.get("id") or "").strip()
+    if not run_id:
+        return None
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    selected_tasks = _normalize_optional_social_account_catalog_backfill_selected_tasks(run_config.get("selected_tasks"))
+    effective_selected_tasks = (
+        _normalize_optional_social_account_catalog_backfill_selected_tasks(run_config.get("effective_selected_tasks"))
+        or selected_tasks
+    )
+    launch_group_id = str(run_config.get("launch_group_id") or "").strip() or None
+    source_scope = str(run_config.get("source_scope") or run_row.get("source_scope") or "bravo").strip() or "bravo"
+    attached_followups = _normalize_attached_followups(run_config.get("attached_followups"))
+    metadata_updates: dict[str, Any] = {
+        "launch_state": "ready",
+        "launch_task_resolution_pending": False,
+        "launch_completed_at": _iso(_now_utc()),
+        "selected_tasks": selected_tasks,
+        "effective_selected_tasks": effective_selected_tasks,
+    }
+
+    if "comments" in effective_selected_tasks and not attached_followups.get("comments"):
+        deferred_comments_followup = {
+            "state": "pending",
+            "platform": normalized_platform,
+            "account_handle": normalized_account,
+            "source_scope": source_scope,
+            "refresh_policy": "all_saved_posts",
+            "comments_enable_media_followups": "media" in effective_selected_tasks,
+            "allow_local_dev_inline_bypass": bool(run_config.get("allow_local_dev_inline_bypass")),
+            "launch_group_id": launch_group_id,
+            "runtime_version": _metadata_dict(run_config.get("required_runtime_version"))
+            or dict(_resolve_effective_runtime_version(required_execution_backend="modal")),
+            "created_by_runtime_version": _metadata_dict(run_config.get("created_by_runtime_version"))
+            or dict(_resolve_runtime_version_stamp()),
+        }
+        metadata_updates["deferred_comments_followup"] = deferred_comments_followup
+        attached_followups["comments"] = _build_attached_comments_followup(
+            run_id=None,
+            status="pending",
+            source="deferred_after_catalog",
+            state="pending",
+        )
+    if "media" in effective_selected_tasks and launch_group_id and not attached_followups.get("media"):
+        attached_followups["media"] = _build_attached_media_followup(
+            attachment_id=_catalog_media_attachment_id(launch_group_id),
+            source="catalog_media_mirror",
+            status=_derive_run_progress_status(run_row.get("status"), job_rows),
+        )
+    if attached_followups:
+        metadata_updates["attached_followups"] = attached_followups
+
+    merged = _merge_catalog_run_config(run_id=run_id, metadata_updates=metadata_updates)
+    merged_config = _metadata_dict(merged.get("config"))
+    logger.info(
+        (
+            "[catalog-launch] finalizing_metadata_repaired platform=%s account=%s run_id=%s "
+            "job_count=%s effective_selected_tasks=%s"
+        ),
+        normalized_platform,
+        normalized_account,
+        run_id,
+        len(job_rows),
+        effective_selected_tasks,
+    )
+    return merged_config or {**run_config, **metadata_updates}
 
 
 def _shared_account_run_partitions_table_ready() -> bool:
@@ -39599,7 +39739,57 @@ def get_social_account_catalog_run_progress(
         features=features,
     )
     if not job_rows:
-        raise ValueError("run_not_found")
+        recovery_result = recover_pending_social_account_catalog_launch(
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            run_id=run_id,
+        )
+        if bool(recovery_result.get("recovered")):
+            try:
+                run_row = _load_social_account_catalog_run_row(
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    run_id=run_id,
+                )
+            except LookupError as exc:
+                raise ValueError("run_not_found") from exc
+            run_config = _metadata_dict(run_row.get("config"))
+            job_rows = _load_social_account_catalog_jobs(
+                run_id=run_id,
+                platform=normalized_platform,
+                account_handle=normalized_account,
+                features=features,
+            )
+        if not job_rows:
+            run_config = _metadata_dict(run_row.get("config"))
+            launch_state = str(run_config.get("launch_state") or "").strip().lower()
+            no_work_reason = str(run_config.get("no_work_reason") or "").strip()
+            recovery_reason = str(recovery_result.get("reason") or "").strip().lower()
+            if (
+                launch_state == "completed_no_work"
+                or no_work_reason
+                or (recovery_reason == "finalize_in_progress" and launch_state == "finalizing")
+            ):
+                return _build_terminal_catalog_run_progress_payload(
+                    run_row=run_row,
+                    job_rows=[],
+                    run_id=run_id,
+                    run_config=run_config,
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    recent_log_limit=safe_recent_log_limit,
+                )
+            raise ValueError("run_not_found")
+
+    repaired_run_config = _repair_finalizing_catalog_launch_after_jobs(
+        run_row=run_row,
+        job_rows=job_rows,
+        platform=normalized_platform,
+        account_handle=normalized_account,
+    )
+    if repaired_run_config:
+        run_config = repaired_run_config
+        run_row = {**dict(run_row), "config": run_config}
 
     computed_summary = _summarize_run_progress_job_rows(job_rows)
     single_target_run = (not configured_platforms or configured_platforms == {normalized_platform}) and (
@@ -56745,6 +56935,94 @@ def _shared_catalog_distinct_post_count(platform: str, account_handle: str) -> i
     return _normalize_non_negative_int((row or {}).get("total"))
 
 
+def _instagram_materialized_detail_gap_counts(
+    account_handle: str,
+    *,
+    date_start: datetime | None = None,
+    date_end: datetime | None = None,
+) -> dict[str, int]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    where_clauses = [
+        owner_match_clause,
+        "nullif(p.shortcode, '') is not null",
+    ]
+    params: list[Any] = [normalized_account]
+    if date_start is not None:
+        where_clauses.append("p.posted_at >= %s")
+        params.append(date_start)
+    if date_end is not None:
+        where_clauses.append("p.posted_at < %s")
+        params.append(date_end)
+
+    detail_success_terms: list[str] = []
+    if _instagram_posts_has_column("scraped_at"):
+        detail_success_terms.append("p.scraped_at is null")
+    if _instagram_posts_has_column("metadata_scraped_at"):
+        detail_success_terms.append("p.metadata_scraped_at is null")
+    if _instagram_posts_has_column("metadata_error"):
+        detail_success_terms.append("nullif(p.metadata_error, '') is not null")
+    missing_detail_refresh_success_expr = "(" + " or ".join(detail_success_terms or ["false"]) + ")"
+
+    detail_payload_terms = []
+    if _instagram_posts_has_column("scraped_at"):
+        detail_payload_terms.append("p.scraped_at is null")
+    if _instagram_posts_has_column("raw_data"):
+        detail_payload_terms.append("(p.raw_data is null or p.raw_data = '{}'::jsonb)")
+    missing_detail_payload_expr = "(" + " or ".join(detail_payload_terms or ["false"]) + ")"
+
+    media_terms: list[str] = []
+    if _instagram_posts_has_column("thumbnail_url"):
+        media_terms.append("nullif(p.thumbnail_url, '') is null")
+    if _instagram_posts_has_column("media_urls"):
+        media_terms.append(
+            """
+            coalesce(
+              jsonb_array_length(
+                case
+                  when jsonb_typeof(p.media_urls) = 'array' then p.media_urls
+                  else '[]'::jsonb
+                end
+              ),
+              0
+            ) = 0
+            """
+        )
+    missing_source_media_expr = "(" + " and ".join(media_terms or ["false"]) + ")"
+    needs_detail_refresh_expr = (
+        f"({missing_detail_refresh_success_expr} or {missing_detail_payload_expr} or {missing_source_media_expr})"
+    )
+
+    try:
+        row = pg.fetch_one(
+            f"""
+            select
+              count(*) filter (where {missing_detail_refresh_success_expr})::int
+                as posts_missing_detail_refresh_success,
+              count(*) filter (where {missing_detail_payload_expr})::int
+                as posts_missing_detail_payload,
+              count(*) filter (where {missing_source_media_expr})::int
+                as posts_missing_source_media,
+              count(*) filter (where {needs_detail_refresh_expr})::int
+                as posts_needing_detail_refresh
+            from social.instagram_posts p
+            where {" and ".join(where_clauses)}
+            """,
+            params,
+        )
+    except (psycopg_errors.UndefinedTable, psycopg_errors.UndefinedColumn):
+        row = {}
+    row = row or {}
+    return {
+        "posts_missing_detail_refresh_success": _normalize_non_negative_int(
+            row.get("posts_missing_detail_refresh_success")
+        ),
+        "posts_missing_detail_payload": _normalize_non_negative_int(row.get("posts_missing_detail_payload")),
+        "posts_missing_source_media": _normalize_non_negative_int(row.get("posts_missing_source_media")),
+        "posts_needing_detail_refresh": _normalize_non_negative_int(row.get("posts_needing_detail_refresh")),
+    }
+
+
 def _instagram_materialization_state(
     account_handle: str,
     *,
@@ -56768,13 +57046,20 @@ def _instagram_materialization_state(
         date_start=date_start,
         date_end=date_end,
     )
-    details_complete = catalog_posts > 0 and materialized_posts >= catalog_posts
+    detail_gap_counts = _instagram_materialized_detail_gap_counts(
+        normalized_account,
+        date_start=date_start,
+        date_end=date_end,
+    )
+    posts_needing_detail_refresh = _normalize_non_negative_int(detail_gap_counts.get("posts_needing_detail_refresh"))
+    details_complete = catalog_posts > 0 and materialized_posts >= catalog_posts and posts_needing_detail_refresh == 0
     bootstrap_required = catalog_posts == 0 or materialized_posts < catalog_posts
     return {
         "platform": "instagram",
         "account_handle": normalized_account,
         "catalog_posts": catalog_posts,
         "materialized_posts": materialized_posts,
+        "detail_gap_counts": detail_gap_counts,
         "details_complete": details_complete,
         "bootstrap_required": bootstrap_required,
     }
@@ -57373,6 +57658,101 @@ def _record_social_account_catalog_launch_failure(*, run_id: str, error_message:
     _set_run_status(normalized_run_id, "failed")
 
 
+_CATALOG_LAUNCH_FINALIZING_RECOVERY_GRACE_SECONDS = 120
+
+
+def _catalog_launch_task_resolution_pending(value: Any) -> bool:
+    return value is True or str(value or "").strip().lower() == "true"
+
+
+def _catalog_launch_finalizing_is_stale(run_config: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    started_at = _coerce_dt(run_config.get("launch_finalizing_started_at") or run_config.get("launch_started_at"))
+    if started_at is None:
+        return True
+    checked_at = now or _now_utc()
+    return (checked_at - started_at).total_seconds() >= _CATALOG_LAUNCH_FINALIZING_RECOVERY_GRACE_SECONDS
+
+
+@contextmanager
+def _catalog_launch_recovery_lock(platform: str, account_handle: str):
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    lock_key = _social_account_catalog_start_lock_key(normalized_platform, normalized_account)
+    lock_label = f"catalog-launch-recovery-lock:{normalized_platform}:{normalized_account[:48]}"
+    locked = False
+    with pg.db_connection(label=lock_label) as lock_conn:
+        try:
+            with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
+                lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
+            locked = bool(lock_row.get("locked"))
+            yield locked
+        finally:
+            if locked:
+                try:
+                    with pg.db_cursor(conn=lock_conn, label=f"{lock_label}:unlock") as cur:
+                        pg.fetch_one_with_cursor(cur, "select pg_advisory_unlock(%s) as unlocked", [lock_key])
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[catalog-launch] recovery advisory unlock failed for %s/%s",
+                        normalized_platform,
+                        normalized_account,
+                        exc_info=True,
+                    )
+
+
+def recover_pending_social_account_catalog_launch(
+    *,
+    platform: str,
+    account_handle: str,
+    run_id: str,
+) -> dict[str, Any]:
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return {"recovered": False, "reason": "missing_run_id"}
+
+    with _catalog_launch_recovery_lock(normalized_platform, normalized_account) as locked:
+        if not locked:
+            return {"recovered": False, "reason": "recovery_lock_busy", "run_id": normalized_run_id}
+        run_row = _load_social_account_catalog_run_row(
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            run_id=normalized_run_id,
+        )
+        run_config = _metadata_dict(run_row.get("config"))
+        task_pending = _catalog_launch_task_resolution_pending(run_config.get("launch_task_resolution_pending"))
+        launch_state = str(run_config.get("launch_state") or "").strip().lower()
+        if launch_state == "finalizing" and not _catalog_launch_finalizing_is_stale(run_config):
+            return {"recovered": False, "reason": "finalize_in_progress", "run_id": normalized_run_id}
+        if launch_state != "pending" and not task_pending:
+            return {"recovered": False, "reason": "not_pending", "run_id": normalized_run_id}
+
+        local_bypass_raw = run_config.get("allow_local_dev_inline_bypass")
+        local_bypass = local_bypass_raw is True or str(local_bypass_raw or "").strip().lower() == "true"
+        result = finalize_social_account_catalog_backfill_launch(
+            normalized_platform,
+            normalized_account,
+            run_id=normalized_run_id,
+            source_scope=str(run_config.get("source_scope") or run_row.get("source_scope") or "bravo").strip() or "bravo",
+            date_start=_coerce_dt(run_config.get("date_start")),
+            date_end=_coerce_dt(run_config.get("date_end")),
+            initiated_by="catalog_launch_recovery",
+            allow_local_dev_inline_bypass=local_bypass,
+            execution_preference=str(run_config.get("execution_preference") or "auto").strip().lower() or "auto",
+            selected_tasks=_normalize_optional_social_account_catalog_backfill_selected_tasks(
+                run_config.get("selected_tasks")
+            ),
+            launch_group_id=str(run_config.get("launch_group_id") or "").strip() or None,
+        )
+    return {
+        "recovered": True,
+        "reason": "finalized",
+        "run_id": normalized_run_id,
+        "result": result,
+    }
+
+
 def _reserve_social_account_catalog_launch(
     *,
     platform: str,
@@ -57808,6 +58188,14 @@ def finalize_social_account_catalog_backfill_launch(
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     started_at = time_module.perf_counter()
     try:
+        _merge_catalog_run_config(
+            run_id=run_id,
+            metadata_updates={
+                "launch_state": "finalizing",
+                "launch_task_resolution_pending": True,
+                "launch_finalizing_started_at": _iso(_now_utc()),
+            },
+        )
         result = launch_social_account_catalog_backfill(
             normalized_platform,
             normalized_account,
@@ -57842,6 +58230,56 @@ def finalize_social_account_catalog_backfill_launch(
             run_id,
         )
         raise
+
+
+def _complete_catalog_launch_no_work(
+    *,
+    run_id: str | None,
+    platform: str,
+    account_handle: str,
+    launch_group_id: str | None,
+    selected_tasks: Sequence[Any] | None,
+    effective_selected_tasks: Sequence[Any] | None,
+    post_details_skipped_reason: str | None,
+) -> dict[str, Any]:
+    normalized_run_id = str(run_id or "").strip() or None
+    normalized_platform = _normalize_social_account_profile_platform(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    normalized_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(selected_tasks)
+    normalized_effective_tasks = _normalize_optional_social_account_catalog_backfill_selected_tasks(
+        effective_selected_tasks
+    )
+    metadata_updates = {
+        "launch_state": "completed_no_work",
+        "launch_task_resolution_pending": False,
+        "launch_completed_at": _iso(_now_utc()),
+        "selected_tasks": normalized_selected_tasks,
+        "effective_selected_tasks": normalized_effective_tasks,
+        "post_details_skipped_reason": post_details_skipped_reason,
+        "no_work_reason": "selected_tasks_already_satisfied",
+        "attached_followups": {},
+    }
+    if normalized_run_id:
+        _merge_catalog_run_config(run_id=normalized_run_id, metadata_updates=metadata_updates)
+        _set_run_status(normalized_run_id, "completed")
+    return {
+        "run_id": normalized_run_id,
+        "status": "completed" if normalized_run_id else None,
+        "platform": normalized_platform,
+        "account_handle": normalized_account,
+        "launch_group_id": str(launch_group_id or "").strip() or None,
+        "selected_tasks": normalized_selected_tasks,
+        "effective_selected_tasks": normalized_effective_tasks,
+        "post_details_skipped_reason": post_details_skipped_reason,
+        "catalog_run_id": normalized_run_id,
+        "comments_run_id": None,
+        "catalog_status": "completed" if normalized_run_id else None,
+        "comments_status": None,
+        "catalog_bootstrap_required": False,
+        "comments_deferred_until_catalog_complete": False,
+        "attached_followups": {},
+        "no_work_reason": "selected_tasks_already_satisfied",
+    }
 
 
 def launch_social_account_catalog_backfill(
@@ -58057,6 +58495,34 @@ def launch_social_account_catalog_backfill(
     catalog_details_refresh_only = catalog_selected and not requires_catalog_bootstrap
     comments_deferred_until_catalog_complete = False
     media_attachment_id = _catalog_media_attachment_id(launch_group_id) if "media" in effective_selected_tasks else None
+
+    if not catalog_selected and not any(task in effective_selected_tasks for task in ("comments", "media")):
+        no_work_payload = _complete_catalog_launch_no_work(
+            run_id=existing_catalog_run_id,
+            platform=normalized_platform,
+            account_handle=normalized_account,
+            launch_group_id=launch_group_id,
+            selected_tasks=normalized_selected_tasks,
+            effective_selected_tasks=effective_selected_tasks,
+            post_details_skipped_reason=post_details_skipped_reason,
+        )
+        logger.info(
+            (
+                "[catalog-launch] launch_complete_no_work platform=%s account=%s run_id=%s "
+                "existing_run_id=%s coverage_ms=%.1f total_ms=%.1f selected_tasks=%s "
+                "effective_selected_tasks=%s reason=%s"
+            ),
+            normalized_platform,
+            normalized_account,
+            no_work_payload.get("run_id"),
+            str(existing_catalog_run_id or "").strip() or None,
+            coverage_ms,
+            round((time_module.perf_counter() - launch_started_at) * 1000, 1),
+            normalized_selected_tasks,
+            effective_selected_tasks,
+            no_work_payload.get("no_work_reason"),
+        )
+        return no_work_payload
 
     if catalog_selected:
         catalog_launch_started_at = time_module.perf_counter()

@@ -35,20 +35,38 @@ _JS_EXTRACT_TABLE = """(() => {
     if (!table) return null;
     const rows = [...table.querySelectorAll("tr")];
     if (rows.length === 0) return null;
-    const datePattern = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\\d{4}-\\d{2}-\\d{2}$/;
+    const datePattern = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\\s*\\d{4}-\\d{2}-\\d{2}$/;
     const headers = [...rows[0].querySelectorAll("th,td")]
         .map(cell => cell.textContent.trim())
         .filter(Boolean);
     if (headers.length === 0) return null;
+    const normalizedHeaders = headers.map(header => header.toLowerCase());
+    const isMetricSummaryTable =
+        normalizedHeaders.length === 4 &&
+        normalizedHeaders[0] === "date" &&
+        normalizedHeaders.includes("following") &&
+        (normalizedHeaders.includes("followers") || normalizedHeaders.includes("subscribers") || normalizedHeaders.includes("likes"));
+    const titleCase = value => value.replace(/\\b\\w/g, letter => letter.toUpperCase());
+    const expandedHeaders = isMetricSummaryTable
+        ? [
+            "Date",
+            `${titleCase(headers[1])} Delta`,
+            `${titleCase(headers[1])} Total`,
+            `${titleCase(headers[2])} Delta`,
+            `${titleCase(headers[2])} Total`,
+            `${titleCase(headers[3])} Delta`,
+            `${titleCase(headers[3])} Total`,
+        ]
+        : headers;
     const data = rows.slice(1)
         .map(row => [...row.querySelectorAll("td")].map(td => td.textContent.trim()))
         .filter(
             cells =>
-                cells.length >= headers.length &&
+                cells.length >= expandedHeaders.length &&
                 datePattern.test((cells[0] || "").replace(/^\\s+|\\s+$/g, ""))
         )
-        .map(cells => Object.fromEntries(headers.map((header, index) => [header, cells[index] || ""])));
-    return { headers, data };
+        .map(cells => Object.fromEntries(expandedHeaders.map((header, index) => [header, cells[index] || ""])));
+    return { headers: expandedHeaders, data };
 })()"""
 
 
@@ -57,7 +75,7 @@ _ACCESS_DENIED_PATTERNS = (
     "error reference number: 1020",
     "social blade access denied",
 )
-_DATE_PREFIX_PATTERN = re.compile(r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(\d{4}-\d{2}-\d{2})$")
+_DATE_PREFIX_PATTERN = re.compile(r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*(\d{4}-\d{2}-\d{2})$")
 _TRPC_FETCH_JS = """async ({ endpoint }) => {
     const response = await fetch(endpoint, {
         headers: { accept: "application/json, text/plain, */*" },
@@ -448,6 +466,8 @@ def _should_retry_in_visible_shared_browser(error: Exception | None) -> bool:
             return True
     rendered = str(error or "").lower()
     if "instagram.monthly" in rendered and "http 412" in rendered:
+        return True
+    if "incomplete profile stats or daily metrics data" in rendered:
         return True
     return "returned non-json data for /api/trpc/instagram.search" in rendered
 

@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import jwt
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -732,7 +732,7 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
                 return_value=expected,
             ) as mocked_begin:
                 with patch(
-                    "api.routers.socials._start_catalog_backfill_finalize_in_background",
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
                     return_value=None,
                 ) as mocked_finalize:
                     response = client.post(
@@ -802,7 +802,7 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
                 },
             ) as mocked_begin:
                 with patch(
-                    "api.routers.socials._start_catalog_backfill_finalize_in_background",
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
                     return_value=None,
                 ):
                     response = client.post(
@@ -826,31 +826,23 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
     assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
 
 
-def test_start_catalog_backfill_finalize_in_background_clears_account_profile_caches(
+def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from api.routers import socials as socials_router
 
     finalized: list[dict[str, Any]] = []
     cleared: list[str] = []
+    background_tasks = BackgroundTasks()
 
-    class _ImmediateThread:
-        def __init__(self, *, target: Any, daemon: bool | None = None, name: str | None = None) -> None:
-            self._target = target
-            self.daemon = daemon
-            self.name = name
-
-        def start(self) -> None:
-            self._target()
-
-    monkeypatch.setattr(socials_router, "Thread", _ImmediateThread)
     monkeypatch.setattr(
         "trr_backend.repositories.social_season_analytics.finalize_social_account_catalog_backfill_launch",
         lambda **kwargs: finalized.append(kwargs) or {"run_id": kwargs["run_id"], "status": "queued"},
     )
     monkeypatch.setattr(socials_router, "_clear_account_profile_caches", lambda: cleared.append("cleared"))
 
-    socials_router._start_catalog_backfill_finalize_in_background(
+    socials_router._queue_catalog_backfill_finalize_task(
+        background_tasks=background_tasks,
         platform="instagram",
         account_handle="bravotv",
         run_id="catalog-run-1",
@@ -863,6 +855,10 @@ def test_start_catalog_backfill_finalize_in_background_clears_account_profile_ca
         selected_tasks=["post_details", "comments", "media"],
         launch_group_id="launch-group-1",
     )
+
+    assert len(background_tasks.tasks) == 1
+
+    asyncio.run(background_tasks())
 
     assert finalized == [
         {
@@ -920,7 +916,7 @@ def test_post_social_account_catalog_backfill_ignores_date_bounds_for_full_histo
                 },
             ) as mocked_begin:
                 with patch(
-                    "api.routers.socials._start_catalog_backfill_finalize_in_background",
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
                     return_value=None,
                 ):
                     response = client.post(
@@ -959,7 +955,7 @@ def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
                 },
             ) as mocked_begin:
                 with patch(
-                    "api.routers.socials._start_catalog_backfill_finalize_in_background",
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
                     return_value=None,
                 ):
                     response = client.post(
@@ -1258,7 +1254,7 @@ def test_post_social_account_catalog_backfill_prefers_modal_when_available_even_
             },
         ) as mocked_start,
         patch(
-            "api.routers.socials._start_catalog_backfill_finalize_in_background",
+            "api.routers.socials._queue_catalog_backfill_finalize_task",
             return_value=None,
         ) as mocked_finalize,
     ):

@@ -554,8 +554,121 @@ def test_resolve_pool_sizing_keeps_production_session_defaults_conservative(monk
     assert sizing["maxconn"] == 8
 
 
+def test_resolve_pool_sizing_treats_trr_local_dev_as_local_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("TRR_ENV", raising=False)
+    monkeypatch.delenv("TRR_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("TRR_LOCAL_DEV", "1")
+    monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
+
+    sizing = pg._resolve_pool_sizing(
+        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+
+    assert sizing["requested_minconn"] == 4
+    assert sizing["requested_maxconn"] == 16
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 8
+    assert sizing["session_pooler_override_clamped"] is True
+    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["maxconn_source"] == "clamped:local_session_pooler_ceiling"
+
+
+def test_resolve_pool_sizing_treats_trr_local_dev_as_local_runtime_even_with_modal_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("TRR_ENV", raising=False)
+    monkeypatch.delenv("TRR_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("TRR_LOCAL_DEV", "1")
+    monkeypatch.setenv("MODAL_TASK_ID", "ta-123")
+    monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
+
+    sizing = pg._resolve_pool_sizing(
+        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+
+    assert sizing["requested_minconn"] == 4
+    assert sizing["requested_maxconn"] == 16
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 8
+    assert sizing["session_pooler_override_clamped"] is True
+    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["maxconn_source"] == "clamped:local_session_pooler_ceiling"
+
+
+def test_resolve_pool_sizing_treats_trr_local_dev_as_authoritative_over_production_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("TRR_ENV", raising=False)
+    monkeypatch.delenv("TRR_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("TRR_LOCAL_DEV", "1")
+    monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
+
+    sizing = pg._resolve_pool_sizing(
+        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+
+    assert sizing["requested_minconn"] == 4
+    assert sizing["requested_maxconn"] == 16
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 8
+    assert sizing["session_pooler_override_clamped"] is True
+    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["maxconn_source"] == "clamped:local_session_pooler_ceiling"
+
+
+def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides_without_pytest_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("TRR_ENV", raising=False)
+    monkeypatch.delenv("TRR_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("TRR_LOCAL_DEV", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("MODAL_TASK_ID", "ta-123")
+    monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
+
+    sizing = pg._resolve_pool_sizing(
+        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+
+    assert sizing["requested_minconn"] == 4
+    assert sizing["requested_maxconn"] == 16
+    assert sizing["minconn"] == 4
+    assert sizing["maxconn"] == 8
+    assert sizing["session_pooler_override_clamped"] is False
+    assert sizing["modal_session_pooler_override_clamped"] is True
+    assert sizing["maxconn_source"] == "clamped:modal_session_pooler_ceiling"
+
+
 def test_resolve_pool_sizing_caps_local_session_pooler_overrides_at_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
     monkeypatch.setenv("TRR_DB_POOL_MINCONN", "6")
     monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "20")
 
@@ -564,7 +677,7 @@ def test_resolve_pool_sizing_caps_local_session_pooler_overrides_at_ceiling(monk
     assert sizing["requested_minconn"] == 6
     assert sizing["requested_maxconn"] == 20
     assert sizing["minconn"] == 6
-    assert sizing["maxconn"] == 16
+    assert sizing["maxconn"] == 8
     assert sizing["session_pooler_override_clamped"] is True
     assert sizing["maxconn_source"] == "clamped:local_session_pooler_ceiling"
 
@@ -641,10 +754,10 @@ def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides(monkeypatch: 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
     assert sizing["minconn"] == 4
-    assert sizing["maxconn"] == 16
-    assert sizing["modal_session_pooler_override_clamped"] is False
+    assert sizing["maxconn"] == 8
+    assert sizing["modal_session_pooler_override_clamped"] is True
     assert sizing["minconn_source"] == "env:TRR_DB_POOL_MINCONN"
-    assert sizing["maxconn_source"] == "env:TRR_DB_POOL_MAXCONN"
+    assert sizing["maxconn_source"] == "clamped:modal_session_pooler_ceiling"
 
 
 def test_resolve_pool_sizing_keeps_local_clamp_outside_modal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -657,9 +770,9 @@ def test_resolve_pool_sizing_keeps_local_clamp_outside_modal(monkeypatch: pytest
     sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
     assert sizing["minconn"] == 4
-    assert sizing["maxconn"] == 16
+    assert sizing["maxconn"] == 8
     assert sizing["modal_session_pooler_override_clamped"] is False
-    assert sizing["session_pooler_override_clamped"] is False
+    assert sizing["session_pooler_override_clamped"] is True
 
 
 def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pytest.MonkeyPatch) -> None:

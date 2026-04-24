@@ -52,6 +52,14 @@ def test_response_text_returns_empty_on_none():
     assert response_text(resp) == ""
 
 
+def test_response_text_decodes_scrapling_body_bytes_when_text_is_empty():
+    from trr_backend.socials._scrapling_http_utils import response_text
+
+    resp = MagicMock(text="")
+    resp.body = b"<html>SocialBlade body</html>"
+    assert response_text(resp) == "<html>SocialBlade body</html>"
+
+
 def test_status_code_reads_status_code_attr():
     from trr_backend.socials._scrapling_http_utils import status_code
 

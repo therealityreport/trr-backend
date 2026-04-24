@@ -40,7 +40,7 @@ DEFAULT_SESSION_POOLER_MINCONN = 2
 DEFAULT_SESSION_POOLER_MAXCONN = 8
 DEFAULT_MODAL_SESSION_POOLER_MINCONN = 2
 DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 8
-LOCAL_SESSION_POOLER_MAX_CEILING = 16
+LOCAL_SESSION_POOLER_MAX_CEILING = 8
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
 DEFAULT_QUERY_TRANSIENT_ATTEMPTS = 3
@@ -140,6 +140,10 @@ def _env_has_value(name: str) -> bool:
     return bool((os.getenv(name) or "").strip())
 
 
+def _env_truthy(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _is_local_or_dev_runtime() -> bool:
     runtime_markers = [
         os.getenv("APP_ENV"),
@@ -149,6 +153,8 @@ def _is_local_or_dev_runtime() -> bool:
         os.getenv("TRR_ENVIRONMENT"),
     ]
     normalized = {str(value or "").strip().lower() for value in runtime_markers if str(value or "").strip()}
+    if _env_truthy("TRR_LOCAL_DEV"):
+        return True
     if normalized & {"prod", "production"}:
         return False
     if normalized & {"local", "dev", "development", "test"}:
@@ -291,13 +297,23 @@ def _resolve_pool_sizing(
     maxconn_source = f"env:{maxconn_env_name}" if maxconn_overridden else "default"
     session_pooler_override_clamped = False
     modal_session_pooler_override_clamped = False
-    if session_pooler and _is_local_or_dev_runtime() and maxconn > LOCAL_SESSION_POOLER_MAX_CEILING:
+    trr_local_dev = _env_truthy("TRR_LOCAL_DEV")
+    modal_runtime = _is_modal_container_runtime()
+    local_or_dev_runtime = _is_local_or_dev_runtime()
+    if session_pooler and modal_runtime and not trr_local_dev and maxconn > DEFAULT_MODAL_SESSION_POOLER_MAXCONN:
+        maxconn = DEFAULT_MODAL_SESSION_POOLER_MAXCONN
+        maxconn_source = "clamped:modal_session_pooler_ceiling"
+        modal_session_pooler_override_clamped = True
+    elif session_pooler and local_or_dev_runtime and maxconn > LOCAL_SESSION_POOLER_MAX_CEILING:
         maxconn = LOCAL_SESSION_POOLER_MAX_CEILING
         maxconn_source = "clamped:local_session_pooler_ceiling"
         session_pooler_override_clamped = True
     if minconn > maxconn:
         minconn = maxconn
-        if session_pooler and _is_local_or_dev_runtime():
+        if session_pooler and modal_runtime and not trr_local_dev:
+            minconn_source = "clamped:modal_session_pooler_ceiling"
+            modal_session_pooler_override_clamped = True
+        elif session_pooler and local_or_dev_runtime:
             minconn_source = "clamped:local_session_pooler_ceiling"
             session_pooler_override_clamped = True
     maxconn = max(minconn, maxconn)
