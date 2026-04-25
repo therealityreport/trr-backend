@@ -39,7 +39,12 @@ class CandidateResult:
 
     @property
     def failed(self) -> bool:
-        return self.failure_count > 0
+        if self.failure_count is None:
+            return False
+        try:
+            return int(self.failure_count) > 0
+        except (TypeError, ValueError):
+            return True
 
     @property
     def has_browser_use_evidence(self) -> bool:

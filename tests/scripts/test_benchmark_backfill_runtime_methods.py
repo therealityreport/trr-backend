@@ -86,3 +86,35 @@ def test_write_results_json_allows_no_change_report_with_null_winner(tmp_path) -
     assert payload["decision_status"]["winner"] is None
     assert written["decision_status"]["winner"] is None
     assert written["decision_status"]["status"] == "awaiting_browser_use_evidence"
+
+
+def test_write_results_json_handles_pending_candidate_null_failure_count(tmp_path) -> None:
+    output_path = tmp_path / "method-comparison.json"
+
+    payload = write_results_json(
+        output_path,
+        [
+            {
+                "method": "SCRAPLING",
+                "completeness": None,
+                "efficiency_score": None,
+                "detail_score": None,
+                "effectiveness_score": None,
+                "failure_count": None,
+                "browser_use_evidence": None,
+            },
+            {
+                "method": "CRAWLEE",
+                "completeness": None,
+                "efficiency_score": None,
+                "detail_score": None,
+                "effectiveness_score": None,
+                "failure_count": None,
+                "browser_use_evidence": None,
+            },
+        ],
+        winner=None,
+    )
+
+    assert payload["decision_status"]["winner"] is None
+    assert payload["candidates"][0]["failed"] is False
