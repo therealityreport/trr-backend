@@ -41,6 +41,7 @@ from trr_backend.security.jwt import (
     expected_supabase_issuer,
     expected_supabase_project_ref,
 )
+from trr_backend.socials.control_plane.background_tasks import background_task_snapshot
 
 configure_runtime_observability(service_name="trr-backend-api")
 
@@ -426,9 +427,19 @@ def health():
 
 
 @app.get("/health/live")
-def health_live():
+async def health_live() -> dict[str, str]:
     """Lightweight liveness probe. No DB check."""
     return {"status": "alive", "service": "trr-backend"}
+
+
+@app.get("/health/runtime")
+async def health_runtime() -> dict[str, object]:
+    """DB-free runtime snapshot for local control-plane diagnostics."""
+    return {
+        "status": "alive",
+        "service": "trr-backend",
+        "background_tasks": background_task_snapshot(),
+    }
 
 
 @app.get("/metrics")

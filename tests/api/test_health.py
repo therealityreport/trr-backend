@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import inspect
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.main import health, health_live
+from api.main import health, health_live, health_runtime
 from trr_backend.db import pg as _real_pg
 
 _test_app = FastAPI()
 _test_app.get("/health")(health)
 _test_app.get("/health/live")(health_live)
+_test_app.get("/health/runtime")(health_runtime)
 
 client = TestClient(_test_app)
 
@@ -89,6 +91,10 @@ def test_health_live():
     assert body["service"] == "trr-backend"
 
 
+def test_health_live_is_async_endpoint() -> None:
+    assert inspect.iscoroutinefunction(health_live)
+
+
 def test_health_live_ignores_database_failure():
     with patch.object(_real_pg, "db_connection", _fake_db_connection_fail):
         resp = client.get("/health/live")
@@ -96,3 +102,13 @@ def test_health_live_ignores_database_failure():
     body = resp.json()
     assert body["status"] == "alive"
     assert body["service"] == "trr-backend"
+
+
+def test_health_runtime_ignores_database_failure():
+    with patch.object(_real_pg, "db_connection", _fake_db_connection_fail):
+        resp = client.get("/health/runtime")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "alive"
+    assert body["service"] == "trr-backend"
+    assert "background_tasks" in body
