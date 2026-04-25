@@ -31297,6 +31297,57 @@ def test_run_shared_account_posts_stage_raises_for_incomplete_single_runner_fall
     assert exc_info.value.error_code == "catalog_incomplete"
     assert exc_info.value.retryable is True
     assert exc_info.value.runtime_metadata["retrieval_meta"]["expected_total_posts"] == 16_454
+    assert exc_info.value.runtime_metadata["retrieval_meta"]["completion_missing_posts"] == 16_442
+    assert exc_info.value.runtime_metadata["retrieval_meta"]["completion_tolerance_posts"] == 0
+
+
+def test_run_shared_account_posts_stage_tolerates_tiktok_empty_body_near_complete_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_scrape_shared_posts_for_account",
+        lambda **_kwargs: (
+            [{"source_id": f"tiktok-{index}"} for index in range(269)],
+            {
+                "retrieval_mode": "single_runner_fallback",
+                "posts_checked": 269,
+                "total_posts": 272,
+                "persist_counters": {"posts_upserted": 269, "comments_upserted": 0},
+            },
+        ),
+    )
+
+    posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
+        run_id="44444444-4444-4444-4444-444444444444",
+        platform="tiktok",
+        source_scope="bravo",
+        account_handle="thetraitorsus",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "tiktok",
+            "source_scope": "bravo",
+            "account": "thetraitorsus",
+            "runner_strategy": "single_runner_fallback",
+            "recovery_reason": "tiktok_empty_body_transport_failure",
+            "discovery_total_posts": 272,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        job_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert posts_count == 269
+    assert comments_count == 0
+    retrieval_meta = metadata["retrieval_meta"]
+    assert retrieval_meta["expected_total_posts"] == 272
+    assert retrieval_meta["completion_target_posts"] == 272
+    assert retrieval_meta["observed_posts_checked"] == 269
+    assert retrieval_meta["observed_posts_saved"] == 269
+    assert retrieval_meta["completion_missing_posts"] == 3
+    assert retrieval_meta["completion_tolerance_posts"] == 3
+    assert retrieval_meta["completion_tolerance_applied"] is True
 
 
 def test_run_shared_account_posts_stage_tiktok_transport_fallback_allows_source_total_drift(
@@ -31343,6 +31394,10 @@ def test_run_shared_account_posts_stage_tiktok_transport_fallback_allows_source_
     assert metadata["expected_total_posts"] == 4444
     assert metadata["retrieval_meta"]["expected_total_posts"] == 4444
     assert metadata["retrieval_meta"]["completion_target_posts"] == 3277
+    assert metadata["retrieval_meta"]["observed_posts_checked"] == 3277
+    assert metadata["retrieval_meta"]["observed_posts_saved"] == 3277
+    assert metadata["retrieval_meta"]["completion_missing_posts"] == 0
+    assert metadata["retrieval_meta"]["completion_tolerance_posts"] == 3
 
 
 @pytest.mark.parametrize("platform", ["twitter", "threads", "youtube", "facebook"])

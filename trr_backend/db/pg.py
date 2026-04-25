@@ -89,6 +89,8 @@ class AdvisoryLockUnavailable(RuntimeError):
 def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
     if pool_name == "social_profile":
         return "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
+    if pool_name == "social_control":
+        return "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN", "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"
     if pool_name == "health":
         return "TRR_HEALTH_DB_POOL_MINCONN", "TRR_HEALTH_DB_POOL_MAXCONN"
     return "TRR_DB_POOL_MINCONN", "TRR_DB_POOL_MAXCONN"
@@ -1071,14 +1073,16 @@ def fetch_all(
     params: Iterable[Any] | None = None,
     *,
     conn: connection_type | None = None,
+    pool_name: str = "default",
 ) -> list[dict[str, Any]]:
     if conn is not None:
         with db_read_cursor(conn=conn, label="fetch_all") as cur:
             return fetch_all_with_cursor(cur, query, params)
 
     def _run() -> list[dict[str, Any]]:
-        with db_read_cursor(label="fetch_all") as cur:
-            return fetch_all_with_cursor(cur, query, params)
+        with db_read_connection(label="fetch_all", pool_name=pool_name) as managed_conn:
+            with managed_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                return fetch_all_with_cursor(cur, query, params)
 
     return _run_with_transient_retry(_run)
 
@@ -1088,14 +1092,16 @@ def fetch_one(
     params: Iterable[Any] | None = None,
     *,
     conn: connection_type | None = None,
+    pool_name: str = "default",
 ) -> dict[str, Any] | None:
     if conn is not None:
         with db_read_cursor(conn=conn, label="fetch_one") as cur:
             return fetch_one_with_cursor(cur, query, params)
 
     def _run() -> dict[str, Any] | None:
-        with db_read_cursor(label="fetch_one") as cur:
-            return fetch_one_with_cursor(cur, query, params)
+        with db_read_connection(label="fetch_one", pool_name=pool_name) as managed_conn:
+            with managed_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                return fetch_one_with_cursor(cur, query, params)
 
     return _run_with_transient_retry(_run)
 

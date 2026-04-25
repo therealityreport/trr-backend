@@ -33332,10 +33332,14 @@ def _run_shared_account_posts_stage(
     configured_completion_target_posts = _normalize_non_negative_int(config.get("completion_target_posts"))
     if configured_completion_target_posts > 0:
         completion_target_posts = configured_completion_target_posts
-    if (
-        str(config.get("runner_strategy") or "").strip().lower() == "single_runner_fallback"
+    runner_strategy = str(config.get("runner_strategy") or "").strip().lower()
+    is_single_runner_fallback = runner_strategy == "single_runner_fallback"
+    is_tiktok_empty_body_fallback = (
+        platform == "tiktok"
+        and is_single_runner_fallback
         and str(config.get("recovery_reason") or "").strip().lower() == "tiktok_empty_body_transport_failure"
-    ):
+    )
+    if is_tiktok_empty_body_fallback:
         observed_current_total_posts = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
         if observed_current_total_posts > 0:
             completion_target_posts = (
@@ -33343,11 +33347,13 @@ def _run_shared_account_posts_stage(
                 if completion_target_posts > 0
                 else observed_current_total_posts
             )
-    if (
-        str(config.get("runner_strategy") or "").strip().lower() == "single_runner_fallback"
-        and completion_target_posts > 0
-        and max(scraped_posts, saved_posts) < completion_target_posts
-    ):
+    observed_completion_posts = max(scraped_posts, saved_posts)
+    missing_posts = max(completion_target_posts - observed_completion_posts, 0) if completion_target_posts > 0 else 0
+    completion_tolerance_posts = 3 if is_tiktok_empty_body_fallback and completion_target_posts > 0 else 0
+    completion_tolerance_applied = (
+        is_tiktok_empty_body_fallback and missing_posts > 0 and missing_posts <= completion_tolerance_posts
+    )
+    if is_single_runner_fallback and completion_target_posts > 0 and missing_posts > 0 and not completion_tolerance_applied:
         raise SharedStageRuntimeError(
             (
                 f"Shared-account fallback ended early for @{account_handle}: "
@@ -33362,6 +33368,8 @@ def _run_shared_account_posts_stage(
                     "completion_target_posts": completion_target_posts,
                     "observed_posts_checked": scraped_posts,
                     "observed_posts_saved": saved_posts,
+                    "completion_missing_posts": missing_posts,
+                    "completion_tolerance_posts": completion_tolerance_posts,
                 }
             },
         )
@@ -33375,6 +33383,12 @@ def _run_shared_account_posts_stage(
         activity["total_posts"] = expected_total_posts
     retrieval_meta["expected_total_posts"] = expected_total_posts or None
     retrieval_meta["completion_target_posts"] = completion_target_posts or None
+    retrieval_meta["observed_posts_checked"] = scraped_posts
+    retrieval_meta["observed_posts_saved"] = saved_posts
+    retrieval_meta["completion_missing_posts"] = missing_posts
+    retrieval_meta["completion_tolerance_posts"] = completion_tolerance_posts
+    if completion_tolerance_applied:
+        retrieval_meta["completion_tolerance_applied"] = True
     retrieval_meta["activity"] = dict(activity)
     _flush_progress(force=True)
     source_ids = sorted(
