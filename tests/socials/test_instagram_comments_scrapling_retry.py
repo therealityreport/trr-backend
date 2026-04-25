@@ -17,6 +17,7 @@ import pytest
 from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     InstagramCommentsFetchResult,
     InstagramCommentsScraplingFetcher,
+    InstagramCommentsWarmupError,
 )
 from trr_backend.socials.instagram.scraper import InstagramComment
 
@@ -461,6 +462,26 @@ def test_warmup_propagates_csrftoken_into_parser_headers() -> None:
     )
 
 
+def test_warmup_raises_when_no_cookies_are_bridged() -> None:
+    fetcher = _build_fetcher()
+
+    warmup_response = MagicMock()
+    warmup_response.status = 200
+    warmup_response.text = ""
+    warmup_response.cookies = {}
+
+    fetcher._fetch_page = AsyncMock(return_value=warmup_response)
+    fetcher._rebuild_http_client = AsyncMock()
+
+    with pytest.raises(InstagramCommentsWarmupError) as exc_info:
+        asyncio.run(fetcher.warmup())
+
+    assert exc_info.value.error_code == "instagram_comments_warmup_no_cookies"
+    assert exc_info.value.retryable is True
+    assert fetcher.runtime_metadata["warmup_cookie_count"] == 0
+    fetcher._rebuild_http_client.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Proxy identity test
 # ---------------------------------------------------------------------------
@@ -510,6 +531,94 @@ def test_select_comments_proxy_decodo_sticky_session(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # Partial-progress persistence (job_runner integration)
 # ---------------------------------------------------------------------------
+
+
+def _fake_comments_session() -> MagicMock:
+    fake_session = MagicMock()
+    fake_session.cookies = []
+    fake_session.auth_session.cookies = {}
+    fake_session.auth_session.metadata = {"source": "test"}
+    fake_session.browser_account_id = "testaccount"
+    return fake_session
+
+
+def test_comments_job_runner_stops_before_targets_when_warmup_has_no_cookies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    finish_calls: list[dict[str, Any]] = []
+    fetch_calls: list[str] = []
+    persist_calls: list[str] = []
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {
+                "transport": "httpx_after_browser_warmup",
+                "request_count": 1,
+                "warmup_cookie_count": 0,
+                "warmup_cookie_names": [],
+            }
+
+        async def warmup(self) -> None:
+            raise InstagramCommentsWarmupError(
+                "Instagram comments warmup did not bridge any cookies.",
+                error_code="instagram_comments_warmup_no_cookies",
+                retryable=True,
+            )
+
+        async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            fetch_calls.append(shortcode)
+            return InstagramCommentsFetchResult()
+
+        async def aclose(self) -> None:
+            return None
+
+    def fake_persist(*, shortcode: str, **_kwargs: Any) -> object:
+        persist_calls.append(shortcode)
+        return object()
+
+    monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1", "SHORT2"],
+            "max_comments_per_post": 10,
+            "fetch_replies": False,
+        },
+        "attempt_count": 1,
+        "max_attempts": 2,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        return_value={"id": "job-1", "status": "retrying"},
+    ):
+        payload = jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert payload["status"] == "retrying"
+    assert fetch_calls == []
+    assert persist_calls == []
+    finish_kwargs = finish_calls[-1]
+    assert finish_kwargs["status"] == "retrying"
+    assert finish_kwargs["last_error_code"] == "instagram_comments_warmup_no_cookies"
+    metadata = finish_kwargs["metadata"]
+    assert metadata["error_code"] == "instagram_comments_warmup_no_cookies"
+    assert metadata["runtime_metadata"]["warmup_cookie_count"] == 0
+    assert metadata["fetcher_runtime"]["warmup_cookie_count"] == 0
 
 
 def test_job_runner_partial_progress_persists_before_error(monkeypatch: pytest.MonkeyPatch) -> None:
