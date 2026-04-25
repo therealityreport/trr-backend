@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from scripts.socials import reconcile_stale_social_run as subject
@@ -10,9 +12,43 @@ class FakePg:
     rows: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     writes: list[tuple[str, list[object]]] = field(default_factory=list)
     remaining_count_reads: int = 0
+    summary_reads: int = 0
+    lock_entries: int = 0
+    current_run_status: str = "queued"
+    lock_conn: object = field(default_factory=object)
 
-    def fetch_one(self, query: str, params: list[object]):
+    @contextmanager
+    def advisory_session_lock(self, lock_key: int, *, label: str, pool_name: str = "default"):
+        del lock_key, label, pool_name
+        self.lock_entries += 1
+        yield self.lock_conn
+
+    def fetch_one(self, query: str, params: list[object], **kwargs):
+        if kwargs:
+            assert kwargs.get("conn") is self.lock_conn
         normalized = " ".join(query.lower().split())
+        if "stage_counts" in normalized and "from social.scrape_jobs" in normalized:
+            self.summary_reads += 1
+            rows = self.fetch_all(query, params)
+            active_statuses = set(params[1])
+            stage_counts: dict[str, dict[str, int]] = {}
+            for row in rows:
+                status = str(row.get("status") or "")
+                stage = str(row.get("stage") or row.get("job_type") or "unknown")
+                bucket = stage_counts.setdefault(stage, {"total": 0, "completed": 0, "failed": 0, "active": 0})
+                bucket["total"] += 1
+                if status == "completed":
+                    bucket["completed"] += 1
+                if status == "failed":
+                    bucket["failed"] += 1
+                if status in active_statuses:
+                    bucket["active"] += 1
+            return {
+                "active_jobs": sum(1 for row in rows if row.get("status") in active_statuses),
+                "completed_jobs": sum(1 for row in rows if row.get("status") == "completed"),
+                "failed_jobs": sum(1 for row in rows if row.get("status") == "failed"),
+                "stage_counts": stage_counts,
+            }
         if "count(*) filter (where status = any(%s))::int as open_jobs" in normalized:
             self.remaining_count_reads += 1
             rows = self.fetch_all(query, params)
@@ -21,6 +57,8 @@ class FakePg:
                 "open_jobs": sum(1 for row in rows if row.get("status") in open_statuses),
                 "failed_jobs": sum(1 for row in rows if row.get("status") == "failed"),
             }
+        if "select status" in normalized and "from social.scrape_runs" in normalized:
+            return {"status": self.current_run_status}
         if "from social.scrape_runs" in normalized:
             return {
                 "id": "80cf0056-7659-4203-b5f9-0758ee9d98c0",
@@ -30,7 +68,9 @@ class FakePg:
             }
         return None
 
-    def fetch_all(self, query: str, params: list[object]):
+    def fetch_all(self, query: str, params: list[object], **kwargs):
+        if kwargs:
+            assert kwargs.get("conn") is self.lock_conn
         normalized = " ".join(query.lower().split())
         if "from social.scrape_jobs" in normalized:
             return [
@@ -38,18 +78,22 @@ class FakePg:
                     "id": "retry-job",
                     "status": "retrying",
                     "job_type": "shared_account_posts",
+                    "stage": "shared_account_posts",
                     "last_error_code": "shared_stage_failed",
                 },
                 {
                     "id": "queued-job",
                     "status": "queued",
                     "job_type": "shared_account_posts",
+                    "stage": "shared_account_posts",
                     "last_error_code": None,
                 },
             ]
         return []
 
-    def execute(self, query: str, params: list[object]) -> None:
+    def execute(self, query: str, params: list[object], **kwargs) -> None:
+        if kwargs:
+            assert kwargs.get("conn") is self.lock_conn
         self.writes.append((" ".join(query.lower().split()), list(params)))
 
 
@@ -72,12 +116,26 @@ def test_execute_cleanup_cancels_duplicates_and_recomputes_run(monkeypatch):
     result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
 
     assert result.duplicate_open_job_ids == ["queued-job"]
+    assert fake_pg.lock_entries == 1
     assert fake_pg.remaining_count_reads == 1
+    assert fake_pg.summary_reads == 1
     joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
     assert "update social.scrape_jobs" in joined_sql
     assert "status = 'cancelled'" in joined_sql
+    assert "completed_at = coalesce(completed_at, now())" in joined_sql
+    assert "heartbeat_at = now()" in joined_sql
+    assert "worker_id = null" in joined_sql
+    assert "claimed_at = null" in joined_sql
     assert "jsonb_typeof(metadata) = 'object'" in joined_sql
     assert "update social.scrape_runs" in joined_sql
+    run_update_params = fake_pg.writes[-1][1]
+    summary_payload = json.loads(run_update_params[-2])
+    assert summary_payload["active_jobs"] == 2
+    assert summary_payload["completed_jobs"] == 0
+    assert summary_payload["failed_jobs"] == 0
+    assert summary_payload["stage_counts"] == {
+        "shared_account_posts": {"total": 2, "completed": 0, "failed": 0, "active": 2}
+    }
 
 
 def test_partitioned_same_type_jobs_are_not_duplicates(monkeypatch):
@@ -415,7 +473,9 @@ def test_execute_cleanup_marks_active_run_terminal_when_no_open_jobs_remain(monk
     class StaleActivePg(FakePg):
         open_fetch_count: int = 0
 
-        def fetch_one(self, query: str, params: list[object]):
+        def fetch_one(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "count(*) filter (where status = any(%s))::int as open_jobs" in normalized:
                 self.remaining_count_reads += 1
@@ -445,7 +505,9 @@ def test_execute_cleanup_marks_active_run_terminal_when_no_open_jobs_remain(monk
 def test_execute_cleanup_terminalizes_cancelling_run_when_no_open_jobs_remain(monkeypatch):
     @dataclass
     class StaleCancellingPg(FakePg):
-        def fetch_one(self, query: str, params: list[object]):
+        def fetch_one(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "count(*) filter (where status = any(%s))::int as open_jobs" in normalized:
                 self.remaining_count_reads += 1
@@ -466,6 +528,77 @@ def test_execute_cleanup_terminalizes_cancelling_run_when_no_open_jobs_remain(mo
 
     assert result.run_status == "cancelling"
     run_update_params = fake_pg.writes[-1][1]
-    assert "cancelling" in run_update_params[2]
+    assert run_update_params[4] == "cancelling"
+    assert "cancelling" in run_update_params[5]
     joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
     assert "then 'completed'" in joined_sql
+
+
+def test_execute_cleanup_rereads_current_status_inside_lock_before_terminalizing(monkeypatch):
+    @dataclass
+    class StatusChangedPg(FakePg):
+        current_run_status: str = "completed"
+
+        def fetch_one(self, query: str, params: list[object], **kwargs):
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_runs" in normalized and "select id::text as id" in normalized:
+                return {
+                    "id": "80cf0056-7659-4203-b5f9-0758ee9d98c0",
+                    "status": "running",
+                    "total_jobs": 2,
+                    "active_jobs": 2,
+                }
+            return super().fetch_one(query, params, **kwargs)
+
+    fake_pg = StatusChangedPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.run_status == "running"
+    run_update_params = fake_pg.writes[-1][1]
+    assert run_update_params[4] == "completed"
+    assert run_update_params[8] == "completed"
+    assert run_update_params[11] == "completed"
+    summary_payload = json.loads(run_update_params[-2])
+    assert summary_payload["stale_run_reconciler"]["terminalized"] is False
+
+
+def test_execute_cleanup_summary_counters_reflect_job_statuses(monkeypatch):
+    @dataclass
+    class MixedStatusPg(FakePg):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" in normalized:
+                if "order by created_at asc, id asc" in normalized:
+                    return [
+                        {"id": "queued-job", "status": "queued", "job_type": "comments", "stage": "comments"},
+                    ]
+                return [
+                    {"id": "completed-job", "status": "completed", "job_type": "posts", "stage": "posts"},
+                    {"id": "failed-job", "status": "failed", "job_type": "posts", "stage": "posts"},
+                    {"id": "queued-job", "status": "queued", "job_type": "comments", "stage": "comments"},
+                ]
+            return []
+
+    fake_pg = MixedStatusPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.duplicate_open_job_ids == []
+    run_update_params = fake_pg.writes[-1][1]
+    assert run_update_params[0] == 1
+    assert run_update_params[1] == 1
+    assert run_update_params[2] == 1
+    assert json.loads(run_update_params[3]) == {
+        "posts": {"total": 2, "completed": 1, "failed": 1, "active": 0},
+        "comments": {"total": 1, "completed": 0, "failed": 0, "active": 1},
+    }
+    summary_payload = json.loads(run_update_params[-2])
+    assert summary_payload["active_jobs"] == 1
+    assert summary_payload["completed_jobs"] == 1
+    assert summary_payload["failed_jobs"] == 1
+    assert summary_payload["stage_counts"]["posts"]["failed"] == 1

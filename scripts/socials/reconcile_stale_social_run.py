@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import asdict, dataclass
@@ -129,7 +130,7 @@ def plan_run_cleanup(run_id: str) -> CleanupPlan:
     )
 
 
-def _fetch_remaining_job_counts(run_id: str) -> dict[str, int]:
+def _fetch_remaining_job_counts(run_id: str, *, conn: object | None = None) -> dict[str, int]:
     row = pg.fetch_one(
         """
         select
@@ -139,6 +140,7 @@ def _fetch_remaining_job_counts(run_id: str) -> dict[str, int]:
         where run_id::text = %s
         """,
         [sorted(OPEN_JOB_STATUSES), run_id],
+        conn=conn,
     )
     if not row:
         return {"open_jobs": 0, "failed_jobs": 0}
@@ -146,6 +148,71 @@ def _fetch_remaining_job_counts(run_id: str) -> dict[str, int]:
         "open_jobs": _normalize_non_negative_int(row.get("open_jobs")),
         "failed_jobs": _normalize_non_negative_int(row.get("failed_jobs")),
     }
+
+
+def _fetch_summary_counters(run_id: str, *, conn: object | None = None) -> dict[str, object]:
+    row = pg.fetch_one(
+        """
+        with job_rows as (
+          select
+            status,
+            coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage
+          from social.scrape_jobs
+          where run_id::text = %s
+        ),
+        stage_rows as (
+          select
+            stage,
+            jsonb_build_object(
+              'total', count(*)::int,
+              'completed', count(*) filter (where status = 'completed')::int,
+              'failed', count(*) filter (where status = 'failed')::int,
+              'active', count(*) filter (where status = any(%s))::int
+            ) as counters
+          from job_rows
+          group by stage
+        )
+        select
+          count(*) filter (where status = any(%s))::int as active_jobs,
+          count(*) filter (where status = 'completed')::int as completed_jobs,
+          count(*) filter (where status = 'failed')::int as failed_jobs,
+          coalesce(
+            (select jsonb_object_agg(stage, counters) from stage_rows),
+            '{}'::jsonb
+          ) as stage_counts
+        from job_rows
+        """,
+        [run_id, sorted(OPEN_JOB_STATUSES), sorted(OPEN_JOB_STATUSES)],
+        conn=conn,
+    )
+    if not row:
+        return {"active_jobs": 0, "completed_jobs": 0, "failed_jobs": 0, "stage_counts": {}}
+    return {
+        "active_jobs": _normalize_non_negative_int(row.get("active_jobs")),
+        "completed_jobs": _normalize_non_negative_int(row.get("completed_jobs")),
+        "failed_jobs": _normalize_non_negative_int(row.get("failed_jobs")),
+        "stage_counts": row.get("stage_counts") if isinstance(row.get("stage_counts"), dict) else {},
+    }
+
+
+def _fetch_current_run_status(run_id: str, *, conn: object | None = None) -> str:
+    row = (
+        pg.fetch_one(
+            """
+            select status
+            from social.scrape_runs
+            where id::text = %s
+            """,
+            [run_id],
+            conn=conn,
+        )
+        or {}
+    )
+    return str(row.get("status") or "").strip()
+
+
+def _run_lock_key(run_id: str) -> int:
+    return int(hashlib.md5(run_id.encode()).hexdigest()[:15], 16) % (2**31)
 
 
 def _normalize_non_negative_int(value: object) -> int:
@@ -157,78 +224,92 @@ def _normalize_non_negative_int(value: object) -> int:
 
 def execute_run_cleanup(run_id: str) -> CleanupPlan:
     plan = plan_run_cleanup(run_id)
-    if plan.duplicate_open_job_ids:
-        pg.execute(
-            """
-            update social.scrape_jobs
-            set
-              status = 'cancelled',
-              error_message = 'duplicate_open_job_cancelled_by_stale_run_reconciler',
-              last_error_code = 'duplicate_open_job_cancelled',
-              last_error_class = 'DuplicateOpenJobCancelled',
-              metadata = (
-                case when jsonb_typeof(metadata) = 'object' then metadata else '{}'::jsonb end
-              ) || %s::jsonb
-            where run_id::text = %s
-              and id::text = any(%s)
-              and status = any(%s)
-            """,
-            [
-                json.dumps({"stale_run_reconciler": {"reason": "duplicate_open_job"}}),
-                plan.run_id,
-                plan.duplicate_open_job_ids,
-                sorted(OPEN_JOB_STATUSES),
-            ],
-        )
+    with pg.advisory_session_lock(_run_lock_key(plan.run_id), label="stale-social-run-reconciler") as lock_conn:
+        if plan.duplicate_open_job_ids:
+            pg.execute(
+                """
+                update social.scrape_jobs
+                set
+                  status = 'cancelled',
+                  error_message = 'duplicate_open_job_cancelled_by_stale_run_reconciler',
+                  last_error_code = 'duplicate_open_job_cancelled',
+                  last_error_class = 'DuplicateOpenJobCancelled',
+                  completed_at = coalesce(completed_at, now()),
+                  heartbeat_at = now(),
+                  worker_id = null,
+                  claimed_at = null,
+                  metadata = (
+                    case when jsonb_typeof(metadata) = 'object' then metadata else '{}'::jsonb end
+                  ) || %s::jsonb
+                where run_id::text = %s
+                  and id::text = any(%s)
+                  and status = any(%s)
+                """,
+                [
+                    json.dumps({"stale_run_reconciler": {"reason": "duplicate_open_job"}}),
+                    plan.run_id,
+                    plan.duplicate_open_job_ids,
+                    sorted(OPEN_JOB_STATUSES),
+                ],
+                conn=lock_conn,
+            )
 
-    remaining_counts = _fetch_remaining_job_counts(plan.run_id)
-    remaining_open_jobs = remaining_counts["open_jobs"]
-    remaining_failed_jobs = remaining_counts["failed_jobs"]
-    cleanup_metadata = json.dumps(
-        {
+        remaining_counts = _fetch_remaining_job_counts(plan.run_id, conn=lock_conn)
+        remaining_open_jobs = remaining_counts["open_jobs"]
+        remaining_failed_jobs = remaining_counts["failed_jobs"]
+        summary_counters = _fetch_summary_counters(plan.run_id, conn=lock_conn)
+        current_run_status = _fetch_current_run_status(plan.run_id, conn=lock_conn)
+        cleanup_metadata = {
+            **summary_counters,
             "stale_run_reconciler": {
                 "duplicate_open_job_ids": plan.duplicate_open_job_ids,
                 "retry_job_ids": plan.retry_job_ids,
                 "remaining_open_jobs": remaining_open_jobs,
                 "remaining_failed_jobs": remaining_failed_jobs,
-                "terminalized": plan.run_status in ACTIVE_RUN_STATUSES and remaining_open_jobs == 0,
-            }
+                "terminalized": current_run_status in ACTIVE_RUN_STATUSES and remaining_open_jobs == 0,
+            },
         }
-    )
-    pg.execute(
-        """
-        update social.scrape_runs
-        set
-          active_jobs = %s,
-          status = case
-            when %s = any(%s) and %s = 0 and %s > 0 then 'failed'
-            when %s = any(%s) and %s = 0 then 'completed'
-            else status
-          end,
-          completed_at = case
-            when %s = any(%s) and %s = 0 then coalesce(completed_at, now())
-            else completed_at
-          end,
-          summary = coalesce(summary, '{}'::jsonb) || %s::jsonb,
-          updated_at = now()
-        where id::text = %s
-        """,
-        [
-            remaining_open_jobs,
-            plan.run_status,
-            sorted(ACTIVE_RUN_STATUSES),
-            remaining_open_jobs,
-            remaining_failed_jobs,
-            plan.run_status,
-            sorted(ACTIVE_RUN_STATUSES),
-            remaining_open_jobs,
-            plan.run_status,
-            sorted(ACTIVE_RUN_STATUSES),
-            remaining_open_jobs,
-            cleanup_metadata,
-            plan.run_id,
-        ],
-    )
+        pg.execute(
+            """
+            update social.scrape_runs
+            set
+              active_jobs = %s,
+              completed_jobs = %s,
+              failed_jobs = %s,
+              stage_counts = %s::jsonb,
+              status = case
+                when %s = any(%s) and %s = 0 and %s > 0 then 'failed'
+                when %s = any(%s) and %s = 0 then 'completed'
+                else status
+              end,
+              completed_at = case
+                when %s = any(%s) and %s = 0 then coalesce(completed_at, now())
+                else completed_at
+              end,
+              summary = coalesce(summary, '{}'::jsonb) || %s::jsonb,
+              updated_at = now()
+            where id::text = %s
+            """,
+            [
+                _normalize_non_negative_int(summary_counters.get("active_jobs")),
+                _normalize_non_negative_int(summary_counters.get("completed_jobs")),
+                _normalize_non_negative_int(summary_counters.get("failed_jobs")),
+                json.dumps(summary_counters.get("stage_counts") or {}),
+                current_run_status,
+                sorted(ACTIVE_RUN_STATUSES),
+                remaining_open_jobs,
+                remaining_failed_jobs,
+                current_run_status,
+                sorted(ACTIVE_RUN_STATUSES),
+                remaining_open_jobs,
+                current_run_status,
+                sorted(ACTIVE_RUN_STATUSES),
+                remaining_open_jobs,
+                json.dumps(cleanup_metadata),
+                plan.run_id,
+            ],
+            conn=lock_conn,
+        )
     return plan
 
 
