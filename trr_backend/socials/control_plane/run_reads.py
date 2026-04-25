@@ -7,6 +7,25 @@ from datetime import datetime
 from typing import Any
 
 import trr_backend.repositories.social_season_analytics as legacy
+import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
+
+
+def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+    try:
+        return legacy.pg.fetch_all(sql, params, pool_name=run_lifecycle.SOCIAL_CONTROL_POOL_NAME)
+    except TypeError as exc:
+        if "unexpected keyword argument 'pool_name'" not in str(exc):
+            raise
+        return legacy.pg.fetch_all(sql, params)
+
+
+def _fetch_one_control(sql: str, params: list[Any]) -> dict[str, Any] | None:
+    try:
+        return legacy.pg.fetch_one(sql, params, pool_name=run_lifecycle.SOCIAL_CONTROL_POOL_NAME)
+    except TypeError as exc:
+        if "unexpected keyword argument 'pool_name'" not in str(exc):
+            raise
+        return legacy.pg.fetch_one(sql, params)
 
 
 def list_runs(
@@ -70,7 +89,7 @@ def list_runs(
         params.append(client_workflow_id)
     sql += " order by created_at desc limit %s"
     params.append(250 if requires_config_filtering else safe_limit)
-    rows = legacy.pg.fetch_all(sql, params)
+    rows = _fetch_all_control(sql, params)
     filtered_rows: list[dict[str, Any]] = []
     for row in rows:
         config = row.get("config") if isinstance(row.get("config"), dict) else {}
@@ -168,7 +187,7 @@ def list_run_summaries(
     if not run_ids:
         return []
 
-    job_rows = legacy.pg.fetch_all(
+    job_rows = _fetch_all_control(
         """
         select
           run_id::text as run_id,
@@ -299,7 +318,7 @@ def get_run_progress_snapshot(
     if not bool(features.get("has_run_id")):
         raise ValueError("run_progress_requires_scrape_jobs_run_id")
 
-    run_row = legacy.pg.fetch_one(
+    run_row = _fetch_one_control(
         """
         select
           id::text as run_id,
@@ -325,7 +344,7 @@ def get_run_progress_snapshot(
     select_last_error_code = (
         "j.last_error_code" if bool(features.get("has_queue_fields")) else "null::text as last_error_code"
     )
-    job_rows = legacy.pg.fetch_all(
+    job_rows = _fetch_all_control(
         f"""
         select
           j.id::text as id,
@@ -359,7 +378,7 @@ def get_run_progress_snapshot(
             legacy._finalize_run_status(run_id, force_recompute=True)
         else:
             legacy._update_run_summary(run_id, force_recompute=True)
-        refreshed_run_row = legacy.pg.fetch_one(
+        refreshed_run_row = _fetch_one_control(
             """
             select
               id::text as run_id,

@@ -236,14 +236,21 @@ def test_get_run_progress_snapshot_includes_dynamic_stages_and_per_handle(monkey
             "worker_id": "social-worker:c",
         },
     ]
+    seen_fetch_one_pools: list[str] = []
 
     monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
-    monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
+
+    def _fake_fetch_one(*_args, **kwargs):
+        seen_fetch_one_pools.append(kwargs.get("pool_name"))
+        return run_row
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
 
     payload = social_repo.get_run_progress_snapshot(season_id, run_id, recent_log_limit=10)
 
+    assert seen_fetch_one_pools[0] == "social_control"
     assert payload["run_id"] == run_id
     assert payload["stages"]["posts"]["jobs_total"] == 1
     assert payload["stages"]["posts"]["jobs_running"] == 1

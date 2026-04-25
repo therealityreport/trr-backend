@@ -5,6 +5,25 @@ from __future__ import annotations
 from typing import Any
 
 import trr_backend.repositories.social_season_analytics as legacy
+import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
+
+
+def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+    try:
+        return legacy.pg.fetch_all(sql, params, pool_name=run_lifecycle.SOCIAL_CONTROL_POOL_NAME)
+    except TypeError as exc:
+        if "unexpected keyword argument 'pool_name'" not in str(exc):
+            raise
+        return legacy.pg.fetch_all(sql, params)
+
+
+def _fetch_one_control(sql: str, params: list[Any]) -> dict[str, Any] | None:
+    try:
+        return legacy.pg.fetch_one(sql, params, pool_name=run_lifecycle.SOCIAL_CONTROL_POOL_NAME)
+    except TypeError as exc:
+        if "unexpected keyword argument 'pool_name'" not in str(exc):
+            raise
+        return legacy.pg.fetch_one(sql, params)
 
 
 def get_season_shared_status(
@@ -21,7 +40,7 @@ def get_season_shared_status(
     if isinstance(cached_payload, dict):
         return cached_payload
     context = legacy.get_season_context(season_id)
-    match_rows = legacy.pg.fetch_all(
+    match_rows = _fetch_all_control(
         """
         select
           status,
@@ -36,7 +55,7 @@ def get_season_shared_status(
         """,
         [source_scope, season_id],
     )
-    review_count_row = legacy.pg.fetch_one(
+    review_count_row = _fetch_one_control(
         """
         select count(*)::int as count
         from social.shared_post_review_queue
@@ -50,7 +69,7 @@ def get_season_shared_status(
         """,
         [source_scope, season_id],
     ) or {"count": 0}
-    retained_unassigned_row = legacy.pg.fetch_one(
+    retained_unassigned_row = _fetch_one_control(
         """
         select count(*)::int as count
         from social.shared_post_matches
@@ -59,7 +78,7 @@ def get_season_shared_status(
         """,
         [source_scope],
     ) or {"count": 0}
-    recent_run = legacy.pg.fetch_one(
+    recent_run = _fetch_one_control(
         """
         select
           r.id::text as id,
@@ -170,7 +189,7 @@ def list_shared_runs(
         params.append(run_id)
     sql += " order by created_at desc limit %s"
     params.append(safe_limit)
-    rows = legacy.pg.fetch_all(sql, params)
+    rows = _fetch_all_control(sql, params)
     for row in rows:
         config = dict(row.get("config") or {})
         row["execution_owner"] = str(config.get("execution_owner") or "").strip() or None
