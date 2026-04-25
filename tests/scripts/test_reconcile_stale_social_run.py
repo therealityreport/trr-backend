@@ -47,6 +47,9 @@ class FakePg:
                 "active_jobs": sum(1 for row in rows if row.get("status") in active_statuses),
                 "completed_jobs": sum(1 for row in rows if row.get("status") == "completed"),
                 "failed_jobs": sum(1 for row in rows if row.get("status") == "failed"),
+                "running_jobs": sum(1 for row in rows if row.get("status") == "running"),
+                "cancelling_jobs": sum(1 for row in rows if row.get("status") == "cancelling"),
+                "queued_jobs": sum(1 for row in rows if row.get("status") in {"queued", "pending", "retrying"}),
                 "stage_counts": stage_counts,
             }
         if "count(*) filter (where status = any(%s))::int as open_jobs" in normalized:
@@ -117,7 +120,6 @@ def test_execute_cleanup_cancels_duplicates_and_recomputes_run(monkeypatch):
 
     assert result.duplicate_open_job_ids == ["queued-job"]
     assert fake_pg.lock_entries == 1
-    assert fake_pg.remaining_count_reads == 1
     assert fake_pg.summary_reads == 1
     joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
     assert "update social.scrape_jobs" in joined_sql
@@ -141,7 +143,9 @@ def test_execute_cleanup_cancels_duplicates_and_recomputes_run(monkeypatch):
 def test_partitioned_same_type_jobs_are_not_duplicates(monkeypatch):
     @dataclass
     class PartitionedPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -175,7 +179,9 @@ def test_partitioned_same_type_jobs_are_not_duplicates(monkeypatch):
 def test_same_type_jobs_with_distinct_config_values_are_not_duplicates(monkeypatch):
     @dataclass
     class CursorPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -209,7 +215,9 @@ def test_same_type_jobs_with_distinct_config_values_are_not_duplicates(monkeypat
 def test_same_type_jobs_with_distinct_metadata_values_are_not_duplicates(monkeypatch):
     @dataclass
     class MetadataPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -243,7 +251,9 @@ def test_same_type_jobs_with_distinct_metadata_values_are_not_duplicates(monkeyp
 def test_same_type_jobs_with_equivalent_payloads_are_duplicates(monkeypatch):
     @dataclass
     class EquivalentPayloadPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -275,7 +285,9 @@ def test_same_type_jobs_with_equivalent_payloads_are_duplicates(monkeypatch):
 def test_same_type_jobs_with_distinct_non_dict_config_values_are_not_duplicates(monkeypatch):
     @dataclass
     class NonDictConfigPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -309,7 +321,9 @@ def test_same_type_jobs_with_distinct_non_dict_config_values_are_not_duplicates(
 def test_same_type_jobs_with_distinct_non_dict_metadata_values_are_not_duplicates(monkeypatch):
     @dataclass
     class NonDictMetadataPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -343,7 +357,9 @@ def test_same_type_jobs_with_distinct_non_dict_metadata_values_are_not_duplicate
 def test_same_type_jobs_with_equivalent_non_dict_payloads_are_duplicates(monkeypatch):
     @dataclass
     class EquivalentNonDictPayloadPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -375,7 +391,9 @@ def test_same_type_jobs_with_equivalent_non_dict_payloads_are_duplicates(monkeyp
 def test_dict_config_and_json_string_config_are_not_duplicates(monkeypatch):
     @dataclass
     class DictVsStringPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -407,7 +425,9 @@ def test_dict_config_and_json_string_config_are_not_duplicates(monkeypatch):
 def test_none_config_and_zero_config_are_not_duplicates(monkeypatch):
     @dataclass
     class NoneVsZeroPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -439,7 +459,9 @@ def test_none_config_and_zero_config_are_not_duplicates(monkeypatch):
 def test_int_config_and_string_config_are_not_duplicates(monkeypatch):
     @dataclass
     class IntVsStringPg(FakePg):
-        def fetch_all(self, query: str, params: list[object]):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
             if "from social.scrape_jobs" in normalized:
                 return [
@@ -466,6 +488,60 @@ def test_int_config_and_string_config_are_not_duplicates(monkeypatch):
     result = subject.plan_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
 
     assert result.duplicate_open_job_ids == []
+
+
+def test_execute_cleanup_builds_duplicate_plan_from_locked_current_jobs(monkeypatch):
+    @dataclass
+    class ChangingJobsPg(FakePg):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" not in normalized:
+                return []
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
+                return [
+                    {
+                        "id": "current-a-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"cursor": "a"},
+                        "metadata": {},
+                    },
+                    {
+                        "id": "current-b-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"cursor": "b"},
+                        "metadata": {},
+                    },
+                ]
+            return [
+                {
+                    "id": "stale-first-job",
+                    "status": "queued",
+                    "job_type": "shared_account_posts",
+                    "config": {"cursor": "stale"},
+                    "metadata": {},
+                },
+                {
+                    "id": "stale-duplicate-job",
+                    "status": "queued",
+                    "job_type": "shared_account_posts",
+                    "config": {"cursor": "stale"},
+                    "metadata": {},
+                },
+            ]
+
+    fake_pg = ChangingJobsPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    dry_run = subject.plan_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert dry_run.duplicate_open_job_ids == ["stale-duplicate-job"]
+    assert result.duplicate_open_job_ids == []
+    joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
+    assert "update social.scrape_jobs" not in joined_sql
 
 
 def test_execute_cleanup_marks_active_run_terminal_when_no_open_jobs_remain(monkeypatch):
@@ -495,10 +571,10 @@ def test_execute_cleanup_marks_active_run_terminal_when_no_open_jobs_remain(monk
     result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
 
     assert result.duplicate_open_job_ids == ["queued-job"]
-    assert fake_pg.remaining_count_reads == 1
+    run_update_params = fake_pg.writes[-1][1]
+    assert run_update_params[4] == "completed"
     joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
-    assert "status = case" in joined_sql
-    assert "then 'completed'" in joined_sql
+    assert "status = %s" in joined_sql
     assert "completed_at = case" in joined_sql
 
 
@@ -528,40 +604,61 @@ def test_execute_cleanup_terminalizes_cancelling_run_when_no_open_jobs_remain(mo
 
     assert result.run_status == "cancelling"
     run_update_params = fake_pg.writes[-1][1]
-    assert run_update_params[4] == "cancelling"
-    assert "cancelling" in run_update_params[5]
+    assert run_update_params[4] == "completed"
     joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
-    assert "then 'completed'" in joined_sql
+    assert "status = %s" in joined_sql
 
 
-def test_execute_cleanup_rereads_current_status_inside_lock_before_terminalizing(monkeypatch):
+def test_execute_cleanup_reconciles_completed_run_with_active_queue_to_queued(monkeypatch):
     @dataclass
-    class StatusChangedPg(FakePg):
+    class CompletedWithQueuedPg(FakePg):
         current_run_status: str = "completed"
 
-        def fetch_one(self, query: str, params: list[object], **kwargs):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
             normalized = " ".join(query.lower().split())
-            if "from social.scrape_runs" in normalized and "select id::text as id" in normalized:
-                return {
-                    "id": "80cf0056-7659-4203-b5f9-0758ee9d98c0",
-                    "status": "running",
-                    "total_jobs": 2,
-                    "active_jobs": 2,
-                }
-            return super().fetch_one(query, params, **kwargs)
+            if "from social.scrape_jobs" in normalized:
+                return [{"id": "queued-job", "status": "queued", "job_type": "posts", "stage": "posts"}]
+            return []
 
-    fake_pg = StatusChangedPg()
+    fake_pg = CompletedWithQueuedPg()
     monkeypatch.setattr(subject, "pg", fake_pg)
 
     result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
 
-    assert result.run_status == "running"
+    assert result.run_status == "queued"
     run_update_params = fake_pg.writes[-1][1]
-    assert run_update_params[4] == "completed"
-    assert run_update_params[8] == "completed"
-    assert run_update_params[11] == "completed"
+    assert run_update_params[4] == "queued"
     summary_payload = json.loads(run_update_params[-2])
+    assert summary_payload["stale_run_reconciler"]["next_run_status"] == "queued"
     assert summary_payload["stale_run_reconciler"]["terminalized"] is False
+
+
+def test_execute_cleanup_reconciles_running_jobs_to_running(monkeypatch):
+    @dataclass
+    class RunningJobPg(FakePg):
+        current_run_status: str = "completed"
+
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" in normalized:
+                return [{"id": "running-job", "status": "running", "job_type": "posts", "stage": "posts"}]
+            return []
+
+    fake_pg = RunningJobPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.run_status == "queued"
+    run_update_params = fake_pg.writes[-1][1]
+    assert run_update_params[4] == "running"
+    summary_payload = json.loads(run_update_params[-2])
+    assert summary_payload["running_jobs"] == 1
+    assert summary_payload["stale_run_reconciler"]["next_run_status"] == "running"
 
 
 def test_execute_cleanup_summary_counters_reflect_job_statuses(monkeypatch):
