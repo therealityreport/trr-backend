@@ -233,3 +233,31 @@ def test_execute_cleanup_marks_active_run_terminal_when_no_open_jobs_remain(monk
     assert "status = case" in joined_sql
     assert "then 'completed'" in joined_sql
     assert "completed_at = case" in joined_sql
+
+
+def test_execute_cleanup_terminalizes_cancelling_run_when_no_open_jobs_remain(monkeypatch):
+    @dataclass
+    class StaleCancellingPg(FakePg):
+        def fetch_one(self, query: str, params: list[object]):
+            normalized = " ".join(query.lower().split())
+            if "count(*) filter (where status = any(%s))::int as open_jobs" in normalized:
+                return {"open_jobs": 0, "failed_jobs": 0}
+            if "from social.scrape_runs" in normalized:
+                return {
+                    "id": "80cf0056-7659-4203-b5f9-0758ee9d98c0",
+                    "status": "cancelling",
+                    "total_jobs": 2,
+                    "active_jobs": 2,
+                }
+            return None
+
+    fake_pg = StaleCancellingPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.run_status == "cancelling"
+    run_update_params = fake_pg.writes[-1][1]
+    assert "cancelling" in run_update_params[2]
+    joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
+    assert "then 'completed'" in joined_sql

@@ -19,7 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
 
 
 OPEN_JOB_STATUSES = {"queued", "pending", "retrying", "running", "cancelling"}
-ACTIVE_RUN_STATUSES = {"queued", "pending", "retrying", "running"}
+ACTIVE_RUN_STATUSES = {"queued", "pending", "retrying", "running", "cancelling"}
 
 
 @dataclass(slots=True)
