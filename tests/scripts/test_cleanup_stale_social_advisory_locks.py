@@ -70,3 +70,18 @@ def test_cleanup_execute_terminates_allowed_stale_sessions(monkeypatch: pytest.M
 def test_find_stale_advisory_sessions_refuses_empty_allowlist() -> None:
     with pytest.raises(subject.AdvisoryCleanupRefused):
         subject.find_stale_advisory_sessions(30, [])
+
+
+def test_main_reports_empty_allowlist_refusal_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(subject, "load_env", lambda: None)
+
+    exit_code = subject.main(["--min-age-minutes", "30"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "without at least one --lock-key" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out == ""

@@ -87,6 +87,22 @@ def _fetch_open_social_jobs() -> list[dict[str, Any]]:
     )
 
 
+def _fetch_social_job_counts() -> list[dict[str, Any]]:
+    return pg.fetch_all(
+        """
+        select
+          coalesce(platform, 'unknown') as platform,
+          status,
+          count(*)::int as job_count
+        from social.scrape_jobs
+        where status = any(%s)
+        group by coalesce(platform, 'unknown'), status
+        order by coalesce(platform, 'unknown'), status
+        """,
+        [sorted(OPEN_JOB_STATUSES)],
+    )
+
+
 def build_pressure_snapshot(
     *,
     min_age_minutes: int = 15,
@@ -97,9 +113,12 @@ def build_pressure_snapshot(
         if allowed_lock_keys
         else []
     )
+    social_job_counts = _fetch_social_job_counts()
     social_jobs = _fetch_open_social_jobs()
     return {
         "db_activity": _fetch_db_activity(),
+        "open_social_jobs_total": sum(int(row.get("job_count") or 0) for row in social_job_counts),
+        "social_job_counts": [_json_safe(row) for row in social_job_counts],
         "social_jobs": [_json_safe(job) for job in social_jobs],
         "stale_advisory_sessions": [_json_safe(session) for session in stale_sessions],
         "stale_advisory_session_count": len(stale_sessions),

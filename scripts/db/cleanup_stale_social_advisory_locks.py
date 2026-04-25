@@ -125,11 +125,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     load_env()
     args = _parse_args(argv or sys.argv[1:])
-    result = cleanup_stale_advisory_sessions(
-        args.min_age_minutes,
-        args.lock_key,
-        execute=args.execute,
-    )
+    try:
+        result = cleanup_stale_advisory_sessions(
+            args.min_age_minutes,
+            args.lock_key,
+            execute=args.execute,
+        )
+    except AdvisoryCleanupRefused as error:
+        print(str(error), file=sys.stderr)
+        return 2
     print(json.dumps(result, sort_keys=True))
     return 0
 

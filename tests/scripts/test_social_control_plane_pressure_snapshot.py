@@ -28,6 +28,13 @@ class FakePg:
                     "max_age_seconds": 1200,
                 },
             ]
+        if "count(*)::int as job_count" in normalized:
+            assert "limit 200" not in normalized
+            assert params == [["cancelling", "pending", "queued", "retrying", "running"]]
+            return [
+                {"platform": "instagram", "status": "queued", "job_count": 5},
+                {"platform": "tiktok", "status": "running", "job_count": 1},
+            ]
         if "from social.scrape_jobs" in normalized:
             assert params == [["cancelling", "pending", "queued", "retrying", "running"]]
             return [
@@ -75,6 +82,11 @@ def test_build_pressure_snapshot_shape_and_stale_advisory_count(monkeypatch: pyt
             },
         },
     }
+    assert snapshot["open_social_jobs_total"] == 6
+    assert snapshot["social_job_counts"] == [
+        {"platform": "instagram", "status": "queued", "job_count": 5},
+        {"platform": "tiktok", "status": "running", "job_count": 1},
+    ]
     assert snapshot["social_jobs"] == [
         {
             "id": "job-1",
