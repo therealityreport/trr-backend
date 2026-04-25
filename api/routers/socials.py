@@ -55,6 +55,7 @@ from trr_backend.modal_dispatch import (
 from trr_backend.observability import get_trace_id
 from trr_backend.read_path_diagnostics import log_read_path
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
+from trr_backend.socials.control_plane.background_tasks import submit_named_background_task
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
@@ -422,20 +423,53 @@ def _queue_catalog_backfill_finalize_task(
     if not str(run_id or "").strip():
         return
 
-    background_tasks.add_task(
-        _finalize_catalog_backfill_launch_task,
-        platform=platform,
-        account_handle=account_handle,
-        run_id=run_id,
-        source_scope=source_scope,
-        date_start=date_start,
-        date_end=date_end,
-        initiated_by=initiated_by,
-        allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
-        execution_preference=execution_preference,
-        selected_tasks=selected_tasks,
-        launch_group_id=launch_group_id,
+    # Starlette BackgroundTasks still keep the local request lifecycle open long
+    # enough for Next.js to hit its upstream timeout on Modal-backed launches.
+    # Detach this finalizer so the admin action can return the reserved run
+    # immediately while the long dispatch work continues.
+    _ = background_tasks
+    normalized_platform = str(platform or "").strip().lower()
+    normalized_account = str(account_handle or "").strip().lower()
+    normalized_run_id = str(run_id or "").strip()
+    task_result = submit_named_background_task(
+        group="catalog-finalize",
+        key=f"{normalized_platform}:{normalized_account}:{normalized_run_id}",
+        thread_name=f"catalog-finalize:{normalized_platform}:{normalized_account[:24]}",
+        target=_finalize_catalog_backfill_launch_task,
+        kwargs={
+            "platform": platform,
+            "account_handle": account_handle,
+            "run_id": run_id,
+            "source_scope": source_scope,
+            "date_start": date_start,
+            "date_end": date_end,
+            "initiated_by": initiated_by,
+            "allow_local_dev_inline_bypass": allow_local_dev_inline_bypass,
+            "execution_preference": execution_preference,
+            "selected_tasks": selected_tasks,
+            "launch_group_id": launch_group_id,
+        },
     )
+    if task_result.get("state") == "duplicate":
+        logger.info(
+            "[catalog-finalize] finalizer already queued platform=%s account=%s run_id=%s state=%s",
+            normalized_platform,
+            normalized_account,
+            normalized_run_id,
+            task_result.get("state"),
+        )
+    elif not task_result.get("submitted"):
+        logger.warning(
+            "[catalog-finalize] finalizer queue unavailable platform=%s account=%s run_id=%s state=%s active=%s queued=%s max=%s queue_max=%s",
+            normalized_platform,
+            normalized_account,
+            normalized_run_id,
+            task_result.get("state"),
+            task_result.get("active_count"),
+            task_result.get("queued_count"),
+            task_result.get("max_active"),
+            task_result.get("queue_maxsize"),
+        )
 
 
 def _cancel_catalog_run_in_background(
@@ -5197,13 +5231,12 @@ async def post_social_account_catalog_backfill_route(
             date_start=date_start,
             date_end=date_end,
         )
-        use_async_instagram_kickoff = (
-            platform == "instagram"
-            and queue_enabled
+        use_async_catalog_kickoff = (
+            queue_enabled
             and not used_inline_fallback
             and list(payload.selected_tasks or []) != ["comments"]
         )
-        if use_async_instagram_kickoff:
+        if use_async_catalog_kickoff:
             result = await run_in_threadpool(
                 begin_social_account_catalog_backfill_launch,
                 platform=platform,
