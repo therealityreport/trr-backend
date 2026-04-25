@@ -20,23 +20,6 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
 
 OPEN_JOB_STATUSES = {"queued", "pending", "retrying", "running", "cancelling"}
 ACTIVE_RUN_STATUSES = {"queued", "pending", "retrying", "running"}
-PARTITION_KEY_FIELDS = (
-    "partition_id",
-    "partition_key",
-    "partition",
-    "partition_index",
-    "shard",
-    "shard_id",
-    "shard_index",
-    "runner_lane",
-    "required_worker_lane",
-    "account_id",
-    "account_handle",
-    "shared_account_id",
-    "source_account_id",
-    "handle",
-    "username",
-)
 
 
 @dataclass(slots=True)
@@ -96,40 +79,19 @@ def _metadata_dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _lookup_nested_value(payload: dict[str, object], field: str) -> object:
-    if field in payload:
-        return payload[field]
-    for value in payload.values():
-        if isinstance(value, dict):
-            nested_value = _lookup_nested_value(value, field)
-            if nested_value not in (None, ""):
-                return nested_value
-    return None
-
-
 def _stable_text(value: object) -> str:
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
     return str(value or "").strip()
 
 
-def _duplicate_group_key(job: dict[str, object]) -> tuple[str, tuple[tuple[str, str], ...]]:
+def _duplicate_group_key(job: dict[str, object]) -> tuple[str, str, str]:
     job_type = str(job.get("job_type") or "").strip()
-    config = _metadata_dict(job.get("config"))
-    metadata = _metadata_dict(job.get("metadata"))
-    partition_values: list[tuple[str, str]] = []
-    for field in PARTITION_KEY_FIELDS:
-        value = _lookup_nested_value(config, field)
-        if value in (None, ""):
-            value = _lookup_nested_value(metadata, field)
-        stable_value = _stable_text(value)
-        if stable_value:
-            partition_values.append((field, stable_value))
-    return job_type, tuple(partition_values)
+    return job_type, _stable_text(_metadata_dict(job.get("config"))), _stable_text(_metadata_dict(job.get("metadata")))
 
 
 def _identify_duplicate_open_job_ids(open_jobs: list[dict[str, object]]) -> list[str]:
-    seen_keys: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+    seen_keys: set[tuple[str, str, str]] = set()
     duplicate_ids: list[str] = []
     for job in open_jobs:
         duplicate_key = _duplicate_group_key(job)

@@ -105,6 +105,106 @@ def test_partitioned_same_type_jobs_are_not_duplicates(monkeypatch):
     assert "update social.scrape_jobs" not in joined_sql
 
 
+def test_same_type_jobs_with_distinct_config_values_are_not_duplicates(monkeypatch):
+    @dataclass
+    class CursorPg(FakePg):
+        def fetch_all(self, query: str, params: list[object]):
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" in normalized:
+                return [
+                    {
+                        "id": "cursor-a-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"cursor": "a"},
+                        "metadata": {},
+                    },
+                    {
+                        "id": "cursor-b-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"cursor": "b"},
+                        "metadata": {},
+                    },
+                ]
+            return []
+
+    fake_pg = CursorPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.duplicate_open_job_ids == []
+    joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
+    assert "update social.scrape_jobs" not in joined_sql
+
+
+def test_same_type_jobs_with_distinct_metadata_values_are_not_duplicates(monkeypatch):
+    @dataclass
+    class MetadataPg(FakePg):
+        def fetch_all(self, query: str, params: list[object]):
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" in normalized:
+                return [
+                    {
+                        "id": "metadata-a-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {},
+                        "metadata": {"cursor": "a"},
+                    },
+                    {
+                        "id": "metadata-b-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {},
+                        "metadata": {"cursor": "b"},
+                    },
+                ]
+            return []
+
+    fake_pg = MetadataPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.duplicate_open_job_ids == []
+    joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
+    assert "update social.scrape_jobs" not in joined_sql
+
+
+def test_same_type_jobs_with_equivalent_payloads_are_duplicates(monkeypatch):
+    @dataclass
+    class EquivalentPayloadPg(FakePg):
+        def fetch_all(self, query: str, params: list[object]):
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" in normalized:
+                return [
+                    {
+                        "id": "first-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"cursor": "a", "nested": {"page": 1}},
+                        "metadata": {"source": "backfill"},
+                    },
+                    {
+                        "id": "second-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"nested": {"page": 1}, "cursor": "a"},
+                        "metadata": {"source": "backfill"},
+                    },
+                ]
+            return []
+
+    fake_pg = EquivalentPayloadPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.plan_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.duplicate_open_job_ids == ["second-job"]
+
+
 def test_execute_cleanup_marks_active_run_terminal_when_no_open_jobs_remain(monkeypatch):
     @dataclass
     class StaleActivePg(FakePg):
