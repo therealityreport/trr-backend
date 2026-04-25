@@ -12,6 +12,8 @@ class FakePg:
 
     def fetch_one(self, query: str, params: list[object]):
         normalized = " ".join(query.lower().split())
+        if "count(*)::int as open_jobs" in normalized:
+            return {"open_jobs": len(self.fetch_all(query, params))}
         if "from social.scrape_runs" in normalized:
             return {
                 "id": "80cf0056-7659-4203-b5f9-0758ee9d98c0",
@@ -67,3 +69,67 @@ def test_execute_cleanup_cancels_duplicates_and_recomputes_run(monkeypatch):
     assert "update social.scrape_jobs" in joined_sql
     assert "status = 'cancelled'" in joined_sql
     assert "update social.scrape_runs" in joined_sql
+
+
+def test_partitioned_same_type_jobs_are_not_duplicates(monkeypatch):
+    @dataclass
+    class PartitionedPg(FakePg):
+        def fetch_all(self, query: str, params: list[object]):
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" in normalized:
+                return [
+                    {
+                        "id": "shard-0-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"partition_id": "shard-0"},
+                        "metadata": {},
+                    },
+                    {
+                        "id": "shard-1-job",
+                        "status": "queued",
+                        "job_type": "shared_account_posts",
+                        "config": {"partition_id": "shard-1"},
+                        "metadata": {},
+                    },
+                ]
+            return []
+
+    fake_pg = PartitionedPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.duplicate_open_job_ids == []
+    joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
+    assert "update social.scrape_jobs" not in joined_sql
+
+
+def test_execute_cleanup_marks_active_run_terminal_when_no_open_jobs_remain(monkeypatch):
+    @dataclass
+    class StaleActivePg(FakePg):
+        open_fetch_count: int = 0
+
+        def fetch_one(self, query: str, params: list[object]):
+            normalized = " ".join(query.lower().split())
+            if "count(*)::int as open_jobs" in normalized:
+                return {"open_jobs": 0}
+            if "from social.scrape_runs" in normalized:
+                return {
+                    "id": "80cf0056-7659-4203-b5f9-0758ee9d98c0",
+                    "status": "running",
+                    "total_jobs": 2,
+                    "active_jobs": 2,
+                }
+            return None
+
+    fake_pg = StaleActivePg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.duplicate_open_job_ids == ["queued-job"]
+    joined_sql = "\n".join(sql for sql, _params in fake_pg.writes)
+    assert "status = case" in joined_sql
+    assert "then 'completed'" in joined_sql
+    assert "completed_at = case" in joined_sql
