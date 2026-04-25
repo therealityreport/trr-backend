@@ -30,7 +30,7 @@ class FakePg:
         if "stage_counts" in normalized and "from social.scrape_jobs" in normalized:
             self.summary_reads += 1
             rows = self.fetch_all(query, params)
-            active_statuses = set(params[1])
+            counter_statuses = set(params[1])
             stage_counts: dict[str, dict[str, int]] = {}
             for row in rows:
                 status = str(row.get("status") or "")
@@ -41,10 +41,10 @@ class FakePg:
                     bucket["completed"] += 1
                 if status == "failed":
                     bucket["failed"] += 1
-                if status in active_statuses:
+                if status in counter_statuses:
                     bucket["active"] += 1
             return {
-                "active_jobs": sum(1 for row in rows if row.get("status") in active_statuses),
+                "active_jobs": sum(1 for row in rows if row.get("status") in counter_statuses),
                 "completed_jobs": sum(1 for row in rows if row.get("status") == "completed"),
                 "failed_jobs": sum(1 for row in rows if row.get("status") == "failed"),
                 "running_jobs": sum(1 for row in rows if row.get("status") == "running"),
@@ -659,6 +659,36 @@ def test_execute_cleanup_reconciles_running_jobs_to_running(monkeypatch):
     summary_payload = json.loads(run_update_params[-2])
     assert summary_payload["running_jobs"] == 1
     assert summary_payload["stale_run_reconciler"]["next_run_status"] == "running"
+
+
+def test_execute_cleanup_cancelling_job_sets_cancelling_status_but_zero_active_counters(monkeypatch):
+    @dataclass
+    class CancellingJobPg(FakePg):
+        def fetch_all(self, query: str, params: list[object], **kwargs):
+            if kwargs:
+                assert kwargs.get("conn") is self.lock_conn
+            normalized = " ".join(query.lower().split())
+            if "from social.scrape_jobs" in normalized:
+                return [{"id": "cancelling-job", "status": "cancelling", "job_type": "posts", "stage": "posts"}]
+            return []
+
+    fake_pg = CancellingJobPg()
+    monkeypatch.setattr(subject, "pg", fake_pg)
+
+    result = subject.execute_run_cleanup("80cf0056-7659-4203-b5f9-0758ee9d98c0")
+
+    assert result.run_status == "queued"
+    run_update_params = fake_pg.writes[-1][1]
+    assert run_update_params[0] == 0
+    assert run_update_params[4] == "cancelling"
+    assert json.loads(run_update_params[3]) == {
+        "posts": {"total": 1, "completed": 0, "failed": 0, "active": 0}
+    }
+    summary_payload = json.loads(run_update_params[-2])
+    assert summary_payload["active_jobs"] == 0
+    assert summary_payload["cancelling_jobs"] == 1
+    assert summary_payload["stage_counts"]["posts"]["active"] == 0
+    assert summary_payload["stale_run_reconciler"]["next_run_status"] == "cancelling"
 
 
 def test_execute_cleanup_summary_counters_reflect_job_statuses(monkeypatch):

@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - script execution convenience
 
 
 OPEN_JOB_STATUSES = {"queued", "pending", "retrying", "running", "cancelling"}
+ACTIVE_JOB_COUNTER_STATUSES = {"queued", "pending", "retrying", "running"}
 ACTIVE_RUN_STATUSES = {"queued", "pending", "retrying", "running", "cancelling"}
 
 
@@ -173,7 +174,7 @@ def _fetch_summary_counters(run_id: str, *, conn: object | None = None) -> dict[
           ) as stage_counts
         from job_rows
         """,
-        [run_id, sorted(OPEN_JOB_STATUSES), sorted(OPEN_JOB_STATUSES)],
+        [run_id, sorted(ACTIVE_JOB_COUNTER_STATUSES), sorted(ACTIVE_JOB_COUNTER_STATUSES)],
         conn=conn,
     )
     if not row:
