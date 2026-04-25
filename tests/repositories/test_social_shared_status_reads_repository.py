@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 import trr_backend.repositories.social_season_analytics as social_repo
+import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
 import trr_backend.socials.control_plane.shared_accounts as shared_reads
 from trr_backend.socials.control_plane import SeasonContext
 
@@ -37,6 +38,8 @@ def test_legacy_list_shared_runs_delegates_to_control_plane_shared_accounts(
 
 
 def test_get_season_shared_status_summarizes_stage_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_fetch_all_pools: list[str] = []
+    seen_fetch_one_pools: list[str] = []
     season_context = SeasonContext(
         season_id="season-1",
         show_id="show-1",
@@ -46,8 +49,9 @@ def test_get_season_shared_status_summarizes_stage_buckets(monkeypatch: pytest.M
     )
     monkeypatch.setattr(social_repo, "get_season_context", lambda season_id: season_context)
 
-    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+    def _fake_fetch_all(sql: str, params: list[Any], *, pool_name: str = "default") -> list[dict[str, Any]]:
         del params
+        seen_fetch_all_pools.append(pool_name)
         if "from social.shared_post_matches" in sql:
             return [
                 {
@@ -59,7 +63,13 @@ def test_get_season_shared_status_summarizes_stage_buckets(monkeypatch: pytest.M
             ]
         raise AssertionError(f"Unexpected fetch_all SQL: {sql}")
 
-    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any] | None:
+    def _fake_fetch_one(
+        sql: str,
+        params: list[Any],
+        *,
+        pool_name: str = "default",
+    ) -> dict[str, Any] | None:
+        seen_fetch_one_pools.append(pool_name)
         if "from social.shared_post_review_queue" in sql and "count(*)::int as count" in sql:
             return {"count": 2}
         if "status = 'unmatched'" in sql:
@@ -93,14 +103,23 @@ def test_get_season_shared_status_summarizes_stage_buckets(monkeypatch: pytest.M
     assert payload["shared_scrape_status"]["status"] == "running"
     assert payload["classification_status"]["status"] == "complete"
     assert payload["materialization_status"]["status"] == "queued"
+    assert seen_fetch_all_pools == [run_lifecycle.SOCIAL_CONTROL_POOL_NAME]
+    assert seen_fetch_one_pools == [run_lifecycle.SOCIAL_CONTROL_POOL_NAME] * 3
 
 
 def test_list_shared_runs_normalizes_execution_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
+    seen_fetch_all_pools: list[str] = []
 
-    def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
+    def _fake_fetch_all(
+        sql: str,
+        params: list[object],
+        *,
+        pool_name: str = "default",
+    ) -> list[dict[str, object]]:
         captured["sql"] = sql
         captured["params"] = params
+        seen_fetch_all_pools.append(pool_name)
         return [
             {
                 "id": "shared-run-1",
@@ -132,3 +151,4 @@ def test_list_shared_runs_normalizes_execution_metadata(monkeypatch: pytest.Monk
     assert payload[0]["execution_backend_canonical"] == "modal"
     assert payload[0]["ingest_mode"] == social_repo.SHARED_ACCOUNT_ASYNC_INGEST_MODE
     assert captured["params"] == [social_repo.SHARED_ACCOUNT_ASYNC_INGEST_MODE, "running", "bravo", 25]
+    assert seen_fetch_all_pools == [run_lifecycle.SOCIAL_CONTROL_POOL_NAME]
