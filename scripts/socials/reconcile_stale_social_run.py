@@ -75,15 +75,18 @@ def _fetch_open_jobs(run_id: str) -> list[dict[str, object]]:
     )
 
 
-def _stable_text(value: object) -> str:
-    if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, sort_keys=True, separators=(",", ":"))
-    return str(value or "").strip()
+def _json_fingerprint(value: object) -> str:
+    return json.dumps(
+        {"type": type(value).__name__, "value": value},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _duplicate_group_key(job: dict[str, object]) -> tuple[str, str, str]:
     job_type = str(job.get("job_type") or "").strip()
-    return job_type, _stable_text(job.get("config")), _stable_text(job.get("metadata"))
+    return job_type, _json_fingerprint(job.get("config")), _json_fingerprint(job.get("metadata"))
 
 
 def _identify_duplicate_open_job_ids(open_jobs: list[dict[str, object]]) -> list[str]:
@@ -163,7 +166,9 @@ def execute_run_cleanup(run_id: str) -> CleanupPlan:
               error_message = 'duplicate_open_job_cancelled_by_stale_run_reconciler',
               last_error_code = 'duplicate_open_job_cancelled',
               last_error_class = 'DuplicateOpenJobCancelled',
-              metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
+              metadata = (
+                case when jsonb_typeof(metadata) = 'object' then metadata else '{}'::jsonb end
+              ) || %s::jsonb
             where run_id::text = %s
               and id::text = any(%s)
               and status = any(%s)
