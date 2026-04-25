@@ -75,10 +75,6 @@ def _fetch_open_jobs(run_id: str) -> list[dict[str, object]]:
     )
 
 
-def _metadata_dict(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
 def _stable_text(value: object) -> str:
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -87,7 +83,7 @@ def _stable_text(value: object) -> str:
 
 def _duplicate_group_key(job: dict[str, object]) -> tuple[str, str, str]:
     job_type = str(job.get("job_type") or "").strip()
-    return job_type, _stable_text(_metadata_dict(job.get("config"))), _stable_text(_metadata_dict(job.get("metadata")))
+    return job_type, _stable_text(job.get("config")), _stable_text(job.get("metadata"))
 
 
 def _identify_duplicate_open_job_ids(open_jobs: list[dict[str, object]]) -> list[str]:
