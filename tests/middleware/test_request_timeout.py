@@ -7,7 +7,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from trr_backend.middleware.request_timeout import RequestTimeoutMiddleware
+from trr_backend.middleware.request_timeout import RequestTimeoutMiddleware, _is_exempt
 
 
 def _make_app(timeout_seconds: float) -> FastAPI:
@@ -71,18 +71,35 @@ class TestRequestTimeoutMiddleware:
         response = client.get("/api/v1/admin/socials/live-status/stream")
         assert response.status_code == 200
 
-    def test_social_profile_posts_endpoint_exempt(self):
-        """Shared profile posts reads use the proxy timeout tiers instead of the generic backend wall clock."""
+    def test_social_profile_posts_endpoint_times_out(self):
+        """Shared profile reads use the generic backend wall-clock timeout."""
         app = _make_app(timeout_seconds=0.1)
 
         @app.get("/api/v1/admin/socials/profiles/tiktok/bravotv/posts")
         async def posts_endpoint():
-            await asyncio.sleep(1)  # Would timeout if not exempt
+            await asyncio.sleep(1)
             return {"items": [], "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 1}}
 
         client = TestClient(app)
         response = client.get("/api/v1/admin/socials/profiles/tiktok/bravotv/posts?comments_only=true")
-        assert response.status_code == 200
+        assert response.status_code == 504
+
+    def test_social_profile_read_paths_are_not_exempt(self):
+        assert _is_exempt("/api/v1/admin/socials/profiles/instagram/thetraitorsus/summary") is False
+        assert _is_exempt("/api/v1/admin/socials/profiles/instagram/thetraitorsus/dashboard") is False
+        assert _is_exempt("/api/v1/admin/socials/profiles/tiktok/bravotv/posts") is False
+        assert (
+            _is_exempt(
+                "/api/v1/admin/socials/profiles/instagram/thetraitorsus/catalog/runs/"
+                "11111111-1111-1111-1111-111111111111/progress"
+            )
+            is False
+        )
+
+    def test_social_profile_action_paths_remain_exempt(self):
+        assert _is_exempt("/api/v1/admin/socials/profiles/instagram/thetraitorsus/catalog/backfill") is True
+        assert _is_exempt("/api/v1/admin/socials/profiles/instagram/thetraitorsus/comments/scrape") is True
+        assert _is_exempt("/api/v1/admin/socials/profiles/instagram/thetraitorsus/socialblade/refresh") is True
 
     def test_unknown_stream_endpoint_not_exempt(self):
         """Arbitrary /stream paths should not bypass the timeout."""

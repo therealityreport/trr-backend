@@ -56,6 +56,8 @@ from trr_backend.observability import get_trace_id
 from trr_backend.read_path_diagnostics import log_read_path
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+from trr_backend.socials.profile_dashboard import build_social_account_profile_dashboard
+from trr_backend.socials.profile_dashboard_schema import SocialAccountDashboardPayload
 
 logger = logging.getLogger(__name__)
 
@@ -467,7 +469,8 @@ def _queue_catalog_backfill_finalize_task(
         )
     elif not task_result.get("submitted"):
         logger.warning(
-            "[catalog-finalize] finalizer queue unavailable platform=%s account=%s run_id=%s state=%s active=%s queued=%s max=%s queue_max=%s",
+            "[catalog-finalize] finalizer queue unavailable platform=%s account=%s run_id=%s state=%s "
+            "active=%s queued=%s max=%s queue_max=%s",
             normalized_platform,
             normalized_account,
             normalized_run_id,
@@ -4296,6 +4299,33 @@ def get_social_account_profile_summary_route(
             account_handle,
         )
         raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get(
+    "/profiles/{platform}/{account_handle}/dashboard",
+    response_model=SocialAccountDashboardPayload,
+)
+def get_social_account_profile_dashboard_route(
+    platform: str,
+    account_handle: str,
+    detail: str = "lite",
+    run_id: str | None = None,
+    recent_log_limit: int = 25,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    bounded_recent_log_limit = max(1, min(recent_log_limit, 100))
+    try:
+        return build_social_account_profile_dashboard(
+            platform=platform,
+            account_handle=account_handle,
+            detail=detail,
+            run_id=run_id,
+            recent_log_limit=bounded_recent_log_limit,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/live-profile-total")
