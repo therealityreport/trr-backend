@@ -833,13 +833,29 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
 
     finalized: list[dict[str, Any]] = []
     cleared: list[str] = []
+    submitted_tasks: list[dict[str, Any]] = []
     background_tasks = BackgroundTasks()
+
+    def _fake_submit_named_background_task(**kwargs: Any) -> dict[str, Any]:
+        submitted_tasks.append(kwargs)
+        kwargs["target"](**dict(kwargs["kwargs"]))
+        return {
+            "submitted": True,
+            "state": "queued",
+            "group": kwargs["group"],
+            "key": kwargs["key"],
+            "active_count": 0,
+            "queued_count": 1,
+            "max_active": 1,
+            "queue_maxsize": 25,
+        }
 
     monkeypatch.setattr(
         "trr_backend.repositories.social_season_analytics.finalize_social_account_catalog_backfill_launch",
         lambda **kwargs: finalized.append(kwargs) or {"run_id": kwargs["run_id"], "status": "queued"},
     )
     monkeypatch.setattr(socials_router, "_clear_account_profile_caches", lambda: cleared.append("cleared"))
+    monkeypatch.setattr(socials_router, "submit_named_background_task", _fake_submit_named_background_task)
 
     socials_router._queue_catalog_backfill_finalize_task(
         background_tasks=background_tasks,
@@ -856,9 +872,11 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
         launch_group_id="launch-group-1",
     )
 
-    assert len(background_tasks.tasks) == 1
-
-    asyncio.run(background_tasks())
+    assert background_tasks.tasks == []
+    assert len(submitted_tasks) == 1
+    assert submitted_tasks[0]["group"] == "catalog-finalize"
+    assert submitted_tasks[0]["key"] == "instagram:bravotv:catalog-run-1"
+    assert submitted_tasks[0]["thread_name"] == "catalog-finalize:instagram:bravotv"
 
     assert finalized == [
         {
@@ -876,6 +894,55 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
         }
     ]
     assert cleared == ["cleared"]
+
+
+def test_queue_catalog_backfill_finalize_task_logs_when_queue_full(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from api.routers import socials as socials_router
+
+    finalized: list[dict[str, Any]] = []
+    background_tasks = BackgroundTasks()
+
+    def _fake_submit_named_background_task(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "submitted": False,
+            "state": "queue_full",
+            "group": kwargs["group"],
+            "key": kwargs["key"],
+            "active_count": 1,
+            "queued_count": 25,
+            "max_active": 1,
+            "queue_maxsize": 25,
+        }
+
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics.finalize_social_account_catalog_backfill_launch",
+        lambda **kwargs: finalized.append(kwargs) or {"run_id": kwargs["run_id"], "status": "queued"},
+    )
+    monkeypatch.setattr(socials_router, "submit_named_background_task", _fake_submit_named_background_task)
+
+    with caplog.at_level("WARNING"):
+        socials_router._queue_catalog_backfill_finalize_task(
+            background_tasks=background_tasks,
+            platform="instagram",
+            account_handle="bravotv",
+            run_id="catalog-run-1",
+            source_scope="bravo",
+            date_start=None,
+            date_end=None,
+            initiated_by="admin@example.com",
+            allow_local_dev_inline_bypass=False,
+            execution_preference="auto",
+            selected_tasks=["post_details"],
+            launch_group_id="launch-group-1",
+        )
+
+    assert background_tasks.tasks == []
+    assert finalized == []
+    assert "finalizer queue unavailable" in caplog.text
+    assert "queue_full" in caplog.text
 
 
 def test_post_social_account_catalog_backfill_rejects_empty_selected_tasks(
@@ -1023,14 +1090,18 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
             return_value=None,
         ) as worker_guard:
             with patch(
-                "trr_backend.repositories.social_season_analytics.launch_social_account_catalog_backfill",
+                "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
                 return_value=expected,
             ) as mocked:
-                response = client.post(
-                    "/api/v1/admin/socials/profiles/tiktok/bravotv/catalog/backfill",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"backfill_scope": "full_history"},
-                )
+                with patch(
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
+                    return_value=None,
+                ) as mocked_finalize:
+                    response = client.post(
+                        "/api/v1/admin/socials/profiles/tiktok/bravotv/catalog/backfill",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"backfill_scope": "full_history"},
+                    )
 
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-tt-1"
@@ -1038,6 +1109,7 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
     assert mocked.call_args.kwargs["platform"] == "tiktok"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
     assert mocked.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-tt-1"
 
 
 def test_post_social_account_catalog_remediate_drift_cancels_and_requeues(
@@ -1129,24 +1201,29 @@ def test_post_social_account_catalog_backfill_additional_supported_platforms(
             return_value=None,
         ) as worker_guard:
             with patch(
-                "trr_backend.repositories.social_season_analytics.launch_social_account_catalog_backfill",
+                "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
                 return_value={
                     "run_id": run_id,
                     "status": "queued",
                     "ingest_mode": "shared_account_catalog_backfill",
                 },
             ) as mocked:
-                response = client.post(
-                    f"/api/v1/admin/socials/profiles/{platform}/{handle}/catalog/backfill",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"backfill_scope": "full_history"},
-                )
+                with patch(
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
+                    return_value=None,
+                ) as mocked_finalize:
+                    response = client.post(
+                        f"/api/v1/admin/socials/profiles/{platform}/{handle}/catalog/backfill",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"backfill_scope": "full_history"},
+                    )
 
     assert response.status_code == 200
     assert response.json()["run_id"] == run_id
     worker_guard.assert_called_once_with(required_execution_backend="modal", platform=platform)
     assert mocked.call_args.kwargs["platform"] == platform
     assert mocked.call_args.kwargs["account_handle"] == handle
+    assert mocked_finalize.call_args.kwargs["run_id"] == run_id
 
 
 def test_post_social_account_catalog_backfill_requires_modal_executor(
@@ -4699,6 +4776,94 @@ def test_post_social_account_comments_scrape_accepts_all_saved_posts_profile_syn
     assert scrape_mock.call_args.kwargs["max_posts"] is None
     assert scrape_mock.call_args.kwargs["max_comments_per_post"] is None
     assert scrape_mock.call_args.kwargs["refresh_policy"] == "all_saved_posts"
+    assert scrape_mock.call_args.kwargs["dispatch_immediately"] is True
+
+
+def test_post_social_account_comments_scrape_queue_dispatches_in_background(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            return_value={
+                "queue_enabled": True,
+                "used_inline_fallback": False,
+                "requires_modal_executor": True,
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            return_value={"run_id": "comments-run-queued-1", "status": "queued"},
+        ) as scrape_mock,
+        patch(
+            "trr_backend.repositories.social_season_analytics._dispatch_due_social_jobs_in_background"
+        ) as dispatch_mock,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"mode": "profile", "source_scope": "bravo", "refresh_policy": "all_saved_posts"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "comments-run-queued-1"
+    scrape_mock.assert_called_once()
+    assert scrape_mock.call_args.kwargs["dispatch_immediately"] is False
+    dispatch_mock.assert_called_once_with(run_id="comments-run-queued-1")
+
+
+def test_post_social_account_comments_scrape_background_dispatch_exception_keeps_response_200(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    def _run_queued_dispatch_and_swallow_failure(**kwargs: Any) -> dict[str, Any]:
+        target = kwargs["target"]
+        try:
+            target()
+        except RuntimeError:
+            pass
+        return {"submitted": True, "state": "queued"}
+
+    with (
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            return_value={
+                "queue_enabled": True,
+                "used_inline_fallback": False,
+                "requires_modal_executor": True,
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            return_value={"run_id": "comments-run-queued-2", "status": "queued"},
+        ) as scrape_mock,
+        patch(
+            "trr_backend.repositories.social_season_analytics.dispatch_due_social_jobs",
+            side_effect=RuntimeError("dispatch failed"),
+        ) as dispatch_mock,
+        patch(
+            "trr_backend.repositories.social_season_analytics.submit_named_background_task",
+            side_effect=_run_queued_dispatch_and_swallow_failure,
+        ) as submit_mock,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"mode": "profile", "source_scope": "bravo", "refresh_policy": "all_saved_posts"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "comments-run-queued-2"
+    assert scrape_mock.call_args.kwargs["dispatch_immediately"] is False
+    submit_mock.assert_called_once()
+    dispatch_mock.assert_called_once_with(run_id="comments-run-queued-2")
 
 
 def test_ingest_returns_503_when_remote_job_plane_enforced_and_queue_disabled(

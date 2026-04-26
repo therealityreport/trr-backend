@@ -26,3 +26,14 @@ Inherits: /Users/thomashulihan/brain/BRAIN.md
 ## Validation
 - Run the backend-local validation or tests touched by the change.
 - Re-read `../AGENTS.md` when workspace startup, MCP routing, or cross-repo policy is involved.
+
+<!-- BRAIN-LEVEL-ROUTING:START -->
+## Brain Level Routing
+
+- Level: `repo`
+- System brain: `/Users/thomashulihan/brain`
+- Project brain: `/Users/thomashulihan/Projects/TRR/TRR Workspace Brain`
+- Repo root: `/Users/thomashulihan/Projects/TRR/TRR-Backend`
+- Write rule: save durable knowledge to the narrowest correct level: repo first, then project, then system.
+- Escalation rule: link upward before promoting notes to a broader level.
+<!-- BRAIN-LEVEL-ROUTING:END -->

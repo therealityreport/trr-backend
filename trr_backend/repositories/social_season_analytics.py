@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -66,6 +66,14 @@ from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
 logger = logging.getLogger(__name__)
+
+
+def submit_named_background_task(**kwargs: Any) -> dict[str, Any]:
+    from trr_backend.socials.control_plane.background_tasks import (
+        submit_named_background_task as _submit_named_background_task,
+    )
+
+    return _submit_named_background_task(**kwargs)
 
 _SOCIAL_PROFILE_TOTAL_POSTS_CACHE: dict[tuple[str, str], tuple[float, int | None]] = {}
 _SOCIAL_PROFILE_TOTAL_POSTS_CACHE_LOCK = Lock()
@@ -3802,6 +3810,7 @@ def _enqueue_shared_posts_job(
     frontier_transport: str | None = None,
     transport_preference: str | None = None,
     allow_public_transport_fallback: bool | None = None,
+    followup_config: Mapping[str, Any] | None = None,
     initiated_by: str | None = None,
     worker_id: str | None = None,
     priority: int = 101,
@@ -3836,6 +3845,7 @@ def _enqueue_shared_posts_job(
             "frontier_transport": str(frontier_transport or "").strip().lower() or None,
             "transport_preference": str(transport_preference or "").strip().lower() or None,
             "allow_public_transport_fallback": allow_public_transport_fallback,
+            **_shared_catalog_followup_job_config(followup_config or {}),
         },
         initiated_by=initiated_by,
         status="queued" if is_queue_enabled() else "pending",
@@ -3843,6 +3853,17 @@ def _enqueue_shared_posts_job(
         worker_id=worker_id,
         preclaim=bool(worker_id),
     )
+
+
+def _shared_catalog_followup_job_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "details_refresh_skip_detail_fetch": bool(config.get("details_refresh_skip_detail_fetch")),
+        "details_refresh_skip_media_followups": bool(config.get("details_refresh_skip_media_followups")),
+        "tiktok_comments_in_posts_stage": bool(config.get("tiktok_comments_in_posts_stage")),
+        "tiktok_direct_comment_api_override": bool(config.get("tiktok_direct_comment_api_override")),
+        "twitter_comments_in_posts_stage": bool(config.get("twitter_comments_in_posts_stage")),
+        "launch_group_id": str(config.get("launch_group_id") or "").strip() or None,
+    }
 
 
 def _count_recent_failures() -> int:
@@ -7859,15 +7880,9 @@ def check_platform_cookie_health(platform: str, *, force: bool = False) -> dict[
     if source_path:
         result["source_path"] = source_path
 
-    # Warn if cookies sourced from env var but refresh writes to file
     if source_kind == "env_json" and refresh_supported:
         default_file = _default_platform_cookie_file_path(normalized)
         result["refresh_target_path"] = str(default_file)
-        result["warning_code"] = "env_json_source_refresh_writes_file"
-        result["warning_message"] = (
-            f"Cookies loaded from environment variable; refresh writes to {default_file}. "
-            "After refresh, the env var will still take precedence on next load."
-        )
     elif source_kind in ("env_file", "default_file") and source_path:
         result["refresh_target_path"] = source_path
 
@@ -17597,7 +17612,7 @@ def _update_twitter_comment_media_mirror_fields(
 
 
 def _enqueue_twitter_comment_media_mirror_job(
-    context: SeasonContext,
+    context: SeasonContext | None,
     *,
     run_id: str | None,
     source_scope: str,
@@ -17639,8 +17654,8 @@ def _enqueue_twitter_comment_media_mirror_job(
     mirror_job_status = "queued" if is_queue_enabled() else "pending"
     config = {
         "run_id": run_id,
-        "season_id": context.season_id,
-        "show_id": context.show_id,
+        "season_id": context.season_id if context else None,
+        "show_id": context.show_id if context else None,
         "platform": "twitter",
         "source_scope": source_scope,
         "stage": COMMENT_MEDIA_MIRROR_STAGE,
@@ -21893,6 +21908,8 @@ def _build_twitter_tweet_payload(
         "replies_count": int(getattr(tweet, "replies", 0) or 0),
         "quotes": int(getattr(tweet, "quotes", 0) or 0),
         "views": int(getattr(tweet, "views", 0) or 0),
+        "bookmarks": int(getattr(tweet, "bookmarks", 0) or 0),
+        "shares": int(getattr(tweet, "shares", 0) or 0),
         "is_reply": bool(getattr(tweet, "is_reply", False)),
         "is_retweet": bool(getattr(tweet, "is_retweet", False)),
         "is_quote": bool(getattr(tweet, "is_quote", False)),
@@ -21910,6 +21927,14 @@ def _build_twitter_tweet_payload(
         payload["user_profile_url"] = user_profile_url or None
     if _platform_posts_has_column("twitter", "user_avatar_url"):
         payload["user_avatar_url"] = str(getattr(tweet, "user_avatar_url", "") or "").strip() or None
+    if _platform_posts_has_column("twitter", "thread_root_tweet_id"):
+        payload["thread_root_tweet_id"] = getattr(tweet, "thread_root_tweet_id", None)
+    if _platform_posts_has_column("twitter", "thread_position"):
+        payload["thread_position"] = getattr(tweet, "thread_position", None)
+    if _platform_posts_has_column("twitter", "is_thread_part"):
+        payload["is_thread_part"] = bool(getattr(tweet, "is_thread_part", False))
+    if _platform_posts_has_column("twitter", "twitter_context_role"):
+        payload["twitter_context_role"] = getattr(tweet, "twitter_context_role", None)
     if job_id:
         payload["job_id"] = job_id
     if _comment_lifecycle_supported("twitter_tweets"):
@@ -26371,12 +26396,17 @@ def _upsert_shared_catalog_twitter_post(
         likes=getattr(tweet, "likes", 0),
         comments_count=getattr(tweet, "replies", 0),
         views=getattr(tweet, "views", 0),
+        shares=getattr(tweet, "shares", 0),
         retweets=getattr(tweet, "retweets", 0),
         replies_count=getattr(tweet, "replies", 0),
         quotes=getattr(tweet, "quotes", 0),
         raw_data=tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         run_id=run_id,
     )
+    payload["bookmarks"] = _normalize_non_negative_int(getattr(tweet, "bookmarks", 0))
+    payload["thread_root_source_id"] = str(getattr(tweet, "thread_root_source_id", "") or "").strip() or None
+    payload["thread_position"] = getattr(tweet, "thread_position", None)
+    payload["is_thread_part"] = bool(getattr(tweet, "is_thread_part", False))
     return _pg_upsert(PLATFORM_CATALOG_POST_TABLES["twitter"], payload, conflict_col="source_id", conn=conn)
 
 
@@ -31574,6 +31604,328 @@ def _scrape_shared_youtube_posts(
     return rows, retrieval_meta
 
 
+def _twitter_account_tweet_role(tweet: Any, account_handle: str) -> str:
+    tweet_handle = _normalize_account_handle(getattr(tweet, "username", None))
+    account = _normalize_account_handle(account_handle)
+    if tweet_handle != account:
+        return "quote" if bool(getattr(tweet, "is_quote", False)) else "audience_reply"
+    if bool(getattr(tweet, "is_reply", False)):
+        return "account_reply"
+    if bool(getattr(tweet, "is_quote", False)):
+        return "quote"
+    return "account_post"
+
+
+def _set_twitter_tweet_metadata(
+    tweet: Any,
+    *,
+    context_role: str | None = None,
+    thread_root_tweet_id: str | None = None,
+    thread_position: int | None = None,
+    is_thread_part: bool = False,
+) -> None:
+    if context_role is not None:
+        tweet.twitter_context_role = context_role
+    tweet.thread_root_tweet_id = thread_root_tweet_id
+    tweet.thread_root_source_id = thread_root_tweet_id
+    tweet.thread_position = thread_position
+    tweet.is_thread_part = bool(is_thread_part)
+
+
+def _resolve_twitter_thread_root(
+    scraper: Any,
+    tweet: Any,
+    account_handle: str,
+    cache: dict[str, Any],
+) -> dict[str, Any]:
+    tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
+    if not tweet_id:
+        return {"root_id": None, "same_account_chain": [], "parent_context": None, "errors": []}
+    root_cache = cache.setdefault("roots", {})
+    if tweet_id in root_cache:
+        return root_cache[tweet_id]
+
+    parent_cache = cache.setdefault("parents", {})
+    account = _normalize_account_handle(account_handle)
+    same_account_chain = [tweet]
+    errors: list[dict[str, str]] = []
+    parent_context = None
+    parent_id = str(getattr(tweet, "reply_to_tweet_id", "") or "").strip()
+    visited = {tweet_id}
+    max_depth = 12
+    depth = 0
+
+    while parent_id:
+        if parent_id in visited:
+            errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "cycle"})
+            break
+        if depth >= max_depth:
+            errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "max_depth"})
+            break
+        visited.add(parent_id)
+        depth += 1
+        parent = parent_cache.get(parent_id)
+        if parent is None:
+            fetch = getattr(scraper, "fetch_tweet_by_id", None)
+            if not callable(fetch):
+                errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "fetch_unavailable"})
+                break
+            try:
+                parent = fetch(parent_id, delay=0.5)
+            except Exception:  # noqa: BLE001
+                errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "fetch_exception"})
+                logger.exception("[twitter] Failed to fetch parent context for tweet %s parent=%s", tweet_id, parent_id)
+                break
+            parent_cache[parent_id] = parent
+        if parent is None:
+            errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "missing_parent"})
+            break
+        if _normalize_account_handle(getattr(parent, "username", None)) == account:
+            same_account_chain.append(parent)
+            parent_id = str(getattr(parent, "reply_to_tweet_id", "") or "").strip()
+            continue
+        parent_context = parent
+        break
+
+    ordered_chain = list(reversed(same_account_chain))
+    root_id = str(getattr(ordered_chain[0], "tweet_id", "") or "").strip() if ordered_chain else tweet_id
+    result = {
+        "root_id": root_id,
+        "same_account_chain": ordered_chain,
+        "parent_context": parent_context,
+        "errors": errors,
+    }
+    for chain_tweet in same_account_chain:
+        chain_id = str(getattr(chain_tweet, "tweet_id", "") or "").strip()
+        if chain_id:
+            root_cache[chain_id] = result
+    return result
+
+
+def _hydrate_twitter_account_post_interactions(
+    *,
+    scraper: Any,
+    anchor_tweets: list[Any],
+    run_id: str | None,
+    job_id: str,
+    account_handle: str,
+    source_scope: str,
+    enable_media_followups: bool,
+) -> dict[str, Any]:
+    comment_stats = _new_comment_persist_stats()
+    quote_stats = {"quotes_fetched": 0, "quotes_upserted": 0}
+    errors: list[dict[str, str]] = []
+    roots_checked: list[str] = []
+    hydrated_roots: set[str] = set()
+    complete = True
+
+    if not anchor_tweets:
+        return {
+            "comment_stats": comment_stats,
+            "quote_stats": quote_stats,
+            "errors": errors,
+            "complete": True,
+            "roots_checked": roots_checked,
+            "roots_hydrated": 0,
+        }
+
+    with pg.db_connection(label="twitter-shared-catalog-interactions") as comments_conn:
+        for index, anchor in enumerate(anchor_tweets, start=1):
+            anchor_id = str(getattr(anchor, "tweet_id", "") or "").strip()
+            if not anchor_id or anchor_id in hydrated_roots:
+                continue
+            hydrated_roots.add(anchor_id)
+            roots_checked.append(anchor_id)
+            expected_replies = _normalize_non_negative_int(getattr(anchor, "replies", 0))
+            expected_quotes = _normalize_non_negative_int(getattr(anchor, "quotes", 0))
+            reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
+                expected_replies=expected_replies,
+                expected_quotes=expected_quotes,
+            )
+            replies: list[Any] = []
+            quotes: list[Any] = []
+            reply_failed = False
+            quote_failed = False
+            reply_fail_reason = ""
+            quote_fail_reason = ""
+            observed_comment_ids: set[str] = set()
+            local_stats = _new_comment_persist_stats()
+
+            try:
+                replies = _fetch_twitter_replies_compat(
+                    scraper=scraper,
+                    tweet_id=anchor_id,
+                    delay=0.5,
+                    search_max_pages=reply_pages,
+                    twikit_max_pages=reply_pages,
+                )
+                reply_fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
+            except Exception:  # noqa: BLE001
+                reply_failed = True
+                complete = False
+                reply_fail_reason = "fetch_exception"
+                errors.append({"tweet_id": anchor_id, "kind": "replies", "reason": reply_fail_reason})
+                logger.exception("[twitter] Failed to hydrate shared catalog replies for tweet %s", anchor_id)
+
+            try:
+                quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
+                    scraper=scraper,
+                    tweet_id=anchor_id,
+                    delay=0.5,
+                    max_pages=quote_pages,
+                )
+                quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
+                if missing_quote_method_reason:
+                    quote_fail_reason = missing_quote_method_reason
+            except Exception:  # noqa: BLE001
+                quote_failed = True
+                complete = False
+                quote_fail_reason = "fetch_exception"
+                errors.append({"tweet_id": anchor_id, "kind": "quotes", "reason": quote_fail_reason})
+                logger.exception("[twitter] Failed to hydrate shared catalog quotes for tweet %s", anchor_id)
+
+            if reply_fail_reason and not replies:
+                complete = False
+                errors.append({"tweet_id": anchor_id, "kind": "replies", "reason": reply_fail_reason})
+            if quote_fail_reason and not quotes:
+                complete = False
+                errors.append({"tweet_id": anchor_id, "kind": "quotes", "reason": quote_fail_reason})
+            quote_stats["quotes_fetched"] += len(quotes)
+
+            if reply_failed and quote_failed:
+                continue
+            try:
+                with _SavepointScope(conn=comments_conn, prefix="twitter_shared_interactions", index=index):
+                    for reply in replies:
+                        reply.is_reply = True
+                        if not getattr(reply, "reply_to_tweet_id", None):
+                            reply.reply_to_tweet_id = anchor_id
+                        _set_twitter_tweet_metadata(
+                            reply,
+                            context_role=_twitter_account_tweet_role(reply, account_handle),
+                        )
+                        reply_id = str(getattr(reply, "tweet_id", "") or "").strip()
+                        if reply_id:
+                            observed_comment_ids.add(reply_id)
+                    persisted_replies = _upsert_tweet_batch(
+                        None,
+                        job_id=job_id,
+                        run_id=run_id,
+                        account=account_handle,
+                        tweets=replies,
+                        persist_stats=local_stats,
+                        conn=comments_conn,
+                    )
+                    for reply in replies:
+                        reply_id = str(getattr(reply, "tweet_id", "") or "").strip()
+                        upserted_reply = persisted_replies.get(reply_id)
+                        if upserted_reply and enable_media_followups:
+                            try:
+                                mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                    None,
+                                    run_id=run_id,
+                                    source_scope=source_scope,
+                                    account=account_handle,
+                                    comment_row=upserted_reply,
+                                    parent_job_id=job_id,
+                                    conn=comments_conn,
+                                )
+                                if mirror_job_id:
+                                    local_stats["comment_media_mirror_jobs_enqueued"] = (
+                                        int(local_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
+                                    )
+                            except Exception:  # noqa: BLE001
+                                local_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                    int(local_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
+                                )
+                                logger.exception("[twitter] Failed to enqueue media mirror for reply %s", reply_id)
+
+                    filtered_quotes: list[Any] = []
+                    for quote in quotes:
+                        quote.is_quote = True
+                        quote.is_reply = False
+                        quote.reply_to_tweet_id = None
+                        if not getattr(quote, "quoted_tweet_id", None):
+                            quote.quoted_tweet_id = anchor_id
+                        if str(getattr(quote, "quoted_tweet_id", "") or "").strip() != anchor_id:
+                            continue
+                        _set_twitter_tweet_metadata(quote, context_role="quote")
+                        quote_id = str(getattr(quote, "tweet_id", "") or "").strip()
+                        if quote_id:
+                            observed_comment_ids.add(quote_id)
+                        filtered_quotes.append(quote)
+                    persisted_quotes = _upsert_tweet_batch(
+                        None,
+                        job_id=job_id,
+                        run_id=run_id,
+                        account=account_handle,
+                        tweets=filtered_quotes,
+                        persist_stats=None,
+                        conn=comments_conn,
+                    )
+                    for quote in filtered_quotes:
+                        quote_id = str(getattr(quote, "tweet_id", "") or "").strip()
+                        upserted_quote = persisted_quotes.get(quote_id)
+                        if upserted_quote:
+                            quote_stats["quotes_upserted"] += 1
+                            if enable_media_followups:
+                                try:
+                                    mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
+                                        None,
+                                        run_id=run_id,
+                                        source_scope=source_scope,
+                                        account=account_handle,
+                                        comment_row=upserted_quote,
+                                        parent_job_id=job_id,
+                                        conn=comments_conn,
+                                    )
+                                    if mirror_job_id:
+                                        local_stats["comment_media_mirror_jobs_enqueued"] = (
+                                            int(local_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
+                                        )
+                                except Exception:  # noqa: BLE001
+                                    local_stats["comment_media_mirror_job_enqueue_errors"] = (
+                                        int(local_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
+                                    )
+                                    logger.exception("[twitter] Failed to enqueue media mirror for quote %s", quote_id)
+
+                    is_complete = _is_comment_fetch_complete(
+                        fetch_failed=reply_failed,
+                        fail_reason=reply_fail_reason,
+                        quote_fail_reason=quote_fail_reason,
+                        auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
+                        fetched_count=len(replies) + len(filtered_quotes),
+                        quotes_fetched=len(filtered_quotes),
+                        max_comments_per_post=1_000_000,
+                        expected_count=expected_replies + expected_quotes,
+                        expected_quotes=expected_quotes,
+                    )
+                    if is_complete:
+                        _mark_missing_comments_for_anchor(
+                            platform="twitter",
+                            anchor_id=anchor_id,
+                            observed_comment_ids=observed_comment_ids,
+                            conn=comments_conn,
+                        )
+                        _reconcile_post_comment_count(platform="twitter", post_db_id=anchor_id, conn=comments_conn)
+                    else:
+                        complete = False
+            except Exception:  # noqa: BLE001
+                complete = False
+                errors.append({"tweet_id": anchor_id, "kind": "persist", "reason": "persist_exception"})
+                logger.exception("[twitter] Failed to persist shared catalog interactions for tweet %s", anchor_id)
+            _merge_comment_persist_stats(comment_stats, local_stats)
+
+    return {
+        "comment_stats": comment_stats,
+        "quote_stats": quote_stats,
+        "errors": errors,
+        "complete": complete,
+        "roots_checked": roots_checked,
+        "roots_hydrated": len(hydrated_roots),
+    }
+
+
 def _scrape_shared_twitter_posts(
     *,
     run_id: str | None,
@@ -31611,45 +31963,178 @@ def _scrape_shared_twitter_posts(
         query=f"from:{account_handle}",
         date_start=date_start,
         date_end=date_end,
-        include_replies=False,
+        include_replies=True,
         include_links=True,
         delay_seconds=0.35,
         max_pages=max_pages,
     )
     posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
-    catalog_posts = [tweet for tweet in posts if not bool(getattr(tweet, "is_reply", False))]
+    account = _normalize_account_handle(account_handle)
+    account_posts = [
+        tweet
+        for tweet in posts
+        if (_normalize_account_handle(getattr(tweet, "username", None)) or account) == account
+    ]
+    account_by_id = {str(getattr(tweet, "tweet_id", "") or "").strip(): tweet for tweet in account_posts}
+    account_by_id = {tweet_id: tweet for tweet_id, tweet in account_by_id.items() if tweet_id}
+    thread_cache: dict[str, Any] = {}
+    parent_context_by_id: dict[str, Any] = {}
+    thread_errors: list[dict[str, str]] = []
+
+    for tweet in list(account_posts):
+        role = _twitter_account_tweet_role(tweet, account_handle)
+        _set_twitter_tweet_metadata(tweet, context_role=role)
+        if bool(getattr(tweet, "is_reply", False)):
+            resolution = _resolve_twitter_thread_root(scraper, tweet, account_handle, thread_cache)
+            thread_errors.extend(resolution.get("errors") or [])
+            parent_context = resolution.get("parent_context")
+            if parent_context is not None:
+                parent_id = str(getattr(parent_context, "tweet_id", "") or "").strip()
+                if parent_id:
+                    parent_context_by_id[parent_id] = parent_context
+            for chain_tweet in resolution.get("same_account_chain") or []:
+                chain_id = str(getattr(chain_tweet, "tweet_id", "") or "").strip()
+                if chain_id and chain_id not in account_by_id:
+                    account_by_id[chain_id] = chain_tweet
+                    account_posts.append(chain_tweet)
+
+    thread_groups: dict[str, list[Any]] = {}
+    for tweet in account_posts:
+        tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
+        if not tweet_id:
+            continue
+        root_id = tweet_id
+        if bool(getattr(tweet, "is_reply", False)):
+            root_id = str(
+                _resolve_twitter_thread_root(scraper, tweet, account_handle, thread_cache).get("root_id") or tweet_id
+            )
+        thread_groups.setdefault(root_id, []).append(tweet)
+
+    for root_id, group in thread_groups.items():
+        unique_group = {
+            str(getattr(tweet, "tweet_id", "") or "").strip(): tweet
+            for tweet in group
+            if str(getattr(tweet, "tweet_id", "") or "").strip()
+        }
+        ordered_group = sorted(
+            unique_group.values(),
+            key=lambda tweet: (
+                _parse_platform_time(getattr(tweet, "created_at", None)) or datetime.max.replace(tzinfo=UTC),
+                str(getattr(tweet, "tweet_id", "") or ""),
+            ),
+        )
+        is_thread = len(ordered_group) > 1
+        for position, tweet in enumerate(ordered_group, start=1):
+            _set_twitter_tweet_metadata(
+                tweet,
+                context_role=_twitter_account_tweet_role(tweet, account_handle),
+                thread_root_tweet_id=root_id if is_thread else None,
+                thread_position=position if is_thread else None,
+                is_thread_part=is_thread,
+            )
+
     if _shared_catalog_mode(config):
-        rows = _persist_shared_catalog_posts_with_progress(
-            platform="twitter",
-            run_id=run_id,
-            account_handle=account_handle,
-            items=catalog_posts,
-            retrieval_meta=retrieval_meta,
-            progress_cb=progress_cb,
-            upsert_item=lambda tweet: _upsert_shared_catalog_post(
+        rows = []
+        progress_interval = _shared_catalog_progress_interval_posts()
+        pages_scanned = _normalize_non_negative_int(retrieval_meta.get("pages_scanned"))
+        posts_checked = max(_normalize_non_negative_int(retrieval_meta.get("posts_checked")), len(posts))
+
+        def _emit_persist_progress(saved_posts: int, *, force: bool = False) -> None:
+            if not progress_cb:
+                return
+            if not force and saved_posts > 0 and saved_posts % progress_interval != 0:
+                return
+            progress_cb(
+                {
+                    "phase": "persist_catalog_posts",
+                    "pages_scanned": pages_scanned,
+                    "posts_checked": posts_checked,
+                    "matched_posts": len(account_by_id),
+                    "saved_posts": max(0, int(saved_posts)),
+                }
+            )
+
+        _emit_persist_progress(0, force=True)
+        for index, tweet in enumerate(account_posts, start=1):
+            tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
+            if not tweet_id:
+                continue
+            row = _upsert_shared_catalog_post(
                 platform="twitter",
                 run_id=run_id,
                 account_handle=account_handle,
                 post=tweet,
-            ),
-        )
+            )
+            if row:
+                rows.append(row)
+            _upsert_tweet(None, job_id=job_id, run_id=run_id, account=account_handle, tweet=tweet)
+            _emit_persist_progress(len(rows), force=index == len(account_posts))
+        for parent_context in parent_context_by_id.values():
+            _set_twitter_tweet_metadata(parent_context, context_role="reply_parent")
+            _upsert_tweet(None, job_id=job_id, run_id=run_id, account=account_handle, tweet=parent_context)
+
+        interaction_stats: dict[str, Any] = {}
+        if bool(config.get("twitter_comments_in_posts_stage")):
+            anchor_ids: set[str] = set()
+            anchor_tweets: list[Any] = []
+            for tweet in account_posts:
+                tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
+                root_id = str(getattr(tweet, "thread_root_tweet_id", "") or "").strip()
+                anchor_id = root_id or tweet_id
+                if not anchor_id or anchor_id in anchor_ids:
+                    continue
+                anchor_ids.add(anchor_id)
+                anchor_tweets.append(account_by_id.get(anchor_id) or tweet)
+            interaction_stats = _hydrate_twitter_account_post_interactions(
+                scraper=scraper,
+                anchor_tweets=anchor_tweets,
+                run_id=run_id,
+                job_id=job_id,
+                account_handle=account_handle,
+                source_scope=str(config.get("source_scope") or "bravo"),
+                enable_media_followups=not bool(config.get("details_refresh_skip_media_followups")),
+            )
     else:
         rows = []
-        for tweet in catalog_posts:
+        for tweet in account_posts:
             row = _upsert_tweet(None, job_id=job_id, run_id=None, account=account_handle, tweet=tweet)
             if row:
                 rows.append(row)
     if _shared_catalog_mode(config):
+        interaction_stats = interaction_stats if "interaction_stats" in locals() else {}
+        comment_stats = _metadata_dict(interaction_stats.get("comment_stats"))
+        quote_stats = _metadata_dict(interaction_stats.get("quote_stats"))
         retrieval_meta["persist_counters"] = {
             "posts_upserted": len(rows),
-            "comments_upserted": 0,
+            "comments_fetched": _normalize_non_negative_int(comment_stats.get("comments_fetched")),
+            "comments_upserted": _normalize_non_negative_int(comment_stats.get("comments_upserted")),
+            "quotes_fetched": _normalize_non_negative_int(quote_stats.get("quotes_fetched")),
+            "quotes_upserted": _normalize_non_negative_int(quote_stats.get("quotes_upserted")),
         }
         retrieval_meta["posts_checked"] = _shared_catalog_progress_posts_checked(
             retrieval_meta,
-            matched_posts=len(catalog_posts),
+            matched_posts=len(account_posts),
         )
         retrieval_meta["pages_scanned"] = _shared_catalog_progress_pages_scanned(retrieval_meta)
+        retrieval_meta["twitter_comments_in_posts_stage"] = bool(config.get("twitter_comments_in_posts_stage"))
+        retrieval_meta["twitter_interactions_complete"] = bool(interaction_stats.get("complete", True))
+        retrieval_meta["twitter_interaction_roots_checked"] = list(interaction_stats.get("roots_checked") or [])
+        retrieval_meta["twitter_interaction_roots_hydrated"] = _normalize_non_negative_int(
+            interaction_stats.get("roots_hydrated")
+        )
+        retrieval_meta["comment_stats"] = _comment_stats_payload(dict(comment_stats))
+        retrieval_meta["quote_stats"] = {
+            "quotes_fetched": _normalize_non_negative_int(quote_stats.get("quotes_fetched")),
+            "quotes_upserted": _normalize_non_negative_int(quote_stats.get("quotes_upserted")),
+        }
+        interaction_errors = list(interaction_stats.get("errors") or [])
+        if thread_errors:
+            interaction_errors.extend(thread_errors)
+        if interaction_errors:
+            retrieval_meta["twitter_interaction_errors"] = interaction_errors
+            retrieval_meta["retryable"] = True
+            retrieval_meta["twitter_interactions_complete"] = False
     retrieval_meta["profile_snapshot"] = _merge_social_profile_snapshots(
         _metadata_dict(config.get("profile_snapshot")),
         {
@@ -32196,6 +32681,7 @@ def _enqueue_shared_discovery_job(
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
     catalog_action: str | None = None,
     catalog_action_scope: str | None = None,
+    followup_config: Mapping[str, Any] | None = None,
     initiated_by: str | None = None,
     worker_id: str | None = None,
     priority: int = 100,
@@ -32234,6 +32720,7 @@ def _enqueue_shared_discovery_job(
             "catalog_action": str(catalog_action or "").strip().lower() or None,
             "catalog_action_scope": str(catalog_action_scope or "").strip().lower() or None,
             "recovery_depth": max(0, int(recovery_depth)),
+            **_shared_catalog_followup_job_config(followup_config or {}),
         },
         initiated_by=initiated_by,
         status="queued" if is_queue_enabled() else "pending",
@@ -32380,6 +32867,7 @@ def _run_shared_account_discovery_stage(
                 "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
                 "frontier_auth_reason": auth_reason if platform == "instagram" else None,
+                **_shared_catalog_followup_job_config(config),
             },
             initiated_by=None,
             status="queued" if is_queue_enabled() else "pending",
@@ -32539,6 +33027,7 @@ def _run_shared_account_discovery_stage(
                             "required_execution_backend": config.get("required_execution_backend"),
                             "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                             "recovery_depth": recovery_depth + 1,
+                            **_shared_catalog_followup_job_config(config),
                         },
                         initiated_by=None,
                         status="queued" if is_queue_enabled() else "pending",
@@ -32648,6 +33137,7 @@ def _run_shared_account_discovery_stage(
                 "transport_preference": "authenticated" if platform == "instagram" and auth_allowed else None,
                 "allow_public_transport_fallback": False if platform == "instagram" and auth_allowed else None,
                 "recovery_depth": _normalize_non_negative_int(config.get("recovery_depth")) + 1,
+                **_shared_catalog_followup_job_config(config),
             },
             initiated_by=None,
             status="queued" if is_queue_enabled() else "pending",
@@ -32777,6 +33267,7 @@ def _run_shared_account_discovery_stage(
                 "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
                 "frontier_auth_reason": auth_reason if platform == "instagram" else None,
+                **_shared_catalog_followup_job_config(config),
             },
             initiated_by=None,
             status="queued" if is_queue_enabled() else "pending",
@@ -33302,6 +33793,10 @@ def _run_shared_account_posts_stage(
         _normalize_non_negative_int((retrieval_meta.get("persist_counters") or {}).get("posts_upserted")),
         len(rows),
     )
+    comments_upserted = _normalize_non_negative_int(
+        (retrieval_meta.get("persist_counters") or {}).get("comments_upserted")
+    )
+    quotes_upserted = _normalize_non_negative_int((retrieval_meta.get("persist_counters") or {}).get("quotes_upserted"))
     retrieval_error_code = (
         str(retrieval_meta.get("error_code") or retrieval_meta.get("last_error_code") or "").strip().lower()
     )
@@ -33399,7 +33894,11 @@ def _run_shared_account_posts_stage(
         "account": account_handle,
         "source_ids": source_ids,
         "classify_jobs_enqueued": 0,
-        "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
+        "persist_counters": {
+            "posts_upserted": len(rows),
+            "comments_upserted": comments_upserted,
+            "quotes_upserted": quotes_upserted,
+        },
         "activity": dict(activity),
         "retrieval_meta": retrieval_meta,
         "expected_total_posts": expected_total_posts or None,
@@ -33407,7 +33906,7 @@ def _run_shared_account_posts_stage(
     }
     if str(config.get("partition_id") or "").strip():
         metadata["partition_id"] = str(config.get("partition_id") or "")
-    return len(rows), 0, metadata
+    return len(rows), comments_upserted + quotes_upserted, metadata
 
 
 def _run_shared_post_classify_stage(
@@ -34076,6 +34575,7 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
                     ),
                     catalog_action=str(config.get("catalog_action") or "").strip().lower() or None,
                     catalog_action_scope=str(config.get("catalog_action_scope") or "").strip().lower() or None,
+                    followup_config=config,
                     initiated_by=None,
                     worker_id=followup_worker_id,
                     priority=100,
@@ -34530,22 +35030,37 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     }
 
 
-def _dispatch_due_social_jobs_in_background(*, run_id: str) -> None:
+def _dispatch_due_social_jobs_in_background(*, run_id: str) -> dict[str, Any]:
     normalized_run_id = str(run_id or "").strip()
     if not normalized_run_id:
-        return
+        return {"submitted": False, "state": "missing_run_id", "run_id": normalized_run_id}
 
     def _runner() -> None:
-        try:
-            dispatch_due_social_jobs(run_id=normalized_run_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("[modal-dispatch] background dispatch failed run_id=%s", normalized_run_id)
+        dispatch_due_social_jobs(run_id=normalized_run_id)
 
-    Thread(
+    task_result = submit_named_background_task(
+        group="social-dispatch",
+        key=normalized_run_id,
+        thread_name=f"dispatch-social-jobs:{normalized_run_id[:24]}",
         target=_runner,
-        name=f"dispatch-social-jobs:{normalized_run_id[:24]}",
-        daemon=True,
-    ).start()
+    )
+    if task_result.get("state") == "duplicate":
+        logger.info(
+            "[modal-dispatch] background dispatch already queued run_id=%s state=%s",
+            normalized_run_id,
+            task_result.get("state"),
+        )
+    elif not task_result.get("submitted"):
+        logger.warning(
+            "[modal-dispatch] background dispatch queue unavailable run_id=%s state=%s active=%s queued=%s max=%s queue_max=%s",
+            normalized_run_id,
+            task_result.get("state"),
+            task_result.get("active_count"),
+            task_result.get("queued_count"),
+            task_result.get("max_active"),
+            task_result.get("queue_maxsize"),
+        )
+    return {**task_result, "run_id": normalized_run_id}
 
 
 def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, Any]:
@@ -36214,6 +36729,7 @@ def ingest_shared_accounts(
     details_refresh_skip_detail_fetch: bool | None = None,
     details_refresh_skip_media_followups: bool | None = None,
     tiktok_comments_in_posts_stage: bool = False,
+    twitter_comments_in_posts_stage: bool = False,
     tiktok_direct_comment_api_override: bool = False,
     launch_group_id: str | None = None,
     existing_run_id: str | None = None,
@@ -36458,6 +36974,7 @@ def ingest_shared_accounts(
         "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
         "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
         "tiktok_comments_in_posts_stage": bool(tiktok_comments_in_posts_stage),
+        "twitter_comments_in_posts_stage": bool(twitter_comments_in_posts_stage),
         "tiktok_direct_comment_api_override": bool(tiktok_direct_comment_api_override),
         "source_scope": source_scope,
         "platforms": sorted(normalized_platforms),
@@ -36581,6 +37098,9 @@ def ingest_shared_accounts(
                         "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
                         "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
                         "tiktok_comments_in_posts_stage": bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
+                        "twitter_comments_in_posts_stage": bool(
+                            platform == "twitter" and twitter_comments_in_posts_stage
+                        ),
                         "tiktok_direct_comment_api_override": bool(
                             platform == "tiktok" and tiktok_direct_comment_api_override
                         ),
@@ -36636,6 +37156,7 @@ def ingest_shared_accounts(
                 "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
                 "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
                 "tiktok_comments_in_posts_stage": bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
+                "twitter_comments_in_posts_stage": bool(platform == "twitter" and twitter_comments_in_posts_stage),
                 "tiktok_direct_comment_api_override": bool(platform == "tiktok" and tiktok_direct_comment_api_override),
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_execution_backend": (
@@ -36720,6 +37241,7 @@ def ingest_shared_accounts(
                     resume_frontier_snapshot=resume_frontier_snapshot,
                     catalog_action=normalized_catalog_action,
                     catalog_action_scope=normalized_catalog_action_scope,
+                    followup_config=job_config,
                     initiated_by=initiated_by,
                     worker_id=inline_worker_id,
                     priority=max(1, int(row.get("scrape_priority") or 100)),
@@ -55552,6 +56074,7 @@ def start_social_account_comments_scrape(
     allow_local_dev_inline_bypass: bool = False,
     comments_enable_media_followups: bool = False,
     launch_group_id: str | None = None,
+    dispatch_immediately: bool = True,
 ) -> dict[str, Any]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -55712,7 +56235,7 @@ def start_social_account_comments_scrape(
                 worker_id=inline_worker_id,
                 preclaim=bool(inline_worker_id),
             )
-            if queue_enabled:
+            if queue_enabled and dispatch_immediately:
                 dispatch_due_social_jobs(run_id=run_id)
             return {
                 "run_id": run_id,
@@ -57936,6 +58459,7 @@ def start_social_account_catalog_backfill(
     details_refresh_skip_detail_fetch: bool | None = None,
     details_refresh_skip_media_followups: bool | None = None,
     tiktok_comments_in_posts_stage: bool = False,
+    twitter_comments_in_posts_stage: bool = False,
     tiktok_direct_comment_api_override: bool = False,
     launch_group_id: str | None = None,
     existing_run_id: str | None = None,
@@ -58055,6 +58579,7 @@ def start_social_account_catalog_backfill(
             details_refresh_skip_detail_fetch=details_refresh_skip_detail_fetch,
             details_refresh_skip_media_followups=details_refresh_skip_media_followups,
             tiktok_comments_in_posts_stage=tiktok_comments_in_posts_stage,
+            twitter_comments_in_posts_stage=twitter_comments_in_posts_stage,
             tiktok_direct_comment_api_override=tiktok_direct_comment_api_override,
             launch_group_id=launch_group_id,
             existing_run_id=run_id,
@@ -58408,6 +58933,9 @@ def launch_social_account_catalog_backfill(
             social_account_post_details_only=effective_selected_tasks == ["post_details"],
             details_refresh_skip_detail_fetch="post_details" not in effective_selected_tasks,
             details_refresh_skip_media_followups="media" not in effective_selected_tasks,
+            twitter_comments_in_posts_stage=(
+                normalized_platform == "twitter" and "comments" in effective_selected_tasks
+            ),
             launch_group_id=launch_group_id,
             existing_run_id=existing_catalog_run_id,
         )
@@ -59533,6 +60061,7 @@ def execute_social_account_catalog_run_auth_repair(
                     frontier_auth_reason=None,
                     transport_preference="authenticated",
                     allow_public_transport_fallback=False,
+                    followup_config=run_config,
                     initiated_by=initiated_by,
                     priority=100,
                     recovery_depth=_normalize_non_negative_int(run_config.get("recovery_depth")) + 1,

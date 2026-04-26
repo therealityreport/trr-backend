@@ -39,6 +39,7 @@ class CastSummaryBatchRequest(BaseModel):
 class CastSummaryMember(BaseModel):
     person_id: str
     full_name: str | None = None
+    photo_url: str | None = None
 
 
 class CastSummaryShow(BaseModel):
@@ -67,8 +68,10 @@ def _group_cast_summary_rows(
 
         full_name_value = row.get("full_name")
         full_name = full_name_value.strip() if isinstance(full_name_value, str) else None
+        photo_url_value = row.get("photo_url")
+        photo_url = photo_url_value.strip() if isinstance(photo_url_value, str) else None
         cast_members_by_show_id[show_id].append(
-            CastSummaryMember(person_id=person_id, full_name=full_name)
+            CastSummaryMember(person_id=person_id, full_name=full_name, photo_url=photo_url)
         )
 
     return CastSummaryBatchResponse(
@@ -96,10 +99,31 @@ def get_admin_cast_summary(
         SELECT DISTINCT
             sc.show_id::text AS show_id,
             sc.person_id::text AS person_id,
-            COALESCE(po.full_name_override, p.full_name) AS full_name
+            COALESCE(po.full_name_override, p.full_name) AS full_name,
+            COALESCE(photo.thumb_url, photo.display_url, photo.hosted_url, photo.url) AS photo_url
         FROM core.v_show_cast sc
         JOIN core.people p ON p.id = sc.person_id
         LEFT JOIN core.people_overrides po ON po.person_id = sc.person_id
+        LEFT JOIN LATERAL (
+          SELECT
+            cp.thumb_url,
+            cp.display_url,
+            cp.hosted_url,
+            cp.url
+          FROM core.v_cast_photos AS cp
+          WHERE cp.person_id = sc.person_id
+          ORDER BY
+            CASE
+              WHEN lower(COALESCE(cp.context_section, '')) = 'bravo_profile' THEN 0
+              WHEN lower(COALESCE(cp.context_section, '')) IN (
+                'official season announcement',
+                'official_season_announcement'
+              ) THEN 1
+              ELSE 2
+            END,
+            cp.gallery_index ASC NULLS LAST
+          LIMIT 1
+        ) AS photo ON true
         WHERE sc.show_id::text = ANY(%s::text[])
         ORDER BY sc.show_id::text, COALESCE(po.full_name_override, p.full_name)
         """,

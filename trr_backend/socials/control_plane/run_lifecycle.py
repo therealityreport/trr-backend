@@ -113,11 +113,11 @@ def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> Non
           end,
           completed_at = case
             when %s in ('completed', 'failed', 'cancelled') then coalesce(completed_at, now())
-            else completed_at
+            else null
           end,
           cancelled_at = case
             when %s = 'cancelled' then coalesce(cancelled_at, now())
-            else cancelled_at
+            else null
           end
         where id = %s
         returning id::text

@@ -426,9 +426,21 @@ def health():
 
 
 @app.get("/health/live")
-def health_live():
+async def health_live() -> dict[str, str]:
     """Lightweight liveness probe. No DB check."""
     return {"status": "alive", "service": "trr-backend"}
+
+
+@app.get("/health/runtime")
+async def health_runtime() -> dict[str, object]:
+    """DB-free runtime snapshot for local control-plane diagnostics."""
+    from trr_backend.socials.control_plane.background_tasks import background_task_snapshot
+
+    return {
+        "status": "alive",
+        "service": "trr-backend",
+        "background_tasks": background_task_snapshot(),
+    }
 
 
 @app.get("/metrics")
