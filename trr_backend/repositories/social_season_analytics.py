@@ -5148,22 +5148,22 @@ def _relation_columns(
     return columns
 
 
-def _scrape_jobs_features() -> dict[str, bool]:
+def _scrape_jobs_features(*, conn: Any | None = None) -> dict[str, bool]:
     global _scrape_jobs_features_cache
     if _scrape_jobs_features_cache is not None:
         return _scrape_jobs_features_cache
-    has_run_id = _column_exists("social", "scrape_jobs", "run_id")
+    has_run_id = _column_exists("social", "scrape_jobs", "run_id", conn=conn)
     has_queue_fields = all(
         [
-            _column_exists("social", "scrape_jobs", "attempt_count"),
-            _column_exists("social", "scrape_jobs", "max_attempts"),
-            _column_exists("social", "scrape_jobs", "priority"),
-            _column_exists("social", "scrape_jobs", "available_at"),
-            _column_exists("social", "scrape_jobs", "claimed_at"),
-            _column_exists("social", "scrape_jobs", "heartbeat_at"),
-            _column_exists("social", "scrape_jobs", "worker_id"),
-            _column_exists("social", "scrape_jobs", "last_error_code"),
-            _column_exists("social", "scrape_jobs", "last_error_class"),
+            _column_exists("social", "scrape_jobs", "attempt_count", conn=conn),
+            _column_exists("social", "scrape_jobs", "max_attempts", conn=conn),
+            _column_exists("social", "scrape_jobs", "priority", conn=conn),
+            _column_exists("social", "scrape_jobs", "available_at", conn=conn),
+            _column_exists("social", "scrape_jobs", "claimed_at", conn=conn),
+            _column_exists("social", "scrape_jobs", "heartbeat_at", conn=conn),
+            _column_exists("social", "scrape_jobs", "worker_id", conn=conn),
+            _column_exists("social", "scrape_jobs", "last_error_code", conn=conn),
+            _column_exists("social", "scrape_jobs", "last_error_class", conn=conn),
         ]
     )
     _scrape_jobs_features_cache = {
@@ -5204,6 +5204,16 @@ def _instagram_posts_has_column(column: str) -> bool:
 
 def _platform_posts_has_column(platform: str, column: str) -> bool:
     table = PLATFORM_POST_TABLES.get((platform or "").strip().lower())
+    if not table:
+        return False
+    try:
+        return _column_exists("social", table, column)
+    except Exception:
+        return True
+
+
+def _platform_catalog_posts_has_column(platform: str, column: str) -> bool:
+    table = PLATFORM_CATALOG_POST_TABLES.get((platform or "").strip().lower())
     if not table:
         return False
     try:
@@ -9984,7 +9994,12 @@ def _create_job(
     if creator_runtime_version:
         config_payload.setdefault("created_by_runtime_version", creator_runtime_version)
     requested_max_attempts = max(1, int(max_attempts)) if max_attempts is not None else None
-    supports_queue_fields = bool(_scrape_jobs_features().get("has_queue_fields"))
+    try:
+        features = _scrape_jobs_features(conn=conn) if conn is not None else _scrape_jobs_features()
+    except TypeError:
+        # Some tests monkeypatch this helper with the old zero-argument shape.
+        features = _scrape_jobs_features()
+    supports_queue_fields = bool(features.get("has_queue_fields"))
     insert_max_attempts_sql = ", max_attempts" if (requested_max_attempts is not None and supports_queue_fields) else ""
     value_max_attempts_sql = ", %s" if (requested_max_attempts is not None and supports_queue_fields) else ""
     insert_params: list[Any] = [
@@ -21908,8 +21923,6 @@ def _build_twitter_tweet_payload(
         "replies_count": int(getattr(tweet, "replies", 0) or 0),
         "quotes": int(getattr(tweet, "quotes", 0) or 0),
         "views": int(getattr(tweet, "views", 0) or 0),
-        "bookmarks": int(getattr(tweet, "bookmarks", 0) or 0),
-        "shares": int(getattr(tweet, "shares", 0) or 0),
         "is_reply": bool(getattr(tweet, "is_reply", False)),
         "is_retweet": bool(getattr(tweet, "is_retweet", False)),
         "is_quote": bool(getattr(tweet, "is_quote", False)),
@@ -21920,6 +21933,10 @@ def _build_twitter_tweet_payload(
         "raw_data": tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         "source_account": account,
     }
+    if _platform_posts_has_column("twitter", "bookmarks"):
+        payload["bookmarks"] = int(getattr(tweet, "bookmarks", 0) or 0)
+    if _platform_posts_has_column("twitter", "shares"):
+        payload["shares"] = int(getattr(tweet, "shares", 0) or 0)
     _apply_assignment_payload(payload, context)
     if _platform_posts_has_column("twitter", "user_id"):
         payload["user_id"] = str(getattr(tweet, "user_id", "") or "").strip() or None
@@ -26403,10 +26420,14 @@ def _upsert_shared_catalog_twitter_post(
         raw_data=tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         run_id=run_id,
     )
-    payload["bookmarks"] = _normalize_non_negative_int(getattr(tweet, "bookmarks", 0))
-    payload["thread_root_source_id"] = str(getattr(tweet, "thread_root_source_id", "") or "").strip() or None
-    payload["thread_position"] = getattr(tweet, "thread_position", None)
-    payload["is_thread_part"] = bool(getattr(tweet, "is_thread_part", False))
+    if _platform_catalog_posts_has_column("twitter", "bookmarks"):
+        payload["bookmarks"] = _normalize_non_negative_int(getattr(tweet, "bookmarks", 0))
+    if _platform_catalog_posts_has_column("twitter", "thread_root_source_id"):
+        payload["thread_root_source_id"] = str(getattr(tweet, "thread_root_source_id", "") or "").strip() or None
+    if _platform_catalog_posts_has_column("twitter", "thread_position"):
+        payload["thread_position"] = getattr(tweet, "thread_position", None)
+    if _platform_catalog_posts_has_column("twitter", "is_thread_part"):
+        payload["is_thread_part"] = bool(getattr(tweet, "is_thread_part", False))
     return _pg_upsert(PLATFORM_CATALOG_POST_TABLES["twitter"], payload, conflict_col="source_id", conn=conn)
 
 
@@ -32557,6 +32578,10 @@ def _maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
 
 
 def _shared_catalog_fetch_row_has_terminal_error(row: Mapping[str, Any]) -> bool:
+    status = str(row.get("status") or "").strip().lower()
+    items_found = _normalize_non_negative_int(row.get("items_found"))
+    if status == "completed" and items_found > 0:
+        return False
     metadata = _metadata_dict(row.get("metadata"))
     retrieval_meta = _metadata_dict(metadata.get("retrieval_meta"))
     error_code = (
@@ -32575,6 +32600,7 @@ def _shared_catalog_fetch_has_terminal_error(run_id: str, *, conn: Any | None = 
         select
           lower(coalesce(config->>'stage', metadata->>'stage', job_type, '')) as stage,
           lower(coalesce(status, '')) as status,
+          items_found,
           metadata,
           error_message,
           last_error_code
@@ -33700,7 +33726,14 @@ def _run_shared_account_frontier_posts_stage(
             "expected_total_posts": expected_total_posts or None,
             "pipeline_ingest_mode": ingest_mode,
         },
-    )
+)
+
+
+def _tiktok_empty_body_fallback_completion_tolerance(expected_total: int) -> int:
+    if expected_total <= 0:
+        return 0
+    percent_tolerance = max(1, int(round(expected_total * 0.02)))
+    return min(5, percent_tolerance)
 
 
 def _run_shared_account_posts_stage(
@@ -33843,23 +33876,37 @@ def _run_shared_account_posts_stage(
         and completion_target_posts > 0
         and max(scraped_posts, saved_posts) < completion_target_posts
     ):
-        raise SharedStageRuntimeError(
-            (
-                f"Shared-account fallback ended early for @{account_handle}: "
-                f"checked {scraped_posts} of {completion_target_posts} discovered posts"
-            ),
-            error_code="catalog_incomplete",
-            retryable=True,
-            runtime_metadata={
-                "retrieval_meta": {
-                    **dict(retrieval_meta or {}),
-                    "expected_total_posts": expected_total_posts,
-                    "completion_target_posts": completion_target_posts,
-                    "observed_posts_checked": scraped_posts,
-                    "observed_posts_saved": saved_posts,
-                }
-            },
-        )
+        missing_posts = completion_target_posts - max(scraped_posts, saved_posts)
+        tolerance = 0
+        if (
+            _normalize_platform_name(platform) == "tiktok"
+            and str(config.get("recovery_reason") or "").strip().lower() == "tiktok_empty_body_transport_failure"
+        ):
+            tolerance = _tiktok_empty_body_fallback_completion_tolerance(completion_target_posts)
+        if missing_posts <= tolerance:
+            retrieval_meta["completion_tolerance_applied"] = True
+            retrieval_meta["completion_missing_posts"] = missing_posts
+            retrieval_meta["completion_tolerance_posts"] = tolerance
+        else:
+            raise SharedStageRuntimeError(
+                (
+                    f"Shared-account fallback ended early for @{account_handle}: "
+                    f"checked {scraped_posts} of {completion_target_posts} discovered posts"
+                ),
+                error_code="catalog_incomplete",
+                retryable=True,
+                runtime_metadata={
+                    "retrieval_meta": {
+                        **dict(retrieval_meta or {}),
+                        "expected_total_posts": expected_total_posts,
+                        "completion_target_posts": completion_target_posts,
+                        "observed_posts_checked": scraped_posts,
+                        "observed_posts_saved": saved_posts,
+                        "completion_missing_posts": missing_posts,
+                        "completion_tolerance_posts": tolerance,
+                    }
+                },
+            )
     activity["phase"] = "shared_account_posts_end"
     activity["posts_checked"] = scraped_posts
     activity["matched_posts"] = matched_posts
@@ -58117,8 +58164,7 @@ def _social_account_catalog_start_lock_key(platform: str, account_handle: str) -
 
 
 def _catalog_launch_initial_status(*, allow_local_dev_inline_bypass: bool) -> str:
-    if allow_local_dev_inline_bypass or not is_queue_enabled():
-        return "pending"
+    del allow_local_dev_inline_bypass
     return "queued"
 
 

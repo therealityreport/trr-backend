@@ -12,6 +12,30 @@ from psycopg2.pool import PoolError
 from trr_backend.db import pg
 
 
+@pytest.fixture(autouse=True)
+def _clear_pool_sizing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "APP_ENV",
+        "ENV",
+        "ENVIRONMENT",
+        "TRR_ENV",
+        "TRR_ENVIRONMENT",
+        "TRR_LOCAL_DEV",
+        "MODAL_TASK_ID",
+        "MODAL_ENVIRONMENT",
+        "TRR_DB_POOL_MINCONN",
+        "TRR_DB_POOL_MAXCONN",
+        "TRR_DB_APPLICATION_NAME",
+        "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN",
+        "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN",
+        "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN",
+        "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN",
+        "TRR_HEALTH_DB_POOL_MINCONN",
+        "TRR_HEALTH_DB_POOL_MAXCONN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 class _FakeConnection:
     def __init__(self, *, query_results: list[dict[str, object] | None] | None = None) -> None:
         self.commit_calls = 0
@@ -262,6 +286,47 @@ def test_db_read_connection_uses_health_pool_sizing(monkeypatch: pytest.MonkeyPa
     assert fake_pool.putconn_calls == 1
 
 
+def test_db_read_connection_uses_social_control_pool_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePool()
+    created: list[tuple[int, int]] = []
+
+    def _pool_factory(*, minconn, maxconn, **_kwargs):
+        created.append((minconn, maxconn))
+        return fake_pool
+
+    monkeypatch.setenv("TRR_SOCIAL_CONTROL_DB_POOL_MINCONN", "1")
+    monkeypatch.setenv("TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN", "2")
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
+
+    with pg.db_read_connection(label="social-control", pool_name="social_control"):
+        pass
+
+    assert created == [(1, 2)]
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+
+
+def test_fetch_one_can_use_named_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakeThreadedPool(lock_result={"ok": True})
+    seen_pool_names: list[str] = []
+
+    def fake_get_pool(pool_name: str = "default"):
+        seen_pool_names.append(pool_name)
+        return fake_pool
+
+    monkeypatch.setattr(pg, "_get_pool", fake_get_pool)
+
+    row = pg.fetch_one("select 1 as ok", pool_name="social_control")
+
+    assert row == {"ok": True}
+    assert seen_pool_names == ["social_control"]
+
+
 def test_resolve_pool_sizing_honors_local_social_profile_session_pooler_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -444,6 +509,10 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
+    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield object()
+
+    @contextmanager
     def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
@@ -453,6 +522,7 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
             raise RuntimeError("SSL SYSCALL error: EOF detected")
         return {"ok": True}
 
+    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(
@@ -779,6 +849,10 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
+    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield object()
+
+    @contextmanager
     def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
@@ -788,6 +862,7 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
             raise RuntimeError("SSL connection has been closed unexpectedly")
         return {"ok": True}
 
+    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(
@@ -825,6 +900,10 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
+    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield object()
+
+    @contextmanager
     def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
@@ -834,6 +913,7 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
             raise RuntimeError("cursor already closed")
         return [{"ok": True}]
 
+    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_all_with_cursor", _fetch_all_with_cursor)
     monkeypatch.setattr(
@@ -853,6 +933,10 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
+    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield object()
+
+    @contextmanager
     def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
         yield object()
 
@@ -862,6 +946,7 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
             raise PoolError("connection pool is closed")
         return {"ok": True}
 
+    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
     monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(

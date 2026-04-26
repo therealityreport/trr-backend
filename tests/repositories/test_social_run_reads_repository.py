@@ -8,6 +8,7 @@ import pytest
 
 import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.dispatch as dispatch_reads
+import trr_backend.socials.control_plane.run_reads as run_reads
 
 
 def test_legacy_list_runs_delegates_to_control_plane_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,6 +31,37 @@ def test_legacy_get_run_progress_snapshot_delegates_to_control_plane_dispatch(
     payload = social_repo.get_run_progress_snapshot("season-1", "run-1")
 
     assert payload is expected
+
+
+def test_get_run_progress_snapshot_uses_social_control_pool_for_initial_run_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_pool_names: list[str] = []
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None, pool_name="default"):
+        del params, conn
+        seen_pool_names.append(pool_name)
+        normalized = " ".join(sql.lower().split())
+        if "from social.scrape_runs" in normalized:
+            return {
+                "run_id": "run-1",
+                "season_id": "season-1",
+                "status": "completed",
+                "source_scope": "bravo",
+                "config": {"pipeline_ingest_mode": "shared_account_catalog_backfill"},
+                "summary": {},
+            }
+        return None
+
+    monkeypatch.setattr(run_reads.legacy, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(run_reads.legacy, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
+    monkeypatch.setattr(run_reads.legacy.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(run_reads.legacy.pg, "fetch_all", lambda *_args, **_kwargs: [])
+
+    payload = run_reads.get_run_progress_snapshot("season-1", "run-1", recent_log_limit=10)
+
+    assert payload["run_id"] == "run-1"
+    assert "social_control" in seen_pool_names
 
 
 def test_list_runs_applies_filters_and_order(monkeypatch: pytest.MonkeyPatch) -> None:

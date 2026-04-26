@@ -28,6 +28,11 @@ _MAX_CONCURRENCY_BY_PLATFORM_DEFAULT = {
     "youtube": 3,
 }
 
+BENCHMARK_APPROVED_RUNTIME_DEFAULTS: dict[str, str] = {
+    # Filled only by browser-use-backed benchmark evidence in
+    # docs/ai/benchmarks/social_backfill_method_comparison.md.
+}
+
 
 @dataclass(frozen=True)
 class CrawleeRuntimeConfig:
@@ -82,6 +87,16 @@ def should_use_crawlee(platform: str) -> bool:
         return False
     force_legacy_platforms = _parse_platform_set(os.getenv("SOCIAL_CRAWLEE_FORCE_LEGACY_PLATFORMS"), default_all=False)
     return normalized_platform not in force_legacy_platforms
+
+
+def default_runtime_method_for_platform(platform: str) -> str:
+    normalized = (platform or "").strip().lower()
+    platform_override = os.getenv(f"SOCIAL_{normalized.upper()}_RUNTIME_METHOD") if normalized else None
+    if platform_override:
+        return platform_override.strip().lower()
+    if normalized in BENCHMARK_APPROVED_RUNTIME_DEFAULTS:
+        return BENCHMARK_APPROVED_RUNTIME_DEFAULTS[normalized]
+    return os.getenv("SOCIAL_DEFAULT_RUNTIME_METHOD", "legacy").strip().lower()
 
 
 def is_auth_strict_for_platform(platform: str) -> bool:

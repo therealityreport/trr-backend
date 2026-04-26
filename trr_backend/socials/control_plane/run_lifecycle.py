@@ -7,6 +7,9 @@ from typing import Any
 import trr_backend.repositories.social_season_analytics as legacy
 
 
+SOCIAL_CONTROL_POOL_NAME = "social_control"
+
+
 def _call_with_optional_conn(
     loader,
     /,
@@ -674,12 +677,15 @@ def _run_job_status_breakdown(run_id: str, *, conn: Any | None = None) -> dict[s
 def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
     lock_key = int(legacy.hashlib.md5(run_id.encode()).hexdigest()[:15], 16) % (2**31)
     try:
-        with legacy.pg.advisory_session_lock(lock_key, label="run-finalize-lock") as lock_conn:
+        with legacy.pg.advisory_session_lock(
+            lock_key,
+            label="run-finalize-lock",
+            pool_name=SOCIAL_CONTROL_POOL_NAME,
+        ) as lock_conn:
             return _finalize_run_status_locked(run_id, lock_conn, force_recompute=force_recompute)
     except legacy.pg.AdvisoryLockUnavailable:
         legacy.logger.debug("[finalize_run_status] skipped — another worker is finalizing run=%s", run_id[:8])
-        current = legacy.pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id]) or {}
-        return {"status": current.get("status", "running")}
+        return {"status": "finalize_skipped_lock_busy"}
 
 
 def _finalize_run_status_locked(
