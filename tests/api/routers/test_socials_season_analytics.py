@@ -4823,14 +4823,13 @@ def test_post_social_account_comments_scrape_background_dispatch_exception_keeps
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
 
-    class SynchronousThread:
-        def __init__(self, *, target: Any, name: str | None = None, daemon: bool | None = None) -> None:
-            self._target = target
-            self.name = name
-            self.daemon = daemon
-
-        def start(self) -> None:
-            self._target()
+    def _run_queued_dispatch_and_swallow_failure(**kwargs: Any) -> dict[str, Any]:
+        target = kwargs["target"]
+        try:
+            target()
+        except RuntimeError:
+            pass
+        return {"submitted": True, "state": "queued"}
 
     with (
         patch(
@@ -4849,7 +4848,10 @@ def test_post_social_account_comments_scrape_background_dispatch_exception_keeps
             "trr_backend.repositories.social_season_analytics.dispatch_due_social_jobs",
             side_effect=RuntimeError("dispatch failed"),
         ) as dispatch_mock,
-        patch("trr_backend.repositories.social_season_analytics.Thread", SynchronousThread),
+        patch(
+            "trr_backend.repositories.social_season_analytics.submit_named_background_task",
+            side_effect=_run_queued_dispatch_and_swallow_failure,
+        ) as submit_mock,
     ):
         response = client.post(
             "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
@@ -4860,6 +4862,7 @@ def test_post_social_account_comments_scrape_background_dispatch_exception_keeps
     assert response.status_code == 200
     assert response.json()["run_id"] == "comments-run-queued-2"
     assert scrape_mock.call_args.kwargs["dispatch_immediately"] is False
+    submit_mock.assert_called_once()
     dispatch_mock.assert_called_once_with(run_id="comments-run-queued-2")
 
 
