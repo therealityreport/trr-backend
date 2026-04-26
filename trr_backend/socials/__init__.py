@@ -1,4 +1,5 @@
-"""
+"""Social account dashboard service helpers.
+
 Social media scraping and analytics module.
 
 This module provides tools for fetching and analyzing social media posts
