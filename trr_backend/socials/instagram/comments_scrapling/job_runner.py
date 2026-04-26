@@ -10,6 +10,7 @@ from trr_backend.db import pg
 from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     InstagramCommentsFetchResult,
     InstagramCommentsScraplingFetcher,
+    InstagramCommentsWarmupError,
 )
 from trr_backend.socials.instagram.comments_scrapling.persistence import persist_instagram_comments_for_post
 from trr_backend.socials.instagram.comments_scrapling.proxy import select_comments_proxy
@@ -111,7 +112,15 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         )
         auth_metadata: dict[str, Any] = {}
         try:
-            await fetcher.warmup()
+            try:
+                await fetcher.warmup()
+            except InstagramCommentsWarmupError as exc:
+                raise CommentsScraplingRuntimeError(
+                    str(exc),
+                    error_code=exc.error_code,
+                    retryable=exc.retryable,
+                    runtime_metadata={"fetcher_runtime": fetcher.runtime_metadata},
+                ) from exc
             auth_metadata = dict(session.auth_session.metadata or {})
             with pg.db_connection(label="instagram-comments-scrapling-persist") as persist_conn:
                 repo._touch_job_heartbeat(job_id, worker_id=worker_id)

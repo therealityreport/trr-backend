@@ -246,10 +246,12 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
 ) -> None:
     lock_conn = object()
     seen_fetch_conns: list[object | None] = []
+    seen_lock_pool_names: list[str] = []
 
     @contextmanager
     def fake_advisory_lock(lock_key, *, label, pool_name="default"):
-        del lock_key, label, pool_name
+        del lock_key, label
+        seen_lock_pool_names.append(pool_name)
         yield lock_conn
 
     def fake_fetch_one(sql: str, params=None, *, conn=None):
@@ -280,4 +282,5 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
 
     run_lifecycle._finalize_run_status("run-1")
 
+    assert seen_lock_pool_names == ["social_control"]
     assert seen_fetch_conns == [lock_conn]
