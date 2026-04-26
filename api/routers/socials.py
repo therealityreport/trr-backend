@@ -55,7 +55,6 @@ from trr_backend.modal_dispatch import (
 from trr_backend.observability import get_trace_id
 from trr_backend.read_path_diagnostics import log_read_path
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
-from trr_backend.socials.control_plane.background_tasks import submit_named_background_task
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 
 logger = logging.getLogger(__name__)
@@ -63,6 +62,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
 _LIVE_STATUS_STREAM_INTERVAL_SECONDS = 5.0
 _LIVE_STATUS_SEQUENCE = 0
+
+
+def submit_named_background_task(**kwargs: Any) -> dict[str, Any]:
+    from trr_backend.socials.control_plane.background_tasks import (
+        submit_named_background_task as _submit_named_background_task,
+    )
+
+    return _submit_named_background_task(**kwargs)
 
 
 class SocialBladeProfileRefreshRequest(BaseModel):

@@ -180,6 +180,31 @@ def test_set_run_status_invalidates_week_detail_cache_on_terminal_states(
         social_repo.register_week_detail_cache_invalidator(None)
 
 
+def test_set_run_status_clears_terminal_timestamps_for_active_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def _fake_fetch_one(sql: str, params: list[object], **_kwargs):
+        calls.append((" ".join(sql.lower().split()), list(params)))
+        return {"id": "run-1"}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    social_repo._set_run_status("run-1", "queued")
+
+    assert len(calls) == 1
+    sql, params = calls[0]
+    assert (
+        "completed_at = case when %s in ('completed', 'failed', 'cancelled') "
+        "then coalesce(completed_at, now()) else null end"
+    ) in sql
+    assert (
+        "cancelled_at = case when %s = 'cancelled' then coalesce(cancelled_at, now()) else null end"
+    ) in sql
+    assert params == ["queued", "queued", "queued", "queued", "run-1"]
+
+
 def test_update_run_summary_prefers_incremental_counter_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 

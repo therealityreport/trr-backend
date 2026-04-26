@@ -281,6 +281,36 @@ def test_resolve_modal_function_classifies_missing_app(monkeypatch: pytest.Monke
     assert payload["modal_environment"] == "main"
 
 
+def test_run_modal_sdk_call_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(modal_dispatch, "_modal_sdk_timeout_seconds", lambda: 0.01)
+
+    def _blocked() -> None:
+        import time
+
+        time.sleep(0.2)
+
+    with pytest.raises(TimeoutError, match="modal_probe_timeout_after_0.01s"):
+        modal_dispatch._run_modal_sdk_call("probe", _blocked)
+
+
+def test_resolve_modal_function_classifies_sdk_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(modal_dispatch, "modal_dispatch_ready", lambda *, function_name: (True, None))
+    monkeypatch.setattr(modal_dispatch, "modal_app_name", lambda: "trr-backend-jobs")
+    monkeypatch.setattr(modal_dispatch, "modal_environment_name", lambda: "main")
+    monkeypatch.setattr(
+        modal_dispatch,
+        "_run_modal_sdk_call",
+        lambda _label, _callback: (_ for _ in ()).throw(TimeoutError("modal_resolve_function_timeout_after_15s")),
+    )
+    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Function=types.SimpleNamespace()))
+
+    payload = modal_dispatch.resolve_modal_function("run_social_job")
+
+    assert payload["resolved"] is False
+    assert payload["reason"] == "modal_sdk_timeout"
+    assert payload["error"] == "modal_resolve_function_timeout_after_15s"
+
+
 def test_resolve_modal_function_classifies_missing_function(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_modal = types.SimpleNamespace(
         Function=types.SimpleNamespace(
