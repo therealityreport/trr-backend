@@ -579,6 +579,13 @@ def _is_connection_closed(conn: connection_type) -> bool:
         return True
 
 
+def _backend_pid_or_none(conn: connection_type) -> int | None:
+    try:
+        return getattr(conn, "get_backend_pid", lambda: None)()
+    except Exception:
+        return None
+
+
 def _log_checkout(
     *,
     pool: ThreadedConnectionPool,
@@ -603,7 +610,7 @@ def _log_checkout(
         checkout_id,
         label,
         acquire_duration_seconds * 1000.0,
-        getattr(conn, "get_backend_pid", lambda: None)(),
+        _backend_pid_or_none(conn),
         _transaction_status_name(conn),
         in_use,
         available,
@@ -632,7 +639,7 @@ def _log_return(
         checkout_id,
         label,
         f"{held_ms:.1f}" if held_ms is not None else "unknown",
-        getattr(conn, "get_backend_pid", lambda: None)(),
+        _backend_pid_or_none(conn),
         _transaction_status_name(conn),
         in_use,
         available,
@@ -646,7 +653,7 @@ def _ensure_connection_idle(conn: connection_type, *, label: str, phase: str) ->
             "[db-pool] discard_closed_connection label=%s phase=%s backend_pid=%s",
             label,
             phase,
-            getattr(conn, "get_backend_pid", lambda: None)(),
+            _backend_pid_or_none(conn),
         )
         return False
     tx_status = _transaction_status_name(conn)
@@ -658,7 +665,7 @@ def _ensure_connection_idle(conn: connection_type, *, label: str, phase: str) ->
             "[db-pool] rollback_dirty_connection label=%s phase=%s backend_pid=%s prior_tx_status=%s",
             label,
             phase,
-            getattr(conn, "get_backend_pid", lambda: None)(),
+            _backend_pid_or_none(conn),
             tx_status,
         )
     except Exception:
@@ -666,7 +673,7 @@ def _ensure_connection_idle(conn: connection_type, *, label: str, phase: str) ->
             "[db-pool] rollback_failed label=%s phase=%s backend_pid=%s prior_tx_status=%s",
             label,
             phase,
-            getattr(conn, "get_backend_pid", lambda: None)(),
+            _backend_pid_or_none(conn),
             tx_status,
         )
         return False

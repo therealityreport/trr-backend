@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from trr_backend.socials.instagram.post_normalizer import normalize_instagram_post
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.persistence")
 
@@ -102,7 +104,28 @@ class _ScraplingPostDTO:
     width: int | None = None
     height: int | None = None
     is_comments_disabled: bool | None = None
+    comments_disabled: bool | None = None
+    like_and_view_counts_disabled: bool | None = None
+    commenting_disabled_for_viewer: bool | None = None
+    media_repost_count: int | None = None
+    is_paid_partnership: bool | None = None
+    is_advertisement: bool | None = None
+    can_viewer_reshare: bool | None = None
+    has_audio: bool | None = None
+    caption_id: str | None = None
+    caption_is_edited: bool | None = None
+    caption_has_translation: bool | None = None
+    source_post_id: str | None = None
+    owner_user_id: str | None = None
+    owner_username: str | None = None
+    owner_profile_pic_url_hd: str | None = None
+    location_id: str | None = None
+    location_name: str | None = None
+    location_raw: dict[str, Any] | None = None
+    original_width: int | None = None
+    original_height: int | None = None
     music_info: dict[str, Any] | None = None
+    audio_url: str | None = None
     video_duration: float | None = None
     child_posts_data: list[dict[str, Any]] = field(default_factory=list)
     # Mirror fields (left empty — mirroring handled separately)
@@ -284,23 +307,48 @@ def _extract_media_urls(node: dict[str, Any]) -> tuple[list[str], str | None]:
     return media_urls, thumbnail_url
 
 
+def _normalizer_object_to_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if hasattr(value, "to_dict"):
+        result = value.to_dict()
+        return dict(result) if isinstance(result, dict) else {}
+    if is_dataclass(value):
+        result = asdict(value)
+        return dict(result) if isinstance(result, dict) else {}
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
 def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _ScraplingPostDTO:
     """Convert a raw GraphQL edge node into a DTO that _upsert_instagram_post can read.
 
     Handles both legacy GraphQL shapes (GraphImage/GraphVideo/GraphSidecar) and
     the newer XDTMediaDict shape returned by the profile timeline connection.
     """
-    shortcode = _extract_shortcode(node)
-    post_type = _extract_media_type(node)
-    caption = _extract_caption(node)
+    normalized = normalize_instagram_post(node, account_handle=account_handle)
+    shortcode = normalized.shortcode or _extract_shortcode(node)
+    post_type = normalized.media_type or _extract_media_type(node)
+    caption = normalized.caption.text or _extract_caption(node)
     likes = _extract_likes(node)
     comments = _extract_comments(node)
-    views = _extract_views(node)
+    views = normalized.video_view_count if normalized.video_view_count is not None else _extract_views(node)
     taken_at = _extract_taken_at(node)
     date_time = datetime.fromtimestamp(taken_at, tz=UTC).isoformat() if taken_at else ""
-    username = _extract_username(node, account_handle=account_handle)
-    pk = _extract_pk(node)
-    media_urls, thumbnail_url = _extract_media_urls(node)
+    username = (
+        normalized.owner.username if normalized.owner and normalized.owner.username else None
+    ) or _extract_username(
+        node,
+        account_handle=account_handle,
+    )
+    pk = normalized.source_id or _extract_pk(node)
+    fallback_media_urls, fallback_thumbnail_url = _extract_media_urls(node)
+    media_urls = normalized.media_urls or fallback_media_urls
+    thumbnail_url = normalized.thumbnail_url or fallback_thumbnail_url
+    owner_detail = normalized.owner
+    location_raw = _normalizer_object_to_dict(normalized.location)
+    flags = normalized.flags
 
     return _ScraplingPostDTO(
         shortcode=shortcode,
@@ -308,7 +356,6 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
         date_time=date_time,
         taken_at=taken_at,
         caption=caption,
-        profile_tags=[],
         sponsored=False,
         likes=likes,
         comments=comments,
@@ -316,11 +363,51 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
         video_views_observed=views if views > 0 else None,
         video_views_source="graphql_scrapling" if views > 0 else None,
         video_views_raw_candidates=[],
-        url=f"https://www.instagram.com/p/{shortcode}/" if shortcode else "",
+        url=normalized.permalink or (f"https://www.instagram.com/p/{shortcode}/" if shortcode else ""),
         pk=pk,
         username=username,
         media_urls=media_urls,
         thumbnail_url=thumbnail_url,
+        hashtags=normalized.hashtags,
+        mentions=normalized.mentions,
+        collaborators=[user.username for user in normalized.collaborators if user.username],
+        profile_tags=[user.username for user in normalized.tagged_users if user.username],
+        tagged_users_detail=normalized.tagged_users,
+        collaborators_detail=normalized.collaborators,
+        owner_detail=owner_detail,
+        product_type=str(node.get("product_type") or node.get("productType") or "") or None,
+        video_play_count=normalized.video_play_count,
+        width=normalized.width,
+        height=normalized.height,
+        is_comments_disabled=flags.get("comments_disabled"),
+        comments_disabled=flags.get("comments_disabled"),
+        like_and_view_counts_disabled=flags.get("like_count_disabled"),
+        commenting_disabled_for_viewer=bool(node.get("commenting_disabled_for_viewer"))
+        if node.get("commenting_disabled_for_viewer") is not None
+        else None,
+        media_repost_count=int(node.get("media_repost_count") or 0)
+        if node.get("media_repost_count") is not None
+        else None,
+        is_paid_partnership=flags.get("paid_partnership"),
+        is_advertisement=flags.get("advertisement"),
+        can_viewer_reshare=bool(node.get("can_viewer_reshare")) if node.get("can_viewer_reshare") is not None else None,
+        has_audio=bool(node.get("has_audio")) if node.get("has_audio") is not None else None,
+        caption_id=normalized.caption.caption_id,
+        caption_is_edited=normalized.caption.is_edited,
+        caption_has_translation=normalized.caption.has_translation,
+        source_post_id=normalized.source_id,
+        owner_user_id=owner_detail.user_id if owner_detail else None,
+        owner_username=owner_detail.username if owner_detail else username,
+        owner_profile_pic_url_hd=owner_detail.profile_pic_url_hd if owner_detail else None,
+        location_id=normalized.location.location_id if normalized.location else None,
+        location_name=normalized.location.name if normalized.location else None,
+        location_raw=location_raw or None,
+        original_width=normalized.width,
+        original_height=normalized.height,
+        music_info=normalized.music_info,
+        audio_url=normalized.audio_url,
+        video_duration=normalized.video_duration,
+        child_posts_data=[_normalizer_object_to_dict(child) for child in normalized.child_posts],
         metadata_scraped_at=datetime.now(tz=UTC),
         metadata_source="posts_scrapling",
         _raw_node=node,
@@ -387,16 +474,17 @@ def persist_instagram_posts(
             posts_upserted += 1
 
     if job_id:
-        existing_row = pg.fetch_one(
-            "select metadata from social.scrape_jobs where id = %s",
-            [job_id],
-        ) or {}
+        existing_row = (
+            pg.fetch_one(
+                "select metadata from social.scrape_jobs where id = %s",
+                [job_id],
+            )
+            or {}
+        )
         metadata = dict(existing_row.get("metadata") or {})
         existing_summary = metadata.get("posts_scrapling_persist_diagnostics")
         existing_reasons = (
-            dict(existing_summary.get("posts_skipped_by_reason") or {})
-            if isinstance(existing_summary, dict)
-            else {}
+            dict(existing_summary.get("posts_skipped_by_reason") or {}) if isinstance(existing_summary, dict) else {}
         )
         merged_reasons = {
             reason: int(existing_reasons.get(reason) or 0) + int(posts_skipped_by_reason.get(reason) or 0)

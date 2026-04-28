@@ -24,6 +24,28 @@ psql "$TRR_DB_URL" \
 
 Use `explain_analyze=true` only for bounded dev/staging reads after checking the route owner, expected row counts, and timeout. The default is plain `EXPLAIN`, which plans but does not execute the SELECT.
 
+## Index Advisor Companion
+
+`index_advisor_social_hot_paths.py` is the companion recommendation workflow for the social/admin subset of this harness. It asks Supabase `index_advisor` for candidate indexes, but it does not prove planner behavior and it does not approve DDL.
+
+Run a dry pass first:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+.venv/bin/python scripts/db/index_advisor_social_hot_paths.py --dry-run
+```
+
+Run an approved dated evidence pass:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+.venv/bin/python scripts/db/index_advisor_social_hot_paths.py --output-date 2026-04-28
+```
+
+The helper resolves DB URLs in this order: `TRR_DB_SESSION_URL`, `TRR_DB_URL`, then `TRR_DB_FALLBACK_URL`. It runs in a read-only transaction, sets local statement and lock timeouts, writes redacted JSON/Markdown reports under `docs/workspace/`, and never executes returned `CREATE INDEX` statements.
+
+Use advisor output only to decide which labeled query should get deeper EXPLAIN review. Every candidate index still needs the evidence listed below before a migration is written.
+
 ## Parameter Conventions
 
 All placeholders are psql variables. The SQL file supplies conservative defaults, but real evidence must use route-realistic values.
@@ -62,4 +84,3 @@ For every proposed index, capture:
 - Observed problem: scan, sort, misestimate, repeated nested loop, or high buffer read.
 - Candidate index with why it matches that route/query.
 - RLS/grants impact review for every touched schema/table before any migration.
-

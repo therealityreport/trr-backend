@@ -158,6 +158,13 @@ class _FakeConnectionClosedOnAutocommitRestore(_FakeConnection):
         self._autocommit = value
 
 
+class _FakeConnectionRaisesOnBackendPidWhenClosed(_FakeConnectionClosedOnAutocommitRestore):
+    def get_backend_pid(self) -> int:
+        if self.closed:
+            raise InterfaceError("connection already closed")
+        return super().get_backend_pid()
+
+
 def _detail(url: str) -> dict[str, object]:
     return {
         "url": url,
@@ -321,7 +328,7 @@ def test_db_read_connection_discards_closed_connection_on_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_pool = _FakePool()
-    fake_pool.connection = _FakeConnectionClosedOnAutocommitRestore()
+    fake_pool.connection = _FakeConnectionRaisesOnBackendPidWhenClosed()
     monkeypatch.setattr(
         pg,
         "resolve_database_url_candidate_details",

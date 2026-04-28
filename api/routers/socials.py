@@ -4776,6 +4776,53 @@ def get_social_account_profile_comments_route(
         raise _to_social_read_http_exception(exc) from exc
 
 
+@router.get("/profiles/instagram/{account_handle}/profile")
+def get_instagram_profile_detail_route(
+    account_handle: str,
+    source_scope: str = Query(default="bravo"),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_instagram_profile_detail
+
+    try:
+        return get_instagram_profile_detail(account_handle=account_handle, source_scope=source_scope)
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch Instagram profile detail: account=%s", account_handle)
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/instagram/{account_handle}/relationships")
+def get_instagram_profile_relationships_route(
+    account_handle: str,
+    relationship_type: Literal["following"] = Query(default="following", alias="type"),
+    source_scope: str = Query(default="bravo"),
+    page: int = Query(default=1, ge=1, le=10_000),
+    page_size: int = Query(default=25, ge=1, le=100),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_instagram_profile_relationships
+
+    try:
+        return get_instagram_profile_relationships(
+            account_handle=account_handle,
+            source_scope=source_scope,
+            relationship_type=relationship_type,
+            page=page,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch Instagram profile relationships: account=%s", account_handle)
+        raise _to_social_read_http_exception(exc) from exc
+
+
 @router.post("/profiles/{platform}/{account_handle}/comments/scrape")
 async def post_social_account_comments_scrape_route(
     platform: str,

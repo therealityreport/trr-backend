@@ -455,11 +455,33 @@ def test_warmup_propagates_csrftoken_into_parser_headers() -> None:
 
     asyncio.run(fetcher.warmup())
 
+    fetcher._fetch_page.assert_awaited_once_with(
+        "https://www.instagram.com/testaccount/",
+        referer="https://www.instagram.com/testaccount/",
+    )
     headers = fetcher._parser._get_headers("https://www.instagram.com/p/ABC/")
     csrf_header = headers.get("x-csrftoken") or headers.get("X-CSRFToken") or ""
     assert csrf_header == "fresh-csrf-token", (
         f"Expected parser headers to reflect the bridged csrftoken, got: {csrf_header}"
     )
+
+
+def test_warmup_allows_existing_session_without_new_cookie_delta() -> None:
+    fetcher = _build_fetcher()
+    fetcher._raw_cookies["sessionid"] = "existing-session"
+
+    warmup_response = MagicMock()
+    warmup_response.status = 200
+    warmup_response.text = ""
+    warmup_response.cookies = {}
+
+    fetcher._fetch_page = AsyncMock(return_value=warmup_response)
+    fetcher._rebuild_http_client = AsyncMock()
+
+    asyncio.run(fetcher.warmup())
+
+    assert fetcher.runtime_metadata["warmup_cookie_count"] == 0
+    fetcher._rebuild_http_client.assert_awaited_once()
 
 
 def test_warmup_raises_when_no_cookies_are_bridged() -> None:
