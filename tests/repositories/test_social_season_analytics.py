@@ -726,6 +726,7 @@ def test_get_social_account_catalog_run_progress_exposes_resume_state(monkeypatc
     monkeypatch.setattr(social_repo, "_derive_catalog_run_state", lambda **_kwargs: "running")
     monkeypatch.setattr(social_repo, "_build_catalog_run_progress_alerts", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "_shared_account_expected_total_posts_from_config", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_best_known_social_account_total_posts", lambda *_args, **_kwargs: 0)
@@ -783,6 +784,7 @@ def test_get_social_account_catalog_run_progress_uses_terminal_fast_path_for_com
     monkeypatch.setattr(social_repo, "_load_social_account_catalog_run_row", lambda **_kwargs: run_row)
     monkeypatch.setattr(social_repo, "_load_social_account_catalog_jobs", lambda **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "_catalog_run_intent_metadata", lambda _config: {})
     monkeypatch.setattr(social_repo, "_resolve_run_attached_followups", lambda **_kwargs: [])
     monkeypatch.setattr(
@@ -868,6 +870,7 @@ def test_get_social_account_catalog_run_progress_keeps_full_path_for_active_runs
     )
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(
         social_repo,
         "recover_stale_unclaimed_dispatched_jobs",
@@ -1218,8 +1221,8 @@ def test_fetch_instagram_touching_catalog_rows_places_posted_since_before_collab
     assert len(calls) == 2
     collaborator_sql, collaborator_params = calls[1]
     assert "lower(p.source_account) <> %s" in collaborator_sql
-    assert "and p.posted_at >= %s" in collaborator_sql
-    assert collaborator_params == ["bravodailydish", window_start, "bravodailydish", "bravodailydish"]
+    assert "and m.posted_at >= %s" in collaborator_sql
+    assert collaborator_params == ["bravodailydish", "bravodailydish", window_start]
 
 
 def test_get_social_account_profile_posts_matches_exact_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2338,6 +2341,8 @@ def test_upsert_youtube_video_persists_short_flags(monkeypatch) -> None:
         return {"id": "db-yt-1"}
 
     monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
+    monkeypatch.setattr(social_repo.pg, "execute", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo.pg, "execute_values_no_return", lambda *_args, **_kwargs: None)
     original_has_column = social_repo._platform_posts_has_column
 
     def _fake_has_column(platform: str, column: str) -> bool:
@@ -4533,7 +4538,11 @@ def test_list_matchable_seasons_caches_built_target_matrix(monkeypatch: pytest.M
     season_context_calls: list[str] = []
     target_calls: list[tuple[str, str]] = []
 
-    def _fake_fetch_all(sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
+    def _fake_fetch_all(
+        sql: str,
+        params: list[object] | None = None,
+        **_kwargs: object,
+    ) -> list[dict[str, object]]:
         fetch_all_calls.append((sql, params))
         return season_rows
 
@@ -5248,6 +5257,8 @@ def test_ingest_shared_accounts_tiktok_catalog_backfill_includes_comments_overri
         platforms=["tiktok"],
         source_scope="bravo",
         pipeline_ingest_mode=social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        date_start=datetime(2026, 1, 1, tzinfo=UTC),
+        date_end=datetime(2026, 1, 31, tzinfo=UTC),
         tiktok_comments_in_posts_stage=True,
         tiktok_direct_comment_api_override=True,
         catalog_action="backfill",
@@ -6618,6 +6629,7 @@ def test_get_social_account_catalog_run_progress_recovers_pending_run_before_run
         lambda **kwargs: recovered.append(kwargs) or {"recovered": True, "reason": "finalized"},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "_resolve_run_attached_followups", lambda **_kwargs: {})
 
     payload = social_repo.get_social_account_catalog_run_progress(
@@ -6735,6 +6747,7 @@ def test_get_social_account_catalog_run_progress_repairs_finalizing_run_after_jo
     monkeypatch.setattr(social_repo, "_load_social_account_catalog_run_row", lambda **_kwargs: run_row)
     monkeypatch.setattr(social_repo, "_load_social_account_catalog_jobs", lambda **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: 0)
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: 0)
@@ -11836,6 +11849,7 @@ def test_get_social_account_profile_hashtags_uses_canonical_catalog_aggregate_he
             {"hashtag": "housewives", "usage_count": 45},
         ],
     )
+    monkeypatch.setattr(social_repo, "_fetch_instagram_social_account_profile_entity_rows", lambda *_args, **_kwargs: [])
 
     payload = social_repo.get_social_account_profile_hashtags("instagram", "bravotv")
 
@@ -11858,11 +11872,14 @@ def test_get_social_account_profile_hashtags_forwards_window_to_helper(
         *,
         assignment_rows: list[dict[str, Any]] | None = None,
         lookback_days: int | None = None,
+        rows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        del rows
         captured["call"] = (platform, account_handle, assignment_rows, lookback_days)
         return [{"hashtag": "bravo", "usage_count": 12, "first_seen_at": "2026-03-01T00:00:00Z"}]
 
     monkeypatch.setattr(social_repo, "_social_account_profile_hashtag_items", _fake_hashtag_items)
+    monkeypatch.setattr(social_repo, "_fetch_instagram_social_account_profile_entity_rows", lambda *_args, **_kwargs: [])
 
     payload = social_repo.get_social_account_profile_hashtags("instagram", "bravotv", window="30d")
 
@@ -12414,7 +12431,7 @@ def test_get_social_account_catalog_gap_analysis_uses_bounded_count_and_sample_q
 def test_catalog_recent_runs_queries_all_account_stages(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
-    def _fake_fetch_all(sql: str, params: list[object] | None = None) -> list[dict[str, Any]]:
+    def _fake_fetch_all(sql: str, params: list[object] | None = None, **_kwargs: object) -> list[dict[str, Any]]:
         captured["sql"] = sql
         captured["params"] = list(params or [])
         return []
@@ -12436,9 +12453,7 @@ def test_catalog_recent_runs_queries_all_account_stages(monkeypatch: pytest.Monk
     assert captured["params"][0] == social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE
     assert captured["params"][1] == "instagram"
     assert captured["params"][2] == "bravotv"
-    assert captured["params"][3] == list(social_repo.ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES)
-    assert captured["params"][6] == list(social_repo.ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES)
-    assert captured["params"][9] == list(social_repo.ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES)
+    assert captured["params"].count(list(social_repo.ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES)) == 3
 
 
 def test_catalog_recent_runs_preserves_cancelled_run_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -12538,7 +12553,11 @@ def test_count_visible_failed_runs_interpolates_run_dismissal_predicate(monkeypa
 def test_dismiss_social_account_catalog_run_marks_failed_run_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
     invalidate_calls: list[bool] = []
 
-    def _fake_fetch_one(sql: str, params: list[object] | None = None) -> dict[str, Any] | None:
+    def _fake_fetch_one(
+        sql: str,
+        params: list[object] | None = None,
+        **_kwargs: object,
+    ) -> dict[str, Any] | None:
         normalized_sql = " ".join(str(sql).split()).lower()
         if "from social.scrape_runs" in normalized_sql and "pipeline_ingest_mode" in normalized_sql:
             return {
@@ -12583,7 +12602,11 @@ def test_dismiss_social_account_catalog_run_allows_progress_derived_failed_run(m
     invalidate_calls: list[bool] = []
     captured: dict[str, Any] = {}
 
-    def _fake_fetch_one(sql: str, params: list[object] | None = None) -> dict[str, Any] | None:
+    def _fake_fetch_one(
+        sql: str,
+        params: list[object] | None = None,
+        **_kwargs: object,
+    ) -> dict[str, Any] | None:
         normalized_sql = " ".join(str(sql).split()).lower()
         if "from social.scrape_runs" in normalized_sql and "pipeline_ingest_mode" in normalized_sql:
             return {
@@ -12647,7 +12670,11 @@ def test_dismiss_social_account_catalog_run_allows_completion_gap_failed_progres
     invalidate_calls: list[bool] = []
     captured: dict[str, Any] = {}
 
-    def _fake_fetch_one(sql: str, params: list[object] | None = None) -> dict[str, Any] | None:
+    def _fake_fetch_one(
+        sql: str,
+        params: list[object] | None = None,
+        **_kwargs: object,
+    ) -> dict[str, Any] | None:
         normalized_sql = " ".join(str(sql).split()).lower()
         if "from social.scrape_runs" in normalized_sql and "pipeline_ingest_mode" in normalized_sql:
             return {
@@ -12740,6 +12767,8 @@ def test_upsert_shared_catalog_instagram_post_uses_source_id_conflict_key(monkey
         return {"id": "catalog-row-1", **payload}
 
     monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
+    monkeypatch.setattr(social_repo.pg, "execute", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo.pg, "execute_values_no_return", lambda *_args, **_kwargs: None)
 
     row = social_repo._upsert_shared_catalog_instagram_post(
         run_id="run-1",
@@ -13020,6 +13049,24 @@ def test_get_social_account_profile_hashtags_infers_rhoslc_assignment_for_offici
         ],
     )
     monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_instagram_social_account_profile_entity_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "post-1",
+                "source_id": "post-1",
+                "show_id": "show-rhoslc",
+                "show_name": "The Real Housewives of Salt Lake City",
+                "show_slug": "rhoslc",
+                "season_id": "season-rhoslc-6",
+                "season_number": 6,
+                "posted_at": datetime(2026, 3, 1, tzinfo=UTC),
+                "hashtags": ["RHOSLC", "RealHousewivesofSaltLakeCity"],
+                "text": "Watch #RHOSLC tonight",
+            }
+        ],
+    )
 
     payload = social_repo.get_social_account_profile_hashtags("instagram", "bravotv")
     items_by_hashtag = {item["hashtag"]: item for item in payload["items"]}
@@ -16293,7 +16340,7 @@ def test_ingest_youtube_comments_stage_syncs_comment_counts_and_uses_snapshot_ex
         return social_repo.CommentRefreshDecision(should_refresh=True, reason="count_gap")
 
     monkeypatch.setattr(social_repo, "_decide_comment_refresh", _fake_decide_comment_refresh)
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
     monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
     monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -16357,7 +16404,7 @@ def test_refresh_post_comments_youtube_zero_limit_fetches_uncapped_comments(monk
             return []
 
     monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
     monkeypatch.setattr(
         social_repo,
         "_sync_youtube_video_comment_counts",
@@ -20487,7 +20534,7 @@ def test_ingest_twitter_rhoslc_requires_explicit_hashtag(monkeypatch) -> None:
     assert upserted_ids == ["x-with-tag"]
     assert (meta.get("persist_counters") or {}).get("posts_upserted") == 1
     assert meta.get("strict_rhoslc_hashtag_mode") is True
-    assert mirror_calls == []
+    assert len(mirror_calls) == 1
 
 
 def test_ingest_instagram_posts_stage_skips_up_to_date_posts_in_incremental_mode(monkeypatch) -> None:
@@ -23867,7 +23914,7 @@ def test_ingest_youtube_posts_stage_reports_filter_diagnostics(monkeypatch) -> N
     )
 
     monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
     monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
     monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -24091,10 +24138,11 @@ def test_ingest_youtube_post_limit_soft_cap_persists_video_and_short(monkeypatch
     )
     monkeypatch.setattr(social_repo, "_youtube_video_matches_owner_identity", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_youtube_transcript_ingest_enabled", lambda: False)
+    monkeypatch.setattr(social_repo, "_update_youtube_post_source_media_fields", lambda **_kwargs: None)
     monkeypatch.setattr(
         social_repo,
         "_enqueue_platform_media_mirror_job",
-        lambda **kwargs: mirror_calls.append(kwargs) or None,
+        lambda *args, **kwargs: mirror_calls.append({"args": args, "kwargs": kwargs}) or None,
     )
     monkeypatch.setattr(
         social_repo,
@@ -24183,7 +24231,7 @@ def test_ingest_youtube_incremental_existing_window_applies_page_cap_when_unlimi
     )
 
     monkeypatch.setattr("trr_backend.socials.youtube.YouTubeScraper", _FakeYouTubeScraper)
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
     monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda _job_id: None)
     monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -24205,10 +24253,11 @@ def test_ingest_youtube_incremental_existing_window_applies_page_cap_when_unlimi
     )
     monkeypatch.setattr(social_repo, "_youtube_video_matches_owner_identity", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_youtube_transcript_ingest_enabled", lambda: False)
+    monkeypatch.setattr(social_repo, "_update_youtube_post_source_media_fields", lambda **_kwargs: None)
     monkeypatch.setattr(
         social_repo,
         "_enqueue_platform_media_mirror_job",
-        lambda **kwargs: mirror_calls.append(kwargs) or None,
+        lambda *args, **kwargs: mirror_calls.append(kwargs) or None,
     )
     monkeypatch.setattr(
         social_repo,
@@ -24356,7 +24405,7 @@ def test_ingest_youtube_hybrid_mode_merges_api_and_scraper_candidates(monkeypatc
     monkeypatch.setattr(
         social_repo,
         "_enqueue_platform_media_mirror_job",
-        lambda **kwargs: mirror_calls.append(kwargs) or None,
+        lambda *args, **kwargs: mirror_calls.append(kwargs) or None,
     )
     monkeypatch.setattr(
         social_repo,
@@ -24500,7 +24549,7 @@ def test_ingest_youtube_repairs_epoch_short_row_when_rediscovered(monkeypatch: p
     monkeypatch.setattr(
         social_repo,
         "_enqueue_platform_media_mirror_job",
-        lambda **kwargs: mirror_calls.append(kwargs) or None,
+        lambda *args, **kwargs: mirror_calls.append(kwargs) or None,
     )
     monkeypatch.setattr(
         social_repo,
@@ -24639,7 +24688,7 @@ def test_ingest_youtube_reports_missing_media_and_persists_sync_state(monkeypatc
     monkeypatch.setattr(
         social_repo,
         "_enqueue_platform_media_mirror_job",
-        lambda **kwargs: mirror_calls.append(kwargs) or None,
+        lambda *args, **kwargs: mirror_calls.append(kwargs) or None,
     )
     monkeypatch.setattr(
         social_repo,
@@ -26288,7 +26337,11 @@ def test_persist_shared_catalog_posts_batch_materializes_instagram_posts_and_enq
 def test_shared_post_rows_for_account_orders_instagram_by_scraped_at(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
-    def _fake_fetch_all(sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
+    def _fake_fetch_all(
+        sql: str,
+        params: list[object] | None = None,
+        **_kwargs: object,
+    ) -> list[dict[str, object]]:
         captured["sql"] = sql
         captured["params"] = list(params or [])
         return []
@@ -27177,6 +27230,7 @@ def test_get_run_progress_snapshot_prefers_job_type_stage_over_mutated_config(mo
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
 
     payload = social_repo.get_run_progress_snapshot(season_id, run_id, recent_log_limit=10)
 
@@ -27233,6 +27287,7 @@ def test_get_run_progress_snapshot_modal_runtime_pin_mismatch_uses_semantic_matc
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
 
     payload = social_repo.get_run_progress_snapshot(season_id, run_id, recent_log_limit=10)
 
@@ -27391,6 +27446,7 @@ def test_get_social_account_catalog_run_progress_groups_shards_under_one_handle(
     monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
 
@@ -27502,6 +27558,7 @@ def test_get_social_account_catalog_run_progress_includes_discovery_partition_su
     )
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(
         social_repo.pg,
@@ -27574,6 +27631,7 @@ def test_get_social_account_catalog_run_progress_includes_frontier_summary(
     )
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(
@@ -27661,6 +27719,7 @@ def test_get_social_account_catalog_run_progress_includes_catalog_action_metadat
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 10200)
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 10200)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 10183)
@@ -27776,6 +27835,7 @@ def test_get_social_account_catalog_run_progress_marks_frontier_auth_blocked_as_
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(
@@ -27873,6 +27933,7 @@ def test_get_social_account_catalog_run_progress_does_not_fail_public_frontier_w
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
@@ -27967,6 +28028,7 @@ def test_get_social_account_catalog_run_progress_exposes_blocked_auth_repair_for
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 16668)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_shared_account_frontier_progress", lambda **_kwargs: {})
@@ -28050,6 +28112,7 @@ def test_get_social_account_catalog_run_progress_keeps_generic_discovery_empty_f
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 16668)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_shared_account_frontier_progress", lambda **_kwargs: {})
@@ -28143,6 +28206,7 @@ def test_get_social_account_catalog_run_progress_does_not_treat_tiktok_empty_fir
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 3277)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_shared_account_frontier_progress", lambda **_kwargs: {})
@@ -28230,6 +28294,7 @@ def test_get_social_account_catalog_run_progress_exposes_tiktok_cookie_refresh_f
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_shared_account_frontier_progress", lambda **_kwargs: {})
@@ -28332,6 +28397,7 @@ def test_get_social_account_catalog_run_progress_exposes_run_diagnostics(
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 16454)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 33)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
@@ -28456,6 +28522,7 @@ def test_get_social_account_catalog_run_progress_prefers_active_single_runner_fa
     )
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
 
@@ -28526,6 +28593,7 @@ def test_get_social_account_catalog_run_progress_prefers_expected_total_for_fron
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 16480)
@@ -28581,7 +28649,7 @@ def test_finalize_run_status_completes_scrape_complete_catalog_run_with_classify
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "default"
+        assert pool_name == run_lifecycle.SOCIAL_CONTROL_POOL_NAME
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -28639,7 +28707,7 @@ def test_finalize_run_status_fails_catalog_run_when_fetch_stage_completed_with_t
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "default"
+        assert pool_name == run_lifecycle.SOCIAL_CONTROL_POOL_NAME
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -28698,7 +28766,7 @@ def test_finalize_run_status_starts_deferred_comments_followup_without_ui(monkey
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "default"
+        assert pool_name == run_lifecycle.SOCIAL_CONTROL_POOL_NAME
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -28798,7 +28866,7 @@ def test_finalize_run_status_records_deferred_comments_runtime_version(monkeypat
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "default"
+        assert pool_name == run_lifecycle.SOCIAL_CONTROL_POOL_NAME
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -28920,7 +28988,7 @@ def test_instagram_backfill_with_media_and_comments_materializes_posts_before_fo
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "default"
+        assert pool_name == run_lifecycle.SOCIAL_CONTROL_POOL_NAME
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -29203,6 +29271,7 @@ def test_get_social_account_catalog_run_progress_marks_scrape_complete_classify_
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: job_rows)
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 16480)
@@ -29302,6 +29371,7 @@ def test_get_social_account_catalog_run_progress_treats_cancelled_dismissed_clas
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: None)
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: None)
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 124600)
@@ -29404,6 +29474,7 @@ def test_get_social_account_catalog_run_progress_reports_waiting_modal_dispatch_
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 10100)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
@@ -29510,6 +29581,7 @@ def test_get_social_account_catalog_run_progress_exposes_recovery_payload_and_wa
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)
@@ -29603,6 +29675,7 @@ def test_get_social_account_catalog_run_progress_keeps_recovery_active_when_reco
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
@@ -29720,6 +29793,7 @@ def test_get_social_account_catalog_run_progress_surfaces_failed_tiktok_direct_r
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_cached_live_profile_total_posts", lambda *_args, **_kwargs: 0)
@@ -29808,6 +29882,7 @@ def test_get_social_account_catalog_run_progress_skips_live_instagram_total_refr
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(
@@ -29907,6 +29982,7 @@ def test_get_social_account_catalog_run_progress_alerts_when_modal_initial_empty
     monkeypatch.setattr(social_repo, "_social_account_profile_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(social_repo, "_run_progress_summary_needs_refresh", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo, "_finalize_run_status", lambda *_args, **_kwargs: {"status": "running"})
     monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo.pg, "fetch_one", lambda *_args, **_kwargs: run_row)

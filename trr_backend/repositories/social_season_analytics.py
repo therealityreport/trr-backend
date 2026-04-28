@@ -40141,10 +40141,13 @@ def _can_fast_path_terminal_catalog_progress(
     normalized_account: str,
 ) -> bool:
     run_status = str(run_row.get("status") or "").strip().lower()
+    run_config = _metadata_dict(run_row.get("config"))
     return (
-        run_status in {"completed", "cancelled"}
+        run_status == "completed"
         and (not configured_platforms or configured_platforms == {normalized_platform})
         and (not configured_accounts or configured_accounts == {normalized_account})
+        and not str(run_config.get("runner_strategy") or "").strip()
+        and not str(run_config.get("partition_strategy") or "").strip()
     )
 
 
@@ -40585,18 +40588,24 @@ def _build_terminal_catalog_run_progress_payload(
     classify_failed = _normalize_non_negative_int(classify_stage.get("jobs_failed"))
     classify_active = _normalize_non_negative_int(classify_stage.get("jobs_active"))
     classify_waiting = _normalize_non_negative_int(classify_stage.get("jobs_waiting"))
+    has_cancelled_classify_job = any(
+        _run_progress_stage_from_row(row) == POST_CLASSIFY_STAGE
+        and str(row.get("status") or "").strip().lower() == "cancelled"
+        for row in job_rows
+    )
     dismissed_terminal_classify_cancel = (
         str(run_row.get("status") or "").strip().lower() == "completed"
         and bool(str(run_config.get(_RUN_FAILURE_DISMISSED_AT_KEY) or "").strip())
-        and classify_total > 0
-        and classify_active <= 0
-        and classify_waiting <= 0
-        and any(
-            _run_progress_stage_from_row(row) == POST_CLASSIFY_STAGE
-            and str(row.get("status") or "").strip().lower() == "cancelled"
-            for row in job_rows
-        )
+        and (classify_total > 0 or has_cancelled_classify_job)
+        and has_cancelled_classify_job
     )
+    if dismissed_terminal_classify_cancel:
+        cancel_reason = None
+        last_error_code = None
+        last_error_message = None
+        payload["cancel_reason"] = None
+        payload["last_error_code"] = None
+        payload["last_error_message"] = None
     payload["scrape_complete"] = (
         posts_total > 0
         and posts_completed >= posts_total
