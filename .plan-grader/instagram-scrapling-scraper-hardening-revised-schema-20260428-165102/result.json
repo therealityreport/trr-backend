@@ -1,0 +1,56 @@
+{
+  "sourcePath": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/REVISED_PLAN.md",
+  "sourceSuggestionsPath": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/SUGGESTIONS.md",
+  "artifactRoot": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102",
+  "rubricPath": "/Users/thomashulihan/Documents/Codex/2026-04-21-create-a-rubric-for-scoring-an/implementation-plan-rubric.md",
+  "schema": "write-plan-v1",
+  "verdict": "APPROVED_WITH_REVISIONS",
+  "originalScore": 91,
+  "revisedScoreEstimate": 96,
+  "gates": {
+    "triage": "pass",
+    "hardFail": "pass_after_revision",
+    "wrongThingCorrectly": "pass",
+    "executionHandoff": "conditional_pass",
+    "automaticCaps": []
+  },
+  "artifactPaths": {
+    "audit": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/AUDIT.md",
+    "scorecard": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/SCORECARD.md",
+    "revisedPlan": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/REVISED_PLAN.md",
+    "patches": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/PATCHES.md",
+    "comparison": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/COMPARISON.md",
+    "suggestions": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/SUGGESTIONS.md",
+    "validation": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/VALIDATION.md"
+  },
+  "suggestionsPath": ".plan-grader/instagram-scrapling-scraper-hardening-revised-schema-20260428-165102/SUGGESTIONS.md",
+  "cleanupAfterImplementation": true,
+  "recommendedNextExecutionSkill": "orchestrate-subagents",
+  "recommended_next_execution_skill": "orchestrate-subagents",
+  "readyForExecution": "conditional_on_main_branch_or_user_branch_approval",
+  "ready_for_execution": "conditional_on_main_branch_or_user_branch_approval",
+  "currentBranchObserved": "chore/backend-batch-2026-04-28",
+  "current_branch_observed": "chore/backend-batch-2026-04-28",
+  "mainBranchVerified": false,
+  "main_branch_verified": false,
+  "worktreeOrBranchCreated": false,
+  "worktree_or_branch_created": false,
+  "selectedSuggestions": [
+    "1. Add a one-page Scrapling lane architecture diagram",
+    "2. Add a static no-cookie-values metadata scanner",
+    "3. Add a local fake Instagram response fixture pack",
+    "4. Track retry reason counts in job metadata",
+    "5. Add worker restart note to local runbook",
+    "6. Split shared retry helpers into unit tests",
+    "7. Add a final smoke command for one page only",
+    "8. Add cancellation latency to worker logs",
+    "9. Add a short glossary for runtime vs lane",
+    "10. Create a future plan for actually implementing ScraplingRuntime"
+  ],
+  "topRequiredFixes": [
+    "Use the write-plan schema as the REVISED_PLAN.md structure.",
+    "Replace Superpowers execution framing with orchestrate-subagents.",
+    "Incorporate every numbered source suggestion as a required task under ADDITIONAL SUGGESTIONS.",
+    "Stop before implementation if the active branch is not main and the user has not explicitly approved continuing there."
+  ]
+}

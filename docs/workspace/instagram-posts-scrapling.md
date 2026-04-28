@@ -9,6 +9,38 @@
 - Handles both the legacy `Graph*` response shape and the newer `XDTMediaDict` shape returned by the current profile timeline connection.
 - Persists each raw GraphQL edge node through the canonical `_upsert_instagram_post()` repo helper, preserving view monotonicity, optional columns, and mirror metadata.
 
+## Scrapling lane architecture
+
+```mermaid
+flowchart LR
+  Dispatcher["Instagram dispatcher"]
+  Legacy["Legacy posts scraper"]
+  Posts["Posts Scrapling lane\nposts_scrapling"]
+  Comments["Comments Scrapling lane\ncomments_scrapling"]
+  Runtime["Pluggable ScraplingRuntime\nunsupported future runtime"]
+  Tables["Shared social tables"]
+
+  Dispatcher --> Legacy
+  Dispatcher --> Posts
+  Dispatcher --> Comments
+  Posts --> Tables
+  Comments --> Tables
+  Runtime -. "not wired to dispatcher" .-> Dispatcher
+```
+
+The posts Scrapling lane and comments Scrapling lane are concrete worker paths. `ScraplingRuntime` is a future pluggable runtime scaffold and must stay unhealthy/unsupported until a separate implementation verifies the current Scrapling APIs.
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| Legacy scraper | Existing Instagram scraper path that still owns normal production posts traffic unless a job explicitly opts into a Scrapling stage. |
+| Posts Scrapling lane | The opt-in `posts_scrapling` worker path for profile timeline posts. |
+| Comments Scrapling lane | The opt-in `comments_scrapling` worker path for post comments. |
+| ScraplingRuntime | Future shared runtime abstraction; not the same thing as either production lane today. |
+| Warmup | Browser pass that establishes cookies, proxy state, and page/runtime tokens before direct API calls. |
+| Cooperative cancellation | Worker checks cancellation between units of work and stops cleanly; it does not interrupt an in-flight Instagram request. |
+
 ## Routing
 
 - `job_type = "posts"` (already in `scrape_jobs` check constraint)
@@ -30,12 +62,26 @@
 | `SOCIAL_INSTAGRAM_DELAY_SEC` | Delay between direct GraphQL requests after warmup | Default: `0.15` |
 | `TRR_DB_URL` | Postgres URL | Required. `TRR_DB_FALLBACK_URL` remains an optional explicit fallback only. |
 
+Scrapling version check: `scripts/setup_scrapling.sh` installs the repo-pinned package from `requirements.lock.txt`. The current verified lock/venv version is Scrapling 0.4.7. Before local validation, confirm `.venv/bin/python -m pip show scrapling` reports the current locked Scrapling version.
+`StealthyFetcher.async_fetch` remains signature-compatible on Scrapling 0.4.7 for this lane's current call sites.
+
 ## Invocation
 
 ### Manual smoke (creates real run+job rows)
 
 ```bash
 python scripts/socials/instagram/smoke_posts_scrapling.py --account bravotv --max-pages 1 --fast
+```
+
+### Manual-only one-page smoke
+
+Run only with operator approval because it creates live scrape rows and reaches Instagram:
+
+```bash
+.venv/bin/python scripts/socials/instagram/smoke_posts_scrapling.py \
+  --account bravotv \
+  --max-pages 1 \
+  --fast
 ```
 
 ### Queue-safe enqueue
@@ -61,12 +107,21 @@ The helper acquires a per-account advisory lock so only one posts_scrapling run 
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `instagram_posts_auth_failed` in scrape_jobs.error_message | Cookies invalid/expired or challenge required | Refresh cookies via `SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH=1` or re-save from browser |
+| `instagram_posts_warmup_no_cookies` | Warmup returned no cookies and no prior `sessionid` was available | Refresh cookies, verify browser storage state, then rerun after the worker has restarted |
 | `http_429` with `retryable: true` | Rate limiting | Decrease concurrency; wait for backoff retry |
+| `transport_error` or `transport_timeout` with `retryable: true` | Proxy, DNS, socket, or timeout failure after bounded retries | Check proxy health and network path; queue retry can proceed if the upstream recovers |
 | `html_challenge_or_auth_required` | Session triggered Instagram challenge | Refresh cookies and re-run |
 | `graphql_empty_connection` on all doc_ids | Instagram rotated doc_ids | Update `PROFILE_POSTS_DOC_IDS` in `constants.py` — check a fresh profile page manually |
 | No posts upserted but `items_found > 0` | Response shape changed again | Inspect `raw_node` — check if fields match XDTMediaDict or a newer shape; add a new branch to `_graph_node_to_post_dto` |
 | `SOCIAL_POSTS_SCRAPLING_RUN_ALREADY_ACTIVE` from `start_instagram_posts_scrapling_scrape` | Another run is already queued/running for this account | Wait for the existing run to complete, or cancel it |
 | `SocialWorkerUnavailableError` from `start_*` | Queue is enabled but no worker is heartbeating with the `instagram_posts_scrapling` lane | Start a worker with `--worker-lane instagram_posts_scrapling` or disable queue mode |
+
+## Warmup, retry, and cancellation guidance
+
+- Warmup failures preserve the latest runtime metadata on the failed job. `instagram_posts_warmup_no_cookies` specifically means neither warmup nor the existing auth session provided a usable `sessionid`.
+- Retryable transport failures use stable reason codes: `transport_error` for broad `httpx.TransportError` failures and `transport_timeout` for timeout classes. These are network/proxy symptoms, not parser failures.
+- Cooperative cancellation is observed between pages and persistence units. A cancellation request may wait for the current Instagram request or DB write to finish before the job moves to `cancelled`.
+- A stale worker process may keep old cancellation/retry behavior until restarted. For local validation, stop old social worker processes and restart through the workspace worker launcher or the lane-specific command documented in the workspace dev commands runbook.
 
 ## Observability
 

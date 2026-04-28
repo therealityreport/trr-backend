@@ -5,12 +5,12 @@ auto-match selectors. For Instagram, it fits the GraphQL/`i/api/v1` JSON
 endpoints best: fast, no browser, harder to fingerprint via canvas/WebGL.
 
 STATUS: scaffold. The module structure, Protocol conformance, and error
-mapping are in place. The actual fetch bodies raise NotImplementedError
-because they depend on Scrapling APIs that change between versions - any
-implementation written from memory would be wrong.
+mapping are in place. Health stays unhealthy and fetch bodies raise
+RuntimeUnsupported until current Scrapling APIs are verified. This prevents
+the dispatcher from routing traffic to a healthy-but-unimplemented runtime.
 
 TODO before production use:
-  1. Pin the installed version: `pip show scrapling`.
+  1. Verify the installed package version: `pip show scrapling`.
   2. Verify the StealthyFetcher / Fetcher import paths against that version.
      Current docs: https://github.com/D4Vinci/Scrapling/blob/main/README.md
   3. Implement `_fetch_json` using the current session/cookie API.
@@ -51,17 +51,17 @@ class ScraplingRuntime:
                 healthy=False,
                 reason=f"scrapling_not_installed: pip install scrapling ({exc})",
             )
-        return RuntimeHealth(healthy=True)
+        return RuntimeHealth(healthy=False, reason="scrapling_runtime_not_wired")
 
     async def fetch_profile(self, username: str) -> ProfileInfo:
-        raise NotImplementedError(
+        raise RuntimeUnsupported(
             "ScraplingRuntime.fetch_profile: verify current Scrapling API "
             "and implement JSON fetch against "
             "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
         )
 
     async def fetch_posts(self, username: str, *, limit: int) -> list[Post]:
-        raise NotImplementedError(
+        raise RuntimeUnsupported(
             "ScraplingRuntime.fetch_posts: verify current Scrapling API "
             "and implement GraphQL pagination against the xdt_api__v1__feed "
             "connection."
@@ -71,14 +71,13 @@ class ScraplingRuntime:
         # Post detail via permalink HTML is the fallback for when the
         # JSON endpoint 429s; Scrapling's auto-match selectors survive
         # DOM churn better than hand-authored CSS selectors.
-        raise NotImplementedError(
-            "ScraplingRuntime.fetch_post_detail: verify Scrapling selector "
-            "API and implement permalink HTML parsing."
+        raise RuntimeUnsupported(
+            "ScraplingRuntime.fetch_post_detail: verify Scrapling selector API and implement permalink HTML parsing."
         )
 
     async def _fetch_json(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
         """Helper hook. See module TODO."""
-        raise NotImplementedError
+        raise RuntimeUnsupported("ScraplingRuntime._fetch_json: verify current Scrapling API before use.")
 
 
 # Protocol conformance check (runs at import; cheap).

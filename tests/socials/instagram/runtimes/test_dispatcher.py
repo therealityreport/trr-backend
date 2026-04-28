@@ -14,6 +14,7 @@ from trr_backend.socials.instagram.runtimes.protocol import (
     RuntimeHealth,
     RuntimeUnsupported,
 )
+from trr_backend.socials.instagram.runtimes.scrapling_runtime import ScraplingRuntime
 
 
 def _run(coro):
@@ -21,9 +22,15 @@ def _run(coro):
 
 
 class _RuntimeStub:
-    def __init__(self, name: str, *, healthy: bool = True,
-                 profile_behavior: str = "ok", posts_behavior: str = "ok",
-                 detail_behavior: str = "ok") -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        healthy: bool = True,
+        profile_behavior: str = "ok",
+        posts_behavior: str = "ok",
+        detail_behavior: str = "ok",
+    ) -> None:
         self.name = name
         self.healthy = healthy
         self._profile_behavior = profile_behavior
@@ -91,6 +98,19 @@ def test_skips_unhealthy_runtimes() -> None:
     _run(disp.fetch_profile("u"))
     assert sick.fetch_profile_calls == 0
     assert healthy.fetch_profile_calls == 1
+
+
+def test_skips_unhealthy_scrapling_scaffold_and_uses_fallback() -> None:
+    fallback = _RuntimeStub("fallback")
+    disp = InstagramRuntimeDispatcher(
+        factories={"scrapling": ScraplingRuntime, "fallback": lambda: fallback},
+        order=["scrapling", "fallback"],
+    )
+
+    result = _run(disp.fetch_profile("bravotv"))
+
+    assert result.username == "bravotv"
+    assert fallback.fetch_profile_calls == 1
 
 
 def test_respects_disabled_set() -> None:

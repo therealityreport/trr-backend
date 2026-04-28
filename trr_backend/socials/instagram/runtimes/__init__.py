@@ -17,9 +17,9 @@ Endpoint -> preferred runtime matrix:
     Bulk backfill         Apify       -> Scrapling -> Crawlee
 
 See individual runtime modules for implementation status. Runtimes that
-wrap external packages are scaffolded with NotImplementedError until their
-current-version APIs are verified via docs; do not call them in production
-without completing the TODO checklist in each file.
+wrap external packages must remain unhealthy or raise RuntimeUnsupported
+until their current-version APIs are verified via docs; do not call them
+in production without completing the TODO checklist in each file.
 """
 
 from __future__ import annotations

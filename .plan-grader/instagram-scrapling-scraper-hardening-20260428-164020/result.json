@@ -1,0 +1,32 @@
+{
+  "sourcePath": "docs/superpowers/plans/2026-04-28-instagram-scrapling-scraper-hardening.md",
+  "artifactRoot": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020",
+  "rubricPath": "/Users/thomashulihan/Documents/Codex/2026-04-21-create-a-rubric-for-scoring-an/implementation-plan-rubric.md",
+  "verdict": "APPROVED_WITH_REVISIONS",
+  "originalScore": 78,
+  "revisedScoreEstimate": 91,
+  "gates": {
+    "triage": "pass",
+    "hardFail": "pass_after_revision",
+    "wrongThingCorrectly": "pass",
+    "automaticCaps": []
+  },
+  "artifactPaths": {
+    "audit": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/AUDIT.md",
+    "scorecard": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/SCORECARD.md",
+    "revisedPlan": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/REVISED_PLAN.md",
+    "patches": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/PATCHES.md",
+    "comparison": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/COMPARISON.md",
+    "suggestions": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/SUGGESTIONS.md",
+    "validation": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/VALIDATION.md"
+  },
+  "suggestionsPath": ".plan-grader/instagram-scrapling-scraper-hardening-20260428-164020/SUGGESTIONS.md",
+  "cleanupAfterImplementation": true,
+  "recommendedNextExecutionSkill": "orchestrate-subagents",
+  "topRequiredFixes": [
+    "Use a valid shared-session test fixture instead of a partial InstagramAuthSession constructor.",
+    "Make cancellation checks connection-aware and run one check before opening the comments persist connection.",
+    "Preserve posts warmup runtime metadata in job-runner failure handling.",
+    "Fix nested markdown fences in the runbook patch task."
+  ]
+}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import httpx
+
 
 def test_env_truthy_reads_common_truthy_strings(monkeypatch):
     from trr_backend.socials._scrapling_http_utils import env_truthy
@@ -139,3 +141,33 @@ def test_extract_response_cookies_returns_empty_on_none():
     resp = MagicMock()
     resp.cookies = None
     assert extract_response_cookies(resp) == {}
+
+
+def test_transport_failure_reason_maps_timeouts_to_stable_reason():
+    from trr_backend.socials._scrapling_http_utils import transport_failure_reason
+
+    assert transport_failure_reason(TimeoutError("slow")) == "transport_timeout"
+    assert transport_failure_reason(httpx.ReadTimeout("slow")) == "transport_timeout"
+
+
+def test_transport_failure_reason_maps_other_transport_errors():
+    from trr_backend.socials._scrapling_http_utils import transport_failure_reason
+
+    assert transport_failure_reason(httpx.ConnectError("connection reset")) == "transport_error"
+
+
+def test_transient_backoff_seconds_uses_exponential_attempts():
+    from trr_backend.socials._scrapling_http_utils import transient_backoff_seconds
+
+    assert transient_backoff_seconds(1, 1.5) == 1.5
+    assert transient_backoff_seconds(2, 1.5) == 3.0
+    assert transient_backoff_seconds(3, 1.5) == 6.0
+
+
+def test_transient_backoff_seconds_uses_retry_after_override_and_bounds():
+    from trr_backend.socials._scrapling_http_utils import transient_backoff_seconds
+
+    assert transient_backoff_seconds(3, 1.0, retry_after=7.0) == 7.0
+    assert transient_backoff_seconds(3, 1.0, retry_after=-1.0) == 0.0
+    assert transient_backoff_seconds(10, 10.0, maximum_seconds=30.0) == 30.0
+    assert transient_backoff_seconds(1, 1.0, retry_after=120.0, maximum_seconds=30.0) == 30.0

@@ -40,6 +40,12 @@ from trr_backend.socials._scrapling_http_utils import (
 from trr_backend.socials._scrapling_http_utils import (
     status_code as _status_code,
 )
+from trr_backend.socials._scrapling_http_utils import (
+    transient_backoff_seconds as _transient_backoff_seconds,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    transport_failure_reason as _transport_failure_reason,
+)
 from trr_backend.socials.instagram.comments_scrapling.proxy import CommentsProxyConfig
 from trr_backend.socials.instagram.constants import COMMENT_REPLIES_URL, COMMENTS_URL
 from trr_backend.socials.instagram.permalink_metadata import _shortcode_to_media_id
@@ -157,6 +163,7 @@ class InstagramCommentsScraplingFetcher:
             maximum=30.0,
         )
         self._last_api_request_started_at = 0.0
+        self._retry_reason_counts: dict[str, int] = {}
 
         # Browser fetcher (for warmup only).
         try:
@@ -184,6 +191,7 @@ class InstagramCommentsScraplingFetcher:
             "api_delay_seconds": self._api_delay_seconds,
             "transport": "httpx_after_browser_warmup",
             "request_count": self._request_count,
+            "retry_reason_counts": dict(sorted(self._retry_reason_counts.items())),
         }
 
     async def warmup(self) -> None:
@@ -570,6 +578,7 @@ class InstagramCommentsScraplingFetcher:
 
     async def _recover_homepage_redirect(self, *, referer: str) -> bool:
         recovery_url = str(referer or "").strip() or "https://www.instagram.com/"
+        self._record_retry_reason("homepage_redirect_recovery")
         try:
             recovery_response = await self._fetch_page(recovery_url, referer=recovery_url)
         except Exception:  # noqa: BLE001
@@ -582,6 +591,12 @@ class InstagramCommentsScraplingFetcher:
         self._merge_warmup_cookies(recovery_response)
         await self._rebuild_http_client()
         return True
+
+    def _record_retry_reason(self, reason: str | None) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        self._retry_reason_counts[normalized] = self._retry_reason_counts.get(normalized, 0) + 1
 
     # -------------------------------------------------------------------
     # JSON response handling with retry/backoff
@@ -623,8 +638,9 @@ class InstagramCommentsScraplingFetcher:
             attempt += 1
             try:
                 response = await self._fetch_api(url, referer=referer, params=params)
-            except (TimeoutError, httpx.TimeoutException):
-                last_transient_reason = "transport_timeout"
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as exc:
+                last_transient_reason = _transport_failure_reason(exc)
+                self._record_retry_reason(last_transient_reason)
                 if attempt > self._MAX_TRANSIENT_RETRIES:
                     return {
                         "failed": True,
@@ -633,7 +649,7 @@ class InstagramCommentsScraplingFetcher:
                         "retryable": True,
                         "payload": None,
                     }
-                await asyncio.sleep(self._BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                await asyncio.sleep(_transient_backoff_seconds(attempt, self._BASE_BACKOFF_SECONDS))
                 continue
 
             status_code = _status_code(response)
@@ -674,6 +690,7 @@ class InstagramCommentsScraplingFetcher:
             # Transient 429 / 5xx: retry with backoff.
             if self._is_transient_status(status_code):
                 last_transient_reason = f"http_{status_code}"
+                self._record_retry_reason(last_transient_reason)
                 if attempt > self._MAX_TRANSIENT_RETRIES:
                     return {
                         "failed": True,
@@ -683,8 +700,10 @@ class InstagramCommentsScraplingFetcher:
                         "payload": None,
                     }
                 retry_after = self._retry_after_seconds(response)
-                sleep_seconds = (
-                    retry_after if retry_after is not None else self._BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                sleep_seconds = _transient_backoff_seconds(
+                    attempt,
+                    self._BASE_BACKOFF_SECONDS,
+                    retry_after=retry_after,
                 )
                 await asyncio.sleep(sleep_seconds)
                 continue

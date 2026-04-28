@@ -7,9 +7,17 @@ for POST form-data transport.
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+
+_FIXTURE_DIR = Path(__file__).parents[3] / "fixtures" / "instagram" / "scrapling"
+
+
+def _fixture_json(name: str) -> dict:
+    return json.loads((_FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
 def _make_httpx_response(
@@ -179,6 +187,29 @@ def test_timeout_exhausts_retries() -> None:
     assert result["failed"] is True
     assert result["retryable"] is True
     assert result["reason"] == "transport_timeout"
+    assert fetcher.runtime_metadata["retry_reason_counts"]["transport_timeout"] == (
+        InstagramPostsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
+    )
+    assert fetcher._fetch_graphql.await_count == InstagramPostsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
+
+
+def test_transport_error_exhausts_retries() -> None:
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+    )
+
+    fetcher = _make_fetcher()
+    fetcher._fetch_graphql = AsyncMock(side_effect=httpx.ConnectError("connection reset"))
+
+    with patch(_SLEEP_TARGET, AsyncMock()):
+        result = asyncio.run(fetcher._fetch_json_response(_URL, referer="r", data={}, headers={}))
+
+    assert result["failed"] is True
+    assert result["retryable"] is True
+    assert result["reason"] == "transport_error"
+    assert fetcher.runtime_metadata["retry_reason_counts"]["transport_error"] == (
+        InstagramPostsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
+    )
     assert fetcher._fetch_graphql.await_count == InstagramPostsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
 
 
@@ -228,6 +259,60 @@ def test_redirect_to_checkpoint_is_auth_failed() -> None:
     assert result["failed"] is True
     assert result["auth_failed"] is True
     assert result["reason"] == "redirect_to_checkpoint"
+
+
+def test_redirect_to_homepage_rewarms_profile_and_retries_once() -> None:
+    fetcher = _make_fetcher()
+    fetcher._fetch_graphql = AsyncMock(
+        side_effect=[
+            _make_httpx_response(status_code=302, headers={"location": "https://www.instagram.com/"}),
+            _make_httpx_response(status_code=200, json_data=_fixture_json("posts_graphql_success.json")),
+        ]
+    )
+    fetcher._fetch_page = AsyncMock(return_value=_make_httpx_response(status_code=200, text="<html></html>"))
+    fetcher._rebuild_http_client = AsyncMock()
+
+    result = asyncio.run(
+        fetcher._fetch_json_response(
+            _URL,
+            referer="https://www.instagram.com/bravotv/",
+            data={},
+            headers={},
+        )
+    )
+
+    assert fetcher._fetch_graphql.await_count == 2
+    fetcher._fetch_page.assert_awaited_once_with(
+        "https://www.instagram.com/bravotv/",
+        referer="https://www.instagram.com/bravotv/",
+    )
+    assert result["failed"] is False
+    assert fetcher.runtime_metadata["retry_reason_counts"]["homepage_redirect_recovery"] == 1
+
+
+def test_redirect_to_homepage_marks_auth_failed_after_recovery_retry() -> None:
+    fetcher = _make_fetcher()
+    fetcher._fetch_graphql = AsyncMock(
+        side_effect=[
+            _make_httpx_response(status_code=302, headers={"location": "https://www.instagram.com/"}),
+            _make_httpx_response(status_code=302, headers={"location": "https://www.instagram.com/"}),
+        ]
+    )
+    fetcher._fetch_page = AsyncMock(return_value=_make_httpx_response(status_code=200, text="<html></html>"))
+    fetcher._rebuild_http_client = AsyncMock()
+
+    result = asyncio.run(
+        fetcher._fetch_json_response(
+            _URL,
+            referer="https://www.instagram.com/bravotv/",
+            data={},
+            headers={},
+        )
+    )
+
+    assert result["failed"] is True
+    assert result["auth_failed"] is True
+    assert result["reason"] == "redirect_to_homepage"
 
 
 # 10 — HTML body marks challenge

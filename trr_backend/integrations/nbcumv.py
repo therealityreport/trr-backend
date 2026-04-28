@@ -18,12 +18,12 @@ from requests.exceptions import RequestException
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_APPSYNC_API_KEY = "da2-rmy4cbtcevfwrdadqabta7ezl4"
+DEFAULT_APPSYNC_API_KEY = ""
 APPSYNC_URL = os.environ.get(
     "NBCUMV_APPSYNC_URL",
     "https://bfg5dqxssngazhtsf6uo7bzdvm.appsync-api.us-west-2.amazonaws.com/graphql",
 )
-APPSYNC_API_KEY = os.environ.get("NBCUMV_APPSYNC_API_KEY", DEFAULT_APPSYNC_API_KEY)
+APPSYNC_API_KEY = os.environ.get("NBCUMV_APPSYNC_API_KEY", DEFAULT_APPSYNC_API_KEY).strip()
 BATCH_DOWNLOAD_URL = os.environ.get(
     "NBCUMV_BATCH_DOWNLOAD_URL",
     "https://or1ukny4rd.execute-api.us-west-2.amazonaws.com/v1",
@@ -204,6 +204,8 @@ def _session(session: Session | None = None) -> Session:
 
 
 def _graphql_request(query: str, *, session: Session | None = None) -> dict[str, Any]:
+    if not APPSYNC_API_KEY:
+        raise RuntimeError("NBCUMV_APPSYNC_API_KEY is required for NBCUMV GraphQL requests")
     client = _session(session)
     try:
         response = client.post(

@@ -9,7 +9,7 @@ These helpers handle the tiny response-shape differences between httpx
 (the post-warmup transport) and Scrapling (the warmup transport).
 
 Kept small and side-effect-free so they can be imported into any lane
-without triggering scrapling/httpx module-level costs.
+without triggering scrapling module-level costs.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 from typing import Any
 from urllib.parse import urlparse
+
+import httpx
 
 
 def env_truthy(name: str, default: bool) -> bool:
@@ -116,3 +118,25 @@ def extract_response_cookies(response: Any) -> dict[str, str]:
     except Exception:  # noqa: BLE001
         pass
     return result
+
+
+def transport_failure_reason(exc: BaseException) -> str:
+    """Map transport exceptions to stable retry metadata reasons."""
+    if isinstance(exc, TimeoutError | httpx.TimeoutException):
+        return "transport_timeout"
+    return "transport_error"
+
+
+def transient_backoff_seconds(
+    attempt: int,
+    base_seconds: float,
+    *,
+    retry_after: float | None = None,
+    maximum_seconds: float = 60.0,
+) -> float:
+    """Return bounded retry sleep seconds for a 1-based retry attempt."""
+    max_seconds = max(0.0, float(maximum_seconds))
+    if retry_after is not None:
+        return min(max_seconds, max(0.0, float(retry_after)))
+    exponent = max(0, int(attempt) - 1)
+    return min(max_seconds, max(0.0, float(base_seconds)) * (2**exponent))

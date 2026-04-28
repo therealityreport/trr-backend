@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 import hashlib
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -104,7 +104,7 @@ def test_select_comments_proxy_adds_decodo_sticky_session_and_duration(monkeypat
 
     config = select_comments_proxy(session_key="bravotv")
 
-    expected_token = hashlib.sha256("bravotv".encode("utf-8")).hexdigest()[:16]
+    expected_token = hashlib.sha256(b"bravotv").hexdigest()[:16]
     expected_suffix = f"-session-{expected_token}-sessionduration-10"
 
     assert config is not None
