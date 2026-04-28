@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -66,14 +66,6 @@ from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
 from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper
 
 logger = logging.getLogger(__name__)
-
-
-def submit_named_background_task(**kwargs: Any) -> dict[str, Any]:
-    from trr_backend.socials.control_plane.background_tasks import (
-        submit_named_background_task as _submit_named_background_task,
-    )
-
-    return _submit_named_background_task(**kwargs)
 
 _SOCIAL_PROFILE_TOTAL_POSTS_CACHE: dict[tuple[str, str], tuple[float, int | None]] = {}
 _SOCIAL_PROFILE_TOTAL_POSTS_CACHE_LOCK = Lock()
@@ -3810,7 +3802,6 @@ def _enqueue_shared_posts_job(
     frontier_transport: str | None = None,
     transport_preference: str | None = None,
     allow_public_transport_fallback: bool | None = None,
-    followup_config: Mapping[str, Any] | None = None,
     initiated_by: str | None = None,
     worker_id: str | None = None,
     priority: int = 101,
@@ -3845,7 +3836,6 @@ def _enqueue_shared_posts_job(
             "frontier_transport": str(frontier_transport or "").strip().lower() or None,
             "transport_preference": str(transport_preference or "").strip().lower() or None,
             "allow_public_transport_fallback": allow_public_transport_fallback,
-            **_shared_catalog_followup_job_config(followup_config or {}),
         },
         initiated_by=initiated_by,
         status="queued" if is_queue_enabled() else "pending",
@@ -3853,17 +3843,6 @@ def _enqueue_shared_posts_job(
         worker_id=worker_id,
         preclaim=bool(worker_id),
     )
-
-
-def _shared_catalog_followup_job_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "details_refresh_skip_detail_fetch": bool(config.get("details_refresh_skip_detail_fetch")),
-        "details_refresh_skip_media_followups": bool(config.get("details_refresh_skip_media_followups")),
-        "tiktok_comments_in_posts_stage": bool(config.get("tiktok_comments_in_posts_stage")),
-        "tiktok_direct_comment_api_override": bool(config.get("tiktok_direct_comment_api_override")),
-        "twitter_comments_in_posts_stage": bool(config.get("twitter_comments_in_posts_stage")),
-        "launch_group_id": str(config.get("launch_group_id") or "").strip() or None,
-    }
 
 
 def _count_recent_failures() -> int:
@@ -5148,22 +5127,22 @@ def _relation_columns(
     return columns
 
 
-def _scrape_jobs_features(*, conn: Any | None = None) -> dict[str, bool]:
+def _scrape_jobs_features() -> dict[str, bool]:
     global _scrape_jobs_features_cache
     if _scrape_jobs_features_cache is not None:
         return _scrape_jobs_features_cache
-    has_run_id = _column_exists("social", "scrape_jobs", "run_id", conn=conn)
+    has_run_id = _column_exists("social", "scrape_jobs", "run_id")
     has_queue_fields = all(
         [
-            _column_exists("social", "scrape_jobs", "attempt_count", conn=conn),
-            _column_exists("social", "scrape_jobs", "max_attempts", conn=conn),
-            _column_exists("social", "scrape_jobs", "priority", conn=conn),
-            _column_exists("social", "scrape_jobs", "available_at", conn=conn),
-            _column_exists("social", "scrape_jobs", "claimed_at", conn=conn),
-            _column_exists("social", "scrape_jobs", "heartbeat_at", conn=conn),
-            _column_exists("social", "scrape_jobs", "worker_id", conn=conn),
-            _column_exists("social", "scrape_jobs", "last_error_code", conn=conn),
-            _column_exists("social", "scrape_jobs", "last_error_class", conn=conn),
+            _column_exists("social", "scrape_jobs", "attempt_count"),
+            _column_exists("social", "scrape_jobs", "max_attempts"),
+            _column_exists("social", "scrape_jobs", "priority"),
+            _column_exists("social", "scrape_jobs", "available_at"),
+            _column_exists("social", "scrape_jobs", "claimed_at"),
+            _column_exists("social", "scrape_jobs", "heartbeat_at"),
+            _column_exists("social", "scrape_jobs", "worker_id"),
+            _column_exists("social", "scrape_jobs", "last_error_code"),
+            _column_exists("social", "scrape_jobs", "last_error_class"),
         ]
     )
     _scrape_jobs_features_cache = {
@@ -5204,16 +5183,6 @@ def _instagram_posts_has_column(column: str) -> bool:
 
 def _platform_posts_has_column(platform: str, column: str) -> bool:
     table = PLATFORM_POST_TABLES.get((platform or "").strip().lower())
-    if not table:
-        return False
-    try:
-        return _column_exists("social", table, column)
-    except Exception:
-        return True
-
-
-def _platform_catalog_posts_has_column(platform: str, column: str) -> bool:
-    table = PLATFORM_CATALOG_POST_TABLES.get((platform or "").strip().lower())
     if not table:
         return False
     try:
@@ -7890,9 +7859,15 @@ def check_platform_cookie_health(platform: str, *, force: bool = False) -> dict[
     if source_path:
         result["source_path"] = source_path
 
+    # Warn if cookies sourced from env var but refresh writes to file
     if source_kind == "env_json" and refresh_supported:
         default_file = _default_platform_cookie_file_path(normalized)
         result["refresh_target_path"] = str(default_file)
+        result["warning_code"] = "env_json_source_refresh_writes_file"
+        result["warning_message"] = (
+            f"Cookies loaded from environment variable; refresh writes to {default_file}. "
+            "After refresh, the env var will still take precedence on next load."
+        )
     elif source_kind in ("env_file", "default_file") and source_path:
         result["refresh_target_path"] = source_path
 
@@ -9994,12 +9969,7 @@ def _create_job(
     if creator_runtime_version:
         config_payload.setdefault("created_by_runtime_version", creator_runtime_version)
     requested_max_attempts = max(1, int(max_attempts)) if max_attempts is not None else None
-    try:
-        features = _scrape_jobs_features(conn=conn) if conn is not None else _scrape_jobs_features()
-    except TypeError:
-        # Some tests monkeypatch this helper with the old zero-argument shape.
-        features = _scrape_jobs_features()
-    supports_queue_fields = bool(features.get("has_queue_fields"))
+    supports_queue_fields = bool(_scrape_jobs_features().get("has_queue_fields"))
     insert_max_attempts_sql = ", max_attempts" if (requested_max_attempts is not None and supports_queue_fields) else ""
     value_max_attempts_sql = ", %s" if (requested_max_attempts is not None and supports_queue_fields) else ""
     insert_params: list[Any] = [
@@ -17627,7 +17597,7 @@ def _update_twitter_comment_media_mirror_fields(
 
 
 def _enqueue_twitter_comment_media_mirror_job(
-    context: SeasonContext | None,
+    context: SeasonContext,
     *,
     run_id: str | None,
     source_scope: str,
@@ -17669,8 +17639,8 @@ def _enqueue_twitter_comment_media_mirror_job(
     mirror_job_status = "queued" if is_queue_enabled() else "pending"
     config = {
         "run_id": run_id,
-        "season_id": context.season_id if context else None,
-        "show_id": context.show_id if context else None,
+        "season_id": context.season_id,
+        "show_id": context.show_id,
         "platform": "twitter",
         "source_scope": source_scope,
         "stage": COMMENT_MEDIA_MIRROR_STAGE,
@@ -21933,10 +21903,6 @@ def _build_twitter_tweet_payload(
         "raw_data": tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         "source_account": account,
     }
-    if _platform_posts_has_column("twitter", "bookmarks"):
-        payload["bookmarks"] = int(getattr(tweet, "bookmarks", 0) or 0)
-    if _platform_posts_has_column("twitter", "shares"):
-        payload["shares"] = int(getattr(tweet, "shares", 0) or 0)
     _apply_assignment_payload(payload, context)
     if _platform_posts_has_column("twitter", "user_id"):
         payload["user_id"] = str(getattr(tweet, "user_id", "") or "").strip() or None
@@ -21944,14 +21910,6 @@ def _build_twitter_tweet_payload(
         payload["user_profile_url"] = user_profile_url or None
     if _platform_posts_has_column("twitter", "user_avatar_url"):
         payload["user_avatar_url"] = str(getattr(tweet, "user_avatar_url", "") or "").strip() or None
-    if _platform_posts_has_column("twitter", "thread_root_tweet_id"):
-        payload["thread_root_tweet_id"] = getattr(tweet, "thread_root_tweet_id", None)
-    if _platform_posts_has_column("twitter", "thread_position"):
-        payload["thread_position"] = getattr(tweet, "thread_position", None)
-    if _platform_posts_has_column("twitter", "is_thread_part"):
-        payload["is_thread_part"] = bool(getattr(tweet, "is_thread_part", False))
-    if _platform_posts_has_column("twitter", "twitter_context_role"):
-        payload["twitter_context_role"] = getattr(tweet, "twitter_context_role", None)
     if job_id:
         payload["job_id"] = job_id
     if _comment_lifecycle_supported("twitter_tweets"):
@@ -26253,7 +26211,10 @@ def _upsert_shared_catalog_instagram_post(
         video_play_count=getattr(post, "video_play_count", None),
         video_duration=getattr(post, "video_duration", None),
     )
-    return _pg_upsert(PLATFORM_CATALOG_POST_TABLES["instagram"], payload, conflict_col="source_id", conn=conn)
+    row = _pg_upsert(PLATFORM_CATALOG_POST_TABLES["instagram"], payload, conflict_col="source_id", conn=conn)
+    if row:
+        _sync_instagram_catalog_post_collaborators(row, conn=conn)
+    return row
 
 
 def _shared_catalog_instagram_post_payload(
@@ -26305,6 +26266,104 @@ def _shared_catalog_instagram_post_payload(
     )
 
 
+def _normalize_instagram_catalog_collaborator_handle(value: Any) -> str:
+    return _normalize_social_account_profile_handle_term(value).lstrip("@")
+
+
+def _instagram_catalog_collaborator_membership_rows(
+    catalog_post_row: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    catalog_post_id = str(catalog_post_row.get("id") or "").strip()
+    if not catalog_post_id:
+        return []
+    source_id = str(catalog_post_row.get("source_id") or "").strip()
+    source_account = _normalize_account_handle(catalog_post_row.get("source_account"))
+    if not source_id or not source_account:
+        return []
+
+    rows_by_handle: dict[str, dict[str, Any]] = {}
+    posted_at = _coerce_dt(catalog_post_row.get("posted_at"))
+
+    def _add(value: Any, *, source: str) -> None:
+        handle = _normalize_instagram_catalog_collaborator_handle(value)
+        if not handle:
+            return
+        rows_by_handle[handle] = {
+            "catalog_post_id": catalog_post_id,
+            "source_id": source_id,
+            "source_account": source_account,
+            "collaborator_handle": handle,
+            "collaborator_source": source,
+            "posted_at": posted_at,
+        }
+
+    for value in _as_text_list(catalog_post_row.get("collaborators")):
+        _add(value, source="collaborators")
+    for detail in _as_json_object_list(catalog_post_row.get("collaborators_detail")):
+        _add(_detail_handle_from_payload(detail), source="collaborators_detail")
+    raw_data = _metadata_dict(catalog_post_row.get("raw_data"))
+    for detail in _as_json_object_list(raw_data.get("collaborators_detail")):
+        _add(_detail_handle_from_payload(detail), source="collaborators_detail")
+
+    return list(rows_by_handle.values())
+
+
+def _sync_instagram_catalog_post_collaborators(
+    catalog_post_row: Mapping[str, Any],
+    *,
+    conn: Any | None = None,
+) -> None:
+    catalog_post_id = str(catalog_post_row.get("id") or "").strip()
+    if not catalog_post_id:
+        return
+    membership_rows = _instagram_catalog_collaborator_membership_rows(catalog_post_row)
+    try:
+        pg.execute(
+            """
+            delete from social.instagram_account_catalog_post_collaborators
+            where catalog_post_id = %s::uuid
+            """,
+            [catalog_post_id],
+            conn=conn,
+        )
+        if not membership_rows:
+            return
+        values = [
+            (
+                row["catalog_post_id"],
+                row["source_id"],
+                row["source_account"],
+                row["collaborator_handle"],
+                row["collaborator_source"],
+                row["posted_at"],
+            )
+            for row in membership_rows
+        ]
+        pg.execute_values_no_return(
+            """
+            insert into social.instagram_account_catalog_post_collaborators (
+              catalog_post_id,
+              source_id,
+              source_account,
+              collaborator_handle,
+              collaborator_source,
+              posted_at
+            )
+            values %s
+            on conflict (catalog_post_id, collaborator_handle) do update set
+              source_id = excluded.source_id,
+              source_account = excluded.source_account,
+              collaborator_source = excluded.collaborator_source,
+              posted_at = excluded.posted_at,
+              updated_at = now()
+            """,
+            values,
+            conn=conn,
+        )
+    except (psycopg_errors.UndefinedTable, psycopg_errors.UndefinedColumn):
+        logger.debug("Instagram catalog collaborator membership table is unavailable; skipping sync", exc_info=True)
+
+
 def _batch_upsert_shared_catalog_instagram_posts(
     *,
     run_id: str | None,
@@ -26327,12 +26386,16 @@ def _batch_upsert_shared_catalog_instagram_posts(
     ]
     if not payloads:
         return []
-    return _pg_upsert_many(
+    rows = _pg_upsert_many(
         PLATFORM_CATALOG_POST_TABLES["instagram"],
         payloads,
         conflict_col="source_id",
         conn=conn,
     )
+    for row in rows:
+        _sync_instagram_catalog_post_collaborators(row, conn=conn)
+    return rows
+
 
 
 def _upsert_shared_catalog_tiktok_post(
@@ -26413,21 +26476,12 @@ def _upsert_shared_catalog_twitter_post(
         likes=getattr(tweet, "likes", 0),
         comments_count=getattr(tweet, "replies", 0),
         views=getattr(tweet, "views", 0),
-        shares=getattr(tweet, "shares", 0),
         retweets=getattr(tweet, "retweets", 0),
         replies_count=getattr(tweet, "replies", 0),
         quotes=getattr(tweet, "quotes", 0),
         raw_data=tweet.to_dict() if hasattr(tweet, "to_dict") else {},
         run_id=run_id,
     )
-    if _platform_catalog_posts_has_column("twitter", "bookmarks"):
-        payload["bookmarks"] = _normalize_non_negative_int(getattr(tweet, "bookmarks", 0))
-    if _platform_catalog_posts_has_column("twitter", "thread_root_source_id"):
-        payload["thread_root_source_id"] = str(getattr(tweet, "thread_root_source_id", "") or "").strip() or None
-    if _platform_catalog_posts_has_column("twitter", "thread_position"):
-        payload["thread_position"] = getattr(tweet, "thread_position", None)
-    if _platform_catalog_posts_has_column("twitter", "is_thread_part"):
-        payload["is_thread_part"] = bool(getattr(tweet, "is_thread_part", False))
     return _pg_upsert(PLATFORM_CATALOG_POST_TABLES["twitter"], payload, conflict_col="source_id", conn=conn)
 
 
@@ -27993,6 +28047,92 @@ def _catalog_recent_runs(
         return normalized_rows
     except psycopg_errors.UndefinedTable:
         return []
+
+
+def _catalog_recent_runs_header(
+    platform: str,
+    account_handle: str,
+    *,
+    limit: int = 3,
+    conn: Any | None = None,
+) -> list[dict[str, Any]]:
+    normalized_platform = _normalize_platform_name(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    safe_limit = max(1, min(int(limit), 5))
+    run_failure_not_dismissed_sql = _run_failure_not_dismissed_sql("r")
+    sql = f"""
+            select
+              j.id::text as job_id,
+              j.run_id::text as run_id,
+              coalesce(nullif(lower(coalesce(r.status, '')), ''), lower(coalesce(nullif(j.status, ''), ''))) as status,
+              coalesce(r.created_at, j.created_at) as created_at,
+              coalesce(r.started_at, j.started_at) as started_at,
+              coalesce(r.completed_at, j.completed_at) as completed_at,
+              nullif(j.error_message, '') as error_message,
+              coalesce(r.config, '{{}}'::jsonb) as run_config
+            from social.scrape_jobs j
+            left join social.scrape_runs r on r.id = j.run_id
+            where j.platform = %s
+              and lower(
+                coalesce(
+                  nullif(j.config->>'account', ''),
+                  nullif(j.metadata->>'account', ''),
+                  ''
+                )
+              ) = %s
+              and lower(
+                coalesce(
+                  nullif(j.config->>'stage', ''),
+                  nullif(j.metadata->>'stage', ''),
+                  nullif(j.job_type, ''),
+                  'unknown'
+                )
+              ) = any(%s::text[])
+              and (
+                r.id is null
+                or (
+                  coalesce(r.config->>'pipeline_ingest_mode', '') = %s
+                  and {run_failure_not_dismissed_sql}
+                )
+              )
+            order by coalesce(j.completed_at, j.started_at, j.created_at) desc, j.id desc
+            limit %s
+            """
+    params = [
+        normalized_platform,
+        normalized_account,
+        list(ACCOUNT_PROFILE_CATALOG_RECENT_RUN_STAGES),
+        SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        safe_limit,
+    ]
+    try:
+        if conn is None:
+            rows = [dict(row) for row in pg.fetch_all(sql, params)]
+        else:
+            with pg.db_cursor(conn=conn, label="catalog_recent_runs_header") as cur:
+                rows = [dict(row) for row in pg.fetch_all_with_cursor(cur, sql, params)]
+    except psycopg_errors.UndefinedTable:
+        return []
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        run_config = _metadata_dict(row.pop("run_config", None))
+        row.update(_catalog_run_intent_metadata(run_config))
+        row["launch_group_id"] = str(run_config.get("launch_group_id") or "").strip() or None
+        row["launch_state"] = str(run_config.get("launch_state") or "").strip().lower() or None
+        selected_tasks = _normalize_optional_social_account_catalog_backfill_selected_tasks(
+            run_config.get("selected_tasks")
+        )
+        row["selected_tasks"] = selected_tasks
+        row["effective_selected_tasks"] = (
+            _normalize_optional_social_account_catalog_backfill_selected_tasks(
+                run_config.get("effective_selected_tasks")
+            )
+            or selected_tasks
+        )
+        row["comments_run_id"] = str(run_config.get("comments_run_id") or "").strip() or None
+        row["attached_followups"] = _normalize_attached_followups(run_config.get("attached_followups"))
+        normalized_rows.append(_lite_social_account_catalog_run(row))
+    return normalized_rows
 
 
 def _historical_catalog_expected_total_posts(platform: str, account_handle: str, *, limit: int = 10) -> int:
@@ -31625,328 +31765,6 @@ def _scrape_shared_youtube_posts(
     return rows, retrieval_meta
 
 
-def _twitter_account_tweet_role(tweet: Any, account_handle: str) -> str:
-    tweet_handle = _normalize_account_handle(getattr(tweet, "username", None))
-    account = _normalize_account_handle(account_handle)
-    if tweet_handle != account:
-        return "quote" if bool(getattr(tweet, "is_quote", False)) else "audience_reply"
-    if bool(getattr(tweet, "is_reply", False)):
-        return "account_reply"
-    if bool(getattr(tweet, "is_quote", False)):
-        return "quote"
-    return "account_post"
-
-
-def _set_twitter_tweet_metadata(
-    tweet: Any,
-    *,
-    context_role: str | None = None,
-    thread_root_tweet_id: str | None = None,
-    thread_position: int | None = None,
-    is_thread_part: bool = False,
-) -> None:
-    if context_role is not None:
-        tweet.twitter_context_role = context_role
-    tweet.thread_root_tweet_id = thread_root_tweet_id
-    tweet.thread_root_source_id = thread_root_tweet_id
-    tweet.thread_position = thread_position
-    tweet.is_thread_part = bool(is_thread_part)
-
-
-def _resolve_twitter_thread_root(
-    scraper: Any,
-    tweet: Any,
-    account_handle: str,
-    cache: dict[str, Any],
-) -> dict[str, Any]:
-    tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
-    if not tweet_id:
-        return {"root_id": None, "same_account_chain": [], "parent_context": None, "errors": []}
-    root_cache = cache.setdefault("roots", {})
-    if tweet_id in root_cache:
-        return root_cache[tweet_id]
-
-    parent_cache = cache.setdefault("parents", {})
-    account = _normalize_account_handle(account_handle)
-    same_account_chain = [tweet]
-    errors: list[dict[str, str]] = []
-    parent_context = None
-    parent_id = str(getattr(tweet, "reply_to_tweet_id", "") or "").strip()
-    visited = {tweet_id}
-    max_depth = 12
-    depth = 0
-
-    while parent_id:
-        if parent_id in visited:
-            errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "cycle"})
-            break
-        if depth >= max_depth:
-            errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "max_depth"})
-            break
-        visited.add(parent_id)
-        depth += 1
-        parent = parent_cache.get(parent_id)
-        if parent is None:
-            fetch = getattr(scraper, "fetch_tweet_by_id", None)
-            if not callable(fetch):
-                errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "fetch_unavailable"})
-                break
-            try:
-                parent = fetch(parent_id, delay=0.5)
-            except Exception:  # noqa: BLE001
-                errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "fetch_exception"})
-                logger.exception("[twitter] Failed to fetch parent context for tweet %s parent=%s", tweet_id, parent_id)
-                break
-            parent_cache[parent_id] = parent
-        if parent is None:
-            errors.append({"tweet_id": tweet_id, "parent_id": parent_id, "reason": "missing_parent"})
-            break
-        if _normalize_account_handle(getattr(parent, "username", None)) == account:
-            same_account_chain.append(parent)
-            parent_id = str(getattr(parent, "reply_to_tweet_id", "") or "").strip()
-            continue
-        parent_context = parent
-        break
-
-    ordered_chain = list(reversed(same_account_chain))
-    root_id = str(getattr(ordered_chain[0], "tweet_id", "") or "").strip() if ordered_chain else tweet_id
-    result = {
-        "root_id": root_id,
-        "same_account_chain": ordered_chain,
-        "parent_context": parent_context,
-        "errors": errors,
-    }
-    for chain_tweet in same_account_chain:
-        chain_id = str(getattr(chain_tweet, "tweet_id", "") or "").strip()
-        if chain_id:
-            root_cache[chain_id] = result
-    return result
-
-
-def _hydrate_twitter_account_post_interactions(
-    *,
-    scraper: Any,
-    anchor_tweets: list[Any],
-    run_id: str | None,
-    job_id: str,
-    account_handle: str,
-    source_scope: str,
-    enable_media_followups: bool,
-) -> dict[str, Any]:
-    comment_stats = _new_comment_persist_stats()
-    quote_stats = {"quotes_fetched": 0, "quotes_upserted": 0}
-    errors: list[dict[str, str]] = []
-    roots_checked: list[str] = []
-    hydrated_roots: set[str] = set()
-    complete = True
-
-    if not anchor_tweets:
-        return {
-            "comment_stats": comment_stats,
-            "quote_stats": quote_stats,
-            "errors": errors,
-            "complete": True,
-            "roots_checked": roots_checked,
-            "roots_hydrated": 0,
-        }
-
-    with pg.db_connection(label="twitter-shared-catalog-interactions") as comments_conn:
-        for index, anchor in enumerate(anchor_tweets, start=1):
-            anchor_id = str(getattr(anchor, "tweet_id", "") or "").strip()
-            if not anchor_id or anchor_id in hydrated_roots:
-                continue
-            hydrated_roots.add(anchor_id)
-            roots_checked.append(anchor_id)
-            expected_replies = _normalize_non_negative_int(getattr(anchor, "replies", 0))
-            expected_quotes = _normalize_non_negative_int(getattr(anchor, "quotes", 0))
-            reply_pages, quote_pages = _twitter_reply_quote_page_budgets(
-                expected_replies=expected_replies,
-                expected_quotes=expected_quotes,
-            )
-            replies: list[Any] = []
-            quotes: list[Any] = []
-            reply_failed = False
-            quote_failed = False
-            reply_fail_reason = ""
-            quote_fail_reason = ""
-            observed_comment_ids: set[str] = set()
-            local_stats = _new_comment_persist_stats()
-
-            try:
-                replies = _fetch_twitter_replies_compat(
-                    scraper=scraper,
-                    tweet_id=anchor_id,
-                    delay=0.5,
-                    search_max_pages=reply_pages,
-                    twikit_max_pages=reply_pages,
-                )
-                reply_fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "")
-            except Exception:  # noqa: BLE001
-                reply_failed = True
-                complete = False
-                reply_fail_reason = "fetch_exception"
-                errors.append({"tweet_id": anchor_id, "kind": "replies", "reason": reply_fail_reason})
-                logger.exception("[twitter] Failed to hydrate shared catalog replies for tweet %s", anchor_id)
-
-            try:
-                quotes, missing_quote_method_reason = _fetch_twitter_quotes_compat(
-                    scraper=scraper,
-                    tweet_id=anchor_id,
-                    delay=0.5,
-                    max_pages=quote_pages,
-                )
-                quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "")
-                if missing_quote_method_reason:
-                    quote_fail_reason = missing_quote_method_reason
-            except Exception:  # noqa: BLE001
-                quote_failed = True
-                complete = False
-                quote_fail_reason = "fetch_exception"
-                errors.append({"tweet_id": anchor_id, "kind": "quotes", "reason": quote_fail_reason})
-                logger.exception("[twitter] Failed to hydrate shared catalog quotes for tweet %s", anchor_id)
-
-            if reply_fail_reason and not replies:
-                complete = False
-                errors.append({"tweet_id": anchor_id, "kind": "replies", "reason": reply_fail_reason})
-            if quote_fail_reason and not quotes:
-                complete = False
-                errors.append({"tweet_id": anchor_id, "kind": "quotes", "reason": quote_fail_reason})
-            quote_stats["quotes_fetched"] += len(quotes)
-
-            if reply_failed and quote_failed:
-                continue
-            try:
-                with _SavepointScope(conn=comments_conn, prefix="twitter_shared_interactions", index=index):
-                    for reply in replies:
-                        reply.is_reply = True
-                        if not getattr(reply, "reply_to_tweet_id", None):
-                            reply.reply_to_tweet_id = anchor_id
-                        _set_twitter_tweet_metadata(
-                            reply,
-                            context_role=_twitter_account_tweet_role(reply, account_handle),
-                        )
-                        reply_id = str(getattr(reply, "tweet_id", "") or "").strip()
-                        if reply_id:
-                            observed_comment_ids.add(reply_id)
-                    persisted_replies = _upsert_tweet_batch(
-                        None,
-                        job_id=job_id,
-                        run_id=run_id,
-                        account=account_handle,
-                        tweets=replies,
-                        persist_stats=local_stats,
-                        conn=comments_conn,
-                    )
-                    for reply in replies:
-                        reply_id = str(getattr(reply, "tweet_id", "") or "").strip()
-                        upserted_reply = persisted_replies.get(reply_id)
-                        if upserted_reply and enable_media_followups:
-                            try:
-                                mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                    None,
-                                    run_id=run_id,
-                                    source_scope=source_scope,
-                                    account=account_handle,
-                                    comment_row=upserted_reply,
-                                    parent_job_id=job_id,
-                                    conn=comments_conn,
-                                )
-                                if mirror_job_id:
-                                    local_stats["comment_media_mirror_jobs_enqueued"] = (
-                                        int(local_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
-                                    )
-                            except Exception:  # noqa: BLE001
-                                local_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                    int(local_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
-                                )
-                                logger.exception("[twitter] Failed to enqueue media mirror for reply %s", reply_id)
-
-                    filtered_quotes: list[Any] = []
-                    for quote in quotes:
-                        quote.is_quote = True
-                        quote.is_reply = False
-                        quote.reply_to_tweet_id = None
-                        if not getattr(quote, "quoted_tweet_id", None):
-                            quote.quoted_tweet_id = anchor_id
-                        if str(getattr(quote, "quoted_tweet_id", "") or "").strip() != anchor_id:
-                            continue
-                        _set_twitter_tweet_metadata(quote, context_role="quote")
-                        quote_id = str(getattr(quote, "tweet_id", "") or "").strip()
-                        if quote_id:
-                            observed_comment_ids.add(quote_id)
-                        filtered_quotes.append(quote)
-                    persisted_quotes = _upsert_tweet_batch(
-                        None,
-                        job_id=job_id,
-                        run_id=run_id,
-                        account=account_handle,
-                        tweets=filtered_quotes,
-                        persist_stats=None,
-                        conn=comments_conn,
-                    )
-                    for quote in filtered_quotes:
-                        quote_id = str(getattr(quote, "tweet_id", "") or "").strip()
-                        upserted_quote = persisted_quotes.get(quote_id)
-                        if upserted_quote:
-                            quote_stats["quotes_upserted"] += 1
-                            if enable_media_followups:
-                                try:
-                                    mirror_job_id = _enqueue_twitter_comment_media_mirror_job(
-                                        None,
-                                        run_id=run_id,
-                                        source_scope=source_scope,
-                                        account=account_handle,
-                                        comment_row=upserted_quote,
-                                        parent_job_id=job_id,
-                                        conn=comments_conn,
-                                    )
-                                    if mirror_job_id:
-                                        local_stats["comment_media_mirror_jobs_enqueued"] = (
-                                            int(local_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
-                                        )
-                                except Exception:  # noqa: BLE001
-                                    local_stats["comment_media_mirror_job_enqueue_errors"] = (
-                                        int(local_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
-                                    )
-                                    logger.exception("[twitter] Failed to enqueue media mirror for quote %s", quote_id)
-
-                    is_complete = _is_comment_fetch_complete(
-                        fetch_failed=reply_failed,
-                        fail_reason=reply_fail_reason,
-                        quote_fail_reason=quote_fail_reason,
-                        auth_failed=bool(getattr(scraper, "comments_auth_failed", False)),
-                        fetched_count=len(replies) + len(filtered_quotes),
-                        quotes_fetched=len(filtered_quotes),
-                        max_comments_per_post=1_000_000,
-                        expected_count=expected_replies + expected_quotes,
-                        expected_quotes=expected_quotes,
-                    )
-                    if is_complete:
-                        _mark_missing_comments_for_anchor(
-                            platform="twitter",
-                            anchor_id=anchor_id,
-                            observed_comment_ids=observed_comment_ids,
-                            conn=comments_conn,
-                        )
-                        _reconcile_post_comment_count(platform="twitter", post_db_id=anchor_id, conn=comments_conn)
-                    else:
-                        complete = False
-            except Exception:  # noqa: BLE001
-                complete = False
-                errors.append({"tweet_id": anchor_id, "kind": "persist", "reason": "persist_exception"})
-                logger.exception("[twitter] Failed to persist shared catalog interactions for tweet %s", anchor_id)
-            _merge_comment_persist_stats(comment_stats, local_stats)
-
-    return {
-        "comment_stats": comment_stats,
-        "quote_stats": quote_stats,
-        "errors": errors,
-        "complete": complete,
-        "roots_checked": roots_checked,
-        "roots_hydrated": len(hydrated_roots),
-    }
-
-
 def _scrape_shared_twitter_posts(
     *,
     run_id: str | None,
@@ -31984,178 +31802,45 @@ def _scrape_shared_twitter_posts(
         query=f"from:{account_handle}",
         date_start=date_start,
         date_end=date_end,
-        include_replies=True,
+        include_replies=False,
         include_links=True,
         delay_seconds=0.35,
         max_pages=max_pages,
     )
     posts = scraper.scrape(scrape_config, progress_cb=progress_cb)
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
-    account = _normalize_account_handle(account_handle)
-    account_posts = [
-        tweet
-        for tweet in posts
-        if (_normalize_account_handle(getattr(tweet, "username", None)) or account) == account
-    ]
-    account_by_id = {str(getattr(tweet, "tweet_id", "") or "").strip(): tweet for tweet in account_posts}
-    account_by_id = {tweet_id: tweet for tweet_id, tweet in account_by_id.items() if tweet_id}
-    thread_cache: dict[str, Any] = {}
-    parent_context_by_id: dict[str, Any] = {}
-    thread_errors: list[dict[str, str]] = []
-
-    for tweet in list(account_posts):
-        role = _twitter_account_tweet_role(tweet, account_handle)
-        _set_twitter_tweet_metadata(tweet, context_role=role)
-        if bool(getattr(tweet, "is_reply", False)):
-            resolution = _resolve_twitter_thread_root(scraper, tweet, account_handle, thread_cache)
-            thread_errors.extend(resolution.get("errors") or [])
-            parent_context = resolution.get("parent_context")
-            if parent_context is not None:
-                parent_id = str(getattr(parent_context, "tweet_id", "") or "").strip()
-                if parent_id:
-                    parent_context_by_id[parent_id] = parent_context
-            for chain_tweet in resolution.get("same_account_chain") or []:
-                chain_id = str(getattr(chain_tweet, "tweet_id", "") or "").strip()
-                if chain_id and chain_id not in account_by_id:
-                    account_by_id[chain_id] = chain_tweet
-                    account_posts.append(chain_tweet)
-
-    thread_groups: dict[str, list[Any]] = {}
-    for tweet in account_posts:
-        tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
-        if not tweet_id:
-            continue
-        root_id = tweet_id
-        if bool(getattr(tweet, "is_reply", False)):
-            root_id = str(
-                _resolve_twitter_thread_root(scraper, tweet, account_handle, thread_cache).get("root_id") or tweet_id
-            )
-        thread_groups.setdefault(root_id, []).append(tweet)
-
-    for root_id, group in thread_groups.items():
-        unique_group = {
-            str(getattr(tweet, "tweet_id", "") or "").strip(): tweet
-            for tweet in group
-            if str(getattr(tweet, "tweet_id", "") or "").strip()
-        }
-        ordered_group = sorted(
-            unique_group.values(),
-            key=lambda tweet: (
-                _parse_platform_time(getattr(tweet, "created_at", None)) or datetime.max.replace(tzinfo=UTC),
-                str(getattr(tweet, "tweet_id", "") or ""),
-            ),
-        )
-        is_thread = len(ordered_group) > 1
-        for position, tweet in enumerate(ordered_group, start=1):
-            _set_twitter_tweet_metadata(
-                tweet,
-                context_role=_twitter_account_tweet_role(tweet, account_handle),
-                thread_root_tweet_id=root_id if is_thread else None,
-                thread_position=position if is_thread else None,
-                is_thread_part=is_thread,
-            )
-
+    catalog_posts = [tweet for tweet in posts if not bool(getattr(tweet, "is_reply", False))]
     if _shared_catalog_mode(config):
-        rows = []
-        progress_interval = _shared_catalog_progress_interval_posts()
-        pages_scanned = _normalize_non_negative_int(retrieval_meta.get("pages_scanned"))
-        posts_checked = max(_normalize_non_negative_int(retrieval_meta.get("posts_checked")), len(posts))
-
-        def _emit_persist_progress(saved_posts: int, *, force: bool = False) -> None:
-            if not progress_cb:
-                return
-            if not force and saved_posts > 0 and saved_posts % progress_interval != 0:
-                return
-            progress_cb(
-                {
-                    "phase": "persist_catalog_posts",
-                    "pages_scanned": pages_scanned,
-                    "posts_checked": posts_checked,
-                    "matched_posts": len(account_by_id),
-                    "saved_posts": max(0, int(saved_posts)),
-                }
-            )
-
-        _emit_persist_progress(0, force=True)
-        for index, tweet in enumerate(account_posts, start=1):
-            tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
-            if not tweet_id:
-                continue
-            row = _upsert_shared_catalog_post(
+        rows = _persist_shared_catalog_posts_with_progress(
+            platform="twitter",
+            run_id=run_id,
+            account_handle=account_handle,
+            items=catalog_posts,
+            retrieval_meta=retrieval_meta,
+            progress_cb=progress_cb,
+            upsert_item=lambda tweet: _upsert_shared_catalog_post(
                 platform="twitter",
                 run_id=run_id,
                 account_handle=account_handle,
                 post=tweet,
-            )
-            if row:
-                rows.append(row)
-            _upsert_tweet(None, job_id=job_id, run_id=run_id, account=account_handle, tweet=tweet)
-            _emit_persist_progress(len(rows), force=index == len(account_posts))
-        for parent_context in parent_context_by_id.values():
-            _set_twitter_tweet_metadata(parent_context, context_role="reply_parent")
-            _upsert_tweet(None, job_id=job_id, run_id=run_id, account=account_handle, tweet=parent_context)
-
-        interaction_stats: dict[str, Any] = {}
-        if bool(config.get("twitter_comments_in_posts_stage")):
-            anchor_ids: set[str] = set()
-            anchor_tweets: list[Any] = []
-            for tweet in account_posts:
-                tweet_id = str(getattr(tweet, "tweet_id", "") or "").strip()
-                root_id = str(getattr(tweet, "thread_root_tweet_id", "") or "").strip()
-                anchor_id = root_id or tweet_id
-                if not anchor_id or anchor_id in anchor_ids:
-                    continue
-                anchor_ids.add(anchor_id)
-                anchor_tweets.append(account_by_id.get(anchor_id) or tweet)
-            interaction_stats = _hydrate_twitter_account_post_interactions(
-                scraper=scraper,
-                anchor_tweets=anchor_tweets,
-                run_id=run_id,
-                job_id=job_id,
-                account_handle=account_handle,
-                source_scope=str(config.get("source_scope") or "bravo"),
-                enable_media_followups=not bool(config.get("details_refresh_skip_media_followups")),
-            )
+            ),
+        )
     else:
         rows = []
-        for tweet in account_posts:
+        for tweet in catalog_posts:
             row = _upsert_tweet(None, job_id=job_id, run_id=None, account=account_handle, tweet=tweet)
             if row:
                 rows.append(row)
     if _shared_catalog_mode(config):
-        interaction_stats = interaction_stats if "interaction_stats" in locals() else {}
-        comment_stats = _metadata_dict(interaction_stats.get("comment_stats"))
-        quote_stats = _metadata_dict(interaction_stats.get("quote_stats"))
         retrieval_meta["persist_counters"] = {
             "posts_upserted": len(rows),
-            "comments_fetched": _normalize_non_negative_int(comment_stats.get("comments_fetched")),
-            "comments_upserted": _normalize_non_negative_int(comment_stats.get("comments_upserted")),
-            "quotes_fetched": _normalize_non_negative_int(quote_stats.get("quotes_fetched")),
-            "quotes_upserted": _normalize_non_negative_int(quote_stats.get("quotes_upserted")),
+            "comments_upserted": 0,
         }
         retrieval_meta["posts_checked"] = _shared_catalog_progress_posts_checked(
             retrieval_meta,
-            matched_posts=len(account_posts),
+            matched_posts=len(catalog_posts),
         )
         retrieval_meta["pages_scanned"] = _shared_catalog_progress_pages_scanned(retrieval_meta)
-        retrieval_meta["twitter_comments_in_posts_stage"] = bool(config.get("twitter_comments_in_posts_stage"))
-        retrieval_meta["twitter_interactions_complete"] = bool(interaction_stats.get("complete", True))
-        retrieval_meta["twitter_interaction_roots_checked"] = list(interaction_stats.get("roots_checked") or [])
-        retrieval_meta["twitter_interaction_roots_hydrated"] = _normalize_non_negative_int(
-            interaction_stats.get("roots_hydrated")
-        )
-        retrieval_meta["comment_stats"] = _comment_stats_payload(dict(comment_stats))
-        retrieval_meta["quote_stats"] = {
-            "quotes_fetched": _normalize_non_negative_int(quote_stats.get("quotes_fetched")),
-            "quotes_upserted": _normalize_non_negative_int(quote_stats.get("quotes_upserted")),
-        }
-        interaction_errors = list(interaction_stats.get("errors") or [])
-        if thread_errors:
-            interaction_errors.extend(thread_errors)
-        if interaction_errors:
-            retrieval_meta["twitter_interaction_errors"] = interaction_errors
-            retrieval_meta["retryable"] = True
-            retrieval_meta["twitter_interactions_complete"] = False
     retrieval_meta["profile_snapshot"] = _merge_social_profile_snapshots(
         _metadata_dict(config.get("profile_snapshot")),
         {
@@ -32578,10 +32263,6 @@ def _maybe_enqueue_shared_catalog_classify_jobs_after_fetch(
 
 
 def _shared_catalog_fetch_row_has_terminal_error(row: Mapping[str, Any]) -> bool:
-    status = str(row.get("status") or "").strip().lower()
-    items_found = _normalize_non_negative_int(row.get("items_found"))
-    if status == "completed" and items_found > 0:
-        return False
     metadata = _metadata_dict(row.get("metadata"))
     retrieval_meta = _metadata_dict(metadata.get("retrieval_meta"))
     error_code = (
@@ -32600,7 +32281,6 @@ def _shared_catalog_fetch_has_terminal_error(run_id: str, *, conn: Any | None = 
         select
           lower(coalesce(config->>'stage', metadata->>'stage', job_type, '')) as stage,
           lower(coalesce(status, '')) as status,
-          items_found,
           metadata,
           error_message,
           last_error_code
@@ -32707,7 +32387,6 @@ def _enqueue_shared_discovery_job(
     resume_frontier_snapshot: Mapping[str, Any] | None = None,
     catalog_action: str | None = None,
     catalog_action_scope: str | None = None,
-    followup_config: Mapping[str, Any] | None = None,
     initiated_by: str | None = None,
     worker_id: str | None = None,
     priority: int = 100,
@@ -32746,7 +32425,6 @@ def _enqueue_shared_discovery_job(
             "catalog_action": str(catalog_action or "").strip().lower() or None,
             "catalog_action_scope": str(catalog_action_scope or "").strip().lower() or None,
             "recovery_depth": max(0, int(recovery_depth)),
-            **_shared_catalog_followup_job_config(followup_config or {}),
         },
         initiated_by=initiated_by,
         status="queued" if is_queue_enabled() else "pending",
@@ -32893,7 +32571,6 @@ def _run_shared_account_discovery_stage(
                 "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
                 "frontier_auth_reason": auth_reason if platform == "instagram" else None,
-                **_shared_catalog_followup_job_config(config),
             },
             initiated_by=None,
             status="queued" if is_queue_enabled() else "pending",
@@ -33053,7 +32730,6 @@ def _run_shared_account_discovery_stage(
                             "required_execution_backend": config.get("required_execution_backend"),
                             "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                             "recovery_depth": recovery_depth + 1,
-                            **_shared_catalog_followup_job_config(config),
                         },
                         initiated_by=None,
                         status="queued" if is_queue_enabled() else "pending",
@@ -33163,7 +32839,6 @@ def _run_shared_account_discovery_stage(
                 "transport_preference": "authenticated" if platform == "instagram" and auth_allowed else None,
                 "allow_public_transport_fallback": False if platform == "instagram" and auth_allowed else None,
                 "recovery_depth": _normalize_non_negative_int(config.get("recovery_depth")) + 1,
-                **_shared_catalog_followup_job_config(config),
             },
             initiated_by=None,
             status="queued" if is_queue_enabled() else "pending",
@@ -33293,7 +32968,6 @@ def _run_shared_account_discovery_stage(
                 "allow_local_dev_inline_bypass": bool(config.get("allow_local_dev_inline_bypass")),
                 "frontier_auth_allowed": auth_allowed if platform == "instagram" else None,
                 "frontier_auth_reason": auth_reason if platform == "instagram" else None,
-                **_shared_catalog_followup_job_config(config),
             },
             initiated_by=None,
             status="queued" if is_queue_enabled() else "pending",
@@ -33726,14 +33400,7 @@ def _run_shared_account_frontier_posts_stage(
             "expected_total_posts": expected_total_posts or None,
             "pipeline_ingest_mode": ingest_mode,
         },
-)
-
-
-def _tiktok_empty_body_fallback_completion_tolerance(expected_total: int) -> int:
-    if expected_total <= 0:
-        return 0
-    percent_tolerance = max(1, int(round(expected_total * 0.02)))
-    return min(5, percent_tolerance)
+    )
 
 
 def _run_shared_account_posts_stage(
@@ -33826,10 +33493,6 @@ def _run_shared_account_posts_stage(
         _normalize_non_negative_int((retrieval_meta.get("persist_counters") or {}).get("posts_upserted")),
         len(rows),
     )
-    comments_upserted = _normalize_non_negative_int(
-        (retrieval_meta.get("persist_counters") or {}).get("comments_upserted")
-    )
-    quotes_upserted = _normalize_non_negative_int((retrieval_meta.get("persist_counters") or {}).get("quotes_upserted"))
     retrieval_error_code = (
         str(retrieval_meta.get("error_code") or retrieval_meta.get("last_error_code") or "").strip().lower()
     )
@@ -33860,10 +33523,14 @@ def _run_shared_account_posts_stage(
     configured_completion_target_posts = _normalize_non_negative_int(config.get("completion_target_posts"))
     if configured_completion_target_posts > 0:
         completion_target_posts = configured_completion_target_posts
-    if (
-        str(config.get("runner_strategy") or "").strip().lower() == "single_runner_fallback"
+    runner_strategy = str(config.get("runner_strategy") or "").strip().lower()
+    is_single_runner_fallback = runner_strategy == "single_runner_fallback"
+    is_tiktok_empty_body_fallback = (
+        platform == "tiktok"
+        and is_single_runner_fallback
         and str(config.get("recovery_reason") or "").strip().lower() == "tiktok_empty_body_transport_failure"
-    ):
+    )
+    if is_tiktok_empty_body_fallback:
         observed_current_total_posts = _normalize_non_negative_int(retrieval_meta.get("total_posts"))
         if observed_current_total_posts > 0:
             completion_target_posts = (
@@ -33871,42 +33538,32 @@ def _run_shared_account_posts_stage(
                 if completion_target_posts > 0
                 else observed_current_total_posts
             )
-    if (
-        str(config.get("runner_strategy") or "").strip().lower() == "single_runner_fallback"
-        and completion_target_posts > 0
-        and max(scraped_posts, saved_posts) < completion_target_posts
-    ):
-        missing_posts = completion_target_posts - max(scraped_posts, saved_posts)
-        tolerance = 0
-        if (
-            _normalize_platform_name(platform) == "tiktok"
-            and str(config.get("recovery_reason") or "").strip().lower() == "tiktok_empty_body_transport_failure"
-        ):
-            tolerance = _tiktok_empty_body_fallback_completion_tolerance(completion_target_posts)
-        if missing_posts <= tolerance:
-            retrieval_meta["completion_tolerance_applied"] = True
-            retrieval_meta["completion_missing_posts"] = missing_posts
-            retrieval_meta["completion_tolerance_posts"] = tolerance
-        else:
-            raise SharedStageRuntimeError(
-                (
-                    f"Shared-account fallback ended early for @{account_handle}: "
-                    f"checked {scraped_posts} of {completion_target_posts} discovered posts"
-                ),
-                error_code="catalog_incomplete",
-                retryable=True,
-                runtime_metadata={
-                    "retrieval_meta": {
-                        **dict(retrieval_meta or {}),
-                        "expected_total_posts": expected_total_posts,
-                        "completion_target_posts": completion_target_posts,
-                        "observed_posts_checked": scraped_posts,
-                        "observed_posts_saved": saved_posts,
-                        "completion_missing_posts": missing_posts,
-                        "completion_tolerance_posts": tolerance,
-                    }
-                },
-            )
+    observed_completion_posts = max(scraped_posts, saved_posts)
+    missing_posts = max(completion_target_posts - observed_completion_posts, 0) if completion_target_posts > 0 else 0
+    completion_tolerance_posts = 3 if is_tiktok_empty_body_fallback and completion_target_posts > 0 else 0
+    completion_tolerance_applied = (
+        is_tiktok_empty_body_fallback and missing_posts > 0 and missing_posts <= completion_tolerance_posts
+    )
+    if is_single_runner_fallback and completion_target_posts > 0 and missing_posts > 0 and not completion_tolerance_applied:
+        raise SharedStageRuntimeError(
+            (
+                f"Shared-account fallback ended early for @{account_handle}: "
+                f"checked {scraped_posts} of {completion_target_posts} discovered posts"
+            ),
+            error_code="catalog_incomplete",
+            retryable=True,
+            runtime_metadata={
+                "retrieval_meta": {
+                    **dict(retrieval_meta or {}),
+                    "expected_total_posts": expected_total_posts,
+                    "completion_target_posts": completion_target_posts,
+                    "observed_posts_checked": scraped_posts,
+                    "observed_posts_saved": saved_posts,
+                    "completion_missing_posts": missing_posts,
+                    "completion_tolerance_posts": completion_tolerance_posts,
+                }
+            },
+        )
     activity["phase"] = "shared_account_posts_end"
     activity["posts_checked"] = scraped_posts
     activity["matched_posts"] = matched_posts
@@ -33917,6 +33574,12 @@ def _run_shared_account_posts_stage(
         activity["total_posts"] = expected_total_posts
     retrieval_meta["expected_total_posts"] = expected_total_posts or None
     retrieval_meta["completion_target_posts"] = completion_target_posts or None
+    retrieval_meta["observed_posts_checked"] = scraped_posts
+    retrieval_meta["observed_posts_saved"] = saved_posts
+    retrieval_meta["completion_missing_posts"] = missing_posts
+    retrieval_meta["completion_tolerance_posts"] = completion_tolerance_posts
+    if completion_tolerance_applied:
+        retrieval_meta["completion_tolerance_applied"] = True
     retrieval_meta["activity"] = dict(activity)
     _flush_progress(force=True)
     source_ids = sorted(
@@ -33941,11 +33604,7 @@ def _run_shared_account_posts_stage(
         "account": account_handle,
         "source_ids": source_ids,
         "classify_jobs_enqueued": 0,
-        "persist_counters": {
-            "posts_upserted": len(rows),
-            "comments_upserted": comments_upserted,
-            "quotes_upserted": quotes_upserted,
-        },
+        "persist_counters": {"posts_upserted": len(rows), "comments_upserted": 0},
         "activity": dict(activity),
         "retrieval_meta": retrieval_meta,
         "expected_total_posts": expected_total_posts or None,
@@ -33953,7 +33612,7 @@ def _run_shared_account_posts_stage(
     }
     if str(config.get("partition_id") or "").strip():
         metadata["partition_id"] = str(config.get("partition_id") or "")
-    return len(rows), comments_upserted + quotes_upserted, metadata
+    return len(rows), 0, metadata
 
 
 def _run_shared_post_classify_stage(
@@ -34622,7 +34281,6 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
                     ),
                     catalog_action=str(config.get("catalog_action") or "").strip().lower() or None,
                     catalog_action_scope=str(config.get("catalog_action_scope") or "").strip().lower() or None,
-                    followup_config=config,
                     initiated_by=None,
                     worker_id=followup_worker_id,
                     priority=100,
@@ -35077,37 +34735,22 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     }
 
 
-def _dispatch_due_social_jobs_in_background(*, run_id: str) -> dict[str, Any]:
+def _dispatch_due_social_jobs_in_background(*, run_id: str) -> None:
     normalized_run_id = str(run_id or "").strip()
     if not normalized_run_id:
-        return {"submitted": False, "state": "missing_run_id", "run_id": normalized_run_id}
+        return
 
     def _runner() -> None:
-        dispatch_due_social_jobs(run_id=normalized_run_id)
+        try:
+            dispatch_due_social_jobs(run_id=normalized_run_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("[modal-dispatch] background dispatch failed run_id=%s", normalized_run_id)
 
-    task_result = submit_named_background_task(
-        group="social-dispatch",
-        key=normalized_run_id,
-        thread_name=f"dispatch-social-jobs:{normalized_run_id[:24]}",
+    Thread(
         target=_runner,
-    )
-    if task_result.get("state") == "duplicate":
-        logger.info(
-            "[modal-dispatch] background dispatch already queued run_id=%s state=%s",
-            normalized_run_id,
-            task_result.get("state"),
-        )
-    elif not task_result.get("submitted"):
-        logger.warning(
-            "[modal-dispatch] background dispatch queue unavailable run_id=%s state=%s active=%s queued=%s max=%s queue_max=%s",
-            normalized_run_id,
-            task_result.get("state"),
-            task_result.get("active_count"),
-            task_result.get("queued_count"),
-            task_result.get("max_active"),
-            task_result.get("queue_maxsize"),
-        )
-    return {**task_result, "run_id": normalized_run_id}
+        name=f"dispatch-social-jobs:{normalized_run_id[:24]}",
+        daemon=True,
+    ).start()
 
 
 def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, Any]:
@@ -36776,7 +36419,6 @@ def ingest_shared_accounts(
     details_refresh_skip_detail_fetch: bool | None = None,
     details_refresh_skip_media_followups: bool | None = None,
     tiktok_comments_in_posts_stage: bool = False,
-    twitter_comments_in_posts_stage: bool = False,
     tiktok_direct_comment_api_override: bool = False,
     launch_group_id: str | None = None,
     existing_run_id: str | None = None,
@@ -37021,7 +36663,6 @@ def ingest_shared_accounts(
         "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
         "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
         "tiktok_comments_in_posts_stage": bool(tiktok_comments_in_posts_stage),
-        "twitter_comments_in_posts_stage": bool(twitter_comments_in_posts_stage),
         "tiktok_direct_comment_api_override": bool(tiktok_direct_comment_api_override),
         "source_scope": source_scope,
         "platforms": sorted(normalized_platforms),
@@ -37145,9 +36786,6 @@ def ingest_shared_accounts(
                         "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
                         "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
                         "tiktok_comments_in_posts_stage": bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
-                        "twitter_comments_in_posts_stage": bool(
-                            platform == "twitter" and twitter_comments_in_posts_stage
-                        ),
                         "tiktok_direct_comment_api_override": bool(
                             platform == "tiktok" and tiktok_direct_comment_api_override
                         ),
@@ -37203,7 +36841,6 @@ def ingest_shared_accounts(
                 "details_refresh_skip_detail_fetch": effective_details_refresh_skip_detail_fetch,
                 "details_refresh_skip_media_followups": effective_details_refresh_skip_media_followups,
                 "tiktok_comments_in_posts_stage": bool(platform == "tiktok" and tiktok_comments_in_posts_stage),
-                "twitter_comments_in_posts_stage": bool(platform == "twitter" and twitter_comments_in_posts_stage),
                 "tiktok_direct_comment_api_override": bool(platform == "tiktok" and tiktok_direct_comment_api_override),
                 "launch_group_id": str(launch_group_id or "").strip() or None,
                 "required_execution_backend": (
@@ -37288,7 +36925,6 @@ def ingest_shared_accounts(
                     resume_frontier_snapshot=resume_frontier_snapshot,
                     catalog_action=normalized_catalog_action,
                     catalog_action_scope=normalized_catalog_action_scope,
-                    followup_config=job_config,
                     initiated_by=initiated_by,
                     worker_id=inline_worker_id,
                     priority=max(1, int(row.get("scrape_priority") or 100)),
@@ -52855,6 +52491,13 @@ def _social_account_profile_post_item(
     title = _social_account_profile_title_text(platform, row)
     content = _social_account_profile_content_text(platform, row)
     excerpt = content[:280].strip()
+    source_media_urls = _as_text_list(row.get("source_media_urls")) or _as_text_list(row.get("media_urls"))
+    hosted_media_urls = _as_text_list(row.get("hosted_media_urls"))
+    thumbnail_url = _first_non_empty_str(row.get("thumbnail_url"))
+    source_thumbnail_url = _first_non_empty_str(row.get("source_thumbnail_url"), thumbnail_url)
+    hosted_thumbnail_url = _first_non_empty_str(row.get("hosted_thumbnail_url"))
+    media_urls = _normalize_unique_terms([*hosted_media_urls, *source_media_urls])
+    post_format = _first_non_empty_str(row.get("post_format"), row.get("media_type"))
     payload = {
         "id": str(row.get("id") or ""),
         "source_id": str(row.get("source_id") or ""),
@@ -52881,6 +52524,20 @@ def _social_account_profile_post_item(
         "tags": tags,
         "metrics": metrics,
     }
+    if thumbnail_url:
+        payload["thumbnail_url"] = thumbnail_url
+    if source_thumbnail_url:
+        payload["source_thumbnail_url"] = source_thumbnail_url
+    if hosted_thumbnail_url:
+        payload["hosted_thumbnail_url"] = hosted_thumbnail_url
+    if source_media_urls:
+        payload["source_media_urls"] = source_media_urls
+    if hosted_media_urls:
+        payload["hosted_media_urls"] = hosted_media_urls
+    if media_urls:
+        payload["media_urls"] = media_urls
+    if post_format:
+        payload["post_format"] = post_format
     if "saved_comments" in row or normalized_platform in {"instagram", "tiktok", "twitter", "youtube"}:
         payload["saved_comments"] = _normalize_non_negative_int(row.get("saved_comments"))
     return payload
@@ -53096,7 +52753,7 @@ def _social_account_profile_exact_jsonb_term_sql(
     )
 
 
-SocialAccountProfileSummaryDetail = Literal["full", "lite"]
+SocialAccountProfileSummaryDetail = Literal["full", "distribution", "lite"]
 
 
 def _normalize_social_account_profile_summary_detail(
@@ -53105,6 +52762,8 @@ def _normalize_social_account_profile_summary_detail(
     normalized = str(detail or "lite").strip().lower()
     if normalized == "full":
         return "full"
+    if normalized == "distribution":
+        return "distribution"
     return "lite"
 
 
@@ -53386,17 +53045,11 @@ def _fetch_instagram_collaborator_catalog_rows(
         normalized_posted_since = (
             posted_since.astimezone(UTC) if posted_since.tzinfo else posted_since.replace(tzinfo=UTC)
         )
-    normalized_handle_sql = (
-        "nullif(regexp_replace(lower(regexp_replace(coalesce(%s, ''), '^@+', '')), '[^a-z0-9._-]+', '', 'g'), '')"
-    )
-    params: list[Any] = [normalized_account]
+    params: list[Any] = [normalized_account, normalized_account]
     posted_since_clause = ""
     if normalized_posted_since is not None:
-        posted_since_clause = "and p.posted_at >= %s"
+        posted_since_clause = "and m.posted_at >= %s"
         params.append(normalized_posted_since)
-    collaborator_value_sql = normalized_handle_sql.replace("%s", "collaborator.value")
-    collaborator_detail_value_sql = normalized_handle_sql.replace("%s", "collaborator_detail.value ->> 'username'")
-    params.extend([normalized_account, normalized_account])
     limit_clause = ""
     if limit is not None:
         limit_clause = "limit %s"
@@ -53404,23 +53057,12 @@ def _fetch_instagram_collaborator_catalog_rows(
     try:
         query = f"""
             {_instagram_catalog_profile_rows_select_sql()}
-            where lower(p.source_account) <> %s
+            join social.instagram_account_catalog_post_collaborators m
+              on m.catalog_post_id = p.id
+            where m.collaborator_handle = %s
+              and lower(p.source_account) <> %s
               {posted_since_clause}
-              and (
-                    exists (
-                        select 1
-                        from jsonb_array_elements_text(coalesce(p.collaborators, '[]'::jsonb)) as collaborator(value)
-                        where {collaborator_value_sql} = %s
-                    )
-                 or exists (
-                        select 1
-                        from jsonb_array_elements(
-                            coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb)
-                        ) as collaborator_detail(value)
-                        where {collaborator_detail_value_sql} = %s
-                    )
-              )
-            order by p.posted_at desc nulls last, p.id desc
+            order by m.posted_at desc nulls last, m.catalog_post_id desc
             {limit_clause}
             """
         if conn is not None:
@@ -53508,36 +53150,23 @@ def _instagram_social_account_profile_has_collaborator_catalog_rows(
     if not normalized_account:
         return False
 
-    normalized_handle_sql = (
-        "nullif(regexp_replace(lower(regexp_replace(coalesce(%s, ''), '^@+', '')), '[^a-z0-9._-]+', '', 'g'), '')"
-    )
-    collaborator_value_sql = normalized_handle_sql.replace("%s", "collaborator.value")
-    collaborator_detail_value_sql = normalized_handle_sql.replace("%s", "collaborator_detail.value ->> 'username'")
-    sql = f"""
+    sql = """
             select 1
-            from social.instagram_account_catalog_posts p
-            where lower(p.source_account) <> %s
-              and (
-                    exists (
-                        select 1
-                        from jsonb_array_elements_text(coalesce(p.collaborators, '[]'::jsonb)) as collaborator(value)
-                        where {collaborator_value_sql} = %s
-                    )
-                 or exists (
-                        select 1
-                        from jsonb_array_elements(
-                            coalesce(to_jsonb(p) -> 'collaborators_detail', '[]'::jsonb)
-                        ) as collaborator_detail(value)
-                        where {collaborator_detail_value_sql} = %s
-                    )
-              )
+            from social.instagram_account_catalog_post_collaborators m
+            join social.instagram_account_catalog_posts p
+              on p.id = m.catalog_post_id
+            where m.collaborator_handle = %s
+              and lower(p.source_account) <> %s
             limit 1
             """
-    if conn is None:
-        row = pg.fetch_one(sql, [normalized_account, normalized_account, normalized_account]) or {}
-    else:
-        with pg.db_cursor(conn=conn, label="instagram_profile_has_collaborator_catalog_rows") as cur:
-            row = pg.fetch_one_with_cursor(cur, sql, [normalized_account, normalized_account, normalized_account]) or {}
+    try:
+        if conn is None:
+            row = pg.fetch_one(sql, [normalized_account, normalized_account]) or {}
+        else:
+            with pg.db_cursor(conn=conn, label="instagram_profile_has_collaborator_catalog_rows") as cur:
+                row = pg.fetch_one_with_cursor(cur, sql, [normalized_account, normalized_account]) or {}
+    except psycopg_errors.UndefinedTable:
+        return False
     return bool(row)
 
 
@@ -53657,8 +53286,15 @@ def _fetch_materialized_comments_only_profile_rows_page(
     conn: Any | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
-    if normalized_platform not in {"tiktok", "twitter", "youtube"}:
+    if normalized_platform not in {"instagram", "tiktok", "twitter", "youtube"}:
         raise ValueError(f"Unsupported comments-only fast path platform: {platform}")
+    if normalized_platform == "instagram":
+        return _fetch_instagram_comments_only_profile_rows_page(
+            account_handle,
+            page=page,
+            page_size=page_size,
+            conn=conn,
+        )
     table, source_id_column, posted_at_column = _social_account_profile_base_query_parts(normalized_platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     safe_page = max(1, int(page))
@@ -53668,7 +53304,7 @@ def _fetch_materialized_comments_only_profile_rows_page(
     base_rows_sql = f"""
         with base_rows as (
           select
-            p.id::text as id,
+            p.id::text as profile_row_id,
             p.show_id::text as show_id,
             p.season_id::text as season_id,
             p.source_account,
@@ -53732,7 +53368,7 @@ def _fetch_materialized_comments_only_profile_rows_page(
         """
     else:
         comment_table = PLATFORM_COMMENT_TABLES[normalized_platform]
-        fk_col = "post_id" if normalized_platform == "tiktok" else "video_id"
+        fk_col = "post_id" if normalized_platform in {"instagram", "tiktok"} else "video_id"
         active_filter = (
             "and coalesce(c.is_missing, false) = false"
             if _comment_lifecycle_supported(comment_table, conn=conn)
@@ -53745,7 +53381,7 @@ def _fetch_materialized_comments_only_profile_rows_page(
                 c.{fk_col}::text as join_key,
                 count(*)::int as saved_comments
               from social.{comment_table} c
-              join base_rows p on p.id = c.{fk_col}::text
+              join base_rows p on p.profile_row_id = c.{fk_col}::text
               where 1 = 1
                 {active_filter}
               group by c.{fk_col}
@@ -53755,7 +53391,7 @@ def _fetch_materialized_comments_only_profile_rows_page(
                 base_rows.*,
                 coalesce(saved_comment_counts.saved_comments, 0)::int as saved_comments
               from base_rows
-              left join saved_comment_counts on saved_comment_counts.join_key = base_rows.id
+              left join saved_comment_counts on saved_comment_counts.join_key = base_rows.profile_row_id
               where greatest(
                 coalesce(base_rows.comments_count, 0),
                 coalesce(saved_comment_counts.saved_comments, 0)
@@ -53786,6 +53422,105 @@ def _fetch_materialized_comments_only_profile_rows_page(
         with pg.db_cursor(conn=conn, label=f"{normalized_platform}_comments_only_profile_rows") as cur:
             rows = pg.fetch_all_with_cursor(cur, page_sql, page_params)
     return rows, _normalize_non_negative_int(total_row.get("total"))
+
+
+def _fetch_instagram_comments_only_profile_rows_page(
+    account_handle: str,
+    *,
+    page: int,
+    page_size: int,
+    conn: Any | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    safe_page = max(1, int(page))
+    safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
+    safe_offset = (safe_page - 1) * safe_page_size
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    active_filter = (
+        "and coalesce(c.is_missing, false) = false"
+        if _comment_lifecycle_supported("instagram_comments", conn=conn)
+        else ""
+    )
+    eligible_posts_where_sql = f"""
+          {owner_match_clause}
+          and nullif(p.shortcode, '') is not null
+          and greatest(coalesce(p.comments_count, 0), 0) > 0
+    """
+    total_sql = f"""
+        select count(*)::int as total
+        from social.instagram_posts p
+        where {eligible_posts_where_sql}
+    """
+    page_sql = f"""
+        with page_rows as materialized (
+          select
+            p.id::text as id,
+            p.id::text as profile_row_id,
+            p.show_id::text as show_id,
+            p.season_id::text as season_id,
+            p.source_account,
+            p.shortcode as source_id,
+            p.shortcode as shortcode,
+            p.posted_at,
+            s.season_number,
+            sh.name as show_name,
+            sh.slug as show_slug,
+            null::text as title,
+            p.caption,
+            null::text as description,
+            null::text as text,
+            p.media_type,
+            coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+            nullif(p.thumbnail_url, '') as thumbnail_url,
+            coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+            coalesce(p.mentions, '[]'::jsonb) as mentions,
+            coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+            coalesce(p.profile_tags, '[]'::jsonb) as profile_tags,
+            coalesce(p.likes, 0)::bigint as likes,
+            coalesce(p.comments_count, 0)::bigint as comments_count,
+            coalesce(p.views, 0)::bigint as views,
+            0::bigint as shares,
+            0::bigint as retweets,
+            0::bigint as replies_count,
+            0::bigint as quotes,
+            coalesce(p.raw_data, '{{}}'::jsonb) as raw_data,
+            'materialized'::text as _profile_source_surface,
+            'owner'::text as _profile_match_mode,
+            3::int as _profile_dataset_priority
+          from social.instagram_posts p
+          left join core.seasons s on s.id = p.season_id
+          left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+          where {eligible_posts_where_sql}
+          order by p.posted_at desc nulls last, p.id desc
+          limit %s offset %s
+        ),
+        saved_comment_counts as (
+          select
+            c.post_id::text as profile_row_id,
+            count(*)::int as saved_comments
+          from social.instagram_comments c
+          where c.post_id in (select profile_row_id::uuid from page_rows)
+            {active_filter}
+          group by c.post_id
+        )
+        select
+          page_rows.*,
+          coalesce(saved_comment_counts.saved_comments, 0)::int as saved_comments
+        from page_rows
+        left join saved_comment_counts
+          on saved_comment_counts.profile_row_id = page_rows.profile_row_id
+        order by posted_at desc nulls last, id desc
+    """
+    if conn is None:
+        total_row = pg.fetch_one(total_sql, [normalized_account]) or {}
+        rows = pg.fetch_all(page_sql, [normalized_account, safe_page_size, safe_offset])
+    else:
+        with pg.db_cursor(conn=conn, label="instagram_comments_only_profile_total") as cur:
+            total_row = pg.fetch_one_with_cursor(cur, total_sql, [normalized_account]) or {}
+        with pg.db_cursor(conn=conn, label="instagram_comments_only_profile_rows") as cur:
+            rows = pg.fetch_all_with_cursor(cur, page_sql, [normalized_account, safe_page_size, safe_offset])
+    total = _normalize_non_negative_int(total_row.get("total"))
+    return rows, total
 
 
 def _annotate_instagram_social_account_profile_dataset_rows(
@@ -53866,6 +53601,26 @@ def _timed_social_account_profile_summary_query(
         elapsed_ms,
     )
     return result
+
+
+def _lite_social_account_catalog_run(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "job_id": row.get("job_id"),
+        "run_id": row.get("run_id"),
+        "status": row.get("status"),
+        "created_at": row.get("created_at"),
+        "started_at": row.get("started_at"),
+        "completed_at": row.get("completed_at"),
+        "error_message": row.get("error_message"),
+        "catalog_action": row.get("catalog_action"),
+        "catalog_action_scope": row.get("catalog_action_scope"),
+        "launch_group_id": row.get("launch_group_id"),
+        "launch_state": row.get("launch_state"),
+        "selected_tasks": row.get("selected_tasks") or [],
+        "effective_selected_tasks": row.get("effective_selected_tasks") or [],
+        "comments_run_id": row.get("comments_run_id"),
+        "attached_followups": row.get("attached_followups") or {},
+    }
 
 
 def _call_profile_summary_loader_with_conn(
@@ -54235,6 +53990,57 @@ def _fetch_social_account_profile_rows(
     return pg.fetch_all(query, params)
 
 
+def _fetch_instagram_social_account_profile_entity_rows(
+    account_handle: str,
+    *,
+    posted_since: datetime | None = None,
+    conn: Any | None = None,
+) -> list[dict[str, Any]]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    params: list[Any] = [normalized_account]
+    posted_since_clause = ""
+    if posted_since is not None:
+        normalized_posted_since = (
+            posted_since.astimezone(UTC) if posted_since.tzinfo else posted_since.replace(tzinfo=UTC)
+        )
+        posted_since_clause = "and p.posted_at >= %s"
+        params.append(normalized_posted_since)
+    query = f"""
+        select
+          p.id::text as id,
+          p.show_id::text as show_id,
+          p.season_id::text as season_id,
+          p.source_account,
+          p.shortcode as source_id,
+          p.shortcode as shortcode,
+          p.posted_at,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          null::text as title,
+          p.caption,
+          null::text as description,
+          null::text as text,
+          coalesce(p.hashtags, '[]'::jsonb) as hashtags,
+          coalesce(p.mentions, '[]'::jsonb) as mentions,
+          coalesce(p.collaborators, '[]'::jsonb) as collaborators,
+          coalesce(p.collaborators_detail, '[]'::jsonb) as collaborators_detail,
+          coalesce(p.profile_tags, '[]'::jsonb) as profile_tags
+        from social.instagram_posts p
+        left join core.seasons s on s.id = p.season_id
+        left join core.shows sh on sh.id = coalesce(p.show_id, s.show_id)
+        where {owner_match_clause}
+          and nullif(p.shortcode, '') is not null
+          {posted_since_clause}
+        order by p.posted_at desc nulls last, p.id desc
+        """
+    if conn is not None:
+        with pg.db_cursor(conn=conn, label="instagram_profile_entity_rows") as cur:
+            return pg.fetch_all_with_cursor(cur, query, params)
+    return pg.fetch_all(query, params)
+
+
 def _fetch_social_account_profile_materialized_row(
     platform: str,
     account_handle: str,
@@ -54467,6 +54273,58 @@ def _social_account_profile_grouped_counts(
             order by count(*) desc, sh.name asc, s.season_number asc
         """
     return [row for row in pg.fetch_all(sql, [normalized_account]) if row.get("show_id") or row.get("season_id")]
+
+
+def _shared_catalog_grouped_counts(
+    platform: str,
+    account_handle: str,
+    *,
+    group_by: Literal["show", "season"],
+    conn: Any | None = None,
+) -> list[dict[str, Any]]:
+    table, _, _ = _shared_catalog_base_query_parts(platform)
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    engagement_expr = _social_account_profile_engagement_sql(platform)
+    if group_by == "show":
+        sql = f"""
+            select
+              sh.id::text as show_id,
+              sh.name as show_name,
+              sh.slug as show_slug,
+              count(*)::int as post_count,
+              coalesce(sum({engagement_expr}), 0)::bigint as engagement
+            from social.{table} p
+            left join core.seasons s on s.id = p.assigned_season_id
+            left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+            where lower(p.source_account) = %s
+              and (p.assigned_show_id is not null or p.assigned_season_id is not null)
+            group by sh.id, sh.name, sh.slug
+            order by count(*) desc, sh.name asc
+        """
+    else:
+        sql = f"""
+            select
+              s.id::text as season_id,
+              s.season_number,
+              sh.id::text as show_id,
+              sh.name as show_name,
+              sh.slug as show_slug,
+              count(*)::int as post_count,
+              coalesce(sum({engagement_expr}), 0)::bigint as engagement
+            from social.{table} p
+            left join core.seasons s on s.id = p.assigned_season_id
+            left join core.shows sh on sh.id = coalesce(p.assigned_show_id, s.show_id)
+            where lower(p.source_account) = %s
+              and p.assigned_season_id is not null
+            group by s.id, s.season_number, sh.id, sh.name, sh.slug
+            order by count(*) desc, sh.name asc, s.season_number asc
+        """
+    if conn is None:
+        rows = pg.fetch_all(sql, [normalized_account])
+    else:
+        with pg.db_cursor(conn=conn, label=f"shared_catalog_{group_by}_counts") as cur:
+            rows = pg.fetch_all_with_cursor(cur, sql, [normalized_account])
+    return [row for row in rows if row.get("show_id") or row.get("season_id")]
 
 
 def _social_account_profile_grouped_counts_from_rows(
@@ -54962,7 +54820,55 @@ def get_social_account_profile_summary(
                     normalized_account,
                     conn=summary_conn,
                 )
-            if normalized_detail == "lite":
+            if normalized_detail == "distribution":
+                if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS):
+                    per_show_counts = _timed_social_account_profile_summary_query(
+                        platform=normalized_platform,
+                        account_handle=normalized_account,
+                        query_name="catalog_show_distribution",
+                        loader=lambda: _call_profile_summary_loader_with_conn(
+                            _shared_catalog_grouped_counts,
+                            normalized_platform,
+                            normalized_account,
+                            group_by="show",
+                            conn=summary_conn,
+                        ),
+                        fallback=lambda _exc: [],
+                    )
+                    per_season_counts = _timed_social_account_profile_summary_query(
+                        platform=normalized_platform,
+                        account_handle=normalized_account,
+                        query_name="catalog_season_distribution",
+                        loader=lambda: _call_profile_summary_loader_with_conn(
+                            _shared_catalog_grouped_counts,
+                            normalized_platform,
+                            normalized_account,
+                            group_by="season",
+                            conn=summary_conn,
+                        ),
+                        fallback=lambda _exc: [],
+                    )
+                else:
+                    per_show_counts, per_season_counts = (
+                        _social_account_profile_grouped_counts(
+                            normalized_platform,
+                            normalized_account,
+                            group_by="show",
+                        ),
+                        _social_account_profile_grouped_counts(
+                            normalized_platform,
+                            normalized_account,
+                            group_by="season",
+                        ),
+                    )
+                return {
+                    "summary_detail": "distribution",
+                    "platform": normalized_platform,
+                    "account_handle": normalized_account,
+                    "per_show_counts": per_show_counts,
+                    "per_season_counts": per_season_counts,
+                }
+            if normalized_detail in {"lite", "distribution"}:
                 analysis_rows = []
                 row_totals = {}
                 catalog_dataset_rows = False
@@ -55037,7 +54943,7 @@ def get_social_account_profile_summary(
                     account_handle=normalized_account,
                     query_name="recent_catalog_runs",
                     loader=lambda: _call_profile_summary_loader_with_conn(
-                        _catalog_recent_runs,
+                        _catalog_recent_runs_header if normalized_detail in {"lite", "distribution"} else _catalog_recent_runs,
                         normalized_platform,
                         normalized_account,
                         conn=summary_conn,
@@ -55045,7 +54951,19 @@ def get_social_account_profile_summary(
                     ),
                     fallback=lambda _exc: [],
                 )
-            if normalized_platform == "instagram" and normalized_detail == "full":
+            if normalized_platform == "instagram" and normalized_detail in {"lite", "distribution"}:
+                query_loaders["lite_header_stats"] = lambda: _timed_social_account_profile_summary_query(
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    query_name="lite_header_stats",
+                    loader=lambda: _call_profile_summary_loader_with_conn(
+                        _instagram_social_account_lite_header_stats,
+                        normalized_account,
+                        conn=summary_conn,
+                    ),
+                    fallback=lambda _exc: {},
+                )
+            elif normalized_platform == "instagram" and normalized_detail == "full":
                 query_loaders["detail_rollup"] = lambda: _timed_social_account_profile_summary_query(
                     platform=normalized_platform,
                     account_handle=normalized_account,
@@ -55078,10 +54996,20 @@ def get_social_account_profile_summary(
             assignment_rows = list(query_results.get("assignment_rows") or [])
             catalog_totals = dict(query_results.get("catalog_totals") or {})
             recent_catalog_runs = list(query_results.get("recent_catalog_runs") or [])
+            if normalized_detail in {"lite", "distribution"}:
+                recent_catalog_runs = [_lite_social_account_catalog_run(row) for row in recent_catalog_runs[:3]]
             detail_rollup = query_results.get("detail_rollup")
+            lite_header_stats = query_results.get("lite_header_stats")
+            lite_comments_saved_summary = (
+                lite_header_stats.get("comments_saved_summary")
+                if isinstance(lite_header_stats, Mapping)
+                else None
+            )
             comments_saved_summary = (
                 _instagram_comments_saved_summary_from_detail_rollup(detail_rollup)
                 if isinstance(detail_rollup, dict)
+                else dict(lite_comments_saved_summary)
+                if isinstance(lite_comments_saved_summary, Mapping)
                 else None
             )
             comments_coverage_recent_runs = list(comments_coverage_state.get("recent_runs") or [])
@@ -55099,8 +55027,15 @@ def get_social_account_profile_summary(
                 comments_saved_summary=comments_saved_summary,
                 active_run=active_comments_run,
             )
+            lite_media_coverage = (
+                lite_header_stats.get("media_coverage") if isinstance(lite_header_stats, Mapping) else None
+            )
             media_coverage = (
-                _instagram_media_coverage_from_detail_rollup(detail_rollup) if isinstance(detail_rollup, dict) else None
+                _instagram_media_coverage_from_detail_rollup(detail_rollup)
+                if isinstance(detail_rollup, dict)
+                else dict(lite_media_coverage)
+                if isinstance(lite_media_coverage, Mapping)
+                else None
             )
 
             with _social_profile_perf_span(breakdown, "summary_totals"):
@@ -55112,6 +55047,10 @@ def get_social_account_profile_summary(
                         lambda: (
                             row_totals
                             if normalized_platform == "instagram" and catalog_dataset_rows
+                            else dict(lite_header_stats.get("totals") or {})
+                            if normalized_platform == "instagram"
+                            and normalized_detail in {"lite", "distribution"}
+                            and isinstance(lite_header_stats, Mapping)
                             else _merge_social_account_profile_summary_totals(
                                 _call_profile_summary_loader_with_conn(
                                     _social_account_profile_summary_totals,
@@ -55137,6 +55076,48 @@ def get_social_account_profile_summary(
                 hashtag_items = []
                 per_show_counts = []
                 per_season_counts = []
+            elif normalized_detail == "distribution":
+                hashtag_items = []
+                if normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS):
+                    per_show_counts = _timed_social_account_profile_summary_query(
+                        platform=normalized_platform,
+                        account_handle=normalized_account,
+                        query_name="catalog_show_distribution",
+                        loader=lambda: _call_profile_summary_loader_with_conn(
+                            _shared_catalog_grouped_counts,
+                            normalized_platform,
+                            normalized_account,
+                            group_by="show",
+                            conn=summary_conn,
+                        ),
+                        fallback=lambda _exc: [],
+                    )
+                    per_season_counts = _timed_social_account_profile_summary_query(
+                        platform=normalized_platform,
+                        account_handle=normalized_account,
+                        query_name="catalog_season_distribution",
+                        loader=lambda: _call_profile_summary_loader_with_conn(
+                            _shared_catalog_grouped_counts,
+                            normalized_platform,
+                            normalized_account,
+                            group_by="season",
+                            conn=summary_conn,
+                        ),
+                        fallback=lambda _exc: [],
+                    )
+                else:
+                    per_show_counts, per_season_counts = (
+                        _social_account_profile_grouped_counts(
+                            normalized_platform,
+                            normalized_account,
+                            group_by="show",
+                        ),
+                        _social_account_profile_grouped_counts(
+                            normalized_platform,
+                            normalized_account,
+                            group_by="season",
+                        ),
+                    )
             elif normalized_platform in set(CATALOG_SUPPORTED_PLATFORMS) and normalized_platform != "instagram":
                 hashtag_items = _build_social_account_profile_hashtag_items(
                     analysis_rows,
@@ -55194,14 +55175,19 @@ def get_social_account_profile_summary(
                 identity_fields.pop("profile_url", None),
                 _platform_profile_url_for_handle(normalized_platform, normalized_account),
             )
-            resolved_avatar_url = _first_non_empty_str(
-                _social_account_profile_avatar_url(
-                    normalized_platform,
-                    normalized_account,
-                    analysis_rows,
-                    conn=summary_conn,
-                ),
-                identity_fields.pop("avatar_url", None),
+            identity_avatar_url = identity_fields.pop("avatar_url", None)
+            resolved_avatar_url = (
+                _first_non_empty_str(identity_avatar_url)
+                if normalized_detail in {"lite", "distribution"}
+                else _first_non_empty_str(
+                    _social_account_profile_avatar_url(
+                        normalized_platform,
+                        normalized_account,
+                        analysis_rows,
+                        conn=summary_conn,
+                    ),
+                    identity_avatar_url,
+                )
             )
         with _social_profile_perf_span(breakdown, "finalize_payload"):
             primary_source_metadata = _metadata_dict((source_rows[0] or {}).get("metadata")) if source_rows else {}
@@ -55327,14 +55313,12 @@ def get_social_account_profile_posts(
     if normalized_platform == "instagram" and comments_only and normalized_search is None:
         with _social_account_profile_summary_connection("social-profile-posts-instagram-comments-only") as read_conn:
             _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
-            matching_rows = _instagram_social_account_profile_dataset_rows(
+            rows, total = _fetch_instagram_comments_only_profile_rows_page(
                 normalized_account,
-                search=None,
-                comments_only=True,
+                page=safe_page,
+                page_size=safe_page_size,
                 conn=read_conn,
             )
-            total = len(matching_rows)
-            rows = matching_rows[(safe_page - 1) * safe_page_size : safe_page * safe_page_size]
     elif normalized_platform in {"tiktok", "twitter", "youtube"} and comments_only and normalized_search is None:
         with _social_account_profile_summary_connection(
             f"social-profile-posts-{normalized_platform}-comments-only"
@@ -55478,6 +55462,146 @@ def _instagram_social_account_comments_target_counts(
     }
 
 
+def _instagram_comment_columns(*, conn: Any | None = None) -> set[str]:
+    try:
+        return _relation_columns("social", "instagram_comments", conn=conn)
+    except Exception:
+        return set()
+
+
+def _instagram_comment_jsonb_expr(column: str, columns: set[str], *, alias: str = "c") -> str:
+    normalized_column = str(column or "").strip()
+    if normalized_column and normalized_column in columns:
+        return f"coalesce({alias}.{normalized_column}, '[]'::jsonb)"
+    return f"coalesce(to_jsonb({alias}) -> '{normalized_column}', '[]'::jsonb)"
+
+
+def _instagram_comment_text_expr(column: str, columns: set[str], *, alias: str = "c") -> str:
+    normalized_column = str(column or "").strip()
+    if normalized_column and normalized_column in columns:
+        return f"{alias}.{normalized_column}"
+    return f"to_jsonb({alias}) ->> '{normalized_column}'"
+
+
+def _instagram_social_account_lite_header_stats(
+    account_handle: str,
+    *,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    normalized_account = _normalize_social_account_profile_handle(account_handle)
+    owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    comment_columns = _instagram_comment_columns(conn=conn)
+    lifecycle_supported = {"is_missing", "missing_at", "first_seen_at", "last_seen_at", "last_seen_run_id"}.issubset(
+        comment_columns
+    )
+    active_comment_filter = "and coalesce(c.is_missing, false) = false" if lifecycle_supported else ""
+    sql = f"""
+            with filtered_posts as materialized (
+              select
+                p.id,
+                p.posted_at,
+                coalesce(p.likes, 0)::bigint as likes,
+                greatest(0, coalesce(p.comments_count, 0))::int as reported_comments,
+                coalesce(p.views, 0)::bigint as views,
+                coalesce(p.media_urls, '[]'::jsonb) as media_urls,
+                coalesce(p.hosted_media_urls, '[]'::jsonb) as hosted_media_urls,
+                nullif(p.hosted_owner_profile_pic_url, '') as hosted_owner_profile_pic_url
+              from social.instagram_posts p
+              where {owner_match_clause}
+                and nullif(p.shortcode, '') is not null
+            ),
+            post_totals as (
+              select
+                count(*)::int as total_posts,
+                coalesce(sum(likes + reported_comments), 0)::bigint as total_engagement,
+                coalesce(sum(views), 0)::bigint as total_views,
+                min(posted_at) as first_post_at,
+                max(posted_at) as last_post_at,
+                count(*) filter (where reported_comments > 0)::int as retrieved_comment_posts,
+                coalesce(sum(reported_comments), 0)::int as retrieved_comments,
+                coalesce(sum(jsonb_array_length(media_urls)), 0)::int as total_post_media_files,
+                coalesce(
+                  sum(least(jsonb_array_length(hosted_media_urls), jsonb_array_length(media_urls))),
+                  0
+                )::int as saved_post_media_files,
+                count(distinct hosted_owner_profile_pic_url)::int as saved_avatar_files
+              from filtered_posts
+            ),
+            comment_totals as (
+              select
+                count(c.id)::int as saved_comments,
+                count(distinct c.post_id)::int as saved_comment_posts
+              from social.instagram_comments c
+              where c.post_id in (select id from filtered_posts)
+                {active_comment_filter}
+            )
+            select
+              post_totals.total_posts,
+              post_totals.total_engagement,
+              post_totals.total_views,
+              post_totals.first_post_at,
+              post_totals.last_post_at,
+              post_totals.total_post_media_files,
+              post_totals.saved_post_media_files,
+              comment_totals.saved_comments,
+              comment_totals.saved_comment_posts,
+              post_totals.saved_avatar_files,
+              post_totals.retrieved_comments,
+              post_totals.retrieved_comment_posts
+            from post_totals
+            cross join comment_totals
+            """
+    if conn is None:
+        row = pg.fetch_one(sql, [normalized_account]) or {}
+    else:
+        with pg.db_cursor(conn=conn, label="instagram_lite_header_stats") as cur:
+            row = pg.fetch_one_with_cursor(cur, sql, [normalized_account]) or {}
+    totals = {
+        "total_posts": _normalize_non_negative_int(row.get("total_posts")),
+        "total_engagement": _normalize_non_negative_int(row.get("total_engagement")),
+        "total_views": _normalize_non_negative_int(row.get("total_views")),
+        "first_post_at": row.get("first_post_at"),
+        "last_post_at": row.get("last_post_at"),
+    }
+
+    total_post_media_files = _normalize_non_negative_int(row.get("total_post_media_files"))
+    saved_post_media_files = min(_normalize_non_negative_int(row.get("saved_post_media_files")), total_post_media_files)
+    total_comment_media_files = 0
+    saved_comment_media_files = 0
+    total_reel_still_files = 0
+    saved_reel_still_files = 0
+    saved_comments = _normalize_non_negative_int(row.get("saved_comments"))
+    saved_comment_posts = _normalize_non_negative_int(row.get("saved_comment_posts"))
+    retrieved_comments = max(saved_comments, _normalize_non_negative_int(row.get("retrieved_comments")))
+    retrieved_comment_posts = max(
+        saved_comment_posts,
+        _normalize_non_negative_int(row.get("retrieved_comment_posts")),
+    )
+    total_files = total_post_media_files + total_comment_media_files + total_reel_still_files
+    saved_files = saved_post_media_files + saved_comment_media_files + saved_reel_still_files
+    return {
+        "totals": totals,
+        "comments_saved_summary": {
+            "saved_comments": saved_comments,
+            "retrieved_comments": retrieved_comments,
+            "saved_comment_posts": saved_comment_posts,
+            "retrieved_comment_posts": retrieved_comment_posts,
+            "saved_comment_media_files": saved_comment_media_files,
+        },
+        "media_coverage": {
+            "saved_files": min(saved_files, total_files),
+            "total_files": total_files,
+            "saved_post_media_files": saved_post_media_files,
+            "total_post_media_files": total_post_media_files,
+            "saved_comment_media_files": saved_comment_media_files,
+            "total_comment_media_files": total_comment_media_files,
+            "saved_avatar_files": _normalize_non_negative_int(row.get("saved_avatar_files")),
+            "saved_reel_still_files": saved_reel_still_files,
+            "total_reel_still_files": total_reel_still_files,
+        },
+    }
+
+
 def _instagram_social_account_comments_saved_summary(
     account_handle: str,
     *,
@@ -55485,9 +55609,15 @@ def _instagram_social_account_comments_saved_summary(
 ) -> dict[str, int]:
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
+    comment_columns = _instagram_comment_columns(conn=conn)
+    lifecycle_supported = {"is_missing", "missing_at", "first_seen_at", "last_seen_at", "last_seen_run_id"}.issubset(
+        comment_columns
+    )
+    hosted_comment_media_urls_expr = _instagram_comment_jsonb_expr("hosted_media_urls", comment_columns)
+    comment_media_urls_expr = _instagram_comment_jsonb_expr("media_urls", comment_columns)
     active_comment_filter = (
         "and coalesce(c.is_missing, false) = false"
-        if _call_profile_summary_loader_with_conn(_comment_lifecycle_supported, "instagram_comments", conn=conn)
+        if lifecycle_supported
         else ""
     )
     sql = f"""
@@ -55512,8 +55642,8 @@ def _instagram_social_account_comments_saved_summary(
                 coalesce(
                   sum(
                     least(
-                      coalesce(jsonb_array_length(coalesce(to_jsonb(c) -> 'hosted_media_urls', '[]'::jsonb)), 0),
-                      coalesce(jsonb_array_length(coalesce(to_jsonb(c) -> 'media_urls', '[]'::jsonb)), 0)
+                      jsonb_array_length({hosted_comment_media_urls_expr}),
+                      jsonb_array_length({comment_media_urls_expr})
                     )
                   ),
                   0
@@ -55567,9 +55697,19 @@ def _instagram_social_account_detail_rollup(
     owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
     thumbnail_expr = _instagram_posts_thumbnail_expr("p")
     post_format_expr = _instagram_posts_json_text_expr("p", "post_format")
+    comment_columns = _instagram_comment_columns(conn=conn)
+    lifecycle_supported = {"is_missing", "missing_at", "first_seen_at", "last_seen_at", "last_seen_run_id"}.issubset(
+        comment_columns
+    )
+    hosted_comment_media_urls_expr = _instagram_comment_jsonb_expr("hosted_media_urls", comment_columns)
+    comment_media_urls_expr = _instagram_comment_jsonb_expr("media_urls", comment_columns)
+    hosted_author_profile_pic_url_expr = _instagram_comment_text_expr(
+        "hosted_author_profile_pic_url",
+        comment_columns,
+    )
     active_comment_filter = (
         "and coalesce(c.is_missing, false) = false"
-        if _call_profile_summary_loader_with_conn(_comment_lifecycle_supported, "instagram_comments", conn=conn)
+        if lifecycle_supported
         else ""
     )
     posts_sql = f"""
@@ -55605,21 +55745,21 @@ def _instagram_social_account_detail_rollup(
                 count(c.id)::int as saved_comments,
                 count(distinct c.post_id)::int as saved_comment_posts,
                 coalesce(
-                  sum(jsonb_array_length(coalesce(to_jsonb(c) -> 'media_urls', '[]'::jsonb))),
+                  sum(jsonb_array_length({comment_media_urls_expr})),
                   0
                 )::int as total_comment_media_files,
                 coalesce(
                   sum(
                     least(
-                      coalesce(jsonb_array_length(coalesce(to_jsonb(c) -> 'hosted_media_urls', '[]'::jsonb)), 0),
-                      coalesce(jsonb_array_length(coalesce(to_jsonb(c) -> 'media_urls', '[]'::jsonb)), 0)
+                      jsonb_array_length({hosted_comment_media_urls_expr}),
+                      jsonb_array_length({comment_media_urls_expr})
                     )
                   ),
                   0
                 )::int as saved_comment_media_files,
                 coalesce(
-                  array_agg(distinct nullif(to_jsonb(c) ->> 'hosted_author_profile_pic_url', ''))
-                    filter (where nullif(to_jsonb(c) ->> 'hosted_author_profile_pic_url', '') is not null),
+                  array_agg(distinct nullif({hosted_author_profile_pic_url_expr}, ''))
+                    filter (where nullif({hosted_author_profile_pic_url_expr}, '') is not null),
                   '{{}}'::text[]
                 ) as hosted_author_profile_pic_urls
               from social.instagram_comments c
@@ -55812,9 +55952,19 @@ def _instagram_social_account_media_target_counts(
     owner_match_clause = _social_account_profile_owner_match_sql("instagram", alias="p")
     thumbnail_expr = _instagram_posts_thumbnail_expr("p")
     post_format_expr = _instagram_posts_json_text_expr("p", "post_format")
+    comment_columns = _instagram_comment_columns(conn=conn)
+    lifecycle_supported = {"is_missing", "missing_at", "first_seen_at", "last_seen_at", "last_seen_run_id"}.issubset(
+        comment_columns
+    )
+    hosted_comment_media_urls_expr = _instagram_comment_jsonb_expr("hosted_media_urls", comment_columns)
+    comment_media_urls_expr = _instagram_comment_jsonb_expr("media_urls", comment_columns)
+    hosted_author_profile_pic_url_expr = _instagram_comment_text_expr(
+        "hosted_author_profile_pic_url",
+        comment_columns,
+    )
     active_comment_filter = (
         "and coalesce(c.is_missing, false) = false"
-        if _call_profile_summary_loader_with_conn(_comment_lifecycle_supported, "instagram_comments", conn=conn)
+        if lifecycle_supported
         else ""
     )
     posts_sql = f"""
@@ -55838,20 +55988,20 @@ def _instagram_social_account_media_target_counts(
                 and nullif(p.shortcode, '') is not null
             )
             select
-              coalesce(sum(jsonb_array_length(coalesce(to_jsonb(c) -> 'media_urls', '[]'::jsonb))), 0)::int
+              coalesce(sum(jsonb_array_length({comment_media_urls_expr})), 0)::int
                 as total_comment_media_files,
               coalesce(
                 sum(
                   least(
-                    coalesce(jsonb_array_length(coalesce(to_jsonb(c) -> 'hosted_media_urls', '[]'::jsonb)), 0),
-                    coalesce(jsonb_array_length(coalesce(to_jsonb(c) -> 'media_urls', '[]'::jsonb)), 0)
+                    jsonb_array_length({hosted_comment_media_urls_expr}),
+                    jsonb_array_length({comment_media_urls_expr})
                   )
                 ),
                 0
               )::int as saved_comment_media_files,
               coalesce(
-                array_agg(distinct nullif(to_jsonb(c) ->> 'hosted_author_profile_pic_url', ''))
-                  filter (where nullif(to_jsonb(c) ->> 'hosted_author_profile_pic_url', '') is not null),
+                array_agg(distinct nullif({hosted_author_profile_pic_url_expr}, ''))
+                  filter (where nullif({hosted_author_profile_pic_url_expr}, '') is not null),
                 '{{}}'::text[]
               ) as hosted_author_profile_pic_urls
             from social.instagram_comments c
@@ -56881,12 +57031,24 @@ def get_social_account_profile_hashtags(
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
     assignment_rows = _fetch_social_account_profile_assignment_rows(normalized_platform, normalized_account)
     lookback_days = _social_account_profile_window_to_lookback_days(window)
+    preloaded_rows: list[dict[str, Any]] | None = None
+    if normalized_platform == "instagram":
+        posted_since = (
+            _now_utc() - timedelta(days=int(lookback_days))
+            if lookback_days is not None and lookback_days > 0
+            else None
+        )
+        preloaded_rows = _fetch_instagram_social_account_profile_entity_rows(
+            normalized_account,
+            posted_since=posted_since,
+        )
     return {
         "items": _social_account_profile_hashtag_items(
             normalized_platform,
             normalized_account,
             assignment_rows=assignment_rows,
             lookback_days=lookback_days,
+            rows=preloaded_rows,
         )
     }
 
@@ -56938,18 +57100,27 @@ def get_social_account_catalog_posts(
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     if normalized_platform not in set(CATALOG_SUPPORTED_PLATFORMS):
         raise ValueError("Catalog backfill is not supported for this platform.")
-    _assert_social_account_profile_exists(normalized_platform, normalized_account)
     safe_page = max(1, int(page))
     safe_page_size = max(1, min(int(page_size), _SOCIAL_ACCOUNT_PROFILE_MAX_PAGE_SIZE))
     statuses = [assignment_status] if assignment_status else None
-    total = _shared_catalog_total_posts(normalized_platform, normalized_account, statuses=statuses)
-    rows = _fetch_shared_catalog_rows(
-        normalized_platform,
-        normalized_account,
-        limit=safe_page_size,
-        offset=(safe_page - 1) * safe_page_size,
-        statuses=statuses,
-    )
+    with _social_account_profile_summary_connection(
+        f"social-profile-catalog-posts-{normalized_platform}"
+    ) as read_conn:
+        _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=read_conn)
+        total = _shared_catalog_total_posts(
+            normalized_platform,
+            normalized_account,
+            statuses=statuses,
+            conn=read_conn,
+        )
+        rows = _fetch_shared_catalog_rows(
+            normalized_platform,
+            normalized_account,
+            limit=safe_page_size,
+            offset=(safe_page - 1) * safe_page_size,
+            statuses=statuses,
+            conn=read_conn,
+        )
     return {
         "items": [
             _social_account_profile_post_item(
@@ -58164,7 +58335,8 @@ def _social_account_catalog_start_lock_key(platform: str, account_handle: str) -
 
 
 def _catalog_launch_initial_status(*, allow_local_dev_inline_bypass: bool) -> str:
-    del allow_local_dev_inline_bypass
+    if allow_local_dev_inline_bypass or not is_queue_enabled():
+        return "pending"
     return "queued"
 
 
@@ -58505,7 +58677,6 @@ def start_social_account_catalog_backfill(
     details_refresh_skip_detail_fetch: bool | None = None,
     details_refresh_skip_media_followups: bool | None = None,
     tiktok_comments_in_posts_stage: bool = False,
-    twitter_comments_in_posts_stage: bool = False,
     tiktok_direct_comment_api_override: bool = False,
     launch_group_id: str | None = None,
     existing_run_id: str | None = None,
@@ -58625,7 +58796,6 @@ def start_social_account_catalog_backfill(
             details_refresh_skip_detail_fetch=details_refresh_skip_detail_fetch,
             details_refresh_skip_media_followups=details_refresh_skip_media_followups,
             tiktok_comments_in_posts_stage=tiktok_comments_in_posts_stage,
-            twitter_comments_in_posts_stage=twitter_comments_in_posts_stage,
             tiktok_direct_comment_api_override=tiktok_direct_comment_api_override,
             launch_group_id=launch_group_id,
             existing_run_id=run_id,
@@ -58979,9 +59149,6 @@ def launch_social_account_catalog_backfill(
             social_account_post_details_only=effective_selected_tasks == ["post_details"],
             details_refresh_skip_detail_fetch="post_details" not in effective_selected_tasks,
             details_refresh_skip_media_followups="media" not in effective_selected_tasks,
-            twitter_comments_in_posts_stage=(
-                normalized_platform == "twitter" and "comments" in effective_selected_tasks
-            ),
             launch_group_id=launch_group_id,
             existing_run_id=existing_catalog_run_id,
         )
@@ -60107,7 +60274,6 @@ def execute_social_account_catalog_run_auth_repair(
                     frontier_auth_reason=None,
                     transport_preference="authenticated",
                     allow_public_transport_fallback=False,
-                    followup_config=run_config,
                     initiated_by=initiated_by,
                     priority=100,
                     recovery_depth=_normalize_non_negative_int(run_config.get("recovery_depth")) + 1,
@@ -60463,7 +60629,11 @@ def get_social_account_profile_collaborators_tags(platform: str, account_handle:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
-    rows = _social_account_profile_analysis_rows(normalized_platform, normalized_account)
+    rows = (
+        _fetch_instagram_social_account_profile_entity_rows(normalized_account)
+        if normalized_platform == "instagram"
+        else _social_account_profile_analysis_rows(normalized_platform, normalized_account)
+    )
     payload = _build_social_account_profile_entity_aggregates(
         rows,
         platform=normalized_platform,

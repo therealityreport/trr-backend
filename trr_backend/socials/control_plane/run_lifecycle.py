@@ -6,7 +6,6 @@ from typing import Any
 
 import trr_backend.repositories.social_season_analytics as legacy
 
-
 SOCIAL_CONTROL_POOL_NAME = "social_control"
 
 
@@ -116,11 +115,11 @@ def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> Non
           end,
           completed_at = case
             when %s in ('completed', 'failed', 'cancelled') then coalesce(completed_at, now())
-            else null
+            else completed_at
           end,
           cancelled_at = case
             when %s = 'cancelled' then coalesce(cancelled_at, now())
-            else null
+            else cancelled_at
           end
         where id = %s
         returning id::text
@@ -685,7 +684,15 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
             return _finalize_run_status_locked(run_id, lock_conn, force_recompute=force_recompute)
     except legacy.pg.AdvisoryLockUnavailable:
         legacy.logger.debug("[finalize_run_status] skipped — another worker is finalizing run=%s", run_id[:8])
-        return {"status": "finalize_skipped_lock_busy"}
+        current = (
+            legacy.pg.fetch_one(
+                "select status from social.scrape_runs where id = %s",
+                [run_id],
+                pool_name=SOCIAL_CONTROL_POOL_NAME,
+            )
+            or {}
+        )
+        return {"status": current.get("status", "running")}
 
 
 def _finalize_run_status_locked(

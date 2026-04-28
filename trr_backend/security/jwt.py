@@ -63,7 +63,7 @@ def _candidate_supabase_project_ref() -> str | None:
         if project_ref:
             return project_ref
 
-    for db_env in ("TRR_DB_URL", "TRR_DB_FALLBACK_URL"):
+    for db_env in ("TRR_DB_DIRECT_URL", "TRR_DB_SESSION_URL", "TRR_DB_URL", "TRR_DB_FALLBACK_URL"):
         raw = (os.getenv(db_env) or "").strip()
         if not raw:
             continue
@@ -106,7 +106,7 @@ def describe_supabase_jwt_context() -> list[str]:
         if project_ref:
             project_ref_candidates[url_env] = project_ref
 
-    for db_env in ("TRR_DB_URL", "TRR_DB_FALLBACK_URL"):
+    for db_env in ("TRR_DB_DIRECT_URL", "TRR_DB_SESSION_URL", "TRR_DB_URL", "TRR_DB_FALLBACK_URL"):
         raw = (os.getenv(db_env) or "").strip()
         project_ref = _project_ref_from_db_url(raw)
         if project_ref:
@@ -116,7 +116,7 @@ def describe_supabase_jwt_context() -> list[str]:
     if not unique_project_refs:
         warnings.append(
             "Unable to derive a Supabase project ref from SUPABASE_PROJECT_REF, "
-            "TRR_CORE_SUPABASE_URL, SUPABASE_URL, TRR_DB_URL, or TRR_DB_FALLBACK_URL.",
+            "TRR_CORE_SUPABASE_URL, SUPABASE_URL, TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, TRR_DB_URL, or TRR_DB_FALLBACK_URL.",
         )
     elif len(unique_project_refs) > 1:
         rendered = ", ".join(f"{source}={ref}" for source, ref in sorted(project_ref_candidates.items()))

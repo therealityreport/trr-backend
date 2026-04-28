@@ -101,8 +101,14 @@ def test_progress_call_receives_account_identity_run_id_and_log_limit(monkeypatc
     summary_kwargs: dict[str, Any] = {}
     progress_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-    def fake_summary(**kwargs: Any) -> dict[str, Any]:
-        summary_kwargs.update(kwargs)
+    def fake_summary(*, platform: str, account_handle: str, detail: str) -> dict[str, Any]:
+        summary_kwargs.update(
+            {
+                "platform": platform,
+                "account_handle": account_handle,
+                "detail": detail,
+            }
+        )
         return _summary([{"id": "run-from-id", "run_status": "in_progress"}])
 
     def fake_progress(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -124,7 +130,6 @@ def test_progress_call_receives_account_identity_run_id_and_log_limit(monkeypatc
         "platform": "tiktok",
         "account_handle": "bravotv",
         "detail": "full",
-        "include_post_embeddings": False,
     }
     assert progress_calls == [(("tiktok", "bravotv", "run-from-id"), {"recent_log_limit": 100})]
 

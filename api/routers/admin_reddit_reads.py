@@ -7,13 +7,15 @@ import re
 import time
 from threading import Event, Lock
 from typing import Any
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from api.auth import InternalAdminUser
 from trr_backend.repositories import admin_reddit_reads as reddit_reads_repo
+from trr_backend.repositories import admin_reddit_sources as reddit_sources_repo
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,11 @@ def _cache_get(key: str) -> dict[str, Any] | None:
 def _cache_set(key: str, payload: dict[str, Any], ttl_seconds: int) -> None:
     with _CACHE_LOCK:
         _CACHE[key] = (time.monotonic() + ttl_seconds, payload)
+
+
+def _cache_clear() -> None:
+    with _CACHE_LOCK:
+        _CACHE.clear()
 
 
 def _get_or_build_cached_payload(
@@ -159,6 +166,100 @@ def _validate_uuid(value: str | None, field_name: str) -> None:
         raise HTTPException(status_code=400, detail=f"{field_name} must be a valid UUID")
 
 
+def _required_string(body: dict[str, Any], key: str) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail=f"{key} is required and must be a string")
+    return value.strip()
+
+
+def _optional_string_array(body: dict[str, Any], key: str) -> list[str] | None:
+    if key not in body:
+        return None
+    value = body.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise HTTPException(status_code=400, detail=f"{key} must be an array of strings")
+    return value
+
+
+def _validate_optional_object(body: dict[str, Any], key: str) -> dict[str, Any] | None:
+    if key not in body:
+        return None
+    value = body.get(key)
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail=f"{key} must be an object")
+    return value
+
+
+def _actor_uid(
+    admin: dict[str, Any] | None,
+    explicit_uid: str | None,
+    explicit_email: str | None,
+    explicit_id: str | None,
+) -> str:
+    for value in (
+        explicit_uid,
+        explicit_email,
+        explicit_id,
+        (admin or {}).get("admin_uid"),
+        (admin or {}).get("admin_email"),
+        (admin or {}).get("email"),
+        (admin or {}).get("id"),
+    ):
+        normalized = str(value or "").strip()
+        if normalized:
+            return normalized
+    return "admin"
+
+
+def _is_unique_violation(error: Exception) -> bool:
+    return getattr(error, "pgcode", None) == "23505" or getattr(error, "code", None) == "23505"
+
+
+def _is_reddit_host(hostname: str) -> bool:
+    host = hostname.lower()
+    return host in {"reddit.com", "redd.it"} or host.endswith(".reddit.com") or host.endswith(".redd.it")
+
+
+def _normalize_reddit_url(value: str, *, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    try:
+        parsed = urlparse(normalized)
+        if not parsed.scheme or not parsed.netloc or not _is_reddit_host(parsed.hostname or ""):
+            raise ValueError
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a valid Reddit URL") from exc
+    return normalized
+
+
+def _normalize_reddit_permalink(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if re.match(r"^https?://", normalized, re.I):
+        return _normalize_reddit_url(normalized, field_name="permalink")
+    if normalized.startswith("/"):
+        return _normalize_reddit_url(f"https://www.reddit.com{normalized}", field_name="permalink")
+    return _normalize_reddit_url(f"https://www.reddit.com/{normalized}", field_name="permalink")
+
+
+def _optional_nonnegative_number(body: dict[str, Any], key: str) -> int | None:
+    if key not in body:
+        return None
+    value = body.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return 0
+    return max(0, int(value))
+
+
+def _require_season_belongs_to_show(season_id: str, show_id: str, detail: str) -> None:
+    season_show_id, _query_count = reddit_sources_repo.get_season_show_id(season_id)
+    if season_show_id != show_id:
+        raise HTTPException(status_code=400, detail=detail)
+
+
 def _normalize_detail_part(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower()
     if not normalized:
@@ -218,6 +319,42 @@ def list_communities(
     return payload
 
 
+@router.post("/communities", status_code=201)
+def create_community(
+    body: dict[str, Any],
+    x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
+    x_trr_admin_user_email: str | None = Header(default=None, alias="X-TRR-Admin-User-Email"),
+    x_trr_admin_user_id: str | None = Header(default=None, alias="X-TRR-Admin-User-Id"),
+    admin: InternalAdminUser = None,
+) -> dict[str, Any]:
+    trr_show_id = _required_string(body, "trr_show_id")
+    _validate_uuid(trr_show_id, "trr_show_id")
+    _required_string(body, "trr_show_name")
+    _required_string(body, "subreddit")
+    for key in ("network_focus_targets", "franchise_focus_targets", "episode_title_patterns"):
+        _optional_string_array(body, key)
+    if "episode_required_flairs" in body:
+        raise HTTPException(
+            status_code=400,
+            detail="episode_required_flairs is no longer supported; use analysis_all_flairs",
+        )
+
+    try:
+        community, _query_count = reddit_sources_repo.create_reddit_community(
+            payload=body,
+            actor_uid=_actor_uid(admin or {}, x_trr_admin_user_uid, x_trr_admin_user_email, x_trr_admin_user_id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        if _is_unique_violation(exc):
+            raise HTTPException(status_code=409, detail="Community already exists for this show") from exc
+        raise
+
+    _cache_clear()
+    return {"community": community}
+
+
 @router.get("/communities/{community_id}")
 def get_community(community_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
     started_at = time.perf_counter()
@@ -237,6 +374,87 @@ def get_community(community_id: str, _: InternalAdminUser = None) -> dict[str, A
     )
     _log_read("community", query_count=query_count, payload=payload, cache_status=cache_status, started_at=started_at)
     return payload
+
+
+@router.patch("/communities/{community_id}")
+def update_community(
+    community_id: str,
+    body: dict[str, Any],
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    _validate_uuid(community_id, "community_id")
+    for key in (
+        "analysis_flairs",
+        "analysis_all_flairs",
+        "network_focus_targets",
+        "franchise_focus_targets",
+        "episode_title_patterns",
+    ):
+        _optional_string_array(body, key)
+    for key in ("post_flair_categories", "post_flair_assignments"):
+        _validate_optional_object(body, key)
+    if "episode_required_flairs" in body:
+        raise HTTPException(
+            status_code=400,
+            detail="episode_required_flairs is no longer supported; use analysis_all_flairs",
+        )
+    if "subreddit" in body and not isinstance(body.get("subreddit"), str):
+        raise HTTPException(status_code=400, detail="subreddit must be a string")
+
+    try:
+        community, _query_count = reddit_sources_repo.update_reddit_community(
+            community_id=community_id,
+            payload=body,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        if _is_unique_violation(exc):
+            raise HTTPException(status_code=409, detail="Community already exists for this show") from exc
+        raise
+
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    _cache_clear()
+    return {"community": community}
+
+
+@router.delete("/communities/{community_id}")
+def delete_community(community_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+    _validate_uuid(community_id, "community_id")
+    deleted, _query_count = reddit_sources_repo.delete_reddit_community(community_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Community not found")
+    _cache_clear()
+    return {"success": True}
+
+
+@router.post("/communities/{community_id}/post-flairs")
+@router.patch("/communities/{community_id}/post-flairs")
+def update_community_post_flairs(
+    community_id: str,
+    body: dict[str, Any],
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    _validate_uuid(community_id, "community_id")
+    post_flairs = _optional_string_array(body, "post_flairs")
+    if post_flairs is None:
+        raise HTTPException(status_code=400, detail="post_flairs must be an array of strings")
+    post_flairs_updated_at = body.get("post_flairs_updated_at")
+    if post_flairs_updated_at is not None and not isinstance(post_flairs_updated_at, str):
+        raise HTTPException(status_code=400, detail="post_flairs_updated_at must be a string")
+    community, _query_count = reddit_sources_repo.update_reddit_community_post_flairs(
+        community_id=community_id,
+        post_flairs=post_flairs,
+        post_flairs_updated_at=post_flairs_updated_at,
+    )
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    _cache_clear()
+    return {
+        "community": community,
+        "flairs": community.get("post_flairs") if isinstance(community.get("post_flairs"), list) else post_flairs,
+    }
 
 
 @router.get("/threads")
@@ -276,6 +494,73 @@ def list_threads(
     return payload
 
 
+@router.post("/threads", status_code=201)
+def create_thread(
+    body: dict[str, Any],
+    x_trr_admin_user_uid: str | None = Header(default=None, alias="X-TRR-Admin-User-Uid"),
+    x_trr_admin_user_email: str | None = Header(default=None, alias="X-TRR-Admin-User-Email"),
+    x_trr_admin_user_id: str | None = Header(default=None, alias="X-TRR-Admin-User-Id"),
+    admin: InternalAdminUser = None,
+) -> dict[str, Any]:
+    community_id = _required_string(body, "community_id")
+    trr_show_id = _required_string(body, "trr_show_id")
+    _required_string(body, "trr_show_name")
+    reddit_post_id = _required_string(body, "reddit_post_id")
+    title = _required_string(body, "title")
+    url = _required_string(body, "url")
+    _validate_uuid(community_id, "community_id")
+    _validate_uuid(trr_show_id, "trr_show_id")
+    if body.get("trr_season_id") is not None:
+        if not isinstance(body.get("trr_season_id"), str):
+            raise HTTPException(status_code=400, detail="trr_season_id must be a valid UUID")
+        _validate_uuid(str(body.get("trr_season_id")), "trr_season_id")
+    normalized_url = _normalize_reddit_url(url, field_name="url")
+    normalized_permalink = _normalize_reddit_permalink(body.get("permalink"))
+    if "source_kind" in body and body.get("source_kind") not in {"manual", "episode_discussion"}:
+        raise HTTPException(status_code=400, detail="source_kind must be one of: manual, episode_discussion")
+
+    community, _query_count = reddit_reads_repo.get_reddit_community_by_id(community_id)
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    if str(community.get("trr_show_id") or "") != trr_show_id:
+        raise HTTPException(status_code=400, detail="trr_show_id does not match selected community")
+    if isinstance(body.get("trr_season_id"), str):
+        _require_season_belongs_to_show(
+            str(body["trr_season_id"]),
+            trr_show_id,
+            "trr_season_id must belong to trr_show_id",
+        )
+
+    payload = {
+        **body,
+        "community_id": community_id,
+        "trr_show_id": trr_show_id,
+        "trr_show_name": community.get("trr_show_name") or body.get("trr_show_name"),
+        "trr_season_id": body.get("trr_season_id") if isinstance(body.get("trr_season_id"), str) else None,
+        "reddit_post_id": reddit_post_id,
+        "title": title,
+        "url": normalized_url,
+        "permalink": normalized_permalink,
+        "score": _optional_nonnegative_number(body, "score") if "score" in body else 0,
+        "num_comments": _optional_nonnegative_number(body, "num_comments") if "num_comments" in body else 0,
+        "author": body.get("author") if isinstance(body.get("author"), str) else None,
+        "posted_at": body.get("posted_at") if isinstance(body.get("posted_at"), str) else None,
+        "notes": body.get("notes") if isinstance(body.get("notes"), str) else None,
+    }
+    try:
+        thread, _query_count = reddit_sources_repo.create_reddit_thread(
+            payload=payload,
+            actor_uid=_actor_uid(admin or {}, x_trr_admin_user_uid, x_trr_admin_user_email, x_trr_admin_user_id),
+        )
+    except ValueError as exc:
+        if str(exc) == "Thread already exists in another community for this show":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _cache_clear()
+    return {"thread": thread}
+
+
 @router.get("/threads/{thread_id}")
 def get_thread(thread_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
     started_at = time.perf_counter()
@@ -295,6 +580,80 @@ def get_thread(thread_id: str, _: InternalAdminUser = None) -> dict[str, Any]:
     )
     _log_read("thread", query_count=query_count, payload=payload, cache_status=cache_status, started_at=started_at)
     return payload
+
+
+@router.patch("/threads/{thread_id}")
+def update_thread(
+    thread_id: str,
+    body: dict[str, Any],
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    _validate_uuid(thread_id, "thread_id")
+    if "community_id" in body:
+        if not isinstance(body.get("community_id"), str):
+            raise HTTPException(status_code=400, detail="community_id must be a valid UUID")
+        _validate_uuid(str(body.get("community_id")), "community_id")
+    if "trr_season_id" in body and body.get("trr_season_id") is not None:
+        if not isinstance(body.get("trr_season_id"), str):
+            raise HTTPException(status_code=400, detail="trr_season_id must be a valid UUID")
+        _validate_uuid(str(body.get("trr_season_id")), "trr_season_id")
+    if "url" in body:
+        if not isinstance(body.get("url"), str):
+            raise HTTPException(status_code=400, detail="url must be a string")
+        body["url"] = _normalize_reddit_url(str(body["url"]), field_name="url")
+    if "permalink" in body:
+        body["permalink"] = _normalize_reddit_permalink(body.get("permalink"))
+    if "source_kind" in body and body.get("source_kind") not in {"manual", "episode_discussion"}:
+        raise HTTPException(status_code=400, detail="source_kind must be one of: manual, episode_discussion")
+
+    existing_thread, _query_count = reddit_reads_repo.get_reddit_thread_by_id(thread_id)
+    if existing_thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    payload = dict(body)
+    next_show_id = str(existing_thread.get("trr_show_id") or "")
+    if isinstance(body.get("community_id"), str):
+        target_community, _query_count = reddit_reads_repo.get_reddit_community_by_id(str(body["community_id"]))
+        if target_community is None:
+            raise HTTPException(status_code=404, detail="Target community not found")
+        if str(target_community.get("trr_show_id") or "") != str(existing_thread.get("trr_show_id") or ""):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot reassign thread to a community belonging to a different show",
+            )
+        next_show_id = str(target_community.get("trr_show_id") or "")
+        payload["trr_show_id"] = target_community.get("trr_show_id")
+        payload["trr_show_name"] = target_community.get("trr_show_name")
+
+    if isinstance(body.get("trr_season_id"), str):
+        _require_season_belongs_to_show(
+            str(body["trr_season_id"]),
+            next_show_id,
+            "trr_season_id must belong to the thread show",
+        )
+    for key in ("score", "num_comments"):
+        number_value = _optional_nonnegative_number(body, key)
+        if number_value is not None:
+            payload[key] = number_value
+
+    try:
+        thread, _query_count = reddit_sources_repo.update_reddit_thread(thread_id=thread_id, payload=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    _cache_clear()
+    return {"thread": thread}
+
+
+@router.delete("/threads/{thread_id}")
+def delete_thread(thread_id: str, _: InternalAdminUser = None) -> dict[str, bool]:
+    _validate_uuid(thread_id, "thread_id")
+    deleted, _query_count = reddit_sources_repo.delete_reddit_thread(thread_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    _cache_clear()
+    return {"success": True}
 
 
 @router.get("/communities/{community_id}/stored-post-counts")

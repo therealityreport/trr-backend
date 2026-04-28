@@ -11,9 +11,10 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - None.
 
 ## Recent Completions
-- `FK Index Hardening Rollout — Closeout` | last updated `2026-04-20` | current phase `closeout complete` | next action `Monitor planner usage for the new indexes over the next 24-48h and merge the rollout branch via PR.` | details `local-status/fk-index-hardening-rollout-2026-04-20.md`
+- None.
 
 ## Older Plans
+- `FK Index Hardening Rollout — Closeout` | last updated `2026-04-20` | current phase `closeout complete` | next action `Monitor planner usage for the new indexes over the next 24-48h and merge the rollout branch via PR.` | details `local-status/fk-index-hardening-rollout-2026-04-20.md`
 - `TikTok vs. Instagram Scrapers — Comparison After Bug Fixes` | last updated `2026-04-14` | current phase `social scraper comparison` | next action `Use this comparison as continuity context for follow-up Instagram runtime hardening` | details `local-status/scraper-compare-2026-04-14.md`
 - `TASK28 Concerns remediation and Screenalytics contract lock` | last updated `2026-04-09` | current phase `backend contract cutover landed` | next action `continue backend decomposition and remove remaining Screenalytics compatibility surfaces` | details `../cross-collab/TASK28/STATUS.md`
 - `TASK27 Instagram Backfill Worker Reliability` | last updated `2026-04-07` | current phase `running targeted verification for the backend reliability changes` | next action `finish validation, update the runbook/status evidence, and close out the backend implementation summary` | details `../cross-collab/TASK27/STATUS.md`
@@ -23,7 +24,6 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - `TASK26 Instagram Shared-Profile Rollout Guardrails` | last updated `2026-04-04` | current phase `frontier/auth fix proven live; instagram session repair pending` | next action `repair the Instagram authenticated session, then rerun bounded canary and affected replay against the deployed backend` | details `../cross-collab/TASK26/STATUS.md`
 - `TASK24 Final Supabase connection audit and donor transition inventory` | last updated `2026-04-03` | current phase `phase 5 screentime runtime retirement implemented` | next action `treat the inventory as historical donor context; active screentime runtime dependency is retired` | details `../cross-collab/TASK24/STATUS.md`
 - `Screenalytics Decommission Ledger` | last updated `2026-04-03` | current phase `phase 5 screentime runtime retirement captured` | next action `Use this ledger as the canonical record that screentime is backend-only; remaining Screenalytics references are legacy or out of scope.` | details `local-status/screenalytics-decommission-ledger.md`
-- `Cloud-First Schema Validation Contract Phase 6` | last updated `2026-04-03` | current phase `phase 6 backend validation contract updated` | next action `Use the frozen remote-first validation contract when Phase 7 aligns backend defaults and workspace scripts.` | details `local-status/cloud-first-schema-validation-contract-phase6.md`
 
 ## Archives / Canonical Links
 - History archive: `archive/HANDOFF-legacy-2026-03-16.md`

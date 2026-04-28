@@ -152,9 +152,6 @@ class Tweet:
     user_id: str | None = None
     user_profile_url: str | None = None
     user_avatar_url: str | None = None
-    bookmarks: int = 0
-    shares: int = 0
-    conversation_id: str | None = None
 
     # Optional tracking metadata
     show_id: int | None = None
@@ -642,63 +639,6 @@ class TwitterScraper:
         elif 200 <= status_code < 400:
             self._consecutive_success += 1
 
-    @staticmethod
-    def _coerce_metric_count(value: Any) -> int:
-        if value is None or value == "":
-            return 0
-        try:
-            if isinstance(value, str):
-                normalized = value.strip().replace(",", "")
-                if not normalized:
-                    return 0
-                multiplier = 1
-                suffix = normalized[-1:].lower()
-                if suffix in {"k", "m", "b"}:
-                    normalized = normalized[:-1]
-                    multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}[suffix]
-                return int(float(normalized) * multiplier)
-            return int(value)
-        except Exception:
-            return 0
-
-    def _extract_metric_count(self, keys: tuple[str, ...], *payloads: dict[str, Any] | None) -> int:
-        for payload in payloads:
-            if not isinstance(payload, dict):
-                continue
-            for key in keys:
-                if key not in payload:
-                    continue
-                value = payload.get(key)
-                if value is None or value == "":
-                    continue
-                return self._coerce_metric_count(value)
-        return 0
-
-    @staticmethod
-    def _extract_optional_text_value(keys: tuple[str, ...], *payloads: dict[str, Any] | None) -> str | None:
-        for payload in payloads:
-            if not isinstance(payload, dict):
-                continue
-            for key in keys:
-                if key not in payload:
-                    continue
-                value = str(payload.get(key) or "").strip()
-                if value:
-                    return value
-        return None
-
-    def _extract_bookmark_count(self, *payloads: dict[str, Any] | None) -> int:
-        return self._extract_metric_count(("bookmark_count", "bookmarkCount", "bookmarks"), *payloads)
-
-    def _extract_share_count(self, *payloads: dict[str, Any] | None) -> int:
-        return self._extract_metric_count(("share_count", "shareCount", "shares", "share"), *payloads)
-
-    def _extract_conversation_id(self, *payloads: dict[str, Any] | None) -> str | None:
-        return self._extract_optional_text_value(
-            ("conversation_id_str", "conversation_id", "conversationId", "conversationID"),
-            *payloads,
-        )
-
     # Syndication endpoints (public, no auth required)
     SYNDICATION_TIMELINE_URL = "https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
     SYNDICATION_TWEET_RESULT_URL = "https://cdn.syndication.twimg.com/tweet-result?id={tweet_id}&lang=en&token={token}"
@@ -988,6 +928,12 @@ class TwitterScraper:
         profile_url = f"https://x.com/{username}" if username else None
         avatar_url = str(user.get("profile_image_url_https") or user.get("profile_image_url") or "").strip() or None
 
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return 0
+
         media_urls = self._extract_media_urls_from_syndication_result(payload)
         tweet_text = self._strip_media_url_text(
             text=str(payload.get("text") or ""),
@@ -1007,20 +953,12 @@ class TwitterScraper:
             "user_id": str(user.get("id_str") or user.get("id") or "").strip() or None,
             "user_profile_url": profile_url,
             "user_avatar_url": avatar_url,
-            "likes": self._coerce_metric_count(payload.get("favorite_count")),
-            "replies": self._coerce_metric_count(payload.get("conversation_count") or payload.get("reply_count")),
-            "retweets": self._coerce_metric_count(payload.get("retweet_count")),
-            "quotes": self._coerce_metric_count(payload.get("quote_count")),
-            "views": self._coerce_metric_count(payload.get("view_count") or payload.get("views")),
-            "bookmarks": self._extract_bookmark_count(payload),
-            "shares": self._extract_share_count(payload),
-            "conversation_id": self._extract_conversation_id(payload),
-            "reply_to_tweet_id": self._normalize_optional_tweet_id(
-                payload.get("in_reply_to_status_id_str") or payload.get("in_reply_to_status_id")
-            ),
-            "quoted_tweet_id": self._normalize_optional_tweet_id(
-                payload.get("quoted_status_id_str") or payload.get("quoted_status_id")
-            ),
+            "likes": _as_int(payload.get("favorite_count")),
+            "replies": _as_int(payload.get("conversation_count") or payload.get("reply_count")),
+            "retweets": _as_int(payload.get("retweet_count")),
+            "quotes": _as_int(payload.get("quote_count")),
+            "views": _as_int(payload.get("view_count") or payload.get("views")),
+            "bookmarks": _as_int(payload.get("bookmark_count")),
             "media_urls": media_urls,
         }
 
@@ -1110,41 +1048,8 @@ class TwitterScraper:
             or None,
         }
 
-    @staticmethod
-    def _unwrap_tweet_result(result: dict[str, Any]) -> dict[str, Any]:
-        if result.get("__typename") == "TweetWithVisibilityResults":
-            result = result.get("tweet", {})
-        return result if isinstance(result, dict) else {}
-
-    def _extract_tweet_detail_root_result(
-        self,
-        data: dict[str, Any],
-        normalized_id: str,
-    ) -> dict[str, Any] | None:
-        instructions = data.get("data", {}).get("threaded_conversation_with_injections_v2", {}).get("instructions", [])
-        for instruction in instructions:
-            if instruction.get("type") != "TimelineAddEntries":
-                continue
-            for entry in instruction.get("entries", []):
-                tweet_result = (
-                    entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
-                )
-                if not isinstance(tweet_result, dict):
-                    continue
-                candidate = self._unwrap_tweet_result(tweet_result)
-                rest_id = str(candidate.get("rest_id") or "").strip()
-                legacy = candidate.get("legacy", {}) if isinstance(candidate.get("legacy"), dict) else {}
-                legacy_id = str(legacy.get("id_str") or "").strip()
-                if (
-                    entry.get("entryId") == f"tweet-{normalized_id}"
-                    or rest_id == normalized_id
-                    or legacy_id == normalized_id
-                ):
-                    return candidate
-        return None
-
-    def _fetch_tweet_detail_result(self, tweet_id: str, delay: float = 0.0) -> dict[str, Any] | None:
-        """Fetch and return the focal TweetDetail result payload."""
+    def fetch_tweet_detail_summary(self, tweet_id: str, delay: float = 0.0) -> dict[str, Any] | None:
+        """Fetch root tweet metadata from TweetDetail GraphQL."""
         import json
         import urllib.parse
 
@@ -1203,24 +1108,43 @@ class TwitterScraper:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status is not None:
                 self._track_response_status(status)
-            logger.debug("Tweet detail request failed for %s: %s", normalized_id, exc)
+            logger.debug("Tweet detail summary request failed for %s: %s", normalized_id, exc)
             return None
         except Exception:
-            logger.debug("Tweet detail parse failed for %s", normalized_id, exc_info=True)
+            logger.debug("Tweet detail summary parse failed for %s", normalized_id, exc_info=True)
             return None
 
         if not isinstance(data, dict):
             return None
-        return self._extract_tweet_detail_root_result(data, normalized_id)
 
-    def fetch_tweet_detail_summary(self, tweet_id: str, delay: float = 0.0) -> dict[str, Any] | None:
-        """Fetch root tweet metadata from TweetDetail GraphQL."""
-        normalized_id = str(tweet_id or "").strip()
-        if not normalized_id:
-            return None
+        root_result: dict[str, Any] | None = None
+        instructions = data.get("data", {}).get("threaded_conversation_with_injections_v2", {}).get("instructions", [])
+        for instruction in instructions:
+            if instruction.get("type") != "TimelineAddEntries":
+                continue
+            for entry in instruction.get("entries", []):
+                tweet_result = (
+                    entry.get("content", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                )
+                if not isinstance(tweet_result, dict):
+                    continue
+                rest_id = str(tweet_result.get("rest_id") or "").strip()
+                legacy_id = str(tweet_result.get("legacy", {}).get("id_str") or "").strip()
+                if (
+                    entry.get("entryId") == f"tweet-{normalized_id}"
+                    or rest_id == normalized_id
+                    or legacy_id == normalized_id
+                ):
+                    root_result = tweet_result
+                    break
+            if root_result:
+                break
 
-        root_result = self._fetch_tweet_detail_result(normalized_id, delay=delay)
         if not root_result:
+            return None
+        if root_result.get("__typename") == "TweetWithVisibilityResults":
+            root_result = root_result.get("tweet", {})
+        if not isinstance(root_result, dict):
             return None
 
         legacy = root_result.get("legacy", {}) if isinstance(root_result.get("legacy"), dict) else {}
@@ -1231,6 +1155,12 @@ class TwitterScraper:
         user = user_result.get("legacy", {}) if isinstance(user_result.get("legacy"), dict) else {}
         user_core = user_result.get("core", {}) if isinstance(user_result.get("core"), dict) else {}
         username = str(user.get("screen_name") or user_core.get("screen_name") or "").strip()
+
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return 0
 
         views_data = root_result.get("views", {}) if isinstance(root_result.get("views"), dict) else {}
         media_urls, _ = self._extract_media_urls_from_tweet(
@@ -1258,110 +1188,14 @@ class TwitterScraper:
             "user_avatar_url": (
                 str(user.get("profile_image_url_https") or user.get("profile_image_url") or "").strip() or None
             ),
-            "likes": self._coerce_metric_count(legacy.get("favorite_count")),
-            "replies": self._coerce_metric_count(legacy.get("reply_count")),
-            "retweets": self._coerce_metric_count(legacy.get("retweet_count")),
-            "quotes": self._coerce_metric_count(legacy.get("quote_count")),
-            "views": self._coerce_metric_count(views_data.get("count")),
-            "bookmarks": self._extract_bookmark_count(legacy, root_result),
-            "shares": self._extract_share_count(legacy, root_result),
-            "conversation_id": self._extract_conversation_id(legacy, root_result),
-            "reply_to_tweet_id": self._normalize_optional_tweet_id(
-                legacy.get("in_reply_to_status_id_str") or legacy.get("in_reply_to_status_id")
-            ),
-            "quoted_tweet_id": self._normalize_optional_tweet_id(
-                legacy.get("quoted_status_id_str") or legacy.get("quoted_status_id")
-            ),
+            "likes": _as_int(legacy.get("favorite_count")),
+            "replies": _as_int(legacy.get("reply_count")),
+            "retweets": _as_int(legacy.get("retweet_count")),
+            "quotes": _as_int(legacy.get("quote_count")),
+            "views": _as_int(views_data.get("count")),
+            "bookmarks": _as_int(legacy.get("bookmark_count")),
             "media_urls": media_urls,
         }
-
-    @staticmethod
-    def _parse_twitter_created_at(value: Any) -> tuple[int, str]:
-        created_at_str = str(value or "").strip()
-        if not created_at_str:
-            return 0, ""
-        try:
-            created_at_dt = datetime.strptime(created_at_str, "%a %b %d %H:%M:%S %z %Y")
-        except (ValueError, TypeError):
-            try:
-                created_at_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                return 0, ""
-        return int(created_at_dt.timestamp()), created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    @staticmethod
-    def _has_minimum_tweet_identity(tweet: Tweet | None, expected_id: str | None = None) -> bool:
-        if not tweet:
-            return False
-        if expected_id and str(tweet.tweet_id or "").strip() != expected_id:
-            return False
-        return bool(str(tweet.tweet_id or "").strip() and str(tweet.username or "").strip())
-
-    def _tweet_from_summary(self, summary: dict[str, Any] | None, tweet_id: str) -> Tweet | None:
-        if not isinstance(summary, dict):
-            return None
-        normalized_id = str(summary.get("tweet_id") or tweet_id or "").strip()
-        username = str(summary.get("username") or "").strip()
-        text = str(summary.get("text") or "").strip()
-        media_urls = [
-            str(url).strip()
-            for url in summary.get("media_urls", []) or []
-            if str(url or "").strip()
-        ]
-        if not normalized_id or not username or (not text and not media_urls):
-            return None
-
-        created_at, date_time = self._parse_twitter_created_at(summary.get("created_at"))
-        reply_to_tweet_id = self._normalize_optional_tweet_id(summary.get("reply_to_tweet_id"))
-        quoted_tweet_id = self._normalize_optional_tweet_id(summary.get("quoted_tweet_id"))
-
-        return Tweet(
-            tweet_id=normalized_id,
-            date_time=date_time,
-            created_at=created_at,
-            text=text,
-            hashtags=self._extract_hashtags(text),
-            mentions=self._extract_mentions(text),
-            likes=self._coerce_metric_count(summary.get("likes")),
-            retweets=self._coerce_metric_count(summary.get("retweets")),
-            replies=self._coerce_metric_count(summary.get("replies")),
-            quotes=self._coerce_metric_count(summary.get("quotes")),
-            views=self._coerce_metric_count(summary.get("views")),
-            url=str(summary.get("url") or f"https://x.com/{username}/status/{normalized_id}").strip(),
-            username=username,
-            display_name=str(summary.get("display_name") or "").strip(),
-            user_verified=bool(summary.get("user_verified")),
-            is_reply=bool(reply_to_tweet_id),
-            is_retweet=False,
-            is_quote=bool(quoted_tweet_id),
-            reply_to_tweet_id=reply_to_tweet_id,
-            quoted_tweet_id=quoted_tweet_id,
-            media_urls=media_urls,
-            user_id=str(summary.get("user_id") or "").strip() or None,
-            user_profile_url=str(summary.get("user_profile_url") or f"https://x.com/{username}").strip(),
-            user_avatar_url=str(summary.get("user_avatar_url") or "").strip() or None,
-            bookmarks=self._coerce_metric_count(summary.get("bookmarks")),
-            shares=self._coerce_metric_count(summary.get("shares")),
-            conversation_id=self._normalize_optional_tweet_id(summary.get("conversation_id")),
-        )
-
-    def fetch_tweet_by_id(self, tweet_id: str, delay: float = 0.0) -> Tweet | None:
-        """Fetch a single tweet by id, preferring TweetDetail and falling back to public summary data."""
-        normalized_id = str(tweet_id or "").strip()
-        if not normalized_id:
-            return None
-
-        config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
-        detail_result = self._fetch_tweet_detail_result(normalized_id, delay=delay)
-        if detail_result:
-            tweet = self._parse_tweet_result(detail_result, config)
-            if self._has_minimum_tweet_identity(tweet, normalized_id):
-                return tweet
-
-        fallback = self._tweet_from_summary(self.fetch_public_tweet_summary(normalized_id, delay=delay), normalized_id)
-        if self._has_minimum_tweet_identity(fallback, normalized_id):
-            return fallback
-        return None
 
     @staticmethod
     def _normalize_optional_tweet_id(value: Any) -> str | None:
@@ -1382,7 +1216,6 @@ class TwitterScraper:
     def _parse_tweet_result(self, result: dict, config: TwitterScrapeConfig) -> Tweet | None:
         """Parse a tweet result from GraphQL response."""
         # Handle different result types
-        original_result = result
         if result.get("__typename") == "TweetWithVisibilityResults":
             result = result.get("tweet", {})
 
@@ -1421,7 +1254,7 @@ class TwitterScraper:
 
         # Get engagement metrics
         views_data = result.get("views", {})
-        views = self._coerce_metric_count(views_data.get("count"))
+        views = int(views_data.get("count", 0)) if views_data.get("count") else 0
 
         text = self._strip_media_url_text(
             text=str(tweet.get("full_text", "") or tweet.get("text", "")),
@@ -1457,9 +1290,6 @@ class TwitterScraper:
             user_id=user_id,
             user_profile_url=user_profile_url,
             user_avatar_url=user_avatar_url,
-            bookmarks=self._extract_bookmark_count(tweet, result, original_result),
-            shares=self._extract_share_count(tweet, result, original_result),
-            conversation_id=self._extract_conversation_id(tweet, result, original_result),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -1528,9 +1358,6 @@ class TwitterScraper:
             user_id=user_id,
             user_profile_url=user_profile_url,
             user_avatar_url=user_avatar_url,
-            bookmarks=self._extract_bookmark_count(tweet_data),
-            shares=self._extract_share_count(tweet_data),
-            conversation_id=self._extract_conversation_id(tweet_data),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -1607,18 +1434,6 @@ class TwitterScraper:
             or raw_data.get("retweeted_tweet_result")
             or str(getattr(raw_tweet, "retweeted_tweet_id", "") or "").strip()
         )
-        bookmarks = self._extract_bookmark_count(legacy, raw_data) or _as_int(
-            getattr(raw_tweet, "bookmark_count", 0) or getattr(raw_tweet, "bookmarks", 0)
-        )
-        shares = self._extract_share_count(legacy, raw_data) or _as_int(
-            getattr(raw_tweet, "share_count", 0) or getattr(raw_tweet, "shares", 0)
-        )
-        conversation_id = (
-            self._extract_conversation_id(legacy, raw_data)
-            or str(getattr(raw_tweet, "conversation_id", "") or "").strip()
-            or str(getattr(raw_tweet, "conversation_id_str", "") or "").strip()
-            or None
-        )
 
         return Tweet(
             tweet_id=tweet_id,
@@ -1654,9 +1469,6 @@ class TwitterScraper:
             )
             if user
             else None,
-            bookmarks=bookmarks,
-            shares=shares,
-            conversation_id=conversation_id,
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -2159,15 +1971,6 @@ class TwitterScraper:
                         )
                         if t.user
                         else None,
-                        bookmarks=self._coerce_metric_count(
-                            getattr(t, "bookmark_count", 0) or getattr(t, "bookmarks", 0)
-                        ),
-                        shares=self._coerce_metric_count(getattr(t, "share_count", 0) or getattr(t, "shares", 0)),
-                        conversation_id=(
-                            str(getattr(t, "conversation_id", "") or "").strip()
-                            or str(getattr(t, "conversation_id_str", "") or "").strip()
-                            or None
-                        ),
                         show_id=config.show_id,
                         season_number=config.season_number,
                         person_id=config.person_id,

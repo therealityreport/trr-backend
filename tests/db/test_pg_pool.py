@@ -12,30 +12,6 @@ from psycopg2.pool import PoolError
 from trr_backend.db import pg
 
 
-@pytest.fixture(autouse=True)
-def _clear_pool_sizing_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (
-        "APP_ENV",
-        "ENV",
-        "ENVIRONMENT",
-        "TRR_ENV",
-        "TRR_ENVIRONMENT",
-        "TRR_LOCAL_DEV",
-        "MODAL_TASK_ID",
-        "MODAL_ENVIRONMENT",
-        "TRR_DB_POOL_MINCONN",
-        "TRR_DB_POOL_MAXCONN",
-        "TRR_DB_APPLICATION_NAME",
-        "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN",
-        "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN",
-        "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN",
-        "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN",
-        "TRR_HEALTH_DB_POOL_MINCONN",
-        "TRR_HEALTH_DB_POOL_MAXCONN",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 class _FakeConnection:
     def __init__(self, *, query_results: list[dict[str, object] | None] | None = None) -> None:
         self.commit_calls = 0
@@ -91,6 +67,11 @@ class _FakeCursor:
         if not self._connection.query_results:
             return None
         return self._connection.query_results.pop(0)
+
+    def fetchall(self) -> list[dict[str, object]]:
+        rows = [row for row in self._connection.query_results if row is not None]
+        self._connection.query_results.clear()
+        return rows
 
 
 class _FakePool:
@@ -286,47 +267,6 @@ def test_db_read_connection_uses_health_pool_sizing(monkeypatch: pytest.MonkeyPa
     assert fake_pool.putconn_calls == 1
 
 
-def test_db_read_connection_uses_social_control_pool_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_pool = _FakePool()
-    created: list[tuple[int, int]] = []
-
-    def _pool_factory(*, minconn, maxconn, **_kwargs):
-        created.append((minconn, maxconn))
-        return fake_pool
-
-    monkeypatch.setenv("TRR_SOCIAL_CONTROL_DB_POOL_MINCONN", "1")
-    monkeypatch.setenv("TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN", "2")
-    monkeypatch.setattr(
-        pg,
-        "resolve_database_url_candidate_details",
-        lambda: (_detail("postgresql://db.example.com/postgres"),),
-    )
-    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
-
-    with pg.db_read_connection(label="social-control", pool_name="social_control"):
-        pass
-
-    assert created == [(1, 2)]
-    assert fake_pool.getconn_calls == 1
-    assert fake_pool.putconn_calls == 1
-
-
-def test_fetch_one_can_use_named_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_pool = _FakeThreadedPool(lock_result={"ok": True})
-    seen_pool_names: list[str] = []
-
-    def fake_get_pool(pool_name: str = "default"):
-        seen_pool_names.append(pool_name)
-        return fake_pool
-
-    monkeypatch.setattr(pg, "_get_pool", fake_get_pool)
-
-    row = pg.fetch_one("select 1 as ok", pool_name="social_control")
-
-    assert row == {"ok": True}
-    assert seen_pool_names == ["social_control"]
-
-
 def test_resolve_pool_sizing_honors_local_social_profile_session_pooler_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,6 +290,31 @@ def test_resolve_pool_sizing_honors_local_social_profile_session_pooler_override
     assert sizing["session_pooler_override_clamped"] is False
     assert sizing["modal_session_pooler_override_clamped"] is False
     assert sizing["maxconn_source"] == "env:TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
+
+
+def test_db_read_connection_uses_social_control_pool_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePool()
+    created: list[tuple[int, int]] = []
+
+    def _pool_factory(*, minconn, maxconn, **_kwargs):
+        created.append((minconn, maxconn))
+        return fake_pool
+
+    monkeypatch.setenv("TRR_SOCIAL_CONTROL_DB_POOL_MINCONN", "1")
+    monkeypatch.setenv("TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN", "2")
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
+
+    with pg.db_read_connection(label="social-control", pool_name="social_control"):
+        pass
+
+    assert created == [(1, 2)]
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
 
 
 def test_db_read_connection_discards_closed_connection_on_return(
@@ -509,12 +474,8 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
-        yield object()
-
-    @contextmanager
-    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
-        yield object()
+    def _fake_read_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield _FakeConnection()
 
     def _fetch_one_with_cursor(_cur, _query, _params=None):
         calls["fetch"] += 1
@@ -522,8 +483,7 @@ def test_fetch_one_retries_once_on_transient_transport_fault(monkeypatch: pytest
             raise RuntimeError("SSL SYSCALL error: EOF detected")
         return {"ok": True}
 
-    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
-    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_connection", _fake_read_connection)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(
         pg,
@@ -607,9 +567,9 @@ def test_get_pool_logs_effective_session_pooler_defaults_warning(
         with pg.db_connection():
             pass
 
-    assert "minconn=2 maxconn=8" in caplog.text
+    assert "minconn=1 maxconn=2" in caplog.text
     assert "minconn_source=default maxconn_source=default" in caplog.text
-    assert "application_name=trr-backend" in caplog.text
+    assert "application_name=trr-backend:default" in caplog.text
     assert "session_pooler_tiny_defaults" in caplog.text
 
 
@@ -620,8 +580,8 @@ def test_resolve_pool_sizing_keeps_production_session_defaults_conservative(monk
 
     sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
-    assert sizing["minconn"] == 2
-    assert sizing["maxconn"] == 8
+    assert sizing["minconn"] == 1
+    assert sizing["maxconn"] == 2
 
 
 def test_resolve_pool_sizing_treats_trr_local_dev_as_local_runtime(
@@ -639,9 +599,7 @@ def test_resolve_pool_sizing_treats_trr_local_dev_as_local_runtime(
     monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
     monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
 
-    sizing = pg._resolve_pool_sizing(
-        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
-    )
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
@@ -667,9 +625,7 @@ def test_resolve_pool_sizing_treats_trr_local_dev_as_local_runtime_even_with_mod
     monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
     monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
 
-    sizing = pg._resolve_pool_sizing(
-        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
-    )
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
@@ -695,9 +651,7 @@ def test_resolve_pool_sizing_treats_trr_local_dev_as_authoritative_over_producti
     monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
     monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
 
-    sizing = pg._resolve_pool_sizing(
-        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
-    )
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
@@ -722,9 +676,7 @@ def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides_without_pytes
     monkeypatch.setenv("TRR_DB_POOL_MINCONN", "4")
     monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "16")
 
-    sizing = pg._resolve_pool_sizing(
-        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
-    )
+    sizing = pg._resolve_pool_sizing("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
@@ -849,12 +801,8 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
-        yield object()
-
-    @contextmanager
-    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
-        yield object()
+    def _fake_read_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield _FakeConnection()
 
     def _fetch_one_with_cursor(_cur, _query, _params=None):
         calls["fetch"] += 1
@@ -862,8 +810,7 @@ def test_fetch_one_retries_once_on_ssl_connection_closed_fault(monkeypatch: pyte
             raise RuntimeError("SSL connection has been closed unexpectedly")
         return {"ok": True}
 
-    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
-    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_connection", _fake_read_connection)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(
         pg,
@@ -900,12 +847,8 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
-        yield object()
-
-    @contextmanager
-    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
-        yield object()
+    def _fake_read_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield _FakeConnection()
 
     def _fetch_all_with_cursor(_cur, _query, _params=None):
         calls["fetch"] += 1
@@ -913,8 +856,7 @@ def test_fetch_all_retries_once_on_closed_cursor_fault(monkeypatch: pytest.Monke
             raise RuntimeError("cursor already closed")
         return [{"ok": True}]
 
-    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
-    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_connection", _fake_read_connection)
     monkeypatch.setattr(pg, "fetch_all_with_cursor", _fetch_all_with_cursor)
     monkeypatch.setattr(
         pg,
@@ -933,12 +875,8 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
     calls = {"fetch": 0, "reset": 0}
 
     @contextmanager
-    def _fake_connection(*, label="read", pool_name="default"):  # noqa: ARG001
-        yield object()
-
-    @contextmanager
-    def _fake_cursor(*, conn=None, label="read"):  # noqa: ARG001
-        yield object()
+    def _fake_read_connection(*, label="read", pool_name="default"):  # noqa: ARG001
+        yield _FakeConnection()
 
     def _fetch_one_with_cursor(_cur, _query, _params=None):
         calls["fetch"] += 1
@@ -946,8 +884,7 @@ def test_fetch_one_retries_once_on_closed_pool_fault(monkeypatch: pytest.MonkeyP
             raise PoolError("connection pool is closed")
         return {"ok": True}
 
-    monkeypatch.setattr(pg, "db_read_connection", _fake_connection)
-    monkeypatch.setattr(pg, "db_read_cursor", _fake_cursor)
+    monkeypatch.setattr(pg, "db_read_connection", _fake_read_connection)
     monkeypatch.setattr(pg, "fetch_one_with_cursor", _fetch_one_with_cursor)
     monkeypatch.setattr(
         pg,
@@ -1065,6 +1002,52 @@ def test_get_connection_with_retry_uses_new_pool_after_closed_pool_reset(
     assert replacement_pool.closeall_calls == 0
 
 
+def test_fetch_one_uses_social_control_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePool()
+    fake_pool.connection = _FakeConnection(query_results=[{"id": 1, "name": "control"}])
+    pool_names: list[str] = []
+
+    def _get_pool(*, pool_name: str = "default"):
+        pool_names.append(pool_name)
+        return fake_pool
+
+    monkeypatch.setattr(pg, "_get_pool", _get_pool)
+
+    result = pg.fetch_one("select 1", pool_name="social_control")
+
+    assert result == {"id": 1, "name": "control"}
+    assert pool_names == ["social_control"]
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+
+
+def test_fetch_all_uses_social_control_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pool = _FakePool()
+    fake_pool.connection = _FakeConnection(
+        query_results=[
+            {"id": 1, "name": "control"},
+            {"id": 2, "name": "plane"},
+        ],
+    )
+    pool_names: list[str] = []
+
+    def _get_pool(*, pool_name: str = "default"):
+        pool_names.append(pool_name)
+        return fake_pool
+
+    monkeypatch.setattr(pg, "_get_pool", _get_pool)
+
+    result = pg.fetch_all("select 1", pool_name="social_control")
+
+    assert result == [
+        {"id": 1, "name": "control"},
+        {"id": 2, "name": "plane"},
+    ]
+    assert pool_names == ["social_control"]
+    assert fake_pool.getconn_calls == 1
+    assert fake_pool.putconn_calls == 1
+
+
 def test_build_pool_for_session_mode_supavisor_uses_conservative_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -1081,13 +1064,73 @@ def test_build_pool_for_session_mode_supavisor_uses_conservative_defaults(monkey
 
     pg._build_pool_for_url("postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres")
 
-    assert captured["minconn"] == 2
-    assert captured["maxconn"] == 8
+    assert captured["minconn"] == 1
+    assert captured["maxconn"] == 2
     options = captured["options"]
     assert "-c idle_in_transaction_session_timeout=60000" in options
     assert "-c statement_timeout=30000" in options
     assert captured.get("connect_timeout") == 10
-    assert captured["application_name"] == "trr-backend"
+    assert captured["application_name"] == "trr-backend:default"
+
+
+def test_build_pool_for_named_pool_sets_pool_application_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _pool_factory(*, minconn, maxconn, **kwargs):
+        captured["minconn"] = minconn
+        captured["maxconn"] = maxconn
+        captured["application_name"] = kwargs.get("application_name")
+        return _FakePool()
+
+    monkeypatch.setattr(pg, "ThreadedConnectionPool", _pool_factory)
+
+    pg._build_pool_for_url(
+        "postgresql://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
+        pool_name="health",
+    )
+
+    assert captured["application_name"] == "trr-backend:health"
+
+
+def test_resolve_application_name_rejects_secret_like_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_DB_APPLICATION_NAME", "postgres://user:secret@example.com/db")
+
+    resolved = pg._resolve_application_name(pool_name="social_control")
+
+    assert resolved["application_name"] == "trr-backend:social_control"
+    assert resolved["application_name_source"] == "default:pool"
+
+
+def test_local_pool_pressure_summary_does_not_expose_pool_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+
+    summary = pg.local_pool_pressure_summary()
+
+    assert summary == {
+        "status": "ok",
+        "reason": "pool_pressure_ok",
+        "service": "trr-backend",
+    }
+
+
+def test_local_pool_pressure_snapshot_reports_named_application_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        pg,
+        "resolve_database_url_candidate_details",
+        lambda: (_detail("postgresql://db.example.com/postgres"),),
+    )
+
+    snapshot = pg.local_pool_pressure_snapshot()
+
+    application_names = {pool["pool_name"]: pool["application_name"] for pool in snapshot["pools"]}
+    assert application_names["default"] == "trr-backend:default"
+    assert application_names["social_profile"] == "trr-backend:social_profile"
+    assert application_names["social_control"] == "trr-backend:social_control"
+    assert application_names["health"] == "trr-backend:health"
 
 
 def test_build_pool_for_non_session_urls_keeps_default_pool_size(monkeypatch: pytest.MonkeyPatch) -> None:

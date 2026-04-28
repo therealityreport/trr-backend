@@ -49,7 +49,6 @@ def build_social_account_profile_dashboard(
         platform=platform,
         account_handle=account_handle,
         detail=normalized_detail,
-        include_post_embeddings=False,
     )
     progress_run_id = run_id or _active_run_id_from_summary(summary)
     progress = None

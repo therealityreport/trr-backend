@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
@@ -12,9 +14,55 @@ from api.auth import InternalAdminUser
 from api.deps import SupabaseAdminClient
 from trr_backend.media.image_variants import generate_cast_photo_variants
 from trr_backend.media.s3_mirror import mirror_cast_photo_row
+from trr_backend.repositories import cast_photo_tags as cast_photo_tags_repo
 from trr_backend.repositories.cast_photos import update_cast_photo_hosted_fields
 
 router = APIRouter(prefix="/admin", tags=["admin-cast-photos"])
+logger = logging.getLogger(__name__)
+
+
+class CastPhotoTagsItem(BaseModel):
+    cast_photo_id: str
+    people_names: list[str] | None = None
+    people_ids: list[str] | None = None
+    people_count: int | None = None
+    people_count_source: Literal["auto", "manual"] | None = None
+    detector: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    created_by_firebase_uid: str | None = None
+    updated_by_firebase_uid: str | None = None
+
+
+class CastPhotoTagsListResponse(BaseModel):
+    tags: list[CastPhotoTagsItem]
+
+
+class CastPhotoIdsForPersonResponse(BaseModel):
+    photo_ids: list[str]
+
+
+class UpsertCastPhotoTagsRequest(BaseModel):
+    cast_photo_id: UUID
+    people_names: list[str] | None = None
+    people_ids: list[str] | None = None
+    people_count: int | None = None
+    people_count_source: Literal["auto", "manual"] | None = None
+    detector: str | None = None
+    created_by_firebase_uid: str | None = None
+    updated_by_firebase_uid: str | None = None
+
+
+class UpsertCastPhotoTagsResponse(BaseModel):
+    tag: CastPhotoTagsItem | None = None
+
+
+class UpdateCastPhotoFaceBoxesRequest(BaseModel):
+    face_boxes: list[Any] | None = None
+
+
+class UpdateCastPhotoFaceBoxesResponse(BaseModel):
+    updated: bool
 
 
 class MirrorCastPhotoResponse(BaseModel):
@@ -56,6 +104,76 @@ class GenerateCastPhotoVariantsResponse(BaseModel):
     generated: int
     crop_signature: str
     variants: list[CastPhotoVariantItem]
+
+
+def _raise_cast_photo_tags_database_error(operation: str, error: Exception) -> None:
+    logger.warning("Cast photo tags database operation failed: %s", operation, exc_info=True)
+    raise HTTPException(status_code=502, detail=f"Database error during {operation}") from error
+
+
+@router.get("/cast-photos/tags", response_model=CastPhotoTagsListResponse)
+def list_cast_photo_tags(
+    _: InternalAdminUser,
+    photo_ids: list[UUID] | None = Query(default=None),
+) -> CastPhotoTagsListResponse:
+    try:
+        rows = cast_photo_tags_repo.list_tag_rows_by_photo_ids([str(photo_id) for photo_id in photo_ids or []])
+    except Exception as exc:
+        _raise_cast_photo_tags_database_error("fetching cast photo tags", exc)
+
+    return CastPhotoTagsListResponse(tags=[CastPhotoTagsItem(**row) for row in rows])
+
+
+@router.get("/cast-photos/tags/photo-ids", response_model=CastPhotoIdsForPersonResponse)
+def list_cast_photo_tag_photo_ids(
+    _: InternalAdminUser,
+    person_id: str = Query(..., min_length=1),
+) -> CastPhotoIdsForPersonResponse:
+    try:
+        photo_ids = cast_photo_tags_repo.list_photo_ids_by_person_id(person_id)
+    except Exception as exc:
+        _raise_cast_photo_tags_database_error("fetching cast photo IDs for person", exc)
+
+    return CastPhotoIdsForPersonResponse(photo_ids=photo_ids)
+
+
+@router.post("/cast-photos/tags", response_model=UpsertCastPhotoTagsResponse)
+def upsert_cast_photo_tags(
+    _: InternalAdminUser,
+    payload: UpsertCastPhotoTagsRequest,
+) -> UpsertCastPhotoTagsResponse:
+    try:
+        row = cast_photo_tags_repo.upsert_cast_photo_tag_row(
+            cast_photo_id=str(payload.cast_photo_id),
+            people_names=payload.people_names,
+            people_ids=payload.people_ids,
+            people_count=payload.people_count,
+            people_count_source=payload.people_count_source,
+            detector=payload.detector,
+            created_by_firebase_uid=payload.created_by_firebase_uid,
+            updated_by_firebase_uid=payload.updated_by_firebase_uid,
+        )
+    except Exception as exc:
+        _raise_cast_photo_tags_database_error("upserting cast photo tags", exc)
+
+    return UpsertCastPhotoTagsResponse(tag=CastPhotoTagsItem(**row) if row else None)
+
+
+@router.post("/cast-photos/{photo_id}/face-boxes", response_model=UpdateCastPhotoFaceBoxesResponse)
+def update_cast_photo_face_boxes(
+    photo_id: UUID,
+    _: InternalAdminUser,
+    payload: UpdateCastPhotoFaceBoxesRequest | None = None,
+) -> UpdateCastPhotoFaceBoxesResponse:
+    try:
+        updated = cast_photo_tags_repo.set_cast_photo_face_boxes(
+            str(photo_id),
+            (payload or UpdateCastPhotoFaceBoxesRequest()).face_boxes,
+        )
+    except Exception as exc:
+        _raise_cast_photo_tags_database_error("updating cast photo face boxes", exc)
+
+    return UpdateCastPhotoFaceBoxesResponse(updated=updated)
 
 
 @router.post("/cast-photos/{photo_id}/mirror", response_model=MirrorCastPhotoResponse)

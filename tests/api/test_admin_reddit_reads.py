@@ -66,6 +66,133 @@ def test_list_communities_returns_contract_and_caches(monkeypatch: pytest.Monkey
     assert calls["count"] == 1
 
 
+def test_community_create_update_post_flairs_and_delete_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    community_id = "11111111-1111-1111-1111-111111111111"
+    show_id = "22222222-2222-2222-2222-222222222222"
+    calls: dict[str, object] = {}
+
+    def fake_create(**kwargs):
+        calls["create"] = kwargs
+        return (
+            {
+                "id": community_id,
+                "trr_show_id": kwargs["payload"]["trr_show_id"],
+                "trr_show_name": kwargs["payload"]["trr_show_name"],
+                "subreddit": "BravoRealHousewives",
+                "display_name": "Bravo",
+                "notes": None,
+                "post_flairs": [],
+                "analysis_flairs": [],
+                "analysis_all_flairs": [],
+                "is_show_focused": True,
+                "network_focus_targets": [],
+                "franchise_focus_targets": [],
+                "episode_title_patterns": [],
+                "post_flair_categories": {},
+                "post_flair_assignments": {},
+                "post_flairs_updated_at": None,
+                "is_active": True,
+                "created_by_firebase_uid": kwargs["actor_uid"],
+                "created_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T00:00:00Z",
+            },
+            1,
+        )
+
+    def fake_update(**kwargs):
+        calls["update"] = kwargs
+        return (
+            {
+                "id": kwargs["community_id"],
+                "trr_show_id": show_id,
+                "trr_show_name": "The Traitors",
+                "subreddit": "TheTraitors",
+                "display_name": "Traitors",
+                "notes": kwargs["payload"].get("notes"),
+                "post_flairs": [],
+                "analysis_flairs": kwargs["payload"].get("analysis_flairs", []),
+                "analysis_all_flairs": [],
+                "is_show_focused": True,
+                "network_focus_targets": [],
+                "franchise_focus_targets": [],
+                "episode_title_patterns": [],
+                "post_flair_categories": {},
+                "post_flair_assignments": {},
+                "post_flairs_updated_at": None,
+                "is_active": True,
+                "created_by_firebase_uid": "firebase:admin-1",
+                "created_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T01:00:00Z",
+            },
+            1,
+        )
+
+    def fake_update_flairs(**kwargs):
+        calls["flairs"] = kwargs
+        return (
+            {
+                "id": kwargs["community_id"],
+                "trr_show_id": show_id,
+                "trr_show_name": "The Traitors",
+                "subreddit": "TheTraitors",
+                "display_name": "Traitors",
+                "notes": None,
+                "post_flairs": kwargs["post_flairs"],
+                "analysis_flairs": [],
+                "analysis_all_flairs": [],
+                "is_show_focused": True,
+                "network_focus_targets": [],
+                "franchise_focus_targets": [],
+                "episode_title_patterns": [],
+                "post_flair_categories": {},
+                "post_flair_assignments": {},
+                "post_flairs_updated_at": kwargs["post_flairs_updated_at"],
+                "is_active": True,
+                "created_by_firebase_uid": "firebase:admin-1",
+                "created_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T01:00:00Z",
+            },
+            2,
+        )
+
+    monkeypatch.setattr(router_module.reddit_sources_repo, "create_reddit_community", fake_create)
+    monkeypatch.setattr(router_module.reddit_sources_repo, "update_reddit_community", fake_update)
+    monkeypatch.setattr(router_module.reddit_sources_repo, "update_reddit_community_post_flairs", fake_update_flairs)
+    monkeypatch.setattr(router_module.reddit_sources_repo, "delete_reddit_community", lambda community_id: (True, 1))
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/admin/reddit/communities",
+        headers={"X-TRR-Admin-User-Uid": "firebase:admin-1"},
+        json={
+            "trr_show_id": show_id,
+            "trr_show_name": "The Traitors",
+            "subreddit": "r/TheTraitors",
+            "display_name": "Traitors",
+            "is_show_focused": True,
+        },
+    )
+    updated = client.patch(
+        f"/api/v1/admin/reddit/communities/{community_id}",
+        json={"notes": "Watch this community", "analysis_flairs": ["Episode Discussion"]},
+    )
+    flairs = client.patch(
+        f"/api/v1/admin/reddit/communities/{community_id}/post-flairs",
+        json={"post_flairs": ["Live Episode Discussion"], "post_flairs_updated_at": "2026-03-26T01:00:00Z"},
+    )
+    deleted = client.delete(f"/api/v1/admin/reddit/communities/{community_id}")
+
+    assert created.status_code == 201
+    assert created.json()["community"]["created_by_firebase_uid"] == "firebase:admin-1"
+    assert updated.status_code == 200
+    assert updated.json()["community"]["notes"] == "Watch this community"
+    assert flairs.status_code == 200
+    assert flairs.json()["flairs"] == ["Live Episode Discussion"]
+    assert deleted.status_code == 200
+    assert deleted.json() == {"success": True}
+    assert calls["create"]["actor_uid"] == "firebase:admin-1"  # type: ignore[index]
+
+
 def test_threads_summary_collapses_cold_misses(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"count": 0}
 
@@ -99,6 +226,138 @@ def test_threads_summary_collapses_cold_misses(monkeypatch: pytest.MonkeyPatch) 
     assert first.status_code == 200
     assert second.status_code == 200
     assert calls["count"] == 1
+
+
+def test_thread_create_update_and_delete_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    community_id = "11111111-1111-1111-1111-111111111111"
+    show_id = "22222222-2222-2222-2222-222222222222"
+    thread_id = "33333333-3333-3333-3333-333333333333"
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        router_module.reddit_reads_repo,
+        "get_reddit_community_by_id",
+        lambda community_id: (
+            {
+                "id": community_id,
+                "trr_show_id": show_id,
+                "trr_show_name": "The Traitors",
+                "subreddit": "TheTraitors",
+            },
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        router_module.reddit_reads_repo,
+        "get_reddit_thread_by_id",
+        lambda thread_id: (
+            {
+                "id": thread_id,
+                "community_id": community_id,
+                "trr_show_id": show_id,
+                "trr_show_name": "The Traitors",
+                "trr_season_id": None,
+                "source_kind": "manual",
+                "reddit_post_id": "abc123",
+                "title": "Episode Thread",
+                "url": "https://www.reddit.com/r/TheTraitors/comments/abc123",
+                "created_by_firebase_uid": "firebase:admin-1",
+            },
+            1,
+        ),
+    )
+
+    def fake_create(**kwargs):
+        calls["create_thread"] = kwargs
+        return (
+            {
+                "id": thread_id,
+                "community_id": kwargs["payload"]["community_id"],
+                "trr_show_id": kwargs["payload"]["trr_show_id"],
+                "trr_show_name": kwargs["payload"]["trr_show_name"],
+                "trr_season_id": kwargs["payload"]["trr_season_id"],
+                "source_kind": kwargs["payload"].get("source_kind", "manual"),
+                "reddit_post_id": kwargs["payload"]["reddit_post_id"],
+                "title": kwargs["payload"]["title"],
+                "url": kwargs["payload"]["url"],
+                "permalink": kwargs["payload"]["permalink"],
+                "author": None,
+                "score": 0,
+                "num_comments": 0,
+                "posted_at": None,
+                "notes": None,
+                "created_by_firebase_uid": kwargs["actor_uid"],
+                "created_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T00:00:00Z",
+            },
+            1,
+        )
+
+    def fake_update(**kwargs):
+        calls["update_thread"] = kwargs
+        return (
+            {
+                "id": kwargs["thread_id"],
+                "community_id": community_id,
+                "trr_show_id": show_id,
+                "trr_show_name": "The Traitors",
+                "trr_season_id": None,
+                "source_kind": "manual",
+                "reddit_post_id": "abc123",
+                "title": kwargs["payload"]["title"],
+                "url": "https://www.reddit.com/r/TheTraitors/comments/abc123",
+                "permalink": None,
+                "author": None,
+                "score": 0,
+                "num_comments": 0,
+                "posted_at": None,
+                "notes": None,
+                "created_by_firebase_uid": "firebase:admin-1",
+                "created_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T01:00:00Z",
+            },
+            1,
+        )
+
+    monkeypatch.setattr(router_module.reddit_sources_repo, "create_reddit_thread", fake_create)
+    monkeypatch.setattr(router_module.reddit_sources_repo, "update_reddit_thread", fake_update)
+    monkeypatch.setattr(router_module.reddit_sources_repo, "delete_reddit_thread", lambda thread_id: (True, 1))
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/admin/reddit/threads",
+        headers={"X-TRR-Admin-User-Uid": "firebase:admin-1"},
+        json={
+            "community_id": community_id,
+            "trr_show_id": show_id,
+            "trr_show_name": "The Traitors",
+            "reddit_post_id": "abc123",
+            "title": "Episode Thread",
+            "url": "https://www.reddit.com/r/TheTraitors/comments/abc123",
+            "permalink": "/r/TheTraitors/comments/abc123",
+        },
+    )
+    updated = client.patch(
+        f"/api/v1/admin/reddit/threads/{thread_id}",
+        json={"title": "Updated Episode Thread"},
+    )
+    deleted = client.delete(f"/api/v1/admin/reddit/threads/{thread_id}")
+
+    assert created.status_code == 201
+    assert created.json()["thread"]["created_by_firebase_uid"] == "firebase:admin-1"
+    assert updated.status_code == 200
+    assert updated.json()["thread"]["title"] == "Updated Episode Thread"
+    assert deleted.status_code == 200
+    assert deleted.json() == {"success": True}
+    assert calls["create_thread"]["actor_uid"] == "firebase:admin-1"  # type: ignore[index]
+
+
+def test_write_routes_return_consistent_uuid_validation_error() -> None:
+    client = TestClient(app)
+    response = client.delete("/api/v1/admin/reddit/threads/not-a-uuid")
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "thread_id must be a valid UUID"}
 
 
 def test_summary_and_resolve_routes_preserve_contract(monkeypatch: pytest.MonkeyPatch) -> None:

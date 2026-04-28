@@ -22,9 +22,16 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from api.auth import InternalAdminUser
 from api.realtime.broker import init_broker, shutdown_broker
 from trr_backend.db import pg
-from trr_backend.db.connection import log_database_resolution_summary, resolve_database_url_candidate_details
+from trr_backend.db.connection import (
+    DIRECT_DB_ENV,
+    TRANSACTION_DB_ENV,
+    log_database_resolution_summary,
+    resolve_database_url_candidate_details,
+    transaction_flight_test_enabled,
+)
 from trr_backend.db.pg import DatabaseServiceUnavailableError, database_service_unavailable_detail
 from trr_backend.middleware.request_timeout import RequestTimeoutMiddleware
 from trr_backend.observability import (
@@ -133,14 +140,32 @@ def _validate_startup_config() -> None:
         is_local,
     )
 
-    # Fail-fast for invalid runtime lanes — only session and local are allowed.
-    invalid_lanes = {"direct", "unknown", "other", "pooler", "transaction"}
+    transaction_flight_allowed = (
+        winner_connection_class == "transaction"
+        and winner_source == TRANSACTION_DB_ENV
+        and transaction_flight_test_enabled()
+    )
+    direct_local_allowed = winner_connection_class == "direct" and winner_source == DIRECT_DB_ENV and is_local
+    direct_source_allowed = winner_source != DIRECT_DB_ENV or is_local
 
-    if winner_connection_class in invalid_lanes:
+    # Fail-fast for invalid runtime lanes. Transaction mode is allowed only for
+    # an explicit flight test using TRR_DB_TRANSACTION_URL, never implicitly via
+    # the compatibility TRR_DB_URL.
+    invalid_lanes = {"unknown", "other", "pooler"}
+
+    if winner_connection_class in invalid_lanes or (
+        not direct_source_allowed
+    ) or (
+        winner_connection_class == "direct" and not direct_local_allowed
+    ) or (
+        winner_connection_class == "transaction" and not transaction_flight_allowed
+    ):
         raise RuntimeError(
             f"Invalid runtime connection lane: {winner_connection_class}\n"
-            f"Only session-mode pooler (:5432) and local Postgres are supported.\n"
-            f"Use session-mode pooler (:5432) via TRR_DB_URL.\n"
+            f"Only session-mode pooler (:5432), local Postgres, local TRR_DB_DIRECT_URL, and explicit transaction flight tests are supported.\n"
+            f"Use session-mode pooler (:5432) via TRR_DB_SESSION_URL or TRR_DB_URL. "
+            f"Local direct database runs must use {DIRECT_DB_ENV}. "
+            f"Transaction tests must use {TRANSACTION_DB_ENV} with TRR_DB_TRANSACTION_FLIGHT_TEST=1.\n"
             f"Winner source: {winner_source}"
         )
 
@@ -426,9 +451,80 @@ def health():
 
 
 @app.get("/health/live")
-async def health_live() -> dict[str, str]:
+def health_live():
     """Lightweight liveness probe. No DB check."""
     return {"status": "alive", "service": "trr-backend"}
+
+
+@app.get("/health/db-pressure")
+def health_db_pressure() -> dict[str, str]:
+    """Public-safe DB pressure status. Does not expose pool topology."""
+    return pg.local_pool_pressure_summary()
+
+
+def _permission_blocked_db_activity(error: Exception) -> bool:
+    code = str(getattr(error, "pgcode", "") or "").strip()
+    message = str(error).lower()
+    return code in {"42501"} or "permission denied" in message or "insufficient privilege" in message
+
+
+def _db_activity_unavailable(error: Exception) -> dict[str, object]:
+    return {
+        "status": "unavailable",
+        "reason": "permission_blocked" if _permission_blocked_db_activity(error) else "unavailable",
+        "error_type": type(error).__name__,
+        "holders": [],
+    }
+
+
+def _db_activity_holder_snapshot() -> dict[str, object]:
+    """Return grouped pg_stat_activity holder counts without query text."""
+    try:
+        with pg.db_read_connection(label="admin-db-pressure", pool_name="health") as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      COALESCE(NULLIF(application_name, ''), 'unknown') AS application_name,
+                      COALESCE(NULLIF(usename, ''), 'unknown') AS role,
+                      COALESCE(NULLIF(state, ''), 'unknown') AS state,
+                      COALESCE(NULLIF(client_addr::text, ''), 'local') AS client_addr,
+                      COUNT(*)::int AS holder_count
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                    GROUP BY 1, 2, 3, 4
+                    ORDER BY holder_count DESC, application_name ASC, role ASC, state ASC, client_addr ASC
+                    LIMIT 50
+                    """
+                )
+                rows = cur.fetchall()
+        holders = [
+            {
+                "application_name": str(row[0] or "unknown"),
+                "role": str(row[1] or "unknown"),
+                "state": str(row[2] or "unknown"),
+                "client_addr": str(row[3] or "local"),
+                "holder_count": int(row[4] or 0),
+            }
+            for row in rows
+        ]
+        return {
+            "status": "available",
+            "reason": "ok",
+            "grouped_by": ["application_name", "role", "state", "client_addr"],
+            "holders": holders,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[health] db activity holder snapshot unavailable", exc_info=True)
+        return _db_activity_unavailable(exc)
+
+
+@app.get("/admin/health/db-pressure")
+def admin_health_db_pressure(_: InternalAdminUser = None) -> dict[str, object]:
+    """Internal DB pressure details for admin/operator diagnostics."""
+    snapshot = pg.local_pool_pressure_snapshot()
+    snapshot["db_activity"] = _db_activity_holder_snapshot()
+    return snapshot
 
 
 @app.get("/health/runtime")

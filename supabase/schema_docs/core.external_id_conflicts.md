@@ -11,10 +11,11 @@
 | conflict_reason | text | NO |  | NO | NEVER |
 | detected_at | timestamp with time zone | NO | now() | NO | NEVER |
 | payload | jsonb | YES |  | NO | NEVER |
+| id | uuid | NO | gen_random_uuid() | NO | NEVER |
 
 ## Primary Key
 
-(none)
+id
 
 ## Unique Constraints
 
@@ -26,11 +27,11 @@
 
 ## Indexes
 
-(none)
+- external_id_conflicts_pkey (unique): id
 
 ## RLS Enabled
 
-false
+true
 
 ## Example Row
 
@@ -42,6 +43,7 @@ false
   "external_id": "example",
   "conflict_reason": "example",
   "detected_at": "1970-01-01T00:00:00Z",
-  "payload": {}
+  "payload": {},
+  "id": "00000000-0000-0000-0000-000000000000"
 }
 ```

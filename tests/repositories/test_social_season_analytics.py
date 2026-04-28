@@ -279,7 +279,7 @@ def test_get_social_account_profile_posts_search_comments_only_falls_back_to_ins
     }
 
 
-def test_get_social_account_profile_posts_instagram_comments_only_without_search_uses_dataset_rows(
+def test_get_social_account_profile_posts_instagram_comments_only_without_search_uses_materialized_fast_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     summary_conn = object()
@@ -300,18 +300,7 @@ def test_get_social_account_profile_posts_instagram_comments_only_without_search
     )
 
     captured: dict[str, object] = {}
-    dataset_rows = [
-        {
-            "id": "post-1",
-            "source_id": "SRC-1",
-            "posted_at": datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
-            "shortcode": "ABC123",
-            "caption": "First",
-            "comments_count": 14,
-            "saved_comments": 9,
-            "_profile_match_mode": "owner",
-            "_profile_source_surface": "materialized",
-        },
+    fast_path_rows = [
         {
             "id": "post-2",
             "source_id": "SRC-2",
@@ -323,40 +312,34 @@ def test_get_social_account_profile_posts_instagram_comments_only_without_search
             "_profile_match_mode": "owner",
             "_profile_source_surface": "materialized",
         },
-        {
-            "id": "post-3",
-            "source_id": "SRC-3",
-            "posted_at": datetime(2026, 4, 18, 12, 0, tzinfo=UTC),
-            "shortcode": "GHI789",
-            "caption": "Third",
-            "comments_count": 8,
-            "saved_comments": 5,
-            "_profile_match_mode": "collaborator",
-            "_profile_source_surface": "catalog",
-        },
     ]
 
-    def fake_dataset_rows(
+    def fake_fast_path(
         account_handle: str,
         *,
-        search: str | None = None,
-        comments_only: bool = False,
+        page: int,
+        page_size: int,
         conn: object | None = None,
-        **_kwargs: object,
-    ) -> list[dict[str, object]]:
+    ) -> tuple[list[dict[str, object]], int]:
         captured.update(
             {
                 "account_handle": account_handle,
-                "search": search,
-                "comments_only": comments_only,
+                "page": page,
+                "page_size": page_size,
                 "conn": conn,
             }
         )
-        return dataset_rows
+        return fast_path_rows, 3
+
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_instagram_comments_only_profile_rows_page",
+        fake_fast_path,
+    )
     monkeypatch.setattr(
         social_repo,
         "_instagram_social_account_profile_dataset_rows",
-        fake_dataset_rows,
+        lambda *_args, **_kwargs: pytest.fail("comments-only page should not scan the full Instagram dataset"),
     )
 
     payload = social_repo.get_social_account_profile_posts(
@@ -369,8 +352,8 @@ def test_get_social_account_profile_posts_instagram_comments_only_without_search
 
     assert captured == {
         "account_handle": "bravotv",
-        "search": None,
-        "comments_only": True,
+        "page": 2,
+        "page_size": 1,
         "conn": summary_conn,
     }
     assert payload["pagination"] == {
@@ -382,6 +365,61 @@ def test_get_social_account_profile_posts_instagram_comments_only_without_search
     assert payload["items"][0]["id"] == "post-2"
     assert payload["items"][0]["saved_comments"] == 7
     assert payload["items"][0]["source_surface"] == "materialized"
+
+
+def test_get_social_account_profile_posts_instagram_comments_only_sql_uses_owner_materialized_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
+
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["page_sql"] = sql
+        captured["page_params"] = params
+        return [
+            {
+                "id": "post-1",
+                "source_id": "OWNER1",
+                "posted_at": datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+                "source_account": "thetraitorsus",
+                "caption": "Owner post",
+                "comments_count": 4,
+                "saved_comments": 2,
+                "_profile_match_mode": "owner",
+                "_profile_source_surface": "materialized",
+            }
+        ]
+
+    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+        captured["total_sql"] = sql
+        captured["total_params"] = params
+        return {"total": 2}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    rows, total = social_repo._fetch_instagram_comments_only_profile_rows_page(
+        "TheTraitorsUS",
+        page=2,
+        page_size=3,
+    )
+
+    assert total == 2
+    assert rows[0]["_profile_match_mode"] == "owner"
+    assert captured["total_params"] == ["thetraitorsus"]
+    assert captured["page_params"] == ["thetraitorsus", 3, 3]
+    normalized_total_sql = " ".join(captured["total_sql"].split()).lower()
+    normalized_page_sql = " ".join(captured["page_sql"].split()).lower()
+    assert "select count(*)::int as total from social.instagram_posts p" in normalized_total_sql
+    assert "from social.instagram_posts p" in normalized_page_sql
+    assert "page_rows as materialized" in normalized_page_sql
+    assert "c.post_id in (select profile_row_id::uuid from page_rows)" in normalized_page_sql
+    assert "page_ids as" not in normalized_page_sql
+    assert "count(*) over ()::int as profile_total" not in normalized_page_sql
+    assert "social.instagram_account_catalog_post_collaborators" not in normalized_page_sql
+    assert "jsonb_array_elements" not in normalized_page_sql
+
 
 def test_get_social_account_profile_posts_tiktok_comments_only_uses_materialized_fast_path(
     monkeypatch: pytest.MonkeyPatch,
@@ -1000,6 +1038,34 @@ def test_instagram_social_account_profile_dataset_rows_prefers_owner_rows_over_c
     assert len(rows) == 1
     assert rows[0]["id"] == "owner-catalog-1"
     assert rows[0]["_profile_match_mode"] == "owner"
+
+
+def test_instagram_collaborator_catalog_rows_uses_membership_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    posted_since = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    rows = social_repo._fetch_instagram_collaborator_catalog_rows(
+        "BravoTV",
+        limit=5,
+        posted_since=posted_since,
+    )
+
+    assert rows == []
+    assert captured["params"] == ["bravotv", "bravotv", posted_since, 5]
+    normalized_sql = " ".join(captured["sql"].split()).lower()
+    assert "social.instagram_account_catalog_post_collaborators m" in normalized_sql
+    assert "m.collaborator_handle = %s" in normalized_sql
+    assert "order by m.posted_at desc nulls last, m.catalog_post_id desc" in normalized_sql
+    assert "jsonb_array_elements" not in normalized_sql
 
 
 def test_social_account_profile_analysis_rows_for_instagram_forwards_limit_to_dataset(
@@ -2516,23 +2582,6 @@ def test_check_platform_cookie_health_marks_instagram_auth_repair_supported(monk
     assert payload["refresh_available"] is True
     assert payload["refresh_action"] == "instagram_auth_repair"
     assert payload["refresh_label"] == "Repair Instagram Auth"
-
-
-def test_check_platform_cookie_health_does_not_warn_for_healthy_env_json_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(social_repo, "_load_twitter_auth_from_sources", lambda: ({"auth_token": "a", "ct0": "c"}, None))
-    monkeypatch.setattr(social_repo, "_validate_twitter_cookie_health", lambda _cookies: (True, None))
-    monkeypatch.setattr(social_repo, "_resolve_cookie_source_kind", lambda _platform: ("env_json", None))
-    monkeypatch.setattr(social_repo, "_is_local_cookie_refresh_runtime", lambda: True)
-
-    payload = social_repo.check_platform_cookie_health("twitter", force=True)
-
-    assert payload["healthy"] is True
-    assert payload["source_kind"] == "env_json"
-    assert "refresh_target_path" in payload
-    assert "warning_code" not in payload
-    assert "warning_message" not in payload
 
 
 def test_refresh_platform_cookies_interactive_uses_instagram_auth_repair(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6108,48 +6157,6 @@ def test_launch_social_account_catalog_backfill_youtube_forces_post_details_for_
     assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details", "comments", "media"]
 
 
-def test_launch_social_account_catalog_backfill_twitter_runs_comments_in_posts_stage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog_calls: list[dict[str, Any]] = []
-    merged_config_updates: list[dict[str, Any]] = []
-
-    monkeypatch.setattr(social_repo, "uuid4", lambda: "launch-group-twitter")
-    monkeypatch.setattr(
-        social_repo,
-        "start_social_account_catalog_backfill",
-        lambda platform, account_handle, **kwargs: (
-            catalog_calls.append({"platform": platform, "account_handle": account_handle, **kwargs})
-            or {"run_id": "catalog-run-twitter-1", "status": "queued"}
-        ),
-    )
-    monkeypatch.setattr(
-        social_repo,
-        "_merge_catalog_run_config",
-        lambda *, run_id, metadata_updates: (
-            merged_config_updates.append({"run_id": run_id, **metadata_updates})
-            or {"id": run_id, "status": "queued", "config": metadata_updates}
-        ),
-    )
-
-    payload = social_repo.launch_social_account_catalog_backfill(
-        "twitter",
-        "thetraitorsus",
-        source_scope="bravo",
-        selected_tasks=["post_details", "comments", "media"],
-    )
-
-    assert payload["run_id"] == "catalog-run-twitter-1"
-    assert payload["comments_run_id"] is None
-    assert payload["selected_tasks"] == ["post_details", "comments", "media"]
-    assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
-    assert catalog_calls[0]["twitter_comments_in_posts_stage"] is True
-    assert catalog_calls[0]["details_refresh_skip_detail_fetch"] is False
-    assert catalog_calls[0]["details_refresh_skip_media_followups"] is False
-    assert merged_config_updates[-1]["selected_tasks"] == ["post_details", "comments", "media"]
-    assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details", "comments", "media"]
-
-
 def test_begin_social_account_catalog_backfill_launch_returns_pending_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8234,7 +8241,6 @@ def test_scrape_shared_twitter_posts_catalog_adds_profile_snapshot(
         "_upsert_shared_catalog_post",
         lambda **kwargs: captured_posts.append(kwargs["post"]) or {"id": "catalog-row-1", "source_id": "tweet-1"},
     )
-    monkeypatch.setattr(social_repo, "_upsert_tweet", lambda *_args, **_kwargs: {"id": "tweet-row-1"})
 
     rows, meta = social_repo._scrape_shared_twitter_posts(
         run_id="run-1",
@@ -8292,296 +8298,6 @@ def test_scrape_shared_twitter_posts_full_history_catalog_uses_unbounded_window(
     assert captured["date_end"] <= datetime.now(UTC)
     assert captured["max_pages"] is None
     assert meta["profile_snapshot"]["username"] == "bravotv"
-
-
-def _twitter_tweet(**overrides: Any) -> SimpleNamespace:
-    defaults: dict[str, Any] = {
-        "tweet_id": "tweet-1",
-        "created_at": 1_700_000_000,
-        "text": "account update",
-        "hashtags": [],
-        "mentions": [],
-        "likes": 0,
-        "retweets": 0,
-        "replies": 0,
-        "quotes": 0,
-        "views": 0,
-        "url": "https://x.com/thetraitorsus/status/tweet-1",
-        "username": "thetraitorsus",
-        "display_name": "The Traitors",
-        "user_verified": True,
-        "is_reply": False,
-        "is_retweet": False,
-        "is_quote": False,
-        "reply_to_tweet_id": None,
-        "quoted_tweet_id": None,
-        "media_urls": [],
-        "hosted_media_urls": [],
-        "link_preview_media_count": 0,
-        "user_id": "user-1",
-        "user_profile_url": "https://x.com/thetraitorsus",
-        "user_avatar_url": "https://images.test/avatar.jpg",
-        "bookmarks": 0,
-        "shares": 0,
-        "conversation_id": None,
-    }
-    defaults.update(overrides)
-    tweet = SimpleNamespace(**defaults)
-    tweet.to_dict = lambda: dict(defaults)
-    return tweet
-
-
-def test_scrape_shared_twitter_posts_catalog_persists_text_and_external_reply_parent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog_payloads: list[dict[str, Any]] = []
-    tweet_payloads: list[dict[str, Any]] = []
-    scrape_configs: list[Any] = []
-    account_post = _twitter_tweet(tweet_id="text-1", text="text only update", bookmarks=5, shares=2)
-    account_reply = _twitter_tweet(
-        tweet_id="reply-1",
-        text="replying with context",
-        is_reply=True,
-        reply_to_tweet_id="parent-1",
-    )
-    parent = _twitter_tweet(
-        tweet_id="parent-1",
-        username="external",
-        text="external parent",
-        user_profile_url="https://x.com/external",
-    )
-
-    class _FakeTwitterScraper:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            del args, kwargs
-            self.last_retrieval_meta = {"pages_scanned": 1, "posts_checked": 2}
-
-        def scrape(self, scrape_config: Any, progress_cb=None) -> list[Any]:
-            scrape_configs.append(scrape_config)
-            return [account_post, account_reply]
-
-        def fetch_tweet_by_id(self, tweet_id: str, delay: float = 0.0) -> Any:
-            del delay
-            assert tweet_id == "parent-1"
-            return parent
-
-    def _fake_pg_upsert(table: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
-        if table == "twitter_account_catalog_posts":
-            catalog_payloads.append(dict(payload))
-            return {"id": f"catalog-{payload['source_id']}", **payload}
-        if table == "twitter_tweets":
-            tweet_payloads.append(dict(payload))
-            return {"id": f"tweet-{payload['tweet_id']}", **payload}
-        raise AssertionError(f"Unexpected table: {table}")
-
-    monkeypatch.setattr(social_repo, "TwitterScraper", _FakeTwitterScraper)
-    monkeypatch.setattr(social_repo, "_load_twitter_auth", lambda: ({}, "bearer"))
-    monkeypatch.setattr(social_repo, "_load_twikit_credentials", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(social_repo, "_pg_upsert", _fake_pg_upsert)
-    monkeypatch.setattr(social_repo, "_platform_posts_has_column", lambda platform, column: platform == "twitter")
-    monkeypatch.setattr(
-        social_repo,
-        "_platform_catalog_posts_has_column",
-        lambda platform, column: platform == "twitter",
-    )
-    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda table: table == "twitter_tweets")
-
-    rows, meta = social_repo._scrape_shared_twitter_posts(
-        run_id="run-1",
-        account_handle="thetraitorsus",
-        config={"pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE},
-        job_id="job-1",
-    )
-
-    assert scrape_configs[0].include_replies is True
-    assert [row["source_id"] for row in rows] == ["text-1", "reply-1"]
-    assert catalog_payloads[0]["media_type"] == "text"
-    assert catalog_payloads[0]["bookmarks"] == 5
-    assert catalog_payloads[0]["shares"] == 2
-    reply_payload = next(payload for payload in tweet_payloads if payload["tweet_id"] == "reply-1")
-    parent_payload = next(payload for payload in tweet_payloads if payload["tweet_id"] == "parent-1")
-    assert reply_payload["twitter_context_role"] == "account_reply"
-    assert parent_payload["twitter_context_role"] == "reply_parent"
-    assert meta["persist_counters"]["posts_upserted"] == 2
-
-
-def test_upsert_shared_catalog_twitter_post_skips_missing_optional_catalog_columns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    def _fake_pg_upsert(table: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
-        captured["table"] = table
-        captured["payload"] = dict(payload)
-        return {"id": "catalog-1", **payload}
-
-    monkeypatch.setattr(social_repo, "_pg_upsert", _fake_pg_upsert)
-    monkeypatch.setattr(
-        social_repo,
-        "_platform_catalog_posts_has_column",
-        lambda _platform, column: column not in {"bookmarks", "thread_root_source_id", "thread_position", "is_thread_part"},
-    )
-
-    result = social_repo._upsert_shared_catalog_twitter_post(
-        run_id="run-1",
-        account_handle="thetraitorsus",
-        tweet=_twitter_tweet(
-            tweet_id="tweet-optional-columns",
-            bookmarks=7,
-            thread_root_source_id="root-1",
-            thread_position=2,
-            is_thread_part=True,
-        ),
-    )
-
-    assert result is not None
-    assert captured["table"] == social_repo.PLATFORM_CATALOG_POST_TABLES["twitter"]
-    assert "bookmarks" not in captured["payload"]
-    assert "thread_root_source_id" not in captured["payload"]
-    assert "thread_position" not in captured["payload"]
-    assert "is_thread_part" not in captured["payload"]
-
-
-def test_scrape_shared_twitter_posts_threads_hydrates_interactions_once_per_root(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog_payloads: list[dict[str, Any]] = []
-    tweet_payloads: list[dict[str, Any]] = []
-    reply_calls: list[str] = []
-    quote_calls: list[str] = []
-    media_jobs: list[str] = []
-    root = _twitter_tweet(tweet_id="root-1", text="thread root", replies=1, quotes=1)
-    thread_reply = _twitter_tweet(
-        tweet_id="thread-2",
-        text="thread part",
-        is_reply=True,
-        reply_to_tweet_id="root-1",
-        created_at=1_700_000_100,
-    )
-    audience_reply = _twitter_tweet(
-        tweet_id="audience-reply-1",
-        username="viewer",
-        text="audience reply",
-        is_reply=True,
-        reply_to_tweet_id="root-1",
-        media_urls=["https://pbs.twimg.com/media/reply.jpg"],
-    )
-    quote = _twitter_tweet(
-        tweet_id="quote-1",
-        username="viewer2",
-        text="quote",
-        is_quote=True,
-        quoted_tweet_id="root-1",
-        media_urls=["https://pbs.twimg.com/media/quote.jpg"],
-    )
-
-    class _FakeTwitterScraper:
-        comments_auth_failed = False
-        last_reply_fetch_reason = ""
-        last_quote_fetch_reason = ""
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            del args, kwargs
-            self.last_retrieval_meta = {"pages_scanned": 1, "posts_checked": 2}
-
-        def scrape(self, _scrape_config: Any, progress_cb=None) -> list[Any]:
-            return [root, thread_reply]
-
-        def fetch_tweet_by_id(self, tweet_id: str, delay: float = 0.0) -> Any:
-            del delay
-            assert tweet_id == "root-1"
-            return root
-
-        def fetch_tweet_replies(self, tweet_id: str, **_kwargs: Any) -> list[Any]:
-            reply_calls.append(tweet_id)
-            return [audience_reply]
-
-        def fetch_tweet_quotes(self, tweet_id: str, **_kwargs: Any) -> list[Any]:
-            quote_calls.append(tweet_id)
-            return [quote]
-
-    def _fake_pg_upsert(table: str, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
-        if table == "twitter_account_catalog_posts":
-            catalog_payloads.append(dict(payload))
-            return {"id": f"catalog-{payload['source_id']}", **payload}
-        if table == "twitter_tweets":
-            tweet_payloads.append(dict(payload))
-            return {
-                "id": f"tweet-{payload['tweet_id']}",
-                "hosted_media_urls": [],
-                "media_mirror_status": "pending",
-                **payload,
-                }
-        raise AssertionError(f"Unexpected table: {table}")
-
-    def _fake_pg_upsert_many(
-        table: str,
-        payloads: list[dict[str, Any]],
-        *,
-        conflict_col: str,
-        conn: Any = None,
-    ) -> list[dict[str, Any]]:
-        del conflict_col, conn
-        assert table == "twitter_tweets"
-        rows: list[dict[str, Any]] = []
-        for payload in payloads:
-            tweet_payloads.append(dict(payload))
-            rows.append(
-                {
-                    "id": f"tweet-{payload['tweet_id']}",
-                    "hosted_media_urls": [],
-                    "media_mirror_status": "pending",
-                    **payload,
-                }
-            )
-        return rows
-
-    monkeypatch.setattr(social_repo, "TwitterScraper", _FakeTwitterScraper)
-    monkeypatch.setattr(social_repo, "_load_twitter_auth", lambda: ({}, "bearer"))
-    monkeypatch.setattr(social_repo, "_load_twikit_credentials", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(social_repo, "_pg_upsert", _fake_pg_upsert)
-    monkeypatch.setattr(social_repo, "_pg_upsert_many", _fake_pg_upsert_many)
-    monkeypatch.setattr(social_repo, "_platform_posts_has_column", lambda platform, column: platform == "twitter")
-    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda table: table == "twitter_tweets")
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
-    monkeypatch.setattr(social_repo, "_SavepointScope", lambda **_kwargs: nullcontext())
-    monkeypatch.setattr(social_repo, "_mark_missing_comments_for_anchor", lambda **_kwargs: 0)
-    monkeypatch.setattr(social_repo, "_reconcile_post_comment_count", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        social_repo,
-        "_enqueue_twitter_comment_media_mirror_job",
-        lambda *_args, comment_row, **_kwargs: media_jobs.append(str(comment_row["tweet_id"])) or "media-job-1",
-    )
-
-    rows, meta = social_repo._scrape_shared_twitter_posts(
-        run_id="run-1",
-        account_handle="thetraitorsus",
-        config={
-            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
-            "source_scope": "bravo",
-            "twitter_comments_in_posts_stage": True,
-            "details_refresh_skip_media_followups": False,
-        },
-        job_id="job-1",
-    )
-
-    assert [row["source_id"] for row in rows] == ["root-1", "thread-2"]
-    root_catalog = next(payload for payload in catalog_payloads if payload["source_id"] == "root-1")
-    thread_catalog = next(payload for payload in catalog_payloads if payload["source_id"] == "thread-2")
-    assert root_catalog["thread_root_source_id"] == "root-1"
-    assert thread_catalog["thread_root_source_id"] == "root-1"
-    assert thread_catalog["is_thread_part"] is True
-    assert thread_catalog["thread_position"] == 2
-    thread_payload = next(payload for payload in tweet_payloads if payload["tweet_id"] == "thread-2")
-    assert thread_payload["thread_root_tweet_id"] == "root-1"
-    assert thread_payload["thread_position"] == 2
-    assert reply_calls == ["root-1"]
-    assert quote_calls == ["root-1"]
-    assert media_jobs == ["audience-reply-1", "quote-1"]
-    assert meta["persist_counters"]["comments_upserted"] == 1
-    assert meta["persist_counters"]["quotes_upserted"] == 1
-    assert meta["quote_stats"]["quotes_fetched"] == 1
-    assert meta["twitter_interactions_complete"] is True
 
 
 def test_scrape_shared_threads_posts_catalog_adds_profile_snapshot(
@@ -8949,15 +8665,6 @@ def test_reserve_social_account_catalog_launch_reopens_cursor_after_lock_query(
         "catalog-start-lock:instagram:thetraitorsus",
         "catalog-start-lock:instagram:thetraitorsus",
     ]
-
-
-def test_catalog_launch_initial_status_matches_scrape_runs_constraint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: False)
-
-    assert social_repo._catalog_launch_initial_status(allow_local_dev_inline_bypass=False) == "queued"
-    assert social_repo._catalog_launch_initial_status(allow_local_dev_inline_bypass=True) == "queued"
 
 
 def test_start_social_account_catalog_backfill_existing_run_defers_initial_dispatch(
@@ -10767,7 +10474,7 @@ def test_get_social_account_profile_summary_normalizes_wwhl_alias(monkeypatch: p
     assert payload["total_posts"] == 14
 
 
-def test_get_social_account_profile_summary_lite_skips_heavy_detail_branches(
+def test_get_social_account_profile_summary_lite_includes_header_stats_without_full_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = [{"user_avatar_url": None, "hosted_user_avatar_url": None, "raw_data": {}}]
@@ -10803,16 +10510,62 @@ def test_get_social_account_profile_summary_lite_skips_heavy_detail_branches(
     monkeypatch.setattr(social_repo, "_social_account_profile_grouped_counts", _should_not_run)
     monkeypatch.setattr(social_repo, "_serialize_social_account_profile_post_buckets", _should_not_run)
     monkeypatch.setattr(social_repo, "_build_social_account_profile_entity_aggregates", _should_not_run)
-    monkeypatch.setattr(social_repo, "_instagram_social_account_comments_saved_summary", _should_not_run)
-    monkeypatch.setattr(social_repo, "_instagram_social_account_media_target_counts", _should_not_run)
+    monkeypatch.setattr(social_repo, "_instagram_social_account_detail_rollup", _should_not_run)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_lite_header_stats",
+        lambda *_args, **_kwargs: {
+            "totals": {
+                "total_posts": 3,
+                "total_engagement": 30,
+                "total_views": 300,
+                "first_post_at": None,
+                "last_post_at": None,
+            },
+            "comments_saved_summary": {
+                "saved_comments": 41,
+                "retrieved_comments": 429,
+                "saved_comment_posts": 8,
+                "retrieved_comment_posts": 12,
+                "saved_comment_media_files": 7,
+            },
+            "media_coverage": {
+                "saved_files": 1289,
+                "total_files": 1400,
+                "saved_post_media_files": 1200,
+                "total_post_media_files": 1300,
+                "saved_comment_media_files": 7,
+                "total_comment_media_files": 75,
+                "saved_avatar_files": 55,
+                "saved_reel_still_files": 29,
+                "total_reel_still_files": 29,
+            },
+        },
+    )
 
     payload = social_repo.get_social_account_profile_summary("instagram", "bravotv", detail="lite")
 
     assert payload["summary_detail"] == "lite"
     assert payload["total_posts"] == 3
-    assert payload["comments_saved_summary"] is None
+    assert payload["comments_saved_summary"] == {
+        "saved_comments": 41,
+        "retrieved_comments": 429,
+        "saved_comment_posts": 8,
+        "retrieved_comment_posts": 12,
+        "saved_comment_media_files": 7,
+    }
     assert payload["comments_coverage"] is None
-    assert payload["media_coverage"] is None
+    assert payload["media_coverage"] == {
+        "saved_files": 1289,
+        "total_files": 1400,
+        "saved_post_media_files": 1200,
+        "total_post_media_files": 1300,
+        "saved_comment_media_files": 7,
+        "total_comment_media_files": 75,
+        "saved_avatar_files": 55,
+        "saved_reel_still_files": 29,
+        "total_reel_still_files": 29,
+    }
     assert payload["per_show_counts"] == []
     assert payload["per_season_counts"] == []
     assert payload["top_hashtags"] == []
@@ -11663,6 +11416,122 @@ def test_cached_live_profile_snapshot_uses_twitter_graphql_user_totals(
     assert snapshot["is_verified"] is True
 
     social_repo._SOCIAL_PROFILE_SNAPSHOT_CACHE.clear()
+
+
+def test_get_social_account_catalog_posts_uses_social_profile_read_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_conn = object()
+    connection_labels: list[str] = []
+    observed_conn_labels: list[str] = []
+
+    @contextmanager
+    def fake_social_profile_connection(label: str):
+        connection_labels.append(label)
+        yield read_conn
+
+    def fake_assert_profile_exists(platform: str, account_handle: str, *, conn: object | None = None) -> list[dict[str, Any]]:
+        assert platform == "instagram"
+        assert account_handle == "thetraitorsus"
+        assert conn is read_conn
+        observed_conn_labels.append("exists")
+        return [{"account_handle": account_handle}]
+
+    def fake_total_posts(
+        platform: str,
+        account_handle: str,
+        *,
+        statuses: list[str] | None = None,
+        conn: object | None = None,
+    ) -> int:
+        assert platform == "instagram"
+        assert account_handle == "thetraitorsus"
+        assert statuses == ["unassigned"]
+        assert conn is read_conn
+        observed_conn_labels.append("total")
+        return 1
+
+    def fake_fetch_rows(
+        platform: str,
+        account_handle: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        statuses: list[str] | None = None,
+        conn: object | None = None,
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        assert platform == "instagram"
+        assert account_handle == "thetraitorsus"
+        assert limit == 25
+        assert offset == 0
+        assert statuses == ["unassigned"]
+        assert conn is read_conn
+        observed_conn_labels.append("rows")
+        return [
+            {
+                "id": "catalog-1",
+                "source_id": "source-1",
+                "assignment_status": "unassigned",
+                "candidate_matches": [],
+            }
+        ]
+
+    monkeypatch.setattr(social_repo, "_social_account_profile_summary_connection", fake_social_profile_connection)
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", fake_assert_profile_exists)
+    monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", fake_total_posts)
+    monkeypatch.setattr(social_repo, "_fetch_shared_catalog_rows", fake_fetch_rows)
+    monkeypatch.setattr(
+        social_repo,
+        "_social_account_profile_post_item",
+        lambda platform, row, **_kwargs: {
+            "platform": platform,
+            "id": row["id"],
+            "source_id": row["source_id"],
+        },
+    )
+
+    payload = social_repo.get_social_account_catalog_posts(
+        "instagram",
+        "thetraitorsus",
+        assignment_status="unassigned",
+    )
+
+    assert connection_labels == ["social-profile-catalog-posts-instagram"]
+    assert observed_conn_labels == ["exists", "total", "rows"]
+    assert payload["pagination"]["total"] == 1
+    assert payload["items"][0]["assignment_status"] == "unassigned"
+
+
+def test_social_account_profile_post_item_includes_catalog_media_fields() -> None:
+    payload = social_repo._social_account_profile_post_item(
+        "instagram",
+        {
+            "id": "catalog-1",
+            "source_id": "ABC123",
+            "caption": "Catalog caption",
+            "posted_at": "2026-03-22T12:00:00Z",
+            "thumbnail_url": "https://cdn.example/source-thumb.jpg",
+            "source_media_urls": ["https://cdn.example/source-1.jpg"],
+            "hosted_thumbnail_url": "https://media.example/hosted-thumb.jpg",
+            "hosted_media_urls": ["https://media.example/hosted-1.jpg"],
+            "post_format": "carousel",
+            "likes": 10,
+            "comments_count": 2,
+        },
+        account_handle="thetraitorsus",
+    )
+
+    assert payload["thumbnail_url"] == "https://cdn.example/source-thumb.jpg"
+    assert payload["source_thumbnail_url"] == "https://cdn.example/source-thumb.jpg"
+    assert payload["hosted_thumbnail_url"] == "https://media.example/hosted-thumb.jpg"
+    assert payload["source_media_urls"] == ["https://cdn.example/source-1.jpg"]
+    assert payload["hosted_media_urls"] == ["https://media.example/hosted-1.jpg"]
+    assert payload["media_urls"] == [
+        "https://media.example/hosted-1.jpg",
+        "https://cdn.example/source-1.jpg",
+    ]
+    assert payload["post_format"] == "carousel"
 
 
 def test_touch_shared_account_source_serializes_datetime_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -17806,64 +17675,6 @@ def test_upsert_tweet_without_run_id_preserves_last_seen_run(monkeypatch) -> Non
     assert captured_payload["is_missing"] is False
 
 
-def test_upsert_tweet_skips_missing_optional_metric_columns(monkeypatch) -> None:
-    captured_payload: dict[str, object] = {}
-
-    class _Tweet:
-        tweet_id = "tweet-optional-metrics"
-        username = "thetraitorsus"
-        display_name = "The Traitors US"
-        user_verified = True
-        text = "tweet body"
-        hashtags = []
-        mentions = []
-        media_urls = []
-        likes = 3
-        retweets = 1
-        replies = 2
-        quotes = 0
-        views = 50
-        bookmarks = 7
-        shares = 4
-        is_reply = False
-        is_retweet = False
-        is_quote = False
-        reply_to_tweet_id = None
-        quoted_tweet_id = None
-        created_at = datetime(2026, 2, 10, tzinfo=UTC)
-        user_profile_url = ""
-        user_avatar_url = ""
-
-        def to_dict(self) -> dict[str, object]:
-            return {"tweet_id": self.tweet_id}
-
-    def _fake_upsert(table: str, payload: dict[str, object], *, conflict_col: str, conn: object | None = None):
-        del conflict_col, conn
-        assert table == "twitter_tweets"
-        captured_payload.update(payload)
-        return {"id": "row-1"}
-
-    monkeypatch.setattr(social_repo, "_pg_upsert", _fake_upsert)
-    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda table: table == "twitter_tweets")
-    monkeypatch.setattr(
-        social_repo,
-        "_platform_posts_has_column",
-        lambda _platform, column: column not in {"bookmarks", "shares"},
-    )
-
-    row = social_repo._upsert_tweet(
-        None,
-        job_id="job-1",
-        run_id="run-1",
-        account="thetraitorsus",
-        tweet=_Tweet(),
-    )
-
-    assert row == {"id": "row-1"}
-    assert "bookmarks" not in captured_payload
-    assert "shares" not in captured_payload
-
-
 def test_upsert_tweet_batch_uses_bulk_upsert_and_dedupes(monkeypatch) -> None:
     captured_chunks: list[list[str]] = []
 
@@ -19071,79 +18882,6 @@ def test_dispatch_due_social_jobs_fails_closed_when_modal_resolution_is_unavaila
     assert result["reason"] == "modal_sdk_unavailable"
     assert dispatcher_heartbeats[0]["metadata_updates"]["dispatch_enabled"] is False
     assert dispatcher_heartbeats[0]["metadata_updates"]["last_dispatch_error_code"] == "modal_sdk_unavailable"
-
-
-def test_dispatch_due_social_jobs_background_submits_to_queue(monkeypatch: pytest.MonkeyPatch) -> None:
-    submitted: list[dict[str, Any]] = []
-
-    def _fake_submit_named_background_task(**kwargs: Any) -> dict[str, Any]:
-        submitted.append(kwargs)
-        return {
-            "submitted": True,
-            "state": "queued",
-            "group": kwargs["group"],
-            "key": kwargs["key"],
-            "active_count": 0,
-            "queued_count": 1,
-            "max_active": 1,
-            "queue_maxsize": 25,
-        }
-
-    monkeypatch.setattr(social_repo, "submit_named_background_task", _fake_submit_named_background_task)
-
-    result = social_repo._dispatch_due_social_jobs_in_background(run_id="run-1")
-
-    assert result["submitted"] is True
-    assert result["state"] == "queued"
-    assert result["run_id"] == "run-1"
-    assert len(submitted) == 1
-    assert submitted[0]["group"] == "social-dispatch"
-    assert submitted[0]["key"] == "run-1"
-    assert submitted[0]["thread_name"] == "dispatch-social-jobs:run-1"
-
-
-def test_dispatch_due_social_jobs_background_reports_duplicate_or_full_queue(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    responses = iter(
-        [
-            {
-                "submitted": False,
-                "state": "duplicate",
-                "group": "social-dispatch",
-                "key": "run-1",
-                "active_count": 1,
-                "queued_count": 0,
-                "max_active": 1,
-                "queue_maxsize": 25,
-            },
-            {
-                "submitted": False,
-                "state": "queue_full",
-                "group": "social-dispatch",
-                "key": "run-2",
-                "active_count": 1,
-                "queued_count": 25,
-                "max_active": 1,
-                "queue_maxsize": 25,
-            },
-        ]
-    )
-
-    monkeypatch.setattr(social_repo, "submit_named_background_task", lambda **_kwargs: next(responses))
-
-    with caplog.at_level("INFO"):
-        duplicate = social_repo._dispatch_due_social_jobs_in_background(run_id="run-1")
-    with caplog.at_level("WARNING"):
-        queue_full = social_repo._dispatch_due_social_jobs_in_background(run_id="run-2")
-
-    assert duplicate["submitted"] is False
-    assert duplicate["state"] == "duplicate"
-    assert queue_full["submitted"] is False
-    assert queue_full["state"] == "queue_full"
-    assert "background dispatch already queued" in caplog.text
-    assert "background dispatch queue unavailable" in caplog.text
 
 
 def test_dispatch_due_social_jobs_uses_env_dispatch_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -20526,13 +20264,11 @@ def test_ingest_twitter_rhoslc_requires_explicit_hashtag(monkeypatch) -> None:
     monkeypatch.setattr("trr_backend.socials.twitter.TwitterScraper", _FakeTwitterScraper)
     monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
     monkeypatch.setattr(social_repo, "_update_job_progress", lambda *args, **kwargs: None)
-    def _fake_enqueue_media_job(*args, **kwargs):
-        post_row = kwargs.get("post_row") or {}
-        if post_row.get("thumbnail_url") or post_row.get("media_urls"):
-            mirror_calls.append({"args": args, "kwargs": kwargs})
-        return None
-
-    monkeypatch.setattr(social_repo, "_enqueue_platform_media_mirror_job", _fake_enqueue_media_job)
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_platform_media_mirror_job",
+        lambda *args, **kwargs: mirror_calls.append({"args": args, "kwargs": kwargs}) or None,
+    )
     monkeypatch.setattr(
         social_repo,
         "_upsert_tweet",
@@ -28637,7 +28373,7 @@ def test_finalize_run_status_completes_scrape_complete_catalog_run_with_classify
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "social_control"
+        assert pool_name == "default"
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -28695,7 +28431,7 @@ def test_finalize_run_status_fails_catalog_run_when_fetch_stage_completed_with_t
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "social_control"
+        assert pool_name == "default"
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -28733,34 +28469,6 @@ def test_finalize_run_status_fails_catalog_run_when_fetch_stage_completed_with_t
     assert set_status_calls == [(run_id, "failed", lock_conn)]
 
 
-def test_shared_catalog_fetch_terminal_error_ignores_stale_error_on_completed_job_with_items() -> None:
-    assert (
-        social_repo._shared_catalog_fetch_row_has_terminal_error(
-            {
-                "status": "completed",
-                "items_found": 96,
-                "metadata": {"error_code": "shared_stage_failed", "error": "old failure"},
-                "last_error_code": "shared_stage_failed",
-                "error_message": "old failure",
-            }
-        )
-        is False
-    )
-
-
-def test_shared_catalog_fetch_terminal_error_keeps_completed_empty_job_strict() -> None:
-    assert (
-        social_repo._shared_catalog_fetch_row_has_terminal_error(
-            {
-                "status": "completed",
-                "items_found": 0,
-                "metadata": {"error_code": "shared_stage_failed"},
-            }
-        )
-        is True
-    )
-
-
 def test_finalize_run_status_starts_deferred_comments_followup_without_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.socials.control_plane import run_lifecycle
 
@@ -28782,7 +28490,7 @@ def test_finalize_run_status_starts_deferred_comments_followup_without_ui(monkey
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "social_control"
+        assert pool_name == "default"
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -28882,7 +28590,7 @@ def test_finalize_run_status_records_deferred_comments_runtime_version(monkeypat
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "social_control"
+        assert pool_name == "default"
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -29004,7 +28712,7 @@ def test_instagram_backfill_with_media_and_comments_materializes_posts_before_fo
     @contextmanager
     def _fake_advisory_lock(_lock_key: int, *, label: str, pool_name: str = "default"):
         assert label == "run-finalize-lock"
-        assert pool_name == "social_control"
+        assert pool_name == "default"
         yield lock_conn
 
     def _fake_fetch_one(sql: str, params: list[Any] | None = None, *, conn: Any | None = None):  # noqa: ANN001
@@ -30588,38 +30296,6 @@ def test_create_job_modal_runtime_metadata_uses_authoritative_runtime_and_preser
     assert inserted_metadata["created_by_runtime_version"] == creator_runtime
 
 
-def test_create_job_reuses_active_connection_for_feature_detection(monkeypatch: pytest.MonkeyPatch) -> None:
-    active_conn = object()
-    feature_conns: list[object | None] = []
-
-    def _fake_scrape_jobs_features(*, conn: object | None = None) -> dict[str, bool]:
-        feature_conns.append(conn)
-        return {"has_queue_fields": True}
-
-    monkeypatch.setattr(social_repo, "_job_required_execution_backend", lambda *_args, **_kwargs: "modal")
-    monkeypatch.setattr(social_repo, "_resolve_runtime_version_stamp", lambda: {})
-    monkeypatch.setattr(social_repo, "_scrape_jobs_features", _fake_scrape_jobs_features)
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", lambda *_args, **_kwargs: {"id": "job-1"})
-
-    job_id = social_repo._create_job(
-        None,
-        run_id="run-1",
-        platform="twitter",
-        source_scope="bravo",
-        job_type=social_repo.TWITTER_COMMENT_MEDIA_MIRROR_JOB_TYPE,
-        stage=social_repo.COMMENT_MEDIA_MIRROR_STAGE,
-        config={"account": "thetraitorsus"},
-        initiated_by="test",
-        status="queued",
-        conn=active_conn,
-        track_run_counters=False,
-    )
-
-    assert job_id == "job-1"
-    assert feature_conns == [active_conn]
-
-
 def test_resolve_run_progress_runtime_versions_dedupes_semantically_equivalent_runtime_stamps() -> None:
     runtime_versions = social_repo._resolve_run_progress_runtime_versions(
         [
@@ -31849,6 +31525,57 @@ def test_run_shared_account_posts_stage_raises_for_incomplete_single_runner_fall
     assert exc_info.value.error_code == "catalog_incomplete"
     assert exc_info.value.retryable is True
     assert exc_info.value.runtime_metadata["retrieval_meta"]["expected_total_posts"] == 16_454
+    assert exc_info.value.runtime_metadata["retrieval_meta"]["completion_missing_posts"] == 16_442
+    assert exc_info.value.runtime_metadata["retrieval_meta"]["completion_tolerance_posts"] == 0
+
+
+def test_run_shared_account_posts_stage_tolerates_tiktok_empty_body_near_complete_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_scrape_shared_posts_for_account",
+        lambda **_kwargs: (
+            [{"source_id": f"tiktok-{index}"} for index in range(269)],
+            {
+                "retrieval_mode": "single_runner_fallback",
+                "posts_checked": 269,
+                "total_posts": 272,
+                "persist_counters": {"posts_upserted": 269, "comments_upserted": 0},
+            },
+        ),
+    )
+
+    posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
+        run_id="44444444-4444-4444-4444-444444444444",
+        platform="tiktok",
+        source_scope="bravo",
+        account_handle="thetraitorsus",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "tiktok",
+            "source_scope": "bravo",
+            "account": "thetraitorsus",
+            "runner_strategy": "single_runner_fallback",
+            "recovery_reason": "tiktok_empty_body_transport_failure",
+            "discovery_total_posts": 272,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        job_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert posts_count == 269
+    assert comments_count == 0
+    retrieval_meta = metadata["retrieval_meta"]
+    assert retrieval_meta["expected_total_posts"] == 272
+    assert retrieval_meta["completion_target_posts"] == 272
+    assert retrieval_meta["observed_posts_checked"] == 269
+    assert retrieval_meta["observed_posts_saved"] == 269
+    assert retrieval_meta["completion_missing_posts"] == 3
+    assert retrieval_meta["completion_tolerance_posts"] == 3
+    assert retrieval_meta["completion_tolerance_applied"] is True
 
 
 def test_run_shared_account_posts_stage_tiktok_transport_fallback_allows_source_total_drift(
@@ -31895,50 +31622,10 @@ def test_run_shared_account_posts_stage_tiktok_transport_fallback_allows_source_
     assert metadata["expected_total_posts"] == 4444
     assert metadata["retrieval_meta"]["expected_total_posts"] == 4444
     assert metadata["retrieval_meta"]["completion_target_posts"] == 3277
-
-
-def test_run_shared_account_posts_stage_tolerates_tiktok_empty_body_near_complete_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rows = [{"source_id": str(index), "posted_at": "2026-01-01T00:00:00Z"} for index in range(269)]
-
-    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
-    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
-    monkeypatch.setattr(social_repo, "_shared_account_frontier_progress", lambda **_kwargs: {})
-    monkeypatch.setattr(
-        social_repo,
-        "_scrape_shared_posts_for_account",
-        lambda **_kwargs: (
-            rows,
-            {
-                "retrieval_mode": "ytdlp",
-                "posts_checked": 269,
-                "total_posts": 272,
-                "persist_counters": {"posts_upserted": 269, "comments_upserted": 0},
-            },
-        ),
-    )
-
-    posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
-        run_id="run-1",
-        platform="tiktok",
-        source_scope="bravo",
-        account_handle="thetraitorsus",
-        config={
-            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
-            "runner_strategy": "single_runner_fallback",
-            "recovery_reason": "tiktok_empty_body_transport_failure",
-            "expected_total_posts": 272,
-            "completion_target_posts": 272,
-        },
-        job_id="job-1",
-    )
-
-    assert posts_count == 269
-    assert comments_count == 0
-    assert metadata["retrieval_meta"]["completion_tolerance_applied"] is True
-    assert metadata["retrieval_meta"]["completion_missing_posts"] == 3
-    assert metadata["retrieval_meta"]["completion_tolerance_posts"] == 5
+    assert metadata["retrieval_meta"]["observed_posts_checked"] == 3277
+    assert metadata["retrieval_meta"]["observed_posts_saved"] == 3277
+    assert metadata["retrieval_meta"]["completion_missing_posts"] == 0
+    assert metadata["retrieval_meta"]["completion_tolerance_posts"] == 3
 
 
 @pytest.mark.parametrize("platform", ["twitter", "threads", "youtube", "facebook"])

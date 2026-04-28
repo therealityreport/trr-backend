@@ -73,6 +73,16 @@ def _auth_failure_text(text: str) -> bool:
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
 
 
+class InstagramCommentsWarmupError(RuntimeError):
+    error_code: str
+    retryable: bool
+
+    def __init__(self, message: str, *, error_code: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = retryable
+
+
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -86,13 +96,6 @@ class InstagramCommentsFetchResult:
     fetch_reason: str | None = None
     request_count: int = 0
     retryable: bool = False
-
-
-class InstagramCommentsWarmupError(RuntimeError):
-    def __init__(self, message: str, *, error_code: str, retryable: bool = False) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.retryable = retryable
 
 
 # ---------------------------------------------------------------------------
@@ -176,16 +179,16 @@ class InstagramCommentsScraplingFetcher:
         text = _response_text(response)
         if _status_code(response) in {401, 403} or _auth_failure_text(text):
             raise InstagramCommentsWarmupError(
-                "Instagram auth warm-up failed; session appears logged out or challenged.",
+                "Instagram comments warmup failed because the session appears logged out or challenged.",
                 error_code="instagram_comments_warmup_auth_failed",
                 retryable=False,
             )
         self._merge_warmup_cookies(response)
         if not self._warmup_cookie_delta:
             raise InstagramCommentsWarmupError(
-                "Instagram comments warmup did not bridge cookies.",
+                "Instagram comments warmup did not bridge any cookies.",
                 error_code="instagram_comments_warmup_no_cookies",
-                retryable=False,
+                retryable=True,
             )
         await self._rebuild_http_client()
 
