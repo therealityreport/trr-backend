@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -28,6 +29,65 @@ class CommentsScraplingRuntimeError(Exception):
 
     def __str__(self) -> str:
         return self.message
+
+
+@dataclass(slots=True)
+class ScraplingJobCancelledError(Exception):
+    message: str
+    cancel_scope: str
+    job_status: str | None = None
+    run_status: str | None = None
+    runtime_metadata: dict[str, Any] | None = None
+
+    def __str__(self) -> str:
+        return self.message
+
+
+ScraplingJobCancelled = ScraplingJobCancelledError
+
+
+def _raise_if_cancelled(
+    *,
+    job_id: str,
+    run_id: str,
+    runtime_metadata: dict[str, Any] | None = None,
+    conn: Any | None = None,
+) -> None:
+    if not job_id:
+        return
+    started_at = time.perf_counter()
+    job_state = pg.fetch_one("select status from social.scrape_jobs where id = %s", [job_id], conn=conn) or {}
+    job_status = str(job_state.get("status") or "").strip().lower() or None
+    run_status: str | None = None
+    if run_id:
+        run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id], conn=conn) or {}
+        run_status = str(run_state.get("status") or "").strip().lower() or None
+    cancel_scope = "job" if job_status == "cancelled" else "run" if run_status == "cancelled" else None
+    if not cancel_scope:
+        return
+
+    metadata = dict(runtime_metadata or {})
+    logger.info(
+        "instagram_comments_scrapling cancellation_detected",
+        extra={
+            "event": "scrapling_job_cancelled",
+            "job_id": job_id,
+            "run_id": run_id or None,
+            "cancel_scope": cancel_scope,
+            "job_status": job_status,
+            "run_status": run_status,
+            "check_latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "request_count": metadata.get("request_count"),
+            "warmup_cookie_count": metadata.get("warmup_cookie_count"),
+        },
+    )
+    raise ScraplingJobCancelledError(
+        "Instagram comments Scrapling job was cancelled.",
+        cancel_scope=cancel_scope,
+        job_status=job_status,
+        run_status=run_status,
+        runtime_metadata=metadata,
+    )
 
 
 def _comments_scrape_is_complete(
@@ -122,6 +182,11 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     runtime_metadata=dict(fetcher.runtime_metadata),
                 ) from exc
             auth_metadata = dict(session.auth_session.metadata or {})
+            _raise_if_cancelled(
+                job_id=job_id,
+                run_id=run_id,
+                runtime_metadata=dict(fetcher.runtime_metadata),
+            )
             with pg.db_connection(label="instagram-comments-scrapling-persist") as persist_conn:
                 repo._touch_job_heartbeat(job_id, worker_id=worker_id)
                 repo._emit_job_progress(
@@ -140,6 +205,12 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
 
                 for index, shortcode in enumerate(target_source_ids, start=1):
                     repo._touch_job_heartbeat(job_id, worker_id=worker_id)
+                    _raise_if_cancelled(
+                        job_id=job_id,
+                        run_id=run_id,
+                        runtime_metadata=dict(fetcher.runtime_metadata),
+                        conn=persist_conn,
+                    )
                     result = await fetcher.fetch_comments_for_shortcode(
                         shortcode,
                         max_comments=max_comments_per_post,
@@ -241,6 +312,41 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             metadata=metadata,
         )
         terminal_status = "completed"
+        terminal_error_message = None
+    except ScraplingJobCancelledError as exc:
+        repo._finish_job(
+            job_id,
+            status="cancelled",
+            items_found=processed_posts + comments_fetched,
+            error_message=str(exc),
+            metadata={
+                "stage": stage,
+                "platform": "instagram",
+                "account": account_handle,
+                "mode": mode,
+                "source_scope": source_scope,
+                "target_source_ids": target_source_ids,
+                "cancelled": True,
+                "cancel_scope": exc.cancel_scope,
+                "job_status_at_cancel": exc.job_status,
+                "run_status_at_cancel": exc.run_status,
+                "activity": {"phase": "cancelled", "last_progress_at": repo._iso(repo._now_utc())},
+                "stage_counters": {"posts": processed_posts, "comments": comments_fetched},
+                "persist_counters": {
+                    "posts_upserted": processed_posts,
+                    "comments_upserted": comments_upserted,
+                    "comments_marked_missing": comments_marked_missing,
+                    "comment_media_mirror_jobs_enqueued": mirror_jobs_enqueued,
+                    "comment_media_mirror_job_enqueue_errors": mirror_job_enqueue_errors,
+                },
+                "runtime_metadata": exc.runtime_metadata,
+                "fetcher_runtime": fetcher_metadata,
+            },
+            last_error_code="instagram_comments_scrapling_cancelled",
+            last_error_class=exc.__class__.__name__,
+        )
+        terminal_status = "cancelled"
+        terminal_error_message = str(exc)
     except Exception as exc:  # noqa: BLE001
         runtime_error_code = str(getattr(exc, "error_code", "") or "").strip().lower()
         error_code = runtime_error_code or "instagram_comments_scrapling_failed"
