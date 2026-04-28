@@ -180,31 +180,6 @@ def test_set_run_status_invalidates_week_detail_cache_on_terminal_states(
         social_repo.register_week_detail_cache_invalidator(None)
 
 
-def test_set_run_status_clears_terminal_timestamps_for_active_status(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, list[object]]] = []
-
-    def _fake_fetch_one(sql: str, params: list[object], **_kwargs):
-        calls.append((" ".join(sql.lower().split()), list(params)))
-        return {"id": "run-1"}
-
-    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
-
-    social_repo._set_run_status("run-1", "queued")
-
-    assert len(calls) == 1
-    sql, params = calls[0]
-    assert (
-        "completed_at = case when %s in ('completed', 'failed', 'cancelled') "
-        "then coalesce(completed_at, now()) else null end"
-    ) in sql
-    assert (
-        "cancelled_at = case when %s = 'cancelled' then coalesce(cancelled_at, now()) else null end"
-    ) in sql
-    assert params == ["queued", "queued", "queued", "queued", "run-1"]
-
-
 def test_update_run_summary_prefers_incremental_counter_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
@@ -246,12 +221,12 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
 ) -> None:
     lock_conn = object()
     seen_fetch_conns: list[object | None] = []
-    seen_lock_pool_names: list[str] = []
+    seen_lock_pools: list[str] = []
 
     @contextmanager
     def fake_advisory_lock(lock_key, *, label, pool_name="default"):
         del lock_key, label
-        seen_lock_pool_names.append(pool_name)
+        seen_lock_pools.append(pool_name)
         yield lock_conn
 
     def fake_fetch_one(sql: str, params=None, *, conn=None):
@@ -282,5 +257,31 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
 
     run_lifecycle._finalize_run_status("run-1")
 
-    assert seen_lock_pool_names == ["social_control"]
     assert seen_fetch_conns == [lock_conn]
+    assert seen_lock_pools == ["social_control"]
+
+
+def test_finalize_run_status_lock_contention_reads_from_social_control_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_fetch_pools: list[str] = []
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        raise run_lifecycle.legacy.pg.AdvisoryLockUnavailable(123)
+        yield  # pragma: no cover
+
+    def fake_fetch_one(sql: str, params=None, *, pool_name="default"):
+        del params
+        assert "select status from social.scrape_runs" in " ".join(sql.split()).lower()
+        seen_fetch_pools.append(pool_name)
+        return {"status": "running"}
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
+
+    payload = run_lifecycle._finalize_run_status("run-1")
+
+    assert payload == {"status": "running"}
+    assert seen_fetch_pools == ["social_control"]

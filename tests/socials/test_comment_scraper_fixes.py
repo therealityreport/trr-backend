@@ -1351,188 +1351,6 @@ def test_twitter_parse_tweet_result_reads_username_from_core_fallback() -> None:
     assert parsed.user_avatar_url == "https://pbs.twimg.com/profile_images/test.jpg"
 
 
-def test_twitter_parse_tweet_result_populates_account_backfill_fields_for_text_only_tweet() -> None:
-    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
-
-    parsed = scraper._parse_tweet_result(  # noqa: SLF001
-        {
-            "__typename": "Tweet",
-            "legacy": {
-                "id_str": "321",
-                "full_text": "text only account update",
-                "favorite_count": 11,
-                "retweet_count": 12,
-                "reply_count": 13,
-                "quote_count": 14,
-                "bookmark_count": 15,
-                "conversation_id_str": "root-321",
-                "created_at": "Thu Feb 13 12:34:56 +0000 2026",
-            },
-            "core": {"user_results": {"result": {"core": {"screen_name": "tester", "name": "Test User"}}}},
-            "views": {"count": "16"},
-            "share_count": 17,
-        },
-        TwitterScrapeConfig(query="x", date_start=datetime(2026, 2, 1), date_end=datetime(2026, 2, 14)),
-    )
-
-    assert parsed is not None
-    assert parsed.text == "text only account update"
-    assert parsed.media_urls == []
-    assert parsed.bookmarks == 15
-    assert parsed.shares == 17
-    assert parsed.conversation_id == "root-321"
-
-
-def test_twitter_fetch_tweet_by_id_uses_tweet_detail_with_feature_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
-    scraper._detail_hash = "detail-hash"
-    scraper._search_hash = "search-hash"
-
-    payload = {
-        "data": {
-            "threaded_conversation_with_injections_v2": {
-                "instructions": [
-                    {
-                        "type": "TimelineAddEntries",
-                        "entries": [
-                            {
-                                "entryId": "tweet-555",
-                                "content": {
-                                    "itemContent": {
-                                        "tweet_results": {
-                                            "result": {
-                                                "__typename": "Tweet",
-                                                "rest_id": "555",
-                                                "legacy": {
-                                                    "id_str": "555",
-                                                    "full_text": "detail text https://t.co/media",
-                                                    "created_at": "Thu Feb 13 12:34:56 +0000 2026",
-                                                    "favorite_count": 1,
-                                                    "reply_count": 2,
-                                                    "retweet_count": 3,
-                                                    "quote_count": 4,
-                                                    "bookmark_count": 5,
-                                                    "conversation_id_str": "root-555",
-                                                    "in_reply_to_status_id_str": "parent-444",
-                                                    "is_quote_status": True,
-                                                    "quoted_status_id_str": "quoted-333",
-                                                    "extended_entities": {
-                                                        "media": [
-                                                            {
-                                                                "type": "photo",
-                                                                "url": "https://t.co/media",
-                                                                "media_url_https": "https://pbs.twimg.com/media/detail.jpg",
-                                                            }
-                                                        ]
-                                                    },
-                                                },
-                                                "core": {
-                                                    "user_results": {
-                                                        "result": {
-                                                            "rest_id": "user-555",
-                                                            "core": {"screen_name": "BravoTV", "name": "Bravo"},
-                                                            "legacy": {
-                                                                "profile_image_url_https": "https://images.test/avatar.jpg"
-                                                            },
-                                                        }
-                                                    }
-                                                },
-                                                "views": {"count": "6"},
-                                                "shares": 7,
-                                            }
-                                        }
-                                    }
-                                },
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
-    }
-    first = _FakeResponse(
-        status_code=400,
-        payload={"errors": [{"message": "The following features cannot be null: detail_flag"}]},
-    )
-    second = _FakeResponse(status_code=200, payload=payload)
-    responses = [first, second]
-    requested_urls: list[str] = []
-
-    def _fake_get(url: str, **_: object) -> _FakeResponse:
-        requested_urls.append(url)
-        return responses.pop(0)
-
-    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
-    monkeypatch.setattr(scraper, "_get_headers", lambda: {})
-    monkeypatch.setattr(scraper.session, "get", _fake_get)
-
-    tweet = scraper.fetch_tweet_by_id("555", delay=0)
-
-    assert tweet is not None
-    assert len(requested_urls) == 2
-    second_query = parse_qs(urlparse(requested_urls[1]).query)
-    second_features = json.loads(second_query["features"][0])
-    assert second_features["detail_flag"] is False
-    assert tweet.tweet_id == "555"
-    assert tweet.username == "BravoTV"
-    assert tweet.text == "detail text"
-    assert tweet.likes == 1
-    assert tweet.replies == 2
-    assert tweet.retweets == 3
-    assert tweet.quotes == 4
-    assert tweet.views == 6
-    assert tweet.bookmarks == 5
-    assert tweet.shares == 7
-    assert tweet.reply_to_tweet_id == "parent-444"
-    assert tweet.quoted_tweet_id == "quoted-333"
-    assert tweet.conversation_id == "root-555"
-    assert tweet.media_urls == ["https://pbs.twimg.com/media/detail.jpg"]
-    assert tweet.user_id == "user-555"
-    assert tweet.user_avatar_url == "https://images.test/avatar.jpg"
-
-
-def test_twitter_fetch_tweet_by_id_skips_public_fallback_without_author(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
-
-    monkeypatch.setattr(scraper, "_fetch_tweet_detail_result", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        scraper,
-        "fetch_public_tweet_summary",
-        lambda *_args, **_kwargs: {"tweet_id": "555", "text": "summary text", "username": ""},
-    )
-
-    assert scraper.fetch_tweet_by_id("555", delay=0) is None
-
-
-def test_twitter_fetch_tweet_by_id_keeps_media_only_public_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
-
-    monkeypatch.setattr(scraper, "_fetch_tweet_detail_result", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        scraper,
-        "fetch_public_tweet_summary",
-        lambda *_args, **_kwargs: {
-            "tweet_id": "555",
-            "text": "",
-            "username": "BravoTV",
-            "media_urls": ["https://video.twimg.com/ext_tw_video/555/pu/vid/720x1280/video.mp4"],
-        },
-    )
-
-    tweet = scraper.fetch_tweet_by_id("555", delay=0)
-
-    assert tweet is not None
-    assert tweet.tweet_id == "555"
-    assert tweet.text == ""
-    assert tweet.media_urls == ["https://video.twimg.com/ext_tw_video/555/pu/vid/720x1280/video.mp4"]
-
-
 def test_twitter_fetch_tweet_detail_summary_strips_media_url_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = TwitterScraper(cookies={"ct0": "csrf-token"})
     scraper._detail_hash = "detail-hash"
@@ -2748,6 +2566,80 @@ def test_instagram_parse_post_node_supports_actor_style_payload_and_normalizes_m
     assert parsed.collaborators == ["amivitale", "natgeoanimals"]
 
 
+def test_instagram_parse_post_node_preserves_xdt_queryable_fields() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="fallback-user")
+    node = {
+        "id": "3885259576224942959_61503085324",
+        "pk": "3885259576224942959",
+        "code": "DXrNv_lEotv",
+        "media_type": 1,
+        "taken_at": 1777379165,
+        "user": {
+            "id": "61503085324",
+            "pk": "61503085324",
+            "username": "jographicss",
+            "full_name": "joseph",
+            "is_verified": False,
+            "profile_pic_url": "https://cdn.test/avatar-small.jpg",
+            "hd_profile_pic_url_info": {"url": "https://cdn.test/avatar-hd.jpg"},
+        },
+        "caption": {
+            "pk": "18072449729658081",
+            "text": "commissions are open! #commission",
+            "has_translation": False,
+        },
+        "caption_is_edited": False,
+        "like_count": 3,
+        "comment_count": 1,
+        "original_width": 1440,
+        "original_height": 1800,
+        "image_versions2": {"candidates": [{"url": "https://cdn.test/post.jpg", "height": 1800, "width": 1440}]},
+        "usertags": {"in": [{"user": {"username": "hroien", "id": "43137384920"}}]},
+        "coauthor_producers": [{"username": "hroien", "id": "43137384920"}],
+        "location": {"id": "1916295438661954", "name": "Cranberry Marsh"},
+        "comments_disabled": False,
+        "like_and_view_counts_disabled": True,
+        "commenting_disabled_for_viewer": False,
+        "is_paid_partnership": False,
+        "isAdvertisement": False,
+        "can_viewer_reshare": True,
+        "has_audio": False,
+        "media_repost_count": 2,
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+
+    assert parsed.shortcode == "DXrNv_lEotv"
+    assert parsed.source_post_id == "3885259576224942959"
+    assert parsed.pk == "3885259576224942959"
+    assert parsed.username == "jographicss"
+    assert parsed.owner_user_id == "61503085324"
+    assert parsed.owner_username == "jographicss"
+    assert parsed.owner_profile_pic_url_hd == "https://cdn.test/avatar-hd.jpg"
+    assert parsed.caption == "commissions are open! #commission"
+    assert parsed.caption_id == "18072449729658081"
+    assert parsed.caption_is_edited is False
+    assert parsed.caption_has_translation is False
+    assert parsed.location_id == "1916295438661954"
+    assert parsed.location_name == "Cranberry Marsh"
+    assert parsed.location_raw == {"id": "1916295438661954", "name": "Cranberry Marsh"}
+    assert parsed.original_width == 1440
+    assert parsed.original_height == 1800
+    assert parsed.comments_disabled is False
+    assert parsed.like_and_view_counts_disabled is True
+    assert parsed.commenting_disabled_for_viewer is False
+    assert parsed.is_paid_partnership is False
+    assert parsed.is_advertisement is False
+    assert parsed.can_viewer_reshare is True
+    assert parsed.has_audio is False
+    assert parsed.media_repost_count == 2
+    assert parsed.media_urls == ["https://cdn.test/post.jpg"]
+    assert parsed.thumbnail_url == "https://cdn.test/post.jpg"
+    assert parsed.profile_tags == ["hroien"]
+    assert parsed.collaborators == ["hroien"]
+
+
 def test_instagram_parse_post_node_keeps_one_source_url_for_single_image_with_mixed_variants() -> None:
     scraper = InstagramScraper(cookies={})
     config = InstagramScrapeConfig(username="bravotv")
@@ -3763,38 +3655,40 @@ def test_tiktok_default_ytdlp_mode_skips_direct_preflight(
     monkeypatch.setattr(
         scraper,
         "_scrape_via_ytdlp",
-        lambda cfg, **_kwargs: scraper.__dict__.__setitem__(
-            "last_retrieval_meta",
-            {
-                "retrieval_mode": "ytdlp",
-                "posts_checked": 1_200,
-                "videos_scanned": 1_200,
-                "pages_scanned": 0,
-            },
-        )
-        or [
-            SimpleNamespace(
-                video_id="vid-1",
-                date_time="2026-01-01 00:00:00",
-                create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
-                description="clip",
-                hashtags=[],
-                mentions=[],
-                likes=1,
-                comments=2,
-                shares=3,
-                saves=4,
-                views=5,
-                url="https://www.tiktok.com/@bravotv/video/vid-1",
-                username="bravotv",
-                author_nickname="Bravo",
-                duration=10,
-                music_title="song",
-                music_author="artist",
-                user_avatar_url=None,
-                thumbnail_url=None,
+        lambda cfg, **_kwargs: (
+            scraper.__dict__.__setitem__(
+                "last_retrieval_meta",
+                {
+                    "retrieval_mode": "ytdlp",
+                    "posts_checked": 1_200,
+                    "videos_scanned": 1_200,
+                    "pages_scanned": 0,
+                },
             )
-        ],
+            or [
+                SimpleNamespace(
+                    video_id="vid-1",
+                    date_time="2026-01-01 00:00:00",
+                    create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
+                    description="clip",
+                    hashtags=[],
+                    mentions=[],
+                    likes=1,
+                    comments=2,
+                    shares=3,
+                    saves=4,
+                    views=5,
+                    url="https://www.tiktok.com/@bravotv/video/vid-1",
+                    username="bravotv",
+                    author_nickname="Bravo",
+                    duration=10,
+                    music_title="song",
+                    music_author="artist",
+                    user_avatar_url=None,
+                    thumbnail_url=None,
+                )
+            ]
+        ),
     )
 
     posts = scraper.scrape(config)
@@ -3939,37 +3833,39 @@ def test_tiktok_auto_mode_is_ytdlp_alias_only(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         scraper,
         "_scrape_via_ytdlp",
-        lambda _config, **_kwargs: scraper.__dict__.__setitem__(
-            "last_retrieval_meta",
-            {
-                "retrieval_mode": "ytdlp",
-                "http_client": "yt_dlp",
-                "fallback_chain": ["yt_dlp"],
-            },
-        )
-        or [
-            SimpleNamespace(
-                video_id="vid-1",
-                date_time="2026-01-01 00:00:00",
-                create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
-                description="clip",
-                hashtags=[],
-                mentions=[],
-                likes=1,
-                comments=2,
-                shares=3,
-                saves=4,
-                views=5,
-                url="https://www.tiktok.com/@bravotv/video/vid-1",
-                username="bravotv",
-                author_nickname="Bravo",
-                duration=10,
-                music_title="song",
-                music_author="artist",
-                user_avatar_url=None,
-                thumbnail_url=None,
+        lambda _config, **_kwargs: (
+            scraper.__dict__.__setitem__(
+                "last_retrieval_meta",
+                {
+                    "retrieval_mode": "ytdlp",
+                    "http_client": "yt_dlp",
+                    "fallback_chain": ["yt_dlp"],
+                },
             )
-        ],
+            or [
+                SimpleNamespace(
+                    video_id="vid-1",
+                    date_time="2026-01-01 00:00:00",
+                    create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
+                    description="clip",
+                    hashtags=[],
+                    mentions=[],
+                    likes=1,
+                    comments=2,
+                    shares=3,
+                    saves=4,
+                    views=5,
+                    url="https://www.tiktok.com/@bravotv/video/vid-1",
+                    username="bravotv",
+                    author_nickname="Bravo",
+                    duration=10,
+                    music_title="song",
+                    music_author="artist",
+                    user_avatar_url=None,
+                    thumbnail_url=None,
+                )
+            ]
+        ),
     )
 
     posts = scraper.scrape(TikTokScrapeConfig(username="bravotv", scrape_mode="auto"))

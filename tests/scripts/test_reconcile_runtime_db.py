@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,37 @@ import pytest
 
 from scripts.dev import reconcile_runtime_db as cli
 from trr_backend.db.preflight import DatabasePreflightError
+
+ORIGINAL_READ_DIRECT_DB_IDENTITY = cli.read_direct_db_identity
+
+
+@pytest.fixture(autouse=True)
+def _clear_runtime_db_env(monkeypatch: pytest.MonkeyPatch):
+    runtime_envs = (
+        "TRR_DB_DIRECT_URL",
+        "TRR_DB_SESSION_URL",
+        "TRR_DB_TRANSACTION_URL",
+        "TRR_DB_URL",
+        "TRR_DB_FALLBACK_URL",
+        "TRR_DB_RUNTIME_LANE",
+        "TRR_DB_TRANSACTION_FLIGHT_TEST",
+    )
+    for name in runtime_envs:
+        os.environ.pop(name, None)
+    monkeypatch.setattr(
+        cli,
+        "read_direct_db_identity",
+        lambda _db_url: {
+            "project_ref": cli.EXPECTED_PROJECT_REF,
+            "host": cli.EXPECTED_DIRECT_HOST,
+            "database": "postgres",
+            "current_user": "postgres",
+            "server_version": "PostgreSQL 17",
+        },
+    )
+    yield
+    for name in runtime_envs:
+        os.environ.pop(name, None)
 
 
 def _read_runtime_reconcile_decisions(path: Path) -> tuple[set[str], set[str], str | None]:
@@ -36,6 +68,8 @@ def _read_runtime_reconcile_decisions(path: Path) -> tuple[set[str], set[str], s
 
 
 def test_reconcile_runtime_db_blocks_without_runtime_db_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRR_DB_DIRECT_URL", raising=False)
+    monkeypatch.delenv("TRR_DB_SESSION_URL", raising=False)
     monkeypatch.delenv("TRR_DB_URL", raising=False)
     monkeypatch.setattr(cli, "read_local_versions", lambda: ["20260422094500"])
     monkeypatch.setattr(cli, "APP_ENV_PATH", cli.Path("/tmp/does-not-exist.env"))
@@ -55,6 +89,22 @@ def test_ensure_runtime_db_env_loaded_reads_app_env_file(tmp_path, monkeypatch: 
     cli.ensure_runtime_db_env_loaded()
 
     assert cli.os.environ["TRR_DB_URL"] == "postgresql://runtime-from-app"
+
+
+def test_ensure_runtime_db_env_loaded_prefers_direct_app_env_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app_env = tmp_path / ".env.local"
+    app_env.write_text(
+        "TRR_DB_DIRECT_URL=postgresql://direct-from-app\nTRR_DB_SESSION_URL=postgresql://session-from-app\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TRR_DB_DIRECT_URL", raising=False)
+    monkeypatch.delenv("TRR_DB_SESSION_URL", raising=False)
+    monkeypatch.delenv("TRR_DB_URL", raising=False)
+    monkeypatch.setattr(cli, "APP_ENV_PATH", app_env)
+
+    cli.ensure_runtime_db_env_loaded()
+
+    assert cli.os.environ["TRR_DB_DIRECT_URL"] == "postgresql://direct-from-app"
 
 
 def test_reconcile_runtime_db_blocks_when_core_schema_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,13 +206,53 @@ def test_reconcile_runtime_db_auto_applies_safe_allowlisted_suffix(monkeypatch: 
     monkeypatch.setattr(
         cli,
         "run_supabase_db_push",
-        lambda _repo_root: subprocess.CompletedProcess(["supabase"], 0, stdout="ok", stderr=""),
+        lambda _repo_root, _db_url: subprocess.CompletedProcess(["supabase"], 0, stdout="ok", stderr=""),
     )
 
     result = cli.reconcile_runtime_db()
 
     assert result["state"] == "fixed"
     assert result["applied_versions"] == ["20260422094500", "20260422111500"]
+
+
+def test_direct_db_identity_rejects_wrong_project_host() -> None:
+    with pytest.raises(RuntimeError, match="direct_db_identity_mismatch"):
+        ORIGINAL_READ_DIRECT_DB_IDENTITY("postgresql://postgres:secret@db.wrong-ref.supabase.co:5432/postgres")
+
+
+def test_reconcile_runtime_db_sanitizes_failed_supabase_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    db_url = "postgresql://postgres:secret@db.abcdefghijklmnopqrst.supabase.co:5432/postgres"
+    monkeypatch.setattr(cli, "EXPECTED_PROJECT_REF", "abcdefghijklmnopqrst")
+    monkeypatch.setattr(cli, "EXPECTED_DIRECT_HOST", "db.abcdefghijklmnopqrst.supabase.co")
+    monkeypatch.setenv("TRR_DB_DIRECT_URL", db_url)
+    monkeypatch.setattr(cli, "assert_migration_safe", lambda require_core_schema=True: None)
+    monkeypatch.setattr(cli, "resolve_direct_runtime_db_url", lambda: db_url)
+    monkeypatch.setattr(cli, "read_local_versions", lambda: ["20260422094500"])
+    calls = {"count": 0}
+
+    def _read_remote_versions(_db_url: str) -> list[str]:
+        calls["count"] += 1
+        return [] if calls["count"] == 1 else []
+
+    monkeypatch.setattr(cli, "read_remote_versions", _read_remote_versions)
+    monkeypatch.setattr(cli, "read_allowlist", lambda path=cli.ALLOWLIST_PATH: {"20260422094500"})
+    monkeypatch.setattr(
+        cli,
+        "run_supabase_db_push",
+        lambda _repo_root, _db_url: subprocess.CompletedProcess(
+            ["supabase"],
+            1,
+            stdout="",
+            stderr=f"failed for {db_url}",
+        ),
+    )
+
+    result = cli.reconcile_runtime_db()
+
+    assert result["state"] == "blocked"
+    assert result["reason"] == "supabase_push_failed"
+    assert db_url not in result["remediation"]
+    assert "secret" not in result["remediation"]
 
 
 def test_runtime_reconcile_tail_migrations_have_explicit_startup_decisions() -> None:

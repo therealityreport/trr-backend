@@ -1,0 +1,1209 @@
+{
+  "metadata": {
+    "name": "instagram-data-field-map",
+    "status": "phase_1_documentation_contract",
+    "plan_reference": "/Users/thomashulihan/Projects/TRR/docs/codex/plans/2026-04-28-instagram-post-queryable-data-plan.md",
+    "generated_on": "2026-04-28",
+    "canonical_source_rule": "Repo-native Instagram source families are canonical. Apify names are adapter/reference aliases only.",
+    "comment_scope_rule": "latestComments, firstComment, and embedded snippets are not persisted and are not comment coverage."
+  },
+  "classification_values": {
+    "normalized_scalar_column": "Durable scalar promoted into typed storage.",
+    "child_table_row": "Repeatable or joinable data stored as rows.",
+    "indexed_jsonb_diagnostic_column": "Structured diagnostic JSONB with a documented query owner/index.",
+    "viewer_session_diagnostic": "Authenticated-viewer-dependent diagnostic data only.",
+    "raw_only_unknown_future_field": "Retained only in raw/observation payloads until classified.",
+    "adapter_alias": "Reference/adapter name that maps into repo-native source fields.",
+    "excluded_not_persisted": "Must not be normalized, persisted as queryable rows, or counted."
+  },
+  "privacy_values": {
+    "public_curated": "Safe for curated public/admin response shapes.",
+    "admin_only": "Operator-only field or diagnostic.",
+    "service_role_private": "Raw payloads, normalized private observations, legacy refs, or sensitive diagnostics.",
+    "transitional_public_raw_risk": "Existing legacy raw-data exposure that must not be repeated for new fields."
+  },
+  "source_families": {
+    "profile_timeline_xdt": {
+      "canonical": true,
+      "query_family": "xdt_api__v1__feed__user_timeline_graphql_connection",
+      "friendly_name": "PolarisProfilePostsTabContentQuery_connection",
+      "repo_paths": [
+        "trr_backend/socials/instagram/posts_scrapling/fetcher.py",
+        "trr_backend/socials/instagram/scraper.py",
+        "trr_backend/repositories/social_season_analytics.py"
+      ],
+      "request_tags": [
+        "fb_api_caller_class",
+        "fb_api_req_friendly_name",
+        "variables",
+        "server_timestamps",
+        "doc_id",
+        "av",
+        "__d",
+        "__user",
+        "__a",
+        "__req",
+        "__comet_req",
+        "lsd",
+        "__spin_r",
+        "__spin_b",
+        "__spin_t",
+        "hsi",
+        "x-fb-friendly-name",
+        "x-fb-lsd",
+        "x-asbd-id",
+        "x-bloks-version-id"
+      ],
+      "response_paths": [
+        "data.xdt_api__v1__feed__user_timeline_graphql_connection.edges",
+        "data.xdt_api__v1__feed__user_timeline_graphql_connection.page_info",
+        "data.xdt_api__v1__feed__user_timeline_graphql_connection.count"
+      ]
+    },
+    "shortcode_graphql": {
+      "canonical": true,
+      "query_family": "PolarisPostActionLoadPostQueryQuery",
+      "repo_paths": [
+        "trr_backend/socials/instagram/permalink_metadata.py"
+      ],
+      "response_paths": [
+        "data.xdt_shortcode_media",
+        "graphql.shortcode_media"
+      ]
+    },
+    "media_info_rest": {
+      "canonical": true,
+      "endpoint": "https://www.instagram.com/api/v1/media/{media_id}/info/",
+      "repo_paths": [
+        "trr_backend/socials/instagram/constants.py",
+        "trr_backend/socials/instagram/permalink_metadata.py",
+        "trr_backend/socials/instagram/scraper.py"
+      ],
+      "response_paths": [
+        "items[0]"
+      ]
+    },
+    "permalink_html_meta": {
+      "canonical": true,
+      "repo_paths": [
+        "trr_backend/socials/instagram/permalink_metadata.py"
+      ],
+      "source_tags": [
+        "script[data-sjs]",
+        "window._sharedData",
+        "__additionalDataLoaded(...)",
+        "script[type=\"application/ld+json\"]",
+        "meta[property=\"og:image\"]",
+        "meta[property=\"og:video\"]"
+      ]
+    },
+    "web_profile_info": {
+      "canonical": true,
+      "endpoint": "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+      "repo_paths": [
+        "trr_backend/socials/instagram/constants.py",
+        "trr_backend/socials/instagram/scraper.py",
+        "trr_backend/socials/instagram/runtimes/crawlee_runtime.py",
+        "trr_backend/socials/instagram/runtimes/scrapling_runtime.py"
+      ],
+      "response_paths": [
+        "data.user",
+        "data.user.edge_owner_to_timeline_media.edges",
+        "data.user.edge_owner_to_timeline_media.page_info",
+        "data.user.edge_owner_to_timeline_media.count"
+      ]
+    },
+    "comments_rest": {
+      "canonical": true,
+      "endpoints": [
+        "https://www.instagram.com/api/v1/media/{media_id}/comments/",
+        "https://www.instagram.com/api/v1/media/{media_id}/comments/{comment_id}/child_comments/"
+      ],
+      "repo_paths": [
+        "trr_backend/socials/instagram/comments_scrapling/fetcher.py",
+        "trr_backend/socials/instagram/comments_scrapling/persistence.py",
+        "trr_backend/socials/instagram/scraper.py"
+      ]
+    },
+    "profile_following_list": {
+      "canonical": false,
+      "status": "planned_fetcher_required",
+      "notes": "Expected row fields are provisional until tied to a repo fetcher or selected job stage. Persist following rows only."
+    },
+    "apify_reference_adapter": {
+      "canonical": false,
+      "repo_paths": [
+        "trr_backend/socials/instagram/apify_scraper.py"
+      ],
+      "notes": "Reference adapter aliases only. Do not use as canonical source taxonomy."
+    }
+  },
+  "fields": [
+    {
+      "id": "post.source_id",
+      "entity": "post",
+      "canonical_field": "source_id",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_posts.source_id; compatibility social.instagram_posts.shortcode and social.instagram_account_catalog_posts.source_id",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "shortcode|code|pk|id",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.shortcode",
+          "node.code",
+          "node.pk",
+          "node.id"
+        ],
+        "shortcode_graphql": [
+          "xdt_shortcode_media.shortcode",
+          "graphql.shortcode_media.shortcode"
+        ],
+        "media_info_rest": [
+          "items[0].code",
+          "items[0].pk",
+          "items[0].id"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "shortCode",
+          "id"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.shortcode",
+          "_ScraplingPostDTO.shortcode",
+          "_ScraplingPostDTO.pk"
+        ]
+      }
+    },
+    {
+      "id": "post.owner_identity",
+      "entity": "post",
+      "canonical_field": "owner_handle_owner_id",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_posts.owner_handle, social.social_posts.owner_handle_norm, social.social_posts.owner_id",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "user.username|owner.username|user.id|owner.id",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.user.username",
+          "node.user.pk",
+          "node.user.id",
+          "node.owner.username",
+          "node.owner.id"
+        ],
+        "shortcode_graphql": [
+          "owner.username",
+          "owner.id"
+        ],
+        "media_info_rest": [
+          "items[0].user.username",
+          "items[0].user.pk",
+          "items[0].user.id"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "ownerUsername",
+          "ownerId"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.username"
+        ]
+      }
+    },
+    {
+      "id": "post.owner_profile_detail",
+      "entity": "post",
+      "canonical_field": "owner_profile_detail",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_posts owner fields where available; otherwise compatibility columns owner_full_name, owner_profile_pic_url, hosted_owner_profile_pic_url, owner_is_verified",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "owner.full_name|owner.profile_pic_url|owner.profile_pic_url_hd|owner.is_verified|user.*",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.owner.full_name",
+          "node.owner.profile_pic_url",
+          "node.owner.profile_pic_url_hd",
+          "node.owner.is_verified",
+          "node.user.full_name",
+          "node.user.profile_pic_url",
+          "node.user.profile_pic_url_hd",
+          "node.user.is_verified"
+        ],
+        "media_info_rest": [
+          "items[0].user.full_name",
+          "items[0].user.profile_pic_url",
+          "items[0].user.profile_pic_url_hd",
+          "items[0].user.is_verified"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "ownerFullName",
+          "ownerProfilePicUrl",
+          "ownerProfilePicUrlHd"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.owner_detail",
+          "InstagramUserDetail.profile_pic_url"
+        ]
+      }
+    },
+    {
+      "id": "post.caption",
+      "entity": "post",
+      "canonical_field": "body",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_posts.body; compatibility social.instagram_posts.caption and catalog caption/text",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "caption.text|edge_media_to_caption.edges[].node.text",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.caption.text",
+          "node.edge_media_to_caption.edges[].node.text"
+        ],
+        "shortcode_graphql": [
+          "edge_media_to_caption.edges[].node.text"
+        ],
+        "media_info_rest": [
+          "items[0].caption.text"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "caption"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.caption",
+          "_ScraplingPostDTO.caption"
+        ]
+      }
+    },
+    {
+      "id": "post.caption_metadata",
+      "entity": "post",
+      "canonical_field": "caption_metadata",
+      "classification": "indexed_jsonb_diagnostic_column",
+      "storage": "admin diagnostic normalized payload until scalar columns are approved",
+      "privacy": "admin_only",
+      "session_dependence": "none",
+      "public_api": false,
+      "admin_api": true,
+      "source_field": "caption.id|caption.is_edited|caption.has_translation",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.caption.id",
+          "node.caption.is_edited",
+          "node.caption.has_translation"
+        ],
+        "media_info_rest": [
+          "items[0].caption.pk",
+          "items[0].caption.has_translation"
+        ]
+      }
+    },
+    {
+      "id": "post.posted_at",
+      "entity": "post",
+      "canonical_field": "posted_at",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_posts.posted_at; compatibility legacy posted_at",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "taken_at|taken_at_timestamp|timestamp",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.taken_at",
+          "node.taken_at_timestamp"
+        ],
+        "shortcode_graphql": [
+          "taken_at_timestamp"
+        ],
+        "media_info_rest": [
+          "items[0].taken_at"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "timestamp"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.taken_at",
+          "InstagramPost.date_time"
+        ]
+      }
+    },
+    {
+      "id": "post.media_type",
+      "entity": "post",
+      "canonical_field": "media_type_product_type",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_posts.media_type; product_type/post_format as Instagram-specific scalar or diagnostic payload",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "__typename|media_type|product_type|productType|is_video",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.__typename",
+          "node.media_type",
+          "node.product_type",
+          "node.productType"
+        ],
+        "shortcode_graphql": [
+          "__typename",
+          "is_video",
+          "product_type"
+        ],
+        "media_info_rest": [
+          "items[0].media_type",
+          "items[0].product_type"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "type",
+          "productType"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.post_type",
+          "InstagramPost.product_type"
+        ]
+      }
+    },
+    {
+      "id": "post.engagement_counts",
+      "entity": "post",
+      "canonical_field": "like_comment_view_play_counts",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_posts.like_count, comment_count, view_count; compatibility count columns",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "like_count|comment_count|view_count|play_count|video_view_count|video_play_count",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.like_count",
+          "node.edge_media_preview_like.count",
+          "node.comment_count",
+          "node.edge_media_to_comment.count",
+          "node.view_count",
+          "node.play_count",
+          "node.video_view_count",
+          "node.video_play_count"
+        ],
+        "media_info_rest": [
+          "items[0].like_count",
+          "items[0].comment_count",
+          "items[0].view_count",
+          "items[0].play_count"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "likesCount",
+          "commentsCount",
+          "videoViewCount",
+          "videoPlayCount"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.likes",
+          "InstagramPost.comments",
+          "InstagramPost.video_views",
+          "InstagramPost.video_play_count"
+        ]
+      },
+      "notes": "Reported comments_count is source-reported post metadata, not saved comment coverage."
+    },
+    {
+      "id": "post.media_variants",
+      "entity": "post",
+      "canonical_field": "media_assets",
+      "classification": "child_table_row",
+      "storage": "social.social_post_media_assets; compatibility media_urls, thumbnail_url, hosted_media_urls, hosted_thumbnail_url",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "image_versions2.candidates[]|display_resources[]|display_url|thumbnail_src|video_versions[]|video_url|video_dash_manifest",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.image_versions2.candidates[]",
+          "node.video_versions[]",
+          "node.display_url",
+          "node.video_url"
+        ],
+        "shortcode_graphql": [
+          "display_resources[]",
+          "display_url",
+          "thumbnail_src",
+          "video_url"
+        ],
+        "media_info_rest": [
+          "items[0].image_versions2.candidates[]",
+          "items[0].video_versions[]",
+          "items[0].video_dash_manifest"
+        ],
+        "permalink_html_meta": [
+          "jsonld.image",
+          "jsonld.video.contentUrl",
+          "jsonld.thumbnailUrl",
+          "meta[property=\"og:image\"]",
+          "meta[property=\"og:video\"]"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "displayUrl",
+          "videoUrl",
+          "displayResourceUrls"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.media_urls",
+          "InstagramPost.thumbnail_url"
+        ]
+      }
+    },
+    {
+      "id": "post.carousel_children",
+      "entity": "post",
+      "canonical_field": "carousel_child_assets",
+      "classification": "child_table_row",
+      "storage": "social.social_post_media_assets; compatibility child_posts_data while migrating",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "carousel_media[]|edge_sidecar_to_children.edges[].node",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.carousel_media[]",
+          "node.edge_sidecar_to_children.edges[].node"
+        ],
+        "shortcode_graphql": [
+          "edge_sidecar_to_children.edges[].node"
+        ],
+        "media_info_rest": [
+          "items[0].carousel_media[]",
+          "items[0].carousel_media_count"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "childPosts"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.child_posts_data"
+        ]
+      }
+    },
+    {
+      "id": "post.dimensions_duration",
+      "entity": "post",
+      "canonical_field": "media_dimensions_duration",
+      "classification": "normalized_scalar_column",
+      "storage": "social.social_post_media_assets.width, height, duration_seconds; media_payload for subsecond/source detail",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "original_width|original_height|width|height|video_duration",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.original_width",
+          "node.original_height",
+          "node.image_versions2.candidates[].width",
+          "node.image_versions2.candidates[].height",
+          "node.video_versions[].width",
+          "node.video_versions[].height"
+        ],
+        "media_info_rest": [
+          "items[0].original_width",
+          "items[0].original_height",
+          "items[0].video_duration"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "dimensionsWidth",
+          "dimensionsHeight",
+          "videoDuration"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.width",
+          "InstagramPost.height",
+          "InstagramPost.video_duration",
+          "InstagramPost.duration_seconds"
+        ]
+      }
+    },
+    {
+      "id": "post.entities_hashtags_mentions",
+      "entity": "post",
+      "canonical_field": "hashtags_mentions",
+      "classification": "child_table_row",
+      "storage": "social.social_post_entities with entity_type hashtag or mention; compatibility arrays/search columns",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "caption hashtag/mention extraction|hashtags|mentions",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.caption.text",
+          "node.edge_media_to_caption.edges[].node.text"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.hashtags",
+          "InstagramPost.mentions"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "hashtags",
+          "mentions"
+        ]
+      }
+    },
+    {
+      "id": "post.tagged_users",
+      "entity": "post",
+      "canonical_field": "tagged_users",
+      "classification": "child_table_row",
+      "storage": "social.social_post_entities after tagged_user entity support or Instagram child table keyed by canonical_post_id",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "usertags.in[]|edge_media_to_tagged_user.edges[]",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.usertags.in[]",
+          "node.edge_media_to_tagged_user.edges[]"
+        ],
+        "shortcode_graphql": [
+          "edge_media_to_tagged_user.edges[]"
+        ],
+        "media_info_rest": [
+          "items[0].usertags.in[]"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "taggedUsers"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.tagged_users_detail",
+          "InstagramPost.profile_tags"
+        ]
+      }
+    },
+    {
+      "id": "post.collaborators",
+      "entity": "post",
+      "canonical_field": "collaborators",
+      "classification": "child_table_row",
+      "storage": "social.social_post_entities with entity_type collaborator; compatibility social.instagram_account_catalog_post_collaborators",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "coauthor_producers[]|invited_coauthor_producers[]",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.coauthor_producers[]",
+          "node.invited_coauthor_producers[]"
+        ],
+        "shortcode_graphql": [
+          "coauthor_producers[]",
+          "invited_coauthor_producers[]"
+        ],
+        "media_info_rest": [
+          "items[0].coauthor_producers[]",
+          "items[0].invited_coauthor_producers[]"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "coauthorProducers"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.collaborators",
+          "InstagramPost.collaborators_detail"
+        ]
+      }
+    },
+    {
+      "id": "post.location",
+      "entity": "post",
+      "canonical_field": "location",
+      "classification": "child_table_row",
+      "storage": "social.social_post_entities if location entity type is approved or Instagram extension table keyed by canonical_post_id",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "location.id|location.name",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.location.id",
+          "node.location.name"
+        ],
+        "media_info_rest": [
+          "items[0].location.id",
+          "items[0].location.name"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "locationId",
+          "locationName"
+        ]
+      }
+    },
+    {
+      "id": "post.music_audio",
+      "entity": "post",
+      "canonical_field": "music_audio",
+      "classification": "child_table_row",
+      "storage": "social.social_post_entities with entity_type sound plus media/diagnostic payload",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "music_info|audio_url",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.music_info",
+          "node.audio_url"
+        ],
+        "media_info_rest": [
+          "items[0].music_info",
+          "items[0].audio_url"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "musicInfo",
+          "audioUrl"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.music_info",
+          "InstagramPost.audio_url"
+        ]
+      }
+    },
+    {
+      "id": "post.visibility_flags",
+      "entity": "post",
+      "canonical_field": "disabled_visibility_flags",
+      "classification": "normalized_scalar_column",
+      "storage": "approved scalar columns or admin diagnostic payload until schema exists",
+      "privacy": "public_curated",
+      "session_dependence": "mixed",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "comments_disabled|is_comments_disabled|commenting_disabled_for_viewer|like_and_view_counts_disabled",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.comments_disabled",
+          "node.commenting_disabled_for_viewer",
+          "node.like_and_view_counts_disabled"
+        ],
+        "media_info_rest": [
+          "items[0].comments_disabled",
+          "items[0].commenting_disabled_for_viewer"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "isCommentsDisabled"
+        ],
+        "current_trr_dto": [
+          "InstagramPost.is_comments_disabled"
+        ]
+      },
+      "notes": "Viewer-specific disablement must be flagged as session-dependent before public exposure."
+    },
+    {
+      "id": "post.paid_ad_flags",
+      "entity": "post",
+      "canonical_field": "paid_ad_flags",
+      "classification": "normalized_scalar_column",
+      "storage": "approved scalar columns or admin diagnostic payload until schema exists",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "is_paid_partnership|paid_partnership|is_advertisement",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.is_paid_partnership",
+          "node.is_advertisement"
+        ],
+        "media_info_rest": [
+          "items[0].is_paid_partnership",
+          "items[0].is_advertisement"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "isAdvertisement"
+        ]
+      }
+    },
+    {
+      "id": "post.viewer_actions",
+      "entity": "post",
+      "canonical_field": "viewer_actions",
+      "classification": "viewer_session_diagnostic",
+      "storage": "social.social_post_observations.raw_payload or normalized_payload only",
+      "privacy": "service_role_private",
+      "session_dependence": "viewer_session",
+      "public_api": false,
+      "admin_api": false,
+      "source_field": "has_liked|has_viewer_saved|can_viewer_reshare|friendship_status|top_likers",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.has_liked",
+          "node.has_viewer_saved",
+          "node.can_viewer_reshare",
+          "node.friendship_status",
+          "node.top_likers"
+        ]
+      }
+    },
+    {
+      "id": "post.embedded_comment_samples",
+      "entity": "post",
+      "canonical_field": "none",
+      "classification": "excluded_not_persisted",
+      "storage": "raw observation only if retained with original post payload; no child table",
+      "privacy": "service_role_private",
+      "session_dependence": "source_snapshot",
+      "public_api": false,
+      "admin_api": false,
+      "source_field": "latestComments|firstComment|embedded_comment_snippets",
+      "source_paths": {
+        "profile_timeline_xdt": [
+          "node.edge_media_to_parent_comment",
+          "node.edge_media_preview_comment",
+          "node.latest_comments"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "latestComments",
+          "firstComment"
+        ]
+      },
+      "notes": "Not persisted to social.instagram_comments and not comment coverage."
+    },
+    {
+      "id": "profile.identity",
+      "entity": "profile",
+      "canonical_field": "profile_identity",
+      "classification": "normalized_scalar_column",
+      "storage": "planned social.instagram_profiles.profile_id, username, normalized_username, full_name",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "data.user.id|data.user.username|data.user.full_name",
+      "source_paths": {
+        "web_profile_info": [
+          "data.user.id",
+          "data.user.pk",
+          "data.user.username",
+          "data.user.full_name"
+        ]
+      }
+    },
+    {
+      "id": "profile.bio_counts_flags",
+      "entity": "profile",
+      "canonical_field": "profile_bio_counts_flags",
+      "classification": "normalized_scalar_column",
+      "storage": "planned social.instagram_profiles scalar columns",
+      "privacy": "public_curated",
+      "session_dependence": "snapshot_time",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "biography|edge_followed_by.count|edge_follow.count|edge_owner_to_timeline_media.count|is_private|is_verified|is_business_account|business_category_name",
+      "source_paths": {
+        "web_profile_info": [
+          "data.user.biography",
+          "data.user.edge_followed_by.count",
+          "data.user.edge_follow.count",
+          "data.user.edge_owner_to_timeline_media.count",
+          "data.user.is_private",
+          "data.user.is_verified",
+          "data.user.is_business_account",
+          "data.user.business_category_name",
+          "data.user.highlight_reel_count",
+          "data.user.igtv_video_count",
+          "data.user.joined_recently",
+          "data.user.has_channel"
+        ]
+      }
+    },
+    {
+      "id": "profile.profile_picture_variants",
+      "entity": "profile",
+      "canonical_field": "profile_picture_variants",
+      "classification": "normalized_scalar_column",
+      "storage": "planned social.instagram_profiles profile_pic_url, profile_pic_url_hd, hosted_profile_pic_url, hosted_profile_pic_url_hd",
+      "privacy": "public_curated",
+      "session_dependence": "snapshot_time",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "profile_pic_url|profile_pic_url_hd",
+      "source_paths": {
+        "web_profile_info": [
+          "data.user.profile_pic_url",
+          "data.user.profile_pic_url_hd"
+        ]
+      }
+    },
+    {
+      "id": "profile.external_links",
+      "entity": "profile",
+      "canonical_field": "external_links",
+      "classification": "child_table_row",
+      "storage": "planned social.instagram_profile_external_links plus profile scalar external_url/external_url_shimmed",
+      "privacy": "public_curated",
+      "session_dependence": "snapshot_time",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "external_url|external_url_linkshimmed|bio_links[]",
+      "source_paths": {
+        "web_profile_info": [
+          "data.user.external_url",
+          "data.user.external_url_linkshimmed",
+          "data.user.bio_links[]"
+        ]
+      }
+    },
+    {
+      "id": "profile.about_country_joined_verified",
+      "entity": "profile",
+      "canonical_field": "account_about_fields",
+      "classification": "normalized_scalar_column",
+      "storage": "planned social.instagram_profiles country, date_joined, date_joined_at, date_verified, date_verified_at",
+      "privacy": "admin_only",
+      "session_dependence": "source_inspection_required",
+      "public_api": false,
+      "admin_api": true,
+      "source_field": "about.country|about.date_joined|about.date_verified",
+      "source_paths": {
+        "web_profile_info": [
+          "data.user.about.country",
+          "data.user.about.date_joined",
+          "data.user.about.date_verified"
+        ]
+      },
+      "notes": "Do not expose publicly until actual raw profile/about payload meaning is verified."
+    },
+    {
+      "id": "profile.about_former_usernames",
+      "entity": "profile",
+      "canonical_field": "former_usernames_count",
+      "classification": "normalized_scalar_column",
+      "storage": "planned social.instagram_profiles.former_usernames_count plus private about_raw for history",
+      "privacy": "admin_only",
+      "session_dependence": "source_inspection_required",
+      "public_api": false,
+      "admin_api": true,
+      "source_field": "about.former_usernames_count|about.former_usernames",
+      "source_paths": {
+        "web_profile_info": [
+          "data.user.about.former_usernames_count",
+          "data.user.about.former_usernames"
+        ]
+      }
+    },
+    {
+      "id": "profile.about_accounts_with_shared_followers",
+      "entity": "profile",
+      "canonical_field": "none",
+      "classification": "viewer_session_diagnostic",
+      "storage": "about_raw_or_diagnostic_only",
+      "privacy": "service_role_private",
+      "session_dependence": "viewer_session",
+      "public_api": false,
+      "admin_api": false,
+      "source_field": "about.accounts_with_shared_followers",
+      "source_paths": {
+        "web_profile_info": [
+          "data.user.about.accounts_with_shared_followers"
+        ]
+      },
+      "notes": "Viewer-session diagnostic example required by the plan. Do not expose as profile fact."
+    },
+    {
+      "id": "relationship.following_row",
+      "entity": "profile_relationship",
+      "canonical_field": "following_relationship",
+      "classification": "child_table_row",
+      "storage": "planned social.instagram_profile_relationships",
+      "privacy": "admin_only",
+      "session_dependence": "collection_snapshot",
+      "public_api": false,
+      "admin_api": true,
+      "source_field": "username_scrape|type|id|username|full_name|is_private|is_verified|profile_pic_url",
+      "source_paths": {
+        "profile_following_list": [
+          "username_scrape",
+          "type",
+          "id",
+          "username",
+          "full_name",
+          "is_private",
+          "is_verified",
+          "profile_pic_url"
+        ]
+      },
+      "notes": "Persist only when requested mode is following and source row type is Following/following/Follows."
+    },
+    {
+      "id": "relationship.follower_row_mismatch",
+      "entity": "profile_relationship",
+      "canonical_field": "none",
+      "classification": "excluded_not_persisted",
+      "storage": "raw mismatch diagnostic only",
+      "privacy": "service_role_private",
+      "session_dependence": "collection_snapshot",
+      "public_api": false,
+      "admin_api": false,
+      "source_field": "type=Followers|followers|Follower",
+      "source_paths": {
+        "profile_following_list": [
+          "type"
+        ]
+      },
+      "notes": "Follower-list scraping is out of scope. Do not persist these rows as follower or following rows."
+    },
+    {
+      "id": "comment.identity",
+      "entity": "comment",
+      "canonical_field": "comment_id",
+      "classification": "normalized_scalar_column",
+      "storage": "social.instagram_comments.comment_id",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "pk|id",
+      "source_paths": {
+        "comments_rest": [
+          "comments[].pk",
+          "comments[].id",
+          "child_comments[].pk",
+          "child_comments[].id",
+          "replies[].pk",
+          "replies[].id"
+        ]
+      },
+      "adapter_aliases": {
+        "apify_reference_adapter": [
+          "latestComments[].id"
+        ],
+        "current_trr_dto": [
+          "InstagramComment.comment_id"
+        ]
+      },
+      "notes": "Apify latestComments id is not persisted because latestComments is excluded."
+    },
+    {
+      "id": "comment.parent_reply",
+      "entity": "comment",
+      "canonical_field": "parent_reply_relationship",
+      "classification": "normalized_scalar_column",
+      "storage": "social.instagram_comments.parent_comment_id, is_reply, reply_count",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "child_comments[]|replies[]|child_comment_count|repliesCount",
+      "source_paths": {
+        "comments_rest": [
+          "comments[].child_comment_count",
+          "comments[].repliesCount",
+          "comments[].replies[]",
+          "child_comments[]"
+        ]
+      },
+      "adapter_aliases": {
+        "current_trr_dto": [
+          "InstagramComment.parent_comment_id",
+          "InstagramComment.is_reply",
+          "InstagramComment.reply_count",
+          "InstagramComment.replies"
+        ]
+      }
+    },
+    {
+      "id": "comment.author",
+      "entity": "comment",
+      "canonical_field": "comment_author",
+      "classification": "normalized_scalar_column",
+      "storage": "social.instagram_comments.username, user_id, author_profile_pic_url, hosted_author_profile_pic_url, author_is_verified",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "user.*|owner.*|ownerUsername|ownerId|ownerProfilePicUrl|owner.is_verified",
+      "source_paths": {
+        "comments_rest": [
+          "comments[].user.pk",
+          "comments[].user.id",
+          "comments[].user.username",
+          "comments[].user.profile_pic_url",
+          "comments[].user.is_verified",
+          "comments[].owner.id",
+          "comments[].owner.username",
+          "comments[].owner.profile_pic_url",
+          "comments[].owner.is_verified",
+          "comments[].ownerUsername",
+          "comments[].ownerId",
+          "comments[].ownerProfilePicUrl",
+          "comments[].ownerProfilePicUrlHd"
+        ]
+      },
+      "adapter_aliases": {
+        "current_trr_dto": [
+          "InstagramComment.username",
+          "InstagramComment.user_id",
+          "InstagramComment.owner_profile_pic_url",
+          "InstagramComment.owner_is_verified"
+        ]
+      }
+    },
+    {
+      "id": "comment.text_time_counts",
+      "entity": "comment",
+      "canonical_field": "comment_text_time_counts",
+      "classification": "normalized_scalar_column",
+      "storage": "social.instagram_comments.text, created_at, likes, reply_count",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "text|created_at|timestamp|comment_like_count|like_count|likesCount|child_comment_count|repliesCount",
+      "source_paths": {
+        "comments_rest": [
+          "comments[].text",
+          "comments[].created_at",
+          "comments[].timestamp",
+          "comments[].comment_like_count",
+          "comments[].like_count",
+          "comments[].likesCount",
+          "comments[].child_comment_count",
+          "comments[].repliesCount"
+        ]
+      },
+      "adapter_aliases": {
+        "current_trr_dto": [
+          "InstagramComment.text",
+          "InstagramComment.created_at",
+          "InstagramComment.likes",
+          "InstagramComment.reply_count"
+        ]
+      }
+    },
+    {
+      "id": "comment.media",
+      "entity": "comment",
+      "canonical_field": "comment_media",
+      "classification": "child_table_row",
+      "storage": "social.instagram_comments.media_urls and hosted media mirror fields",
+      "privacy": "public_curated",
+      "session_dependence": "none",
+      "public_api": true,
+      "admin_api": true,
+      "source_field": "comment media nodes|media_urls",
+      "source_paths": {
+        "comments_rest": [
+          "comments[].media",
+          "comments[].media_urls",
+          "child_comments[].media",
+          "child_comments[].media_urls"
+        ]
+      },
+      "adapter_aliases": {
+        "current_trr_dto": [
+          "InstagramComment.media_urls"
+        ]
+      }
+    },
+    {
+      "id": "comment.pagination",
+      "entity": "comment",
+      "canonical_field": "comment_pagination",
+      "classification": "indexed_jsonb_diagnostic_column",
+      "storage": "scrape job/run metadata and API pagination envelope",
+      "privacy": "admin_only",
+      "session_dependence": "collection_snapshot",
+      "public_api": false,
+      "admin_api": true,
+      "source_field": "has_more_comments|has_more_headload_comments|next_min_id|next_max_id|has_more_tail_child_comments|next_min_child_cursor",
+      "source_paths": {
+        "comments_rest": [
+          "has_more_comments",
+          "has_more_headload_comments",
+          "next_min_id",
+          "next_max_id",
+          "has_more_tail_child_comments",
+          "next_min_child_cursor"
+        ]
+      }
+    }
+  ],
+  "excluded_fields": [
+    {
+      "source_field": "latestComments",
+      "classification": "excluded_not_persisted",
+      "storage": "raw observation only if retained",
+      "public_api": false,
+      "reason": "Partial sample, not full comment coverage."
+    },
+    {
+      "source_field": "firstComment",
+      "classification": "excluded_not_persisted",
+      "storage": "raw observation only if retained",
+      "public_api": false,
+      "reason": "Partial sample, not full comment coverage."
+    },
+    {
+      "source_field": "embedded comment snippets",
+      "classification": "excluded_not_persisted",
+      "storage": "raw observation only if retained",
+      "public_api": false,
+      "reason": "Do not create social.instagram_post_embedded_comments."
+    },
+    {
+      "source_field": "type=Followers",
+      "classification": "excluded_not_persisted",
+      "storage": "raw mismatch diagnostic only",
+      "public_api": false,
+      "reason": "Follower-list rows are out of scope for this plan."
+    }
+  ]
+}

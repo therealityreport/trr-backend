@@ -1,4 +1,4 @@
-"""Bounded background task queues for local social control-plane work."""
+"""Bounded background task queue snapshots for local social control-plane work."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def _worker_loop(group: str) -> None:
                 queued_task.target(**queued_task.kwargs)
                 with _LOCK:
                     state.completed_count += 1
-            except Exception:  # noqa: BLE001
+            except Exception:
                 with _LOCK:
                     state.exception_count += 1
                 logger.exception("[background-task-queue] task failed group=%s key=%s", group, queued_task.key)
@@ -222,4 +222,3 @@ def background_task_snapshot() -> dict[str, Any]:
             for group, state in sorted(_GROUPS.items())
         }
     return {"groups": groups}
-

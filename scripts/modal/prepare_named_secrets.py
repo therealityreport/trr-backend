@@ -19,6 +19,7 @@ DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 CANONICAL_DB_ENV = "TRR_DB_URL"
 RETIRED_DB_ENV_NAMES = ("SUPABASE_DB_URL", "DATABASE_URL")
+REMOTE_RUNTIME_EXCLUDED_ENV_NAMES = ("TRR_DB_DIRECT_URL",)
 CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_JOB_PLANE_MODE": "remote",
     "TRR_LONG_JOB_ENFORCE_REMOTE": "1",
@@ -225,7 +226,7 @@ def _split_env(values: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
 
 def _apply_runtime_overrides(values: dict[str, str], *, disabled: bool) -> dict[str, str]:
     merged = dict(values)
-    for retired_name in RETIRED_DB_ENV_NAMES:
+    for retired_name in (*RETIRED_DB_ENV_NAMES, *REMOTE_RUNTIME_EXCLUDED_ENV_NAMES):
         merged.pop(retired_name, None)
     canonical_db_url = (merged.get(CANONICAL_DB_ENV) or "").strip()
     if not canonical_db_url:

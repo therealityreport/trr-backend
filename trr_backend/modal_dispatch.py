@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import UTC, datetime
 from threading import Lock
 from time import monotonic
@@ -57,45 +55,6 @@ def _env_flag(name: str, *, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, *, default: int, minimum: int = 1) -> int:
-    raw = str(os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return max(minimum, int(raw))
-    except ValueError:
-        logger.warning("[modal-dispatch] invalid integer env %s=%r; using %s", name, raw, default)
-        return default
-
-
-def _modal_sdk_worker_count() -> int:
-    return _env_int("TRR_MODAL_SDK_CALL_WORKERS", default=2)
-
-
-_MODAL_SDK_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_modal_sdk_worker_count(),
-    thread_name_prefix="modal-sdk-call",
-)
-
-
-def _modal_sdk_timeout_seconds() -> float:
-    raw = str(os.getenv("TRR_MODAL_SDK_CALL_TIMEOUT_SECONDS") or "15").strip()
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
-        logger.warning("[modal-dispatch] invalid TRR_MODAL_SDK_CALL_TIMEOUT_SECONDS=%r; using 15", raw)
-        return 15.0
-
-
-def _run_modal_sdk_call(label: str, callback: Callable[[], Any]) -> Any:
-    timeout_seconds = _modal_sdk_timeout_seconds()
-    future = _MODAL_SDK_EXECUTOR.submit(callback)
-    try:
-        return future.result(timeout=timeout_seconds)
-    except FutureTimeoutError as exc:
-        raise TimeoutError(f"modal_{label}_timeout_after_{timeout_seconds:g}s") from exc
 
 
 def modal_dispatch_enabled() -> bool:
@@ -242,8 +201,6 @@ def _classify_modal_resolution_error(error: str) -> str:
         return "modal_app_not_found"
     if "modal" in normalized and "unavailable" in normalized:
         return "modal_sdk_unavailable"
-    if "timeout" in normalized:
-        return "modal_sdk_timeout"
     return "modal_resolution_failed"
 
 
@@ -268,14 +225,10 @@ def resolve_modal_function(function_name: str) -> dict[str, Any]:
     try:
         import modal
 
-        def _resolve() -> Any:
-            fn = modal.Function.from_name(app_name, normalized_function)
-            hydrate = getattr(fn, "hydrate", None)
-            if callable(hydrate):
-                hydrate()
-            return fn
-
-        _run_modal_sdk_call("resolve_function", _resolve)
+        fn = modal.Function.from_name(app_name, normalized_function)
+        hydrate = getattr(fn, "hydrate", None)
+        if callable(hydrate):
+            hydrate()
     except Exception as exc:  # noqa: BLE001
         payload["reason"] = _classify_modal_resolution_error(str(exc))
         payload["error"] = str(exc)
@@ -551,11 +504,8 @@ def _spawn_named_modal_function(
     try:
         import modal
 
-        def _spawn() -> Any:
-            fn = modal.Function.from_name(app_name, normalized_function)
-            return fn.spawn(**kwargs)
-
-        call = _run_modal_sdk_call("spawn_function", _spawn)
+        fn = modal.Function.from_name(app_name, normalized_function)
+        call = fn.spawn(**kwargs)
         call_id = str(getattr(call, "object_id", "") or "").strip() or None
         _record_dispatcher_heartbeat(
             dispatcher_name=dispatcher_name,
@@ -605,7 +555,6 @@ def _spawn_named_modal_function(
                 "dispatch_enabled": reason_code
                 not in {
                     "modal_sdk_unavailable",
-                    "modal_sdk_timeout",
                     "modal_app_not_found",
                     "modal_function_not_found",
                     "modal_resolution_failed",

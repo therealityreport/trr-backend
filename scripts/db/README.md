@@ -5,7 +5,7 @@ This directory contains scripts for database maintenance, verification, and migr
 ## Quick Start
 
 ```bash
-# Run any SQL script safely (auto-resolves DB URL)
+# Run any SQL script safely (auto-resolves DB URL from env, .env, or local Supabase)
 ./scripts/db/run_sql.sh scripts/db/verify_pre_0033_cleanup.sql
 
 # Run an ad-hoc query
@@ -22,6 +22,7 @@ This directory contains scripts for database maintenance, verification, and migr
 | `run_fk_index_inventory.py` | Freeze wave inventory YAML from live FK metadata |
 | `run_fk_index_observer.py` | Capture baseline / snapshot CSVs for concurrent index rollout |
 | `build_fk_index_wave_artifacts.py` | Generate forward SQL, rollback SQL, and wave status notes from frozen inventory |
+| `index_advisor_social_hot_paths.py` | Read-only social/admin hot-path `index_advisor` recommendation reports |
 
 ---
 
@@ -29,12 +30,16 @@ This directory contains scripts for database maintenance, verification, and migr
 
 ### How DB URL is Resolved
 
-The tools in this directory resolve the database URL in this order:
+`run_sql.sh` resolves the database URL in this order, checking exported environment first and then the local `.env` file for each key:
 
-1. **`TRR_DB_URL`** - Canonical runtime Postgres URL
-2. **`TRR_DB_FALLBACK_URL`** - Explicit break-glass fallback
-3. **`SUPABASE_DB_URL` / `DATABASE_URL`** - Deprecated compatibility inputs only
-4. **`supabase status`** - Falls back to local Supabase instance (dev only)
+1. **`TRR_DB_SESSION_URL`** - Preferred Supabase session-pooler URL
+2. **`TRR_DB_URL`** - Compatibility runtime Postgres URL
+3. **`TRR_DB_FALLBACK_URL`** - Explicit break-glass fallback
+4. **`DATABASE_URL`** - Tooling-only compatibility input
+5. **`SUPABASE_DB_URL`** - Deprecated compatibility input
+6. **`supabase status`** - Falls back to local Supabase instance (dev only)
+
+Do not shell-source `.env` as a migration prerequisite. Local `.env` values may contain characters that are valid dotenv syntax but invalid bare shell assignments; the helper reads only the DB URL keys it needs.
 
 ### Shared-Schema Ownership
 
@@ -70,6 +75,18 @@ psql "$TRR_DB_URL" -f docs/db/fk-index-hardening/wave-1-forward.sql
 (Substitute `fk-index-wave-2-apply` for Wave 2.)
 
 This contract enables observer attribution via `pg_stat_activity.application_name` (captured by `fk_index_observer_snapshot.sql`) and acts as a fail-safe against pooler-rewritten connections. The guard is intentionally absent from rollback SQL so incident-response sessions aren't blocked.
+
+### Social Hot-Path Index Advisor Workflow
+
+`index_advisor_social_hot_paths.py` is evidence-only. It calls `extensions.index_advisor(query text)` for curated social/admin query labels, writes redacted JSON/Markdown under `../docs/workspace/`, and never executes returned DDL.
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+.venv/bin/python scripts/db/index_advisor_social_hot_paths.py --dry-run
+.venv/bin/python scripts/db/index_advisor_social_hot_paths.py --output-date 2026-04-28
+```
+
+This helper intentionally resolves DB URLs in this order: `TRR_DB_SESSION_URL`, `TRR_DB_URL`, then `TRR_DB_FALLBACK_URL`. Use generated recommendations only to pick candidates for the EXPLAIN workflow in `scripts/db/hot_path_explain/`.
 
 ### For Local Development
 
@@ -247,7 +264,8 @@ except DatabasePreflightError as e:
 
 | Variable | Purpose | When to Use |
 |----------|---------|-------------|
-| `TRR_DB_URL` | Canonical runtime Postgres connection | Runtime SQL helpers and local workspace runs |
+| `TRR_DB_SESSION_URL` | Preferred Supabase session-pooler connection | Cloud/hybrid, remote workers, and explicit session-mode tooling |
+| `TRR_DB_URL` | Compatibility runtime Postgres connection | Runtime SQL helpers and local workspace fallback |
 | `TRR_DB_FALLBACK_URL` | Explicit break-glass fallback URL | Emergency fallback only |
 | `SUPABASE_DB_URL` | Deprecated compatibility alias | Transitional fallback only |
 | `DATABASE_URL` | Tooling-only Postgres connection | Third-party tools that explicitly require this name |
@@ -272,10 +290,10 @@ export SUPABASE_SERVICE_ROLE_KEY=$(supabase status -o json | jq -r '.DB.SERVICE_
 
 ```bash
 # From Supabase Dashboard → Settings → Database → Connection string
-export TRR_DB_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
+export TRR_DB_SESSION_URL='postgresql://postgres.<project>:<password>@<host>:5432/postgres'
 
 # Only for tooling that explicitly requires DATABASE_URL
-export DATABASE_URL="$TRR_DB_URL"
+export DATABASE_URL="$TRR_DB_SESSION_URL"
 
 # From Supabase Dashboard → Settings → API
 export SUPABASE_URL='https://<project>.supabase.co'

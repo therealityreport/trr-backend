@@ -28,7 +28,7 @@ Python 3.11+ is required.
    ```
 
    Minimum required for most scripts:
-   - `TRR_DB_URL`
+   - `TRR_DB_SESSION_URL` or `TRR_DB_URL`
    - `SUPABASE_JWT_SECRET`
    - `TRR_INTERNAL_ADMIN_SHARED_SECRET`
    - `TMDB_API_KEY`
@@ -54,18 +54,23 @@ Python 3.11+ is required.
 For migration and schema verification, prefer an isolated remote Supabase branch or other disposable database target over a local Docker-backed replay.
 
 1. Create or select an isolated branch/disposable database target.
-2. Export `TRR_DB_URL` to that isolated target.
-3. Push migrations there:
+2. Export `TRR_DB_SESSION_URL` or `TRR_DB_URL` to that isolated target. The Supabase CLI does not load `.env` by itself.
+3. Check the target before pushing:
    ```bash
-   supabase db push --db-url "$TRR_DB_URL" --include-all
+   supabase migration list --db-url "${TRR_DB_SESSION_URL:-$TRR_DB_URL}"
    ```
-4. Run the schema-doc verification against that same isolated target:
+4. Push migrations there:
+   ```bash
+   supabase db push --db-url "${TRR_DB_SESSION_URL:-$TRR_DB_URL}" --include-all
+   ```
+5. Run the schema-doc verification against that same isolated target:
    ```bash
    make schema-docs-check
    ```
 
 Safety rules:
 - Never run destructive replay or reset verification against production or other long-lived shared persistent databases.
+- Do not shell-source `.env` as a migration prerequisite; use an exported DB URL or a dotenv-aware helper because `.env` may contain valid dotenv values that are not valid bare shell assignments.
 - Use `make schema-docs-reset-check` only as an explicit local Docker fallback when you intentionally need a fully local replay.
 
 ## make dev Runtime Reconcile

@@ -308,6 +308,12 @@ def _persist_without_season_context(
             payload["media_urls"] = [
                 str(url).strip() for url in (getattr(comment_obj, "media_urls", []) or []) if str(url).strip()
             ]
+        repo._apply_instagram_comment_queryable_columns(
+            payload,
+            comment_obj,
+            parent_external_id=parent_external_id,
+            reply_depth=1 if parent_external_id else 0,
+        )
         if parent_external_id is None:
             top_level.append(payload)
         else:

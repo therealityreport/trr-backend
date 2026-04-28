@@ -5,14 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 import trr_backend.repositories.social_season_analytics as legacy
-
-
-SOCIAL_CONTROL_POOL_NAME = "social_control"
+import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
 
 
 def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:
     try:
-        return legacy.pg.fetch_all(sql, params, pool_name=SOCIAL_CONTROL_POOL_NAME)
+        return legacy.pg.fetch_all(sql, params, pool_name=run_lifecycle.SOCIAL_CONTROL_POOL_NAME)
     except TypeError as exc:
         if "unexpected keyword argument 'pool_name'" not in str(exc):
             raise
@@ -21,7 +19,7 @@ def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:
 
 def _fetch_one_control(sql: str, params: list[Any]) -> dict[str, Any] | None:
     try:
-        return legacy.pg.fetch_one(sql, params, pool_name=SOCIAL_CONTROL_POOL_NAME)
+        return legacy.pg.fetch_one(sql, params, pool_name=run_lifecycle.SOCIAL_CONTROL_POOL_NAME)
     except TypeError as exc:
         if "unexpected keyword argument 'pool_name'" not in str(exc):
             raise

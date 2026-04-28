@@ -20,7 +20,17 @@ def _clear_resolution_cache() -> None:
 
 @pytest.fixture
 def _reset_db_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("TRR_DB_FALLBACK_URL", "TRR_DB_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
+    for name in (
+        "TRR_DB_DIRECT_URL",
+        "TRR_DB_TRANSACTION_URL",
+        "TRR_DB_SESSION_URL",
+        "TRR_DB_FALLBACK_URL",
+        "TRR_DB_URL",
+        "TRR_DB_RUNTIME_LANE",
+        "TRR_DB_TRANSACTION_FLIGHT_TEST",
+        "SUPABASE_DB_URL",
+        "DATABASE_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -40,6 +50,73 @@ def test_resolve_database_url_candidates_prefers_trr_runtime_envs(
         primary_pooler,
         explicit_fallback,
     )
+
+
+def test_resolve_database_url_candidates_prefers_explicit_direct_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_db_env: None,
+) -> None:
+    direct_url = "postgresql://postgres:secret@db.abcdefghijklmno.supabase.co:5432/postgres"
+    session_pooler = "postgresql://postgres.session:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    compatibility_pooler = "postgresql://postgres.compat:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    explicit_fallback = "postgresql://postgres.fallback:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+
+    monkeypatch.setenv("TRR_DB_DIRECT_URL", direct_url)
+    monkeypatch.setenv("TRR_DB_SESSION_URL", session_pooler)
+    monkeypatch.setenv("TRR_DB_URL", compatibility_pooler)
+    monkeypatch.setenv("TRR_DB_FALLBACK_URL", explicit_fallback)
+
+    candidates = connection.resolve_database_url_candidates()
+
+    assert candidates == (direct_url, session_pooler, compatibility_pooler, explicit_fallback)
+
+
+def test_resolve_database_url_candidates_prefers_explicit_session_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_db_env: None,
+) -> None:
+    session_pooler = "postgresql://postgres.session:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    compatibility_pooler = "postgresql://postgres.compat:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+
+    monkeypatch.setenv("TRR_DB_SESSION_URL", session_pooler)
+    monkeypatch.setenv("TRR_DB_URL", compatibility_pooler)
+
+    candidates = connection.resolve_database_url_candidates()
+
+    assert candidates == (session_pooler, compatibility_pooler)
+
+
+def test_transaction_url_is_ignored_without_flight_test(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_db_env: None,
+) -> None:
+    transaction_pooler = "postgresql://postgres.tx:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
+    session_pooler = "postgresql://postgres.session:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+
+    monkeypatch.setenv("TRR_DB_RUNTIME_LANE", "transaction")
+    monkeypatch.setenv("TRR_DB_TRANSACTION_URL", transaction_pooler)
+    monkeypatch.setenv("TRR_DB_SESSION_URL", session_pooler)
+
+    candidates = connection.resolve_database_url_candidates()
+
+    assert candidates == (session_pooler,)
+
+
+def test_transaction_url_is_first_for_explicit_flight_test(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_db_env: None,
+) -> None:
+    transaction_pooler = "postgresql://postgres.tx:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
+    session_pooler = "postgresql://postgres.session:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+
+    monkeypatch.setenv("TRR_DB_RUNTIME_LANE", "transaction")
+    monkeypatch.setenv("TRR_DB_TRANSACTION_FLIGHT_TEST", "1")
+    monkeypatch.setenv("TRR_DB_TRANSACTION_URL", transaction_pooler)
+    monkeypatch.setenv("TRR_DB_SESSION_URL", session_pooler)
+
+    candidates = connection.resolve_database_url_candidates()
+
+    assert candidates == (transaction_pooler, session_pooler)
 
 
 def test_derived_direct_never_produced_at_runtime(

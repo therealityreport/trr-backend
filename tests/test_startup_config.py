@@ -80,10 +80,15 @@ def test_workspace_shared_env_manifest_matches_backend_contract() -> None:
     transitional = set(manifest["transitional"].keys())
     backend_contract = manifest["repo_validation"]["TRR-Backend"]
 
-    assert {"TRR_DB_URL", "TRR_DB_FALLBACK_URL", "TRR_INTERNAL_ADMIN_SHARED_SECRET"} <= canonical
+    assert {"TRR_DB_DIRECT_URL", "TRR_DB_URL", "TRR_DB_FALLBACK_URL", "TRR_INTERNAL_ADMIN_SHARED_SECRET"} <= canonical
     assert "SCREENALYTICS_API_URL" not in transitional
     assert "SCREENALYTICS_SERVICE_TOKEN" not in transitional
-    assert set(backend_contract["db_any_of"]) == {"TRR_DB_URL", "TRR_DB_FALLBACK_URL"}
-    assert set(backend_contract["required_in_deployed"]) == {"TRR_INTERNAL_ADMIN_SHARED_SECRET"}
+    assert set(backend_contract["db_any_of"]) == {
+        "TRR_DB_DIRECT_URL",
+        "TRR_DB_SESSION_URL",
+        "TRR_DB_URL",
+        "TRR_DB_FALLBACK_URL",
+    }
+    assert set(backend_contract["required_in_deployed"]) == {"TRR_INTERNAL_ADMIN_SHARED_SECRET", "SUPABASE_JWT_SECRET"}
     assert "SCREENALYTICS_API_URL" not in set(backend_contract["transitional_compat"])
     assert "SCREENALYTICS_SERVICE_TOKEN" not in set(backend_contract["transitional_compat"])

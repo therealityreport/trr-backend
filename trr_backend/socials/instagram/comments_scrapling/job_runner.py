@@ -119,7 +119,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     str(exc),
                     error_code=exc.error_code,
                     retryable=exc.retryable,
-                    runtime_metadata={"fetcher_runtime": fetcher.runtime_metadata},
+                    runtime_metadata=dict(fetcher.runtime_metadata),
                 ) from exc
             auth_metadata = dict(session.auth_session.metadata or {})
             with pg.db_connection(label="instagram-comments-scrapling-persist") as persist_conn:

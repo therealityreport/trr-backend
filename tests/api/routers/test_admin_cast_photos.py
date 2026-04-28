@@ -99,3 +99,125 @@ def test_generate_cast_photo_variants_runtime_error_returns_409(client, monkeypa
 
     assert response.status_code == 409
     assert "Cast photo not found" in response.json()["detail"]
+
+
+def test_list_cast_photo_tags_uses_repository(client, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    photo_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    row = {
+        "cast_photo_id": photo_id,
+        "people_names": ["Person One"],
+        "people_ids": ["person-1"],
+        "people_count": 1,
+        "people_count_source": "manual",
+        "detector": None,
+        "created_at": "2026-04-27T12:00:00+00:00",
+        "updated_at": "2026-04-27T12:00:00+00:00",
+        "created_by_firebase_uid": "admin-user",
+        "updated_by_firebase_uid": "admin-user",
+    }
+
+    with patch(
+        "api.routers.admin_cast_photos.cast_photo_tags_repo.list_tag_rows_by_photo_ids",
+        return_value=[row],
+    ) as list_tags:
+        response = client.get(
+            f"/api/v1/admin/cast-photos/tags?photo_ids={photo_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tags"] == [row]
+    list_tags.assert_called_once_with([photo_id])
+
+
+def test_list_cast_photo_tag_photo_ids_uses_repository(client, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    photo_id = str(uuid4())
+
+    with patch(
+        "api.routers.admin_cast_photos.cast_photo_tags_repo.list_photo_ids_by_person_id",
+        return_value=[photo_id],
+    ) as list_photo_ids:
+        response = client.get(
+            "/api/v1/admin/cast-photos/tags/photo-ids?person_id=person-1",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"photo_ids": [photo_id]}
+    list_photo_ids.assert_called_once_with("person-1")
+
+
+def test_upsert_cast_photo_tags_uses_repository(client, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    photo_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    row = {
+        "cast_photo_id": photo_id,
+        "people_names": ["Person One"],
+        "people_ids": ["person-1"],
+        "people_count": 1,
+        "people_count_source": "manual",
+        "detector": None,
+        "created_at": "2026-04-27T12:00:00+00:00",
+        "updated_at": "2026-04-27T12:00:00+00:00",
+        "created_by_firebase_uid": "admin-user",
+        "updated_by_firebase_uid": "admin-user",
+    }
+
+    with patch(
+        "api.routers.admin_cast_photos.cast_photo_tags_repo.upsert_cast_photo_tag_row",
+        return_value=row,
+    ) as upsert_tag:
+        response = client.post(
+            "/api/v1/admin/cast-photos/tags",
+            json={
+                "cast_photo_id": photo_id,
+                "people_names": ["Person One"],
+                "people_ids": ["person-1"],
+                "people_count": 1,
+                "people_count_source": "manual",
+                "created_by_firebase_uid": "admin-user",
+                "updated_by_firebase_uid": "admin-user",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tag"] == row
+    upsert_tag.assert_called_once_with(
+        cast_photo_id=photo_id,
+        people_names=["Person One"],
+        people_ids=["person-1"],
+        people_count=1,
+        people_count_source="manual",
+        detector=None,
+        created_by_firebase_uid="admin-user",
+        updated_by_firebase_uid="admin-user",
+    )
+
+
+def test_update_cast_photo_face_boxes_uses_repository(client, monkeypatch):
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    photo_id = str(uuid4())
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    face_boxes = [{"index": 1, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}]
+
+    with patch(
+        "api.routers.admin_cast_photos.cast_photo_tags_repo.set_cast_photo_face_boxes",
+        return_value=True,
+    ) as set_face_boxes:
+        response = client.post(
+            f"/api/v1/admin/cast-photos/{photo_id}/face-boxes",
+            json={"face_boxes": face_boxes},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"updated": True}
+    set_face_boxes.assert_called_once_with(photo_id, face_boxes)

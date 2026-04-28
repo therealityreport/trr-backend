@@ -56,26 +56,26 @@ from trr_backend.observability import get_trace_id
 from trr_backend.read_path_diagnostics import log_read_path
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
-from trr_backend.socials.profile_dashboard import build_social_account_profile_dashboard
-from trr_backend.socials.profile_dashboard_schema import SocialAccountDashboardPayload
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
 _LIVE_STATUS_STREAM_INTERVAL_SECONDS = 5.0
+_LIVE_STATUS_SNAPSHOT_TTL_SECONDS = float(os.getenv("SOCIAL_LIVE_STATUS_SNAPSHOT_TTL_SECONDS", "5"))
+_LIVE_STATUS_SNAPSHOT_STALE_SECONDS = float(os.getenv("SOCIAL_LIVE_STATUS_SNAPSHOT_STALE_SECONDS", "30"))
 _LIVE_STATUS_SEQUENCE = 0
-
-
-def submit_named_background_task(**kwargs: Any) -> dict[str, Any]:
-    from trr_backend.socials.control_plane.background_tasks import (
-        submit_named_background_task as _submit_named_background_task,
-    )
-
-    return _submit_named_background_task(**kwargs)
+_LIVE_STATUS_SNAPSHOT_LOCK = Lock()
+_LIVE_STATUS_SNAPSHOT_CACHE: dict[str, Any] | None = None
 
 
 class SocialBladeProfileRefreshRequest(BaseModel):
     force: bool = False
+
+
+class SocialLandingSocialBladeRowsRequest(BaseModel):
+    platforms: list[str] = Field(default_factory=list, max_length=8)
+    person_ids: list[str] = Field(default_factory=list, max_length=1000)
+    account_handles: list[str] = Field(default_factory=list, max_length=5000)
 
 
 def _reddit_refresh_worker_health_payload(
@@ -95,6 +95,134 @@ def _reddit_refresh_worker_health_payload(
     if isinstance(extra, dict):
         payload.update(extra)
     return payload
+
+
+def _social_landing_reddit_dashboard_summary() -> tuple[dict[str, int], list[dict[str, Any]]]:
+    from trr_backend.repositories.admin_reddit_reads import list_reddit_communities
+
+    omitted_sections: list[dict[str, Any]] = []
+    try:
+        payload, _query_count = list_reddit_communities(include_inactive=True)
+        communities = payload.get("communities") if isinstance(payload, dict) else []
+        community_rows = communities if isinstance(communities, list) else []
+        show_ids = {
+            str(community.get("trr_show_id") or "").strip()
+            for community in community_rows
+            if isinstance(community, dict) and str(community.get("trr_show_id") or "").strip()
+        }
+        active_count = sum(
+            1 for community in community_rows if isinstance(community, dict) and bool(community.get("is_active"))
+        )
+        return (
+            {
+                "active_community_count": active_count,
+                "archived_community_count": max(0, len(community_rows) - active_count),
+                "show_count": len(show_ids),
+            },
+            omitted_sections,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to build social landing reddit summary", exc_info=True)
+        omitted_sections.append(
+            {
+                "section": "reddit_dashboard",
+                "reason": type(exc).__name__,
+                "retryable": True,
+            }
+        )
+        return (
+            {
+                "active_community_count": 0,
+                "archived_community_count": 0,
+                "show_count": 0,
+            },
+            omitted_sections,
+        )
+
+
+@router.get("/landing-summary")
+def get_social_landing_summary(_: InternalAdminUser = None) -> dict[str, Any]:
+    from trr_backend.repositories.covered_shows import list_covered_shows
+
+    try:
+        covered_shows, _query_count = list_covered_shows()
+        reddit_dashboard, omitted_sections = _social_landing_reddit_dashboard_summary()
+        payload: dict[str, Any] = {
+            "covered_shows": covered_shows,
+            "reddit_dashboard": reddit_dashboard,
+        }
+        if omitted_sections:
+            payload["omitted_sections"] = omitted_sections
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to build social landing summary")
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.post("/landing-socialblade-rows")
+def post_social_landing_socialblade_rows(
+    payload: SocialLandingSocialBladeRowsRequest,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.db import pg
+
+    platforms = [
+        platform.strip().lower()
+        for platform in payload.platforms
+        if platform.strip().lower() in {"instagram", "youtube", "facebook"}
+    ]
+    if not platforms:
+        platforms = ["instagram", "youtube", "facebook"]
+    person_ids: list[str] = []
+    for value in payload.person_ids:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        try:
+            person_ids.append(str(UUID(raw)))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid person_id: {raw}") from exc
+    account_handles = sorted(
+        {str(value or "").strip() for value in payload.account_handles if str(value or "").strip()}
+    )
+    if not person_ids and not account_handles:
+        return {"rows": []}
+
+    try:
+        rows = pg.fetch_all(
+            """
+            SELECT
+              id::text AS id,
+              person_id::text AS person_id,
+              platform,
+              account_handle,
+              scraped_at,
+              updated_at,
+              created_at,
+              stats_refreshed,
+              raw_response->>'socialblade_url' AS socialblade_url
+            FROM pipeline.socialblade_growth_data
+            WHERE platform = ANY(%s::text[])
+              AND (
+                person_id = ANY(%s::uuid[])
+                OR account_handle = ANY(%s::text[])
+              )
+            ORDER BY
+              platform ASC,
+              account_handle ASC,
+              person_id ASC NULLS LAST,
+              updated_at DESC NULLS LAST,
+              scraped_at DESC NULLS LAST,
+              created_at DESC NULLS LAST,
+              id ASC
+            """,
+            [platforms, person_ids, account_handles],
+            pool_name="social_profile",
+        )
+        return {"rows": jsonable_encoder(rows)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read social landing SocialBlade rows")
+        raise _to_social_read_http_exception(exc) from exc
 
 
 def _next_live_status_sequence() -> int:
@@ -130,7 +258,7 @@ def _build_social_ingest_health_dot(status_payload: dict[str, Any]) -> dict[str,
     }
 
 
-def _build_live_status_payload() -> dict[str, Any]:
+def _build_live_status_payload_uncached() -> dict[str, Any]:
     from trr_backend.repositories import admin_operations as admin_operations_repo
     from trr_backend.repositories.social_season_analytics import get_queue_status
 
@@ -146,6 +274,73 @@ def _build_live_status_payload() -> dict[str, Any]:
         "generated_at": datetime.now(UTC).isoformat(),
         "sequence": _next_live_status_sequence(),
     }
+
+
+def _live_status_payload_with_snapshot_metadata(
+    payload: dict[str, Any],
+    *,
+    cache_status: str,
+    fetched_at: float,
+    stale: bool,
+    refresh_error: Exception | None = None,
+) -> dict[str, Any]:
+    next_payload = copy.deepcopy(payload)
+    cache_age_ms = max(0, int((monotonic() - fetched_at) * 1000))
+    metadata: dict[str, Any] = {
+        "cache_status": cache_status,
+        "generated_at": str(next_payload.get("generated_at") or datetime.now(UTC).isoformat()),
+        "cache_age_ms": cache_age_ms,
+        "ttl_ms": int(_LIVE_STATUS_SNAPSHOT_TTL_SECONDS * 1000),
+        "stale_if_error_ttl_ms": int(_LIVE_STATUS_SNAPSHOT_STALE_SECONDS * 1000),
+        "stale": stale,
+    }
+    if refresh_error is not None:
+        metadata["refresh_error"] = type(refresh_error).__name__
+    next_payload["snapshot"] = metadata
+    return next_payload
+
+
+def _build_live_status_payload() -> dict[str, Any]:
+    """Return a cheap live-status snapshot shared by HTTP and SSE subscribers."""
+    global _LIVE_STATUS_SNAPSHOT_CACHE
+
+    now = monotonic()
+    with _LIVE_STATUS_SNAPSHOT_LOCK:
+        cached = _LIVE_STATUS_SNAPSHOT_CACHE
+        if cached is not None:
+            fetched_at = float(cached["fetched_at"])
+            if now - fetched_at < _LIVE_STATUS_SNAPSHOT_TTL_SECONDS:
+                return _live_status_payload_with_snapshot_metadata(
+                    cached["payload"],
+                    cache_status="hit",
+                    fetched_at=fetched_at,
+                    stale=False,
+                )
+
+        try:
+            payload = _build_live_status_payload_uncached()
+        except Exception as exc:
+            cached = _LIVE_STATUS_SNAPSHOT_CACHE
+            if cached is not None:
+                fetched_at = float(cached["fetched_at"])
+                if now - fetched_at <= _LIVE_STATUS_SNAPSHOT_TTL_SECONDS + _LIVE_STATUS_SNAPSHOT_STALE_SECONDS:
+                    return _live_status_payload_with_snapshot_metadata(
+                        cached["payload"],
+                        cache_status="stale",
+                        fetched_at=fetched_at,
+                        stale=True,
+                        refresh_error=exc,
+                    )
+            raise
+
+        fetched_at = monotonic()
+        _LIVE_STATUS_SNAPSHOT_CACHE = {"payload": copy.deepcopy(payload), "fetched_at": fetched_at}
+        return _live_status_payload_with_snapshot_metadata(
+            payload,
+            cache_status="miss" if cached is None else "refresh",
+            fetched_at=fetched_at,
+            stale=False,
+        )
 
 
 def _raise_if_modal_social_dispatch_unresolvable(platform: str | None = None) -> None:
@@ -195,13 +390,15 @@ _COMMENTS_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _COMMENTS_COVERAGE_CACHE_LOCK = Lock()
 _MIRROR_COVERAGE_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _MIRROR_COVERAGE_CACHE_LOCK = Lock()
-_ACCOUNT_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_TTL_SECONDS", "120"))
+_ACCOUNT_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_TTL_SECONDS", "600"))
 _ACCOUNT_PROFILE_CACHE_MAX_ENTRIES = int(os.getenv("SOCIAL_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES", "256"))
 _ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS = int(
     os.getenv("SOCIAL_ACCOUNT_PROFILE_RUN_PROGRESS_CACHE_TTL_SECONDS", "3")
 )
 _ACCOUNT_PROFILE_SUMMARY_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK = Lock()
+_ACCOUNT_PROFILE_DASHBOARD_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
+_ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_PROGRESS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
 _ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK = Lock()
 _ACCOUNT_PROFILE_POSTS_CACHE: dict[Any, tuple[float, dict[str, Any]]] = {}
@@ -432,54 +629,20 @@ def _queue_catalog_backfill_finalize_task(
     if not str(run_id or "").strip():
         return
 
-    # Starlette BackgroundTasks still keep the local request lifecycle open long
-    # enough for Next.js to hit its upstream timeout on Modal-backed launches.
-    # Detach this finalizer so the admin action can return the reserved run
-    # immediately while the long dispatch work continues.
-    _ = background_tasks
-    normalized_platform = str(platform or "").strip().lower()
-    normalized_account = str(account_handle or "").strip().lower()
-    normalized_run_id = str(run_id or "").strip()
-    task_result = submit_named_background_task(
-        group="catalog-finalize",
-        key=f"{normalized_platform}:{normalized_account}:{normalized_run_id}",
-        thread_name=f"catalog-finalize:{normalized_platform}:{normalized_account[:24]}",
-        target=_finalize_catalog_backfill_launch_task,
-        kwargs={
-            "platform": platform,
-            "account_handle": account_handle,
-            "run_id": run_id,
-            "source_scope": source_scope,
-            "date_start": date_start,
-            "date_end": date_end,
-            "initiated_by": initiated_by,
-            "allow_local_dev_inline_bypass": allow_local_dev_inline_bypass,
-            "execution_preference": execution_preference,
-            "selected_tasks": selected_tasks,
-            "launch_group_id": launch_group_id,
-        },
+    background_tasks.add_task(
+        _finalize_catalog_backfill_launch_task,
+        platform=platform,
+        account_handle=account_handle,
+        run_id=run_id,
+        source_scope=source_scope,
+        date_start=date_start,
+        date_end=date_end,
+        initiated_by=initiated_by,
+        allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
+        execution_preference=execution_preference,
+        selected_tasks=selected_tasks,
+        launch_group_id=launch_group_id,
     )
-    if task_result.get("state") == "duplicate":
-        logger.info(
-            "[catalog-finalize] finalizer already queued platform=%s account=%s run_id=%s state=%s",
-            normalized_platform,
-            normalized_account,
-            normalized_run_id,
-            task_result.get("state"),
-        )
-    elif not task_result.get("submitted"):
-        logger.warning(
-            "[catalog-finalize] finalizer queue unavailable platform=%s account=%s run_id=%s state=%s "
-            "active=%s queued=%s max=%s queue_max=%s",
-            normalized_platform,
-            normalized_account,
-            normalized_run_id,
-            task_result.get("state"),
-            task_result.get("active_count"),
-            task_result.get("queued_count"),
-            task_result.get("max_active"),
-            task_result.get("queue_maxsize"),
-        )
 
 
 def _cancel_catalog_run_in_background(
@@ -1007,6 +1170,7 @@ def _account_profile_cache_key(
 
 def _clear_account_profile_caches() -> None:
     _clear_ttl_cache(_ACCOUNT_PROFILE_SUMMARY_CACHE, _ACCOUNT_PROFILE_SUMMARY_CACHE_LOCK)
+    _clear_ttl_cache(_ACCOUNT_PROFILE_DASHBOARD_CACHE, _ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_PROGRESS_CACHE, _ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK)
     _clear_ttl_cache(_ACCOUNT_PROFILE_HASHTAGS_CACHE, _ACCOUNT_PROFILE_HASHTAGS_CACHE_LOCK)
@@ -4301,31 +4465,52 @@ def get_social_account_profile_summary_route(
         raise _to_social_read_http_exception(exc) from exc
 
 
-@router.get(
-    "/profiles/{platform}/{account_handle}/dashboard",
-    response_model=SocialAccountDashboardPayload,
-)
+@router.get("/profiles/{platform}/{account_handle}/dashboard")
 def get_social_account_profile_dashboard_route(
+    request: Request,
     platform: str,
     account_handle: str,
-    detail: str = "lite",
-    run_id: str | None = None,
-    recent_log_limit: int = 25,
+    run_id: str | None = Query(default=None),
+    recent_log_limit: int = Query(default=25, ge=0, le=100),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    bounded_recent_log_limit = max(1, min(recent_log_limit, 100))
+    from trr_backend.repositories.social_season_analytics import _normalize_social_account_profile_summary_detail
+    from trr_backend.socials.profile_dashboard import build_social_account_profile_dashboard
+
+    detail = _normalize_social_account_profile_summary_detail(request.query_params.get("detail"))
+    normalized_run_id = str(run_id or "").strip() or None
+    cache_key = _account_profile_cache_key(
+        surface="dashboard",
+        platform=platform,
+        account_handle=account_handle,
+        extra=(detail, normalized_run_id, recent_log_limit),
+    )
     try:
-        return build_social_account_profile_dashboard(
-            platform=platform,
-            account_handle=account_handle,
-            detail=detail,
-            run_id=run_id,
-            recent_log_limit=bounded_recent_log_limit,
+        return _resolve_account_profile_singleflight(
+            cache_key,
+            lambda: build_social_account_profile_dashboard(
+                platform=platform,
+                account_handle=account_handle,
+                detail=detail,
+                run_id=normalized_run_id,
+                recent_log_limit=recent_log_limit,
+            ),
+            cache=_ACCOUNT_PROFILE_DASHBOARD_CACHE,
+            cache_lock=_ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK,
+            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
         )
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account profile dashboard: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/live-profile-total")
@@ -4497,6 +4682,13 @@ def get_social_account_profile_posts_route(
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
         raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Failed to fetch social account profile posts: platform=%s account=%s",
+            platform,
+            account_handle,
+        )
+        raise _to_social_read_http_exception(exc) from exc
 
 
 @router.get("/profiles/{platform}/{account_handle}/comments")
@@ -4581,6 +4773,53 @@ def get_social_account_profile_comments_route(
             page,
             page_size,
         )
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/instagram/{account_handle}/profile")
+def get_instagram_profile_detail_route(
+    account_handle: str,
+    source_scope: str = Query(default="bravo"),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_instagram_profile_detail
+
+    try:
+        return get_instagram_profile_detail(account_handle=account_handle, source_scope=source_scope)
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch Instagram profile detail: account=%s", account_handle)
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.get("/profiles/instagram/{account_handle}/relationships")
+def get_instagram_profile_relationships_route(
+    account_handle: str,
+    relationship_type: Literal["following"] = Query(default="following", alias="type"),
+    source_scope: str = Query(default="bravo"),
+    page: int = Query(default=1, ge=1, le=10_000),
+    page_size: int = Query(default=25, ge=1, le=100),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import get_instagram_profile_relationships
+
+    try:
+        return get_instagram_profile_relationships(
+            account_handle=account_handle,
+            source_scope=source_scope,
+            relationship_type=relationship_type,
+            page=page,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to fetch Instagram profile relationships: account=%s", account_handle)
         raise _to_social_read_http_exception(exc) from exc
 
 
@@ -5268,12 +5507,13 @@ async def post_social_account_catalog_backfill_route(
             date_start=date_start,
             date_end=date_end,
         )
-        use_async_catalog_kickoff = (
-            queue_enabled
+        use_async_instagram_kickoff = (
+            platform == "instagram"
+            and queue_enabled
             and not used_inline_fallback
             and list(payload.selected_tasks or []) != ["comments"]
         )
-        if use_async_catalog_kickoff:
+        if use_async_instagram_kickoff:
             result = await run_in_threadpool(
                 begin_social_account_catalog_backfill_launch,
                 platform=platform,
