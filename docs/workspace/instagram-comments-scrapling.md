@@ -12,6 +12,27 @@ shared `social.instagram_comments` table. No schema forks, no second scheduler.
 
 ## Architecture at a glance
 
+### Scrapling lane architecture
+
+```mermaid
+flowchart LR
+  Dispatcher["Instagram dispatcher"]
+  Legacy["Legacy posts scraper"]
+  Posts["Posts Scrapling lane\nposts_scrapling"]
+  Comments["Comments Scrapling lane\ncomments_scrapling"]
+  Runtime["Pluggable ScraplingRuntime\nunsupported future runtime"]
+  Tables["Shared social tables"]
+
+  Dispatcher --> Legacy
+  Dispatcher --> Posts
+  Dispatcher --> Comments
+  Posts --> Tables
+  Comments --> Tables
+  Runtime -. "not wired to dispatcher" .-> Dispatcher
+```
+
+The comments Scrapling lane and posts Scrapling lane are concrete worker paths. `ScraplingRuntime` is a future pluggable runtime scaffold and must stay unhealthy/unsupported until a separate implementation verifies the current Scrapling APIs.
+
 ```
 UI (/social/:platform/:handle/comments)
   └─ POST /api/v1/admin/socials/profiles/:platform/:account_handle/comments/scrape
@@ -41,6 +62,17 @@ Scrapling / Patchright stack cannot take down the posts pipeline, and a
 stale Instagram cookie manifests as a single failed job rather than a
 cross-lane outage.
 
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| Legacy scraper | Existing Instagram scraper path that still owns normal production posts traffic unless a job explicitly opts into a Scrapling stage. |
+| Posts Scrapling lane | The opt-in `posts_scrapling` worker path for profile timeline posts. |
+| Comments Scrapling lane | The opt-in `comments_scrapling` worker path for post comments. |
+| ScraplingRuntime | Future shared runtime abstraction; not the same thing as either production lane today. |
+| Warmup | Browser pass that establishes cookies, proxy state, and page/runtime tokens before direct API calls. |
+| Cooperative cancellation | Worker checks cancellation between target posts and persistence units; it does not interrupt an in-flight Instagram request. |
+
 ---
 
 ## Initial setup (local dev)
@@ -51,12 +83,15 @@ cd TRR-Backend
 ```
 
 That script does three things, in order:
-1. `pip install -r requirements.lock.txt` — pulls in `scrapling==0.4.6`.
+1. `pip install -r requirements.lock.txt` — pulls in the repo-pinned Scrapling v0.4 package. The current verified lock/venv version is Scrapling 0.4.7; confirm `.venv/bin/python -m pip show scrapling` reports the current locked Scrapling version before validation.
 2. `scrapling install` — downloads the Patchright/Playwright browser
    binaries that `StealthyFetcher` needs. Skipping this is the classic
    reason the lane crashes on first run with "browser binary not found".
 3. Smoke import — proves `from scrapling.fetchers import StealthyFetcher`
    works in the venv.
+
+`StealthyFetcher.async_fetch` remains signature-compatible on Scrapling
+0.4.7 for the comments lane's current call sites.
 
 Idempotent — safe to re-run after pulling upgrades.
 
@@ -119,6 +154,8 @@ TRR_SOCIAL_INGEST_WORKER_COMMENTS_SCRAPLING=1 \
   ./scripts/start_remote_job_workers.sh
 ```
 
+Restart note: stale worker processes may keep old retry or cancellation behavior until restarted. Before validating cancellation, warmup, or transport retry changes, stop the old worker process and start it again with one of the commands above.
+
 ### Production (Modal)
 
 Current Modal defaults come from `trr_backend/modal_jobs.py`, including
@@ -147,6 +184,17 @@ SOCIAL_INSTAGRAM_COMMENTS_HEADLESS=false \
 
 This bypasses the queue and runs the fetch inline so you can see the
 Patchright window, the cookie state, and the requests being made.
+
+### Manual-only one-page smoke
+
+Run only with operator approval because it creates live scrape rows and reaches Instagram. Use a single shortcode with known comments:
+
+```bash
+SOCIAL_INSTAGRAM_COMMENTS_HEADLESS=true \
+  .venv/bin/python -m scripts.socials.instagram.comments_scrape_cli \
+    --shortcode=<SHORTCODE> \
+    --max-comments=25
+```
 
 ---
 
@@ -242,6 +290,29 @@ and the queue requeues on its own.
 
 **Fix.** No action unless retries persistently fail — in that case the
 proxy pool is likely flagged; swap to a fresh IP set.
+
+### 7. Retryable transport failure
+
+**Symptom.** Job metadata shows `transport_error` or `transport_timeout`
+with `retryable=true`.
+
+**Cause.** Network, proxy, DNS, socket, or timeout failure after bounded
+fetcher retries. This is not a parser failure.
+
+**Fix.** Check proxy health and network path, then allow queue retry if
+the upstream has recovered.
+
+### 8. Cooperative cancellation delay
+
+**Symptom.** A cancelled job does not stop until the current post or DB
+unit finishes.
+
+**Cause.** Expected. Cooperative cancellation is checked between target
+posts and persistence units so the worker can leave consistent metadata
+and avoid interrupting active Instagram requests.
+
+**Fix.** Wait for the current unit to finish. If local behavior does not
+match the current code, restart stale worker processes before retesting.
 
 ---
 

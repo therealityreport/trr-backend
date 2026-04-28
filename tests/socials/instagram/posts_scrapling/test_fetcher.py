@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+_FIXTURE_DIR = Path(__file__).parents[3] / "fixtures" / "instagram" / "scrapling"
+
+
+def _fixture_text(name: str) -> str:
+    return (_FIXTURE_DIR / name).read_text(encoding="utf-8")
 
 
 @pytest.fixture
@@ -194,3 +201,83 @@ def test_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     assert len(events) == 1
     assert events[0].account == "bravotv"
     assert events[0].cookie_count >= 1
+
+
+def test_warmup_raises_auth_error_code(_mock_scrapling):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+        InstagramPostsWarmupError,
+    )
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "x"},
+        browser_account_id="t",
+    )
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = _fixture_text("auth_failure.html")
+    fake_resp.cookies = {}
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+
+    with pytest.raises(InstagramPostsWarmupError) as exc_info:
+        asyncio.run(fetcher.warmup("bravotv"))
+
+    assert exc_info.value.error_code == "instagram_posts_warmup_auth_failed"
+    assert exc_info.value.retryable is False
+
+
+def test_warmup_raises_no_cookie_when_no_prior_session(_mock_scrapling):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import (
+        InstagramPostsScraplingFetcher,
+        InstagramPostsWarmupError,
+    )
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"csrftoken": "csrf"},
+        browser_account_id="t",
+    )
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = _fixture_text("no_cookie_warmup.html")
+    fake_resp.cookies = {}
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+    fetcher._rebuild_http_client = AsyncMock()
+
+    with pytest.raises(InstagramPostsWarmupError) as exc_info:
+        asyncio.run(fetcher.warmup("bravotv"))
+
+    assert exc_info.value.error_code == "instagram_posts_warmup_no_cookies"
+    assert exc_info.value.retryable is True
+    assert fetcher.runtime_metadata["warmup_cookie_count"] == 0
+    fetcher._rebuild_http_client.assert_not_awaited()
+
+
+def test_warmup_allows_no_new_cookies_when_prior_session_exists(_mock_scrapling):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing", "csrftoken": "csrf"},
+        browser_account_id="t",
+    )
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = _fixture_text("no_cookie_warmup.html")
+    fake_resp.cookies = {}
+    fetcher._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+    fetcher._rebuild_http_client = AsyncMock()
+
+    asyncio.run(fetcher.warmup("bravotv"))
+
+    fetcher._rebuild_http_client.assert_awaited_once()

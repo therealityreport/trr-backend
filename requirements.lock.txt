@@ -499,7 +499,7 @@ rich==14.3.3
     #   typer
 s3transfer==0.16.0
     # via boto3
-scrapling==0.4.6
+scrapling==0.4.7
     # via -r requirements.in
 setuptools==82.0.1
     # via tensorflow

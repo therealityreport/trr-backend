@@ -7,7 +7,9 @@ Mocks target `_fetch_api` (httpx path) for JSON tests, not the old `_fetch`
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +22,12 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     InstagramCommentsWarmupError,
 )
 from trr_backend.socials.instagram.scraper import InstagramComment
+
+_FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "instagram" / "scrapling"
+
+
+def _fixture_json(name: str) -> dict:
+    return json.loads((_FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
 class _TrackingClient:
@@ -183,6 +191,9 @@ def test_fetch_gives_up_after_max_retries_with_retryable_true() -> None:
     assert result["failed"] is True
     assert result["retryable"] is True
     assert result["reason"] == "http_429"
+    assert fetcher.runtime_metadata["retry_reason_counts"]["http_429"] == (
+        InstagramCommentsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
+    )
     assert fetcher._fetch_api.await_count == InstagramCommentsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
 
 
@@ -267,6 +278,27 @@ def test_httpx_timeout_exception_is_retryable() -> None:
 
     assert result["failed"] is False
     assert fetcher._fetch_api.await_count == 2
+    assert fetcher.runtime_metadata["retry_reason_counts"]["transport_timeout"] == 1
+
+
+def test_httpx_transport_error_exhausts_retries() -> None:
+    fetcher = _build_fetcher()
+    fetcher._fetch_api = AsyncMock(side_effect=httpx.ConnectError("connection reset"))
+
+    with patch("trr_backend.socials.instagram.comments_scrapling.fetcher.asyncio.sleep", AsyncMock()):
+        result = asyncio.run(
+            fetcher._fetch_json_response(
+                "https://www.instagram.com/api/v1/media/1/comments/",
+                referer="https://www.instagram.com/p/ABC/",
+            )
+        )
+
+    assert result["failed"] is True
+    assert result["retryable"] is True
+    assert result["reason"] == "transport_error"
+    assert fetcher.runtime_metadata["retry_reason_counts"]["transport_error"] == (
+        InstagramCommentsScraplingFetcher._MAX_TRANSIENT_RETRIES + 1
+    )
 
 
 def test_rebuild_http_client_closes_existing_async_client() -> None:
@@ -367,7 +399,7 @@ def test_3xx_redirect_to_homepage_rewarms_permalink_and_retries_once() -> None:
     fetcher._fetch_api = AsyncMock(
         side_effect=[
             _mock_httpx_response(status_code=302, location="/"),
-            _mock_httpx_response(status_code=200, json_data={"status": "ok", "comments": []}),
+            _mock_httpx_response(status_code=200, json_data=_fixture_json("comments_success.json")),
         ]
     )
     fetcher._fetch_page = AsyncMock(return_value=_mock_httpx_response(status_code=200))
@@ -386,6 +418,7 @@ def test_3xx_redirect_to_homepage_rewarms_permalink_and_retries_once() -> None:
         referer="https://www.instagram.com/p/DXXAP-Ekb59/",
     )
     assert result["failed"] is False
+    assert fetcher.runtime_metadata["retry_reason_counts"]["homepage_redirect_recovery"] == 1
 
 
 def test_3xx_redirect_to_homepage_marks_auth_failed_after_recovery_retry() -> None:

@@ -1,0 +1,11 @@
+# Historical findings reviewed during the 2026-04-28 backend main cleanup.
+# Current code removes the active NBCUMV default key; these entries keep the
+# push/scheduled full-history scan from failing on already-committed history.
+fc267df3e563bc7a8090be95ab5cf6b6648c1fa0:trr_backend/integrations/nbcumv.py:generic-api-key:21
+9f37087f7086adc12f6d6ccd80b0917a47502afb:data/tiktok_cookies.json:generic-api-key:9
+c99d56dec72d18724c3028ce0f2eb6a7f87995a2:supabase/migrations/0102_screenalytics_face_bank_images.sql:generic-api-key:12
+7f662b2f9c17a464fcb3861c760c076ec30770c4:docs/ai/archive/HANDOFF-legacy-2026-03-16.md:curl-auth-header:15098
+7f662b2f9c17a464fcb3861c760c076ec30770c4:docs/ai/archive/HANDOFF-legacy-2026-03-16.md:generic-api-key:2255
+7f662b2f9c17a464fcb3861c760c076ec30770c4:docs/ai/archive/HANDOFF-legacy-2026-03-16.md:generic-api-key:15730
+7f662b2f9c17a464fcb3861c760c076ec30770c4:docs/ai/archive/HANDOFF-legacy-2026-03-16.md:generic-api-key:15734
+7f662b2f9c17a464fcb3861c760c076ec30770c4:docs/ai/archive/HANDOFF-legacy-2026-03-16.md:generic-api-key:15856

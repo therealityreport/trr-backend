@@ -44,6 +44,12 @@ from trr_backend.socials._scrapling_http_utils import (
 from trr_backend.socials._scrapling_http_utils import (
     status_code as _status_code,
 )
+from trr_backend.socials._scrapling_http_utils import (
+    transient_backoff_seconds as _transient_backoff_seconds,
+)
+from trr_backend.socials._scrapling_http_utils import (
+    transport_failure_reason as _transport_failure_reason,
+)
 from trr_backend.socials.instagram.constants import (
     GRAPHQL_URL,
     PROFILE_POSTS_DOC_IDS,
@@ -85,6 +91,16 @@ _HSI_RE = re.compile(r'"hsi":"?(?P<token>\d+)"?')
 def _auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
+
+
+class InstagramPostsWarmupError(RuntimeError):
+    error_code: str
+    retryable: bool
+
+    def __init__(self, message: str, *, error_code: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = retryable
 
 
 def _extract_page_tokens(html: str) -> dict[str, str]:
@@ -301,6 +317,7 @@ class InstagramPostsScraplingFetcher:
         self._selected_proxy_fingerprint: str = proxy_config.fingerprint if proxy_config else "none"
         self._proxy_session_mode: str = proxy_config.session_mode if proxy_config else "none"
         self._page_tokens: dict[str, str] = {}
+        self._retry_reason_counts: dict[str, int] = {}
         self._api_delay_seconds = _resolve_positive_float_env(
             "SOCIAL_INSTAGRAM_DELAY_SEC",
             _POSTS_REQUEST_DELAY_DEFAULT,
@@ -336,6 +353,7 @@ class InstagramPostsScraplingFetcher:
             "api_delay_seconds": self._api_delay_seconds,
             "request_count": self._request_count,
             "transport": "httpx_after_browser_warmup",
+            "retry_reason_counts": dict(sorted(self._retry_reason_counts.items())),
         }
 
     async def warmup(self, username: str) -> None:
@@ -346,9 +364,19 @@ class InstagramPostsScraplingFetcher:
         response = await self._fetch_page(profile_url, referer=profile_url)
         text = _response_text(response)
         if _status_code(response) in {401, 403} or _auth_failure_text(text):
-            raise RuntimeError("Instagram auth warm-up failed; session appears logged out or challenged.")
+            raise InstagramPostsWarmupError(
+                "Instagram posts warmup failed because the session appears logged out or challenged.",
+                error_code="instagram_posts_warmup_auth_failed",
+                retryable=False,
+            )
         self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(response)
+        if not self._warmup_cookie_delta and not str(self._raw_cookies.get("sessionid") or "").strip():
+            raise InstagramPostsWarmupError(
+                "Instagram posts warmup did not bridge cookies and no prior sessionid exists.",
+                error_code="instagram_posts_warmup_no_cookies",
+                retryable=True,
+            )
         await self._rebuild_http_client()
         logger.info(
             "instagram_posts_scrapling warmup_success",
@@ -569,6 +597,31 @@ class InstagramPostsScraplingFetcher:
             await asyncio.sleep(remaining)
         self._last_api_request_started_at = time.monotonic()
 
+    async def _recover_homepage_redirect(self, *, referer: str) -> bool:
+        recovery_url = str(referer or "").strip() or "https://www.instagram.com/"
+        self._record_retry_reason("homepage_redirect_recovery")
+        try:
+            recovery_response = await self._fetch_page(recovery_url, referer=recovery_url)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Instagram posts homepage redirect recovery warmup failed for %s", recovery_url, exc_info=True
+            )
+            return False
+        status_code = _status_code(recovery_response)
+        text = _response_text(recovery_response)
+        if status_code >= 400 or 300 <= status_code < 400 or _auth_failure_text(text):
+            return False
+        self._page_tokens = _extract_page_tokens(text)
+        self._merge_warmup_cookies(recovery_response)
+        await self._rebuild_http_client()
+        return True
+
+    def _record_retry_reason(self, reason: str | None) -> None:
+        normalized = str(reason or "").strip()
+        if not normalized:
+            return
+        self._retry_reason_counts[normalized] = self._retry_reason_counts.get(normalized, 0) + 1
+
     # -------------------------------------------------------------------
     # JSON response handling with retry/backoff
     # -------------------------------------------------------------------
@@ -603,15 +656,16 @@ class InstagramPostsScraplingFetcher:
         """JSON fetch via httpx POST with bounded exponential backoff on
         transient failures (429 / 5xx / transport timeout).
         """
-        del referer  # reserved for future telemetry; referer already encoded in headers
         attempt = 0
+        homepage_redirect_recovery_attempted = False
         last_transient_reason: str | None = None
         while True:
             attempt += 1
             try:
                 response = await self._fetch_graphql(url, data=data, headers=headers)
-            except (TimeoutError, httpx.TimeoutException):
-                last_transient_reason = "transport_timeout"
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as exc:
+                last_transient_reason = _transport_failure_reason(exc)
+                self._record_retry_reason(last_transient_reason)
                 if attempt > self._MAX_TRANSIENT_RETRIES:
                     return {
                         "failed": True,
@@ -620,7 +674,7 @@ class InstagramPostsScraplingFetcher:
                         "retryable": True,
                         "payload": None,
                     }
-                await asyncio.sleep(self._BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                await asyncio.sleep(_transient_backoff_seconds(attempt, self._BASE_BACKOFF_SECONDS))
                 continue
 
             status_code = _status_code(response)
@@ -643,9 +697,16 @@ class InstagramPostsScraplingFetcher:
                     location,
                     reason,
                 )
+                auth_redirect = any(token in location for token in ("login", "challenge", "checkpoint"))
+                if reason == "redirect_to_homepage":
+                    if not homepage_redirect_recovery_attempted:
+                        homepage_redirect_recovery_attempted = True
+                        if await self._recover_homepage_redirect(referer=referer):
+                            continue
+                    auth_redirect = True
                 return {
                     "failed": True,
-                    "auth_failed": any(token in location for token in ("login", "challenge", "checkpoint")),
+                    "auth_failed": auth_redirect,
                     "reason": reason,
                     "retryable": False,
                     "payload": None,
@@ -654,6 +715,7 @@ class InstagramPostsScraplingFetcher:
             # Transient 429 / 5xx: retry with backoff.
             if self._is_transient_status(status_code):
                 last_transient_reason = f"http_{status_code}"
+                self._record_retry_reason(last_transient_reason)
                 if attempt > self._MAX_TRANSIENT_RETRIES:
                     return {
                         "failed": True,
@@ -663,8 +725,10 @@ class InstagramPostsScraplingFetcher:
                         "payload": None,
                     }
                 retry_after = self._retry_after_seconds(response)
-                sleep_seconds = (
-                    retry_after if retry_after is not None else self._BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                sleep_seconds = _transient_backoff_seconds(
+                    attempt,
+                    self._BASE_BACKOFF_SECONDS,
+                    retry_after=retry_after,
                 )
                 await asyncio.sleep(sleep_seconds)
                 continue
