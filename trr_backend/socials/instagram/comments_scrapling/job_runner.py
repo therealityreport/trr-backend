@@ -56,11 +56,27 @@ def _raise_if_cancelled(
     if not job_id:
         return
     started_at = time.perf_counter()
-    job_state = pg.fetch_one("select status from social.scrape_jobs where id = %s", [job_id], conn=conn) or {}
+    try:
+        job_state = pg.fetch_one("select status from social.scrape_jobs where id = %s", [job_id], conn=conn) or {}
+    except pg.DatabaseServiceUnavailableError as exc:
+        logger.warning(
+            "Skipping comments cancellation check after database saturation: job_id=%s error=%s",
+            job_id,
+            exc,
+        )
+        return
     job_status = str(job_state.get("status") or "").strip().lower() or None
     run_status: str | None = None
     if run_id:
-        run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id], conn=conn) or {}
+        try:
+            run_state = pg.fetch_one("select status from social.scrape_runs where id = %s", [run_id], conn=conn) or {}
+        except pg.DatabaseServiceUnavailableError as exc:
+            logger.warning(
+                "Skipping comments run cancellation check after database saturation: run_id=%s error=%s",
+                run_id,
+                exc,
+            )
+            return
         run_status = str(run_state.get("status") or "").strip().lower() or None
     cancel_scope = "job" if job_status == "cancelled" else "run" if run_status == "cancelled" else None
     if not cancel_scope:
