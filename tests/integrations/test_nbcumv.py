@@ -5,12 +5,12 @@ from fractions import Fraction
 from trr_backend.integrations import nbcumv
 
 
-def test_appsync_key_defaults_to_empty_when_env_is_unset(monkeypatch) -> None:
+def test_default_public_appsync_key_is_used_when_env_is_unset(monkeypatch) -> None:
     monkeypatch.delenv("NBCUMV_APPSYNC_API_KEY", raising=False)
     sys.modules.pop("trr_backend.integrations.nbcumv", None)
     reloaded = importlib.import_module("trr_backend.integrations.nbcumv")
 
-    assert reloaded.APPSYNC_API_KEY == ""
+    assert reloaded.APPSYNC_API_KEY == reloaded.DEFAULT_APPSYNC_API_KEY
 
 
 def test_find_show_image_by_filename_uses_show_index(monkeypatch) -> None:

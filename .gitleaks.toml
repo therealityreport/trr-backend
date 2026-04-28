@@ -74,4 +74,6 @@ regexes = [
   '''REDACTED''',
   '''\*{3,}''',
   '''•{3,}''',
+  # NBCUMV AppSync key used by public vendor/reference scripts.
+  '''da2-rmy4cbtcevfwrdadqabta7ezl4''',
 ]

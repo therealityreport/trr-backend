@@ -16,7 +16,7 @@ handoff:
 - Root cause split in two:
   1. `trr_backend.integrations.nbcumv` was defaulting to an empty AppSync key while the BRAVOTV reference scripts use the public AppSync key directly.
   2. The live workspace backend was still running a pre-fix non-reload process, so browser-driven refreshes kept using the old code until the workspace restart.
-- `trr_backend.integrations.nbcumv` requires `NBCUMV_APPSYNC_API_KEY` from the environment when GraphQL requests are used.
+- `trr_backend.integrations.nbcumv` defaults `APPSYNC_API_KEY` to the known working public key when no override is present.
 - The person-gallery NBCUMV crosswalk now falls back from exact `lbx_filename` lookup to date-scoped and caption-scoped searches, then matches locally by exact NUP filename or, when unambiguous, by shared `NUP_<set>` prefix.
 - Getty grouped-event search remains a first-class backend path for person refreshes.
 - Bravo-scoped grouped events continue to feed `show`, `wwhl`, and `bravocon` buckets, while broad person-name grouped events only survive when at least one sampled image matches the target person and the bucket resolves to `event`.
