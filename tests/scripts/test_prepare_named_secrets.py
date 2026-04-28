@@ -78,6 +78,7 @@ def test_apply_runtime_overrides_preserves_object_storage_values() -> None:
 def test_apply_runtime_overrides_preserves_existing_trr_db_url() -> None:
     result = cli._apply_runtime_overrides(
         {
+            "TRR_DB_DIRECT_URL": "postgresql://postgres:secret@db.example.supabase.co:5432/postgres",
             "TRR_DB_URL": "postgresql://canonical",
             "SUPABASE_DB_URL": "postgresql://legacy",
             "DATABASE_URL": "postgresql://legacy-tooling",
@@ -86,6 +87,7 @@ def test_apply_runtime_overrides_preserves_existing_trr_db_url() -> None:
     )
 
     assert result["TRR_DB_URL"] == "postgresql://canonical"
+    assert "TRR_DB_DIRECT_URL" not in result
     assert "SUPABASE_DB_URL" not in result
     assert "DATABASE_URL" not in result
 

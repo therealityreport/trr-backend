@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import psycopg2
 
@@ -21,6 +22,8 @@ RUNBOOK_PATH = "TRR-Backend/docs/runbooks/supabase_migration_history_repair.md"
 MIGRATIONS_DIR = REPO_ROOT / "supabase" / "migrations"
 ALLOWLIST_PATH = Path(__file__).with_name("runtime_reconcile_migration_allowlist.txt")
 APP_ENV_PATH = REPO_ROOT.parent / "TRR-APP" / "apps" / "web" / ".env.local"
+EXPECTED_PROJECT_REF = os.getenv("TRR_SUPABASE_PROJECT_REF", "vwxfvzutyufrkhfgoeaa")
+EXPECTED_DIRECT_HOST = f"db.{EXPECTED_PROJECT_REF}.supabase.co"
 
 
 def default_result() -> dict[str, Any]:
@@ -96,15 +99,19 @@ def _read_env_file_value(path: Path, key: str) -> str | None:
 
 
 def ensure_runtime_db_env_loaded() -> None:
-    if (os.getenv("TRR_DB_URL") or "").strip():
+    if (os.getenv("TRR_DB_DIRECT_URL") or os.getenv("TRR_DB_SESSION_URL") or os.getenv("TRR_DB_URL") or "").strip():
         return
-    fallback = _read_env_file_value(APP_ENV_PATH, "TRR_DB_URL")
-    if fallback:
-        os.environ["TRR_DB_URL"] = fallback
+    for key in ("TRR_DB_DIRECT_URL", "TRR_DB_SESSION_URL", "TRR_DB_URL"):
+        fallback = _read_env_file_value(APP_ENV_PATH, key)
+        if fallback:
+            os.environ[key] = fallback
+            if key == "TRR_DB_DIRECT_URL":
+                os.environ.setdefault("TRR_DB_URL", fallback)
+            return
 
 
 def resolve_direct_runtime_db_url() -> str:
-    if not (os.getenv("TRR_DB_URL") or "").strip():
+    if not (os.getenv("TRR_DB_DIRECT_URL") or os.getenv("TRR_DB_SESSION_URL") or os.getenv("TRR_DB_URL") or "").strip():
         raise RuntimeError("missing_runtime_db_url")
     resolved = resolve_direct_db_url(
         allow_database_url=False,
@@ -112,6 +119,53 @@ def resolve_direct_runtime_db_url() -> str:
         allow_local_supabase_status=False,
     )
     return resolved.value
+
+
+def _direct_database_from_url(db_url: str) -> str:
+    parsed = urlsplit(db_url)
+    database = parsed.path.lstrip("/").strip()
+    return database or "postgres"
+
+
+def _sanitize_db_text(text: str, db_url: str) -> str:
+    sanitized = text.replace(db_url, "[redacted-db-url]")
+    parsed = urlsplit(db_url)
+    if parsed.password:
+        sanitized = sanitized.replace(parsed.password, "[redacted-password]")
+    return sanitized
+
+
+def read_direct_db_identity(db_url: str) -> dict[str, str]:
+    parsed = urlsplit(db_url)
+    host = (parsed.hostname or "").lower()
+    database = _direct_database_from_url(db_url)
+
+    if host != EXPECTED_DIRECT_HOST:
+        raise RuntimeError("direct_db_identity_mismatch")
+    if database != "postgres":
+        raise RuntimeError("direct_db_database_mismatch")
+
+    try:
+        with psycopg2.connect(db_url, connect_timeout=8) as conn, conn.cursor() as cursor:
+            cursor.execute("select version(), current_database(), current_user")
+            row = cursor.fetchone()
+    except psycopg2.Error as exc:
+        raise RuntimeError("direct_db_unreachable") from exc
+
+    if not row:
+        raise RuntimeError("direct_db_identity_unavailable")
+
+    server_version, current_database, current_user = (str(value or "") for value in row)
+    if current_database != "postgres":
+        raise RuntimeError("direct_db_database_mismatch")
+
+    return {
+        "project_ref": EXPECTED_PROJECT_REF,
+        "host": EXPECTED_DIRECT_HOST,
+        "database": current_database,
+        "current_user": current_user,
+        "server_version": server_version,
+    }
 
 
 def read_remote_versions(db_url: str) -> list[str]:
@@ -128,9 +182,16 @@ def is_contiguous_suffix(local_versions: list[str], pending_local: list[str]) ->
     return local_versions[-len(pending_local) :] == pending_local
 
 
-def run_supabase_db_push(repo_root: Path) -> subprocess.CompletedProcess[str]:
+def run_supabase_db_push(repo_root: Path, db_url: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["supabase", "db", "push", "--db-url", os.environ["TRR_DB_URL"], "--include-all"],
+        [
+            "supabase",
+            "db",
+            "push",
+            "--db-url",
+            db_url,
+            "--include-all",
+        ],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -143,26 +204,43 @@ def reconcile_runtime_db() -> dict[str, Any]:
     local_versions = read_local_versions()
     allowlist = read_allowlist()
     ensure_runtime_db_env_loaded()
-    if not (os.getenv("TRR_DB_URL") or "").strip():
+    if not (os.getenv("TRR_DB_DIRECT_URL") or os.getenv("TRR_DB_SESSION_URL") or os.getenv("TRR_DB_URL") or "").strip():
         return blocked_result(
             "missing_runtime_db_url",
-            "Configure TRR_DB_URL in TRR-APP/apps/web/.env.local or export it before running make dev.",
+            "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in TRR-APP/apps/web/.env.local or export one before running make dev.",
             local_versions=local_versions,
         )
     try:
         assert_migration_safe(require_core_schema=True)
         db_url = resolve_direct_runtime_db_url()
+        db_identity = read_direct_db_identity(db_url)
         remote_versions = read_remote_versions(db_url)
     except DatabasePreflightError as exc:
         if "No database URL configured" in str(exc):
             return blocked_result(
                 "missing_runtime_db_url",
-                "Configure TRR_DB_URL in TRR-APP/apps/web/.env.local or export it before running make dev.",
+                "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in TRR-APP/apps/web/.env.local or export one before running make dev.",
                 local_versions=local_versions,
             )
         return blocked_result(
             "missing_core_schema",
             str(exc),
+            local_versions=local_versions,
+        )
+    except RuntimeError as exc:
+        reason = str(exc) or "direct_db_identity_failed"
+        remediation = (
+            f"Validate TRR_DB_DIRECT_URL points at project {EXPECTED_PROJECT_REF}, "
+            f"host {EXPECTED_DIRECT_HOST}, database postgres, then rerun preflight."
+        )
+        if reason == "missing_runtime_db_url":
+            remediation = (
+                "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in "
+                "TRR-APP/apps/web/.env.local or export one before running make dev."
+            )
+        return blocked_result(
+            reason,
+            remediation,
             local_versions=local_versions,
         )
 
@@ -173,6 +251,7 @@ def reconcile_runtime_db() -> dict[str, Any]:
         "remote_versions": remote_versions,
         "pending_local": pending_local,
         "remote_only": remote_only,
+        "db_identity": db_identity,
     }
 
     if remote_only:
@@ -204,11 +283,11 @@ def reconcile_runtime_db() -> dict[str, Any]:
     if not pending_local or os.getenv("WORKSPACE_RUNTIME_DB_AUTO_APPLY_ENABLED", "1") != "1":
         return ok_result(**base)
 
-    completed = run_supabase_db_push(REPO_ROOT)
+    completed = run_supabase_db_push(REPO_ROOT, db_url)
     if completed.returncode != 0:
         return blocked_result(
             "supabase_push_failed",
-            (completed.stderr or completed.stdout or "supabase db push failed").strip(),
+            _sanitize_db_text((completed.stderr or completed.stdout or "supabase db push failed").strip(), db_url),
             **base,
         )
 
@@ -220,6 +299,7 @@ def reconcile_runtime_db() -> dict[str, Any]:
         "remote_versions": refreshed_remote,
         "pending_local": refreshed_pending,
         "remote_only": refreshed_remote_only,
+        "db_identity": db_identity,
     }
     if refreshed_pending or refreshed_remote_only:
         return blocked_result(

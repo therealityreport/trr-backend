@@ -341,6 +341,90 @@ def test_get_social_account_profile_summary_defaults_to_lite(
     summary_mock.assert_called_once_with(platform="instagram", account_handle="bravotv", detail="lite")
 
 
+def test_get_social_account_profile_dashboard(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "data": {
+            "summary": {
+                "platform": "instagram",
+                "account_handle": "thetraitorsus",
+                "total_posts": 431,
+            },
+            "catalog_run_progress": {"run_id": "run-active"},
+        },
+        "freshness": {
+            "status": "fresh",
+            "source": "live",
+            "generated_at": "2026-04-27T12:00:00+00:00",
+            "age_seconds": 0,
+        },
+        "operational_alerts": [],
+    }
+
+    with patch(
+        "trr_backend.socials.profile_dashboard.build_social_account_profile_dashboard",
+        return_value=expected,
+    ) as dashboard_mock:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/thetraitorsus/dashboard"
+            "?detail=full&run_id=run-active&recent_log_limit=12",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["summary"]["total_posts"] == 431
+    dashboard_mock.assert_called_once_with(
+        platform="instagram",
+        account_handle="thetraitorsus",
+        detail="full",
+        run_id="run-active",
+        recent_log_limit=12,
+    )
+
+
+def test_get_social_account_profile_dashboard_reuses_cached_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "data": {
+            "summary": {
+                "platform": "instagram",
+                "account_handle": "cacheprobe",
+                "total_posts": 12,
+            },
+            "catalog_run_progress": None,
+        },
+        "freshness": {
+            "status": "fresh",
+            "source": "live",
+            "generated_at": "2026-04-27T12:00:00+00:00",
+            "age_seconds": 0,
+        },
+        "operational_alerts": [],
+    }
+
+    with patch(
+        "trr_backend.socials.profile_dashboard.build_social_account_profile_dashboard",
+        return_value=expected,
+    ) as dashboard_mock:
+        for _ in range(2):
+            response = client.get(
+                "/api/v1/admin/socials/profiles/instagram/cacheprobe/dashboard?detail=lite",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 200
+            assert response.json()["data"]["summary"]["total_posts"] == 12
+
+    dashboard_mock.assert_called_once()
+
+
 def test_get_social_account_profile_summary_returns_503_on_session_pool_saturation(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -492,6 +576,29 @@ def test_get_social_account_profile_posts_forwards_comments_only(
 
     assert response.status_code == 200
     assert mocked.call_args.kwargs["comments_only"] is True
+
+
+def test_get_social_account_profile_posts_returns_503_on_statement_timeout(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_posts",
+        side_effect=Exception("canceling statement due to statement timeout"),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/posts?page=1&page_size=25&comments_only=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "DATABASE_SERVICE_UNAVAILABLE"
+    assert body["detail"]["reason"] == "statement_timeout"
+    assert body["detail"]["retryable"] is True
 
 
 def test_get_social_account_catalog_posts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_DB_ENV = "TRR_DB_URL"
 FALLBACK_DB_ENV = "TRR_DB_FALLBACK_URL"
+DIRECT_DB_ENV = "TRR_DB_DIRECT_URL"
+SESSION_DB_ENV = "TRR_DB_SESSION_URL"
+TRANSACTION_DB_ENV = "TRR_DB_TRANSACTION_URL"
+RUNTIME_LANE_ENV = "TRR_DB_RUNTIME_LANE"
+TRANSACTION_FLIGHT_TEST_ENV = "TRR_DB_TRANSACTION_FLIGHT_TEST"
 
 
 class DatabaseConnectionError(RuntimeError):
@@ -97,6 +102,20 @@ def classify_connection_class(url: str) -> str:
     return "other"
 
 
+def _env_truthy(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def transaction_flight_test_enabled() -> bool:
+    """Return True only when transaction-mode use is explicitly flight-tested."""
+    return _env_truthy(TRANSACTION_FLIGHT_TEST_ENV)
+
+
+def resolve_runtime_connection_lane() -> str:
+    lane = (os.getenv(RUNTIME_LANE_ENV) or "").strip().lower()
+    return "transaction" if lane == "transaction" else "session"
+
+
 def describe_database_url_target(url: str, *, source: str) -> dict[str, str | int | None]:
     parsed = urlsplit(url)
     return {
@@ -115,8 +134,12 @@ def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None
     Resolve candidate database URLs in priority order.
 
     Priority order:
-    1. TRR_DB_URL
-    2. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
+    1. TRR_DB_DIRECT_URL
+    2. TRR_DB_TRANSACTION_URL only when TRR_DB_RUNTIME_LANE=transaction and
+       TRR_DB_TRANSACTION_FLIGHT_TEST=1
+    3. TRR_DB_SESSION_URL
+    4. TRR_DB_URL
+    5. TRR_DB_FALLBACK_URL (optional operator-provided fallback)
     """
 
     def _append_candidate(
@@ -135,6 +158,10 @@ def resolve_database_url_candidate_details() -> tuple[dict[str, str | int | None
     candidates: list[dict[str, str | int | None]] = []
     seen: set[str] = set()
 
+    _append_candidate(candidates, seen, os.getenv(DIRECT_DB_ENV), source=DIRECT_DB_ENV)
+    if resolve_runtime_connection_lane() == "transaction" and transaction_flight_test_enabled():
+        _append_candidate(candidates, seen, os.getenv(TRANSACTION_DB_ENV), source=TRANSACTION_DB_ENV)
+    _append_candidate(candidates, seen, os.getenv(SESSION_DB_ENV), source=SESSION_DB_ENV)
     _append_candidate(candidates, seen, os.getenv(CANONICAL_DB_ENV), source=CANONICAL_DB_ENV)
     _append_candidate(candidates, seen, os.getenv(FALLBACK_DB_ENV), source=FALLBACK_DB_ENV)
 
@@ -192,8 +219,11 @@ def resolve_database_url() -> str:
     Resolve the database URL using a prioritized lookup.
 
     Priority order:
-    1. TRR_DB_URL - Canonical runtime database URL
-    2. TRR_DB_FALLBACK_URL - Optional operator-provided fallback
+    1. TRR_DB_DIRECT_URL - explicit local direct database lane
+    2. TRR_DB_TRANSACTION_URL - only during an explicit transaction-mode flight test
+    3. TRR_DB_SESSION_URL - preferred explicit session-mode URL
+    4. TRR_DB_URL - compatibility/canonical runtime database URL
+    5. TRR_DB_FALLBACK_URL - Optional operator-provided fallback
 
     Returns:
         Database connection URL string.
@@ -208,13 +238,18 @@ def resolve_database_url() -> str:
     raise DatabaseConnectionError(
         "No database URL configured.\n\n"
         "For remote/production:\n"
-        "  Set TRR_DB_URL to your Supabase session-pooler connection string.\n"
+        "  Set TRR_DB_SESSION_URL or TRR_DB_URL to your Supabase session-pooler connection string.\n"
         "  Optionally set TRR_DB_FALLBACK_URL for controlled failover.\n"
+        "  Transaction-mode flight tests require TRR_DB_TRANSACTION_URL, "
+        "TRR_DB_RUNTIME_LANE=transaction, and TRR_DB_TRANSACTION_FLIGHT_TEST=1.\n"
         "  Example: postgresql://postgres.<project>:<password>@<host>:5432/postgres\n\n"
         "For local development:\n"
-        "  Set TRR_DB_URL to your local Postgres connection string.\n\n"
+        "  Set TRR_DB_DIRECT_URL to your direct Postgres connection string.\n\n"
         "Available environment variables (checked in order):\n"
-        "  - TRR_DB_URL (canonical runtime env)\n"
+        "  - TRR_DB_DIRECT_URL (explicit local direct DB lane)\n"
+        "  - TRR_DB_TRANSACTION_URL (explicit flight-test env only)\n"
+        "  - TRR_DB_SESSION_URL (preferred session runtime env)\n"
+        "  - TRR_DB_URL (compatibility/canonical runtime env)\n"
         "  - TRR_DB_FALLBACK_URL (optional runtime fallback)\n"
     )
 

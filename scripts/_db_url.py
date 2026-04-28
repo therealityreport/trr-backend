@@ -44,6 +44,8 @@ def resolve_db_url(
     allow_local_supabase_status: bool = True,
 ) -> ResolvedDbUrl:
     ordered_sources: list[tuple[str, str, bool]] = [
+        ("TRR_DB_DIRECT_URL", _read_env("TRR_DB_DIRECT_URL"), False),
+        ("TRR_DB_SESSION_URL", _read_env("TRR_DB_SESSION_URL"), False),
         ("TRR_DB_URL", _read_env("TRR_DB_URL"), False),
         ("TRR_DB_FALLBACK_URL", _read_env("TRR_DB_FALLBACK_URL"), False),
     ]
@@ -62,7 +64,7 @@ def resolve_db_url(
             return ResolvedDbUrl(value=local_value, source="supabase status (local)", deprecated=False)
 
     raise RuntimeError(
-        "No database URL configured. Set TRR_DB_URL, optionally TRR_DB_FALLBACK_URL, "
+        "No database URL configured. Set TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, TRR_DB_URL, optionally TRR_DB_FALLBACK_URL, "
         "and use DATABASE_URL only for tooling-specific flows."
     )
 

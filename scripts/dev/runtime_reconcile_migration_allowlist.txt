@@ -3,3 +3,15 @@
 # Comment lines with `manual: <version>` record deliberate manual-only decisions.
 # decision-required-after: 20260422153000
 20260422170000
+20260425
+# Phase 8B: idempotent public survey show DDL moved out of app request paths.
+20260427131550
+# manual: 20260427140000 quarantines typography runtime DDL; keep out of startup auto-apply until reviewed with the app migration owner.
+# manual: 20260428110000 advisor safety hotfix must be deployed deliberately after owner review of exposed SECURITY DEFINER RPC access.
+# manual: 20260428111000 advisor RLS policy cleanup requires Phase 1 matrix verification and immediate Performance Advisor recheck before index work.
+# manual: 20260428112000 advisor external_id_conflicts primary key was deployed live through Phase 4; keep out of startup auto-apply.
+# manual: 20260428113000 flashback gameplay write-path removal requires owner review before startup may repair or apply it.
+# manual: 20260428114333 social post canonical foundation was deployed deliberately for Instagram queryable data; do not let startup own schema architecture changes.
+# manual: 20260428114500 Instagram catalog collaborators landed as a deliberate catalog extension; keep out of startup auto-apply.
+# manual: 20260428145222 Instagram queryable profile schema was deployed deliberately with live verification; keep out of startup auto-apply.
+# manual: 20260428163345 index_advisor extension is operator tooling and must be applied deliberately, not by workspace startup.

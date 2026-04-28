@@ -11,5 +11,6 @@ erDiagram
         TEXT conflict_reason
         TIMESTAMP_WITH_TIME_ZONE detected_at
         JSONB payload
+        UUID id PK
     }
 ```

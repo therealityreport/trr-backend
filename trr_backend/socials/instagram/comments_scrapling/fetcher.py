@@ -73,6 +73,23 @@ def _auth_failure_text(text: str) -> bool:
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
 
 
+def _document_auth_failure_text(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "accounts/login",
+            "/challenge/",
+            "/checkpoint/",
+            "login_required",
+            "challenge_required",
+            "checkpoint_required",
+        )
+    )
+
+
 class InstagramCommentsWarmupError(RuntimeError):
     error_code: str
     retryable: bool
@@ -172,19 +189,21 @@ class InstagramCommentsScraplingFetcher:
     async def warmup(self) -> None:
         """Navigate to instagram.com via Patchright to establish the session,
         solve challenges, and bridge cookies into the httpx client."""
+        warmup_account = str(self._browser_account_id or "").strip().lower().lstrip("@")
+        warmup_url = f"https://www.instagram.com/{warmup_account}/" if warmup_account else "https://www.instagram.com/"
         response = await self._fetch_page(
-            "https://www.instagram.com/",
-            referer="https://www.instagram.com/",
+            warmup_url,
+            referer=warmup_url,
         )
         text = _response_text(response)
-        if _status_code(response) in {401, 403} or _auth_failure_text(text):
+        if _status_code(response) in {401, 403} or _document_auth_failure_text(text):
             raise InstagramCommentsWarmupError(
                 "Instagram comments warmup failed because the session appears logged out or challenged.",
                 error_code="instagram_comments_warmup_auth_failed",
                 retryable=False,
             )
         self._merge_warmup_cookies(response)
-        if not self._warmup_cookie_delta:
+        if not self._warmup_cookie_delta and not str(self._raw_cookies.get("sessionid") or "").strip():
             raise InstagramCommentsWarmupError(
                 "Instagram comments warmup did not bridge any cookies.",
                 error_code="instagram_comments_warmup_no_cookies",
@@ -558,7 +577,7 @@ class InstagramCommentsScraplingFetcher:
             return False
         status_code = _status_code(recovery_response)
         text = _response_text(recovery_response)
-        if status_code >= 400 or 300 <= status_code < 400 or _auth_failure_text(text):
+        if status_code >= 400 or 300 <= status_code < 400 or _document_auth_failure_text(text):
             return False
         self._merge_warmup_cookies(recovery_response)
         await self._rebuild_http_client()

@@ -2566,6 +2566,80 @@ def test_instagram_parse_post_node_supports_actor_style_payload_and_normalizes_m
     assert parsed.collaborators == ["amivitale", "natgeoanimals"]
 
 
+def test_instagram_parse_post_node_preserves_xdt_queryable_fields() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="fallback-user")
+    node = {
+        "id": "3885259576224942959_61503085324",
+        "pk": "3885259576224942959",
+        "code": "DXrNv_lEotv",
+        "media_type": 1,
+        "taken_at": 1777379165,
+        "user": {
+            "id": "61503085324",
+            "pk": "61503085324",
+            "username": "jographicss",
+            "full_name": "joseph",
+            "is_verified": False,
+            "profile_pic_url": "https://cdn.test/avatar-small.jpg",
+            "hd_profile_pic_url_info": {"url": "https://cdn.test/avatar-hd.jpg"},
+        },
+        "caption": {
+            "pk": "18072449729658081",
+            "text": "commissions are open! #commission",
+            "has_translation": False,
+        },
+        "caption_is_edited": False,
+        "like_count": 3,
+        "comment_count": 1,
+        "original_width": 1440,
+        "original_height": 1800,
+        "image_versions2": {"candidates": [{"url": "https://cdn.test/post.jpg", "height": 1800, "width": 1440}]},
+        "usertags": {"in": [{"user": {"username": "hroien", "id": "43137384920"}}]},
+        "coauthor_producers": [{"username": "hroien", "id": "43137384920"}],
+        "location": {"id": "1916295438661954", "name": "Cranberry Marsh"},
+        "comments_disabled": False,
+        "like_and_view_counts_disabled": True,
+        "commenting_disabled_for_viewer": False,
+        "is_paid_partnership": False,
+        "isAdvertisement": False,
+        "can_viewer_reshare": True,
+        "has_audio": False,
+        "media_repost_count": 2,
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+
+    assert parsed.shortcode == "DXrNv_lEotv"
+    assert parsed.source_post_id == "3885259576224942959"
+    assert parsed.pk == "3885259576224942959"
+    assert parsed.username == "jographicss"
+    assert parsed.owner_user_id == "61503085324"
+    assert parsed.owner_username == "jographicss"
+    assert parsed.owner_profile_pic_url_hd == "https://cdn.test/avatar-hd.jpg"
+    assert parsed.caption == "commissions are open! #commission"
+    assert parsed.caption_id == "18072449729658081"
+    assert parsed.caption_is_edited is False
+    assert parsed.caption_has_translation is False
+    assert parsed.location_id == "1916295438661954"
+    assert parsed.location_name == "Cranberry Marsh"
+    assert parsed.location_raw == {"id": "1916295438661954", "name": "Cranberry Marsh"}
+    assert parsed.original_width == 1440
+    assert parsed.original_height == 1800
+    assert parsed.comments_disabled is False
+    assert parsed.like_and_view_counts_disabled is True
+    assert parsed.commenting_disabled_for_viewer is False
+    assert parsed.is_paid_partnership is False
+    assert parsed.is_advertisement is False
+    assert parsed.can_viewer_reshare is True
+    assert parsed.has_audio is False
+    assert parsed.media_repost_count == 2
+    assert parsed.media_urls == ["https://cdn.test/post.jpg"]
+    assert parsed.thumbnail_url == "https://cdn.test/post.jpg"
+    assert parsed.profile_tags == ["hroien"]
+    assert parsed.collaborators == ["hroien"]
+
+
 def test_instagram_parse_post_node_keeps_one_source_url_for_single_image_with_mixed_variants() -> None:
     scraper = InstagramScraper(cookies={})
     config = InstagramScrapeConfig(username="bravotv")
@@ -3581,38 +3655,40 @@ def test_tiktok_default_ytdlp_mode_skips_direct_preflight(
     monkeypatch.setattr(
         scraper,
         "_scrape_via_ytdlp",
-        lambda cfg, **_kwargs: scraper.__dict__.__setitem__(
-            "last_retrieval_meta",
-            {
-                "retrieval_mode": "ytdlp",
-                "posts_checked": 1_200,
-                "videos_scanned": 1_200,
-                "pages_scanned": 0,
-            },
-        )
-        or [
-            SimpleNamespace(
-                video_id="vid-1",
-                date_time="2026-01-01 00:00:00",
-                create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
-                description="clip",
-                hashtags=[],
-                mentions=[],
-                likes=1,
-                comments=2,
-                shares=3,
-                saves=4,
-                views=5,
-                url="https://www.tiktok.com/@bravotv/video/vid-1",
-                username="bravotv",
-                author_nickname="Bravo",
-                duration=10,
-                music_title="song",
-                music_author="artist",
-                user_avatar_url=None,
-                thumbnail_url=None,
+        lambda cfg, **_kwargs: (
+            scraper.__dict__.__setitem__(
+                "last_retrieval_meta",
+                {
+                    "retrieval_mode": "ytdlp",
+                    "posts_checked": 1_200,
+                    "videos_scanned": 1_200,
+                    "pages_scanned": 0,
+                },
             )
-        ],
+            or [
+                SimpleNamespace(
+                    video_id="vid-1",
+                    date_time="2026-01-01 00:00:00",
+                    create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
+                    description="clip",
+                    hashtags=[],
+                    mentions=[],
+                    likes=1,
+                    comments=2,
+                    shares=3,
+                    saves=4,
+                    views=5,
+                    url="https://www.tiktok.com/@bravotv/video/vid-1",
+                    username="bravotv",
+                    author_nickname="Bravo",
+                    duration=10,
+                    music_title="song",
+                    music_author="artist",
+                    user_avatar_url=None,
+                    thumbnail_url=None,
+                )
+            ]
+        ),
     )
 
     posts = scraper.scrape(config)
@@ -3757,37 +3833,39 @@ def test_tiktok_auto_mode_is_ytdlp_alias_only(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         scraper,
         "_scrape_via_ytdlp",
-        lambda _config, **_kwargs: scraper.__dict__.__setitem__(
-            "last_retrieval_meta",
-            {
-                "retrieval_mode": "ytdlp",
-                "http_client": "yt_dlp",
-                "fallback_chain": ["yt_dlp"],
-            },
-        )
-        or [
-            SimpleNamespace(
-                video_id="vid-1",
-                date_time="2026-01-01 00:00:00",
-                create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
-                description="clip",
-                hashtags=[],
-                mentions=[],
-                likes=1,
-                comments=2,
-                shares=3,
-                saves=4,
-                views=5,
-                url="https://www.tiktok.com/@bravotv/video/vid-1",
-                username="bravotv",
-                author_nickname="Bravo",
-                duration=10,
-                music_title="song",
-                music_author="artist",
-                user_avatar_url=None,
-                thumbnail_url=None,
+        lambda _config, **_kwargs: (
+            scraper.__dict__.__setitem__(
+                "last_retrieval_meta",
+                {
+                    "retrieval_mode": "ytdlp",
+                    "http_client": "yt_dlp",
+                    "fallback_chain": ["yt_dlp"],
+                },
             )
-        ],
+            or [
+                SimpleNamespace(
+                    video_id="vid-1",
+                    date_time="2026-01-01 00:00:00",
+                    create_time=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()),
+                    description="clip",
+                    hashtags=[],
+                    mentions=[],
+                    likes=1,
+                    comments=2,
+                    shares=3,
+                    saves=4,
+                    views=5,
+                    url="https://www.tiktok.com/@bravotv/video/vid-1",
+                    username="bravotv",
+                    author_nickname="Bravo",
+                    duration=10,
+                    music_title="song",
+                    music_author="artist",
+                    user_avatar_url=None,
+                    thumbnail_url=None,
+                )
+            ]
+        ),
     )
 
     posts = scraper.scrape(TikTokScrapeConfig(username="bravotv", scrape_mode="auto"))

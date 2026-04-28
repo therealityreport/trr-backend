@@ -296,12 +296,33 @@ class InstagramPost:
     owner_detail: InstagramUserDetail | None = None
 
     # Additional metadata
+    input_url: str | None = None
+    source_post_id: str | None = None
+    caption_id: str | None = None
+    caption_is_edited: bool | None = None
+    caption_has_translation: bool | None = None
+    owner_user_id: str | None = None
+    owner_username: str | None = None
+    owner_profile_pic_url_hd: str | None = None
+    location_id: str | None = None
+    location_name: str | None = None
+    location_raw: dict[str, Any] | None = None
+    original_width: int | None = None
+    original_height: int | None = None
     product_type: str | None = None
     video_play_count: int | None = None
     alt_text: str | None = None
     width: int | None = None
     height: int | None = None
     is_comments_disabled: bool | None = None
+    comments_disabled: bool | None = None
+    like_and_view_counts_disabled: bool | None = None
+    commenting_disabled_for_viewer: bool | None = None
+    media_repost_count: int | None = None
+    is_paid_partnership: bool | None = None
+    is_advertisement: bool | None = None
+    can_viewer_reshare: bool | None = None
+    has_audio: bool | None = None
     music_info: dict[str, Any] | None = None
     audio_url: str | None = None
     video_duration: float | None = None
@@ -473,9 +494,7 @@ class InstagramScraper:
 
     def _build_identity_pool(self) -> InstagramIdentityPool:
         proxy_urls = [
-            value.strip()
-            for value in str(os.getenv("SOCIAL_INSTAGRAM_PROXY_URLS") or "").split(",")
-            if value.strip()
+            value.strip() for value in str(os.getenv("SOCIAL_INSTAGRAM_PROXY_URLS") or "").split(",") if value.strip()
         ]
         return InstagramIdentityPool(
             proxy_urls=proxy_urls,
@@ -759,9 +778,8 @@ class InstagramScraper:
             return {"refreshed": False, "reason": "running_on_modal"}
 
         chrome_profile = (
-            (os.getenv("SOCIAL_INSTAGRAM_CHROME_PROFILE") or "").strip()
-            or "entertainmentdatagroup@gmail.com"
-        )
+            os.getenv("SOCIAL_INSTAGRAM_CHROME_PROFILE") or ""
+        ).strip() or "entertainmentdatagroup@gmail.com"
         cookie_file = (os.getenv("SOCIAL_INSTAGRAM_COOKIES_FILE") or "").strip() or "data/instagram_cookies.json"
         validation_username = str(self.browser_account_id or "").strip().lstrip("@") or None
         headless = self._chrome_browser_headless()
@@ -1050,12 +1068,12 @@ class InstagramScraper:
                     self._set_profile_page_context_cache_entry(
                         username,
                         {
-                        "lsd": str(runtime.get("lsd") or "").strip(),
-                        "spin_r": str(runtime.get("__spin_r") or "").strip(),
-                        "spin_b": str(runtime.get("__spin_b") or "").strip(),
-                        "spin_t": str(runtime.get("__spin_t") or "").strip(),
-                        "hsi": str(runtime.get("__hsi") or "").strip(),
-                        "hs": str(runtime.get("__hs") or "").strip(),
+                            "lsd": str(runtime.get("lsd") or "").strip(),
+                            "spin_r": str(runtime.get("__spin_r") or "").strip(),
+                            "spin_b": str(runtime.get("__spin_b") or "").strip(),
+                            "spin_t": str(runtime.get("__spin_t") or "").strip(),
+                            "hsi": str(runtime.get("__hsi") or "").strip(),
+                            "hs": str(runtime.get("__hs") or "").strip(),
                         },
                     )
                 for cookie in context.cookies():
@@ -1687,6 +1705,22 @@ class InstagramScraper:
             return default
 
     @staticmethod
+    def _coerce_bool_or_none(value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "t", "1", "yes", "y", "on"}:
+                return True
+            if normalized in {"false", "f", "0", "no", "n", "off"}:
+                return False
+        return None
+
+    @staticmethod
     def _coerce_timestamp(value: Any) -> int:
         if isinstance(value, (int, float)):
             return int(value)
@@ -2192,23 +2226,43 @@ class InstagramScraper:
     def _extract_owner_detail(self, node: dict) -> InstagramUserDetail | None:
         """Extract post owner/author detail."""
         owner = node.get("owner", {}) if isinstance(node.get("owner"), dict) else {}
-        username = str(node.get("ownerUsername") or owner.get("username") or "").strip()
+        user = node.get("user", {}) if isinstance(node.get("user"), dict) else {}
+        user_hd_pic = (
+            user.get("hd_profile_pic_url_info") if isinstance(user.get("hd_profile_pic_url_info"), dict) else {}
+        )
+        username = str(node.get("ownerUsername") or owner.get("username") or user.get("username") or "").strip()
         if not username:
             return None
         return InstagramUserDetail(
             username=username,
-            user_id=str(owner.get("id") or owner.get("pk") or node.get("ownerId") or "") or None,
-            full_name=str(owner.get("full_name") or node.get("ownerFullName") or "").strip() or None,
-            is_verified=bool(owner.get("is_verified")) if "is_verified" in owner else None,
+            user_id=str(
+                owner.get("id") or owner.get("pk") or user.get("id") or user.get("pk") or node.get("ownerId") or ""
+            )
+            or None,
+            full_name=str(owner.get("full_name") or user.get("full_name") or node.get("ownerFullName") or "").strip()
+            or None,
+            is_verified=(
+                bool(owner.get("is_verified"))
+                if "is_verified" in owner
+                else bool(user.get("is_verified"))
+                if "is_verified" in user
+                else None
+            ),
             profile_pic_url=self._pick_best_profile_pic_url(
                 owner.get("profile_pic_url_hd") or owner.get("profilePicUrlHd"),
                 owner.get("profile_pic_url"),
+                user_hd_pic.get("url"),
+                user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+                user.get("profile_pic_url"),
                 node.get("ownerProfilePicUrlHd"),
                 node.get("ownerProfilePicUrl"),
             ),
             profile_pic_url_hd=str(
                 owner.get("profile_pic_url_hd")
                 or owner.get("profilePicUrlHd")
+                or user_hd_pic.get("url")
+                or user.get("profile_pic_url_hd")
+                or user.get("profilePicUrlHd")
                 or node.get("ownerProfilePicUrlHd")
                 or ""
             ).strip()
@@ -2328,12 +2382,52 @@ class InstagramScraper:
             h = node.get("dimensionsHeight") or node.get("original_height")
             result["width"] = self._coerce_int(w, 0) or None if w is not None else None
             result["height"] = self._coerce_int(h, 0) or None if h is not None else None
+        result["original_width"] = self._coerce_int(node.get("original_width"), 0) or result.get("width")
+        result["original_height"] = self._coerce_int(node.get("original_height"), 0) or result.get("height")
 
         # is_comments_disabled
         icd = node.get("comments_disabled")
         if icd is None:
             icd = node.get("isCommentsDisabled")
-        result["is_comments_disabled"] = bool(icd) if icd is not None else None
+        result["is_comments_disabled"] = self._coerce_bool_or_none(icd)
+        result["comments_disabled"] = result["is_comments_disabled"]
+
+        result["like_and_view_counts_disabled"] = self._coerce_bool_or_none(
+            node.get("like_and_view_counts_disabled")
+            if "like_and_view_counts_disabled" in node
+            else node.get("likeAndViewCountsDisabled")
+        )
+        result["commenting_disabled_for_viewer"] = self._coerce_bool_or_none(node.get("commenting_disabled_for_viewer"))
+        result["is_paid_partnership"] = self._coerce_bool_or_none(node.get("is_paid_partnership"))
+        result["is_advertisement"] = self._coerce_bool_or_none(
+            node.get("isAdvertisement") if "isAdvertisement" in node else node.get("is_advertisement")
+        )
+        result["can_viewer_reshare"] = self._coerce_bool_or_none(node.get("can_viewer_reshare"))
+        result["has_audio"] = self._coerce_bool_or_none(node.get("has_audio"))
+        result["media_repost_count"] = (
+            self._coerce_int(node.get("media_repost_count"), 0) if node.get("media_repost_count") is not None else None
+        )
+
+        caption = node.get("caption") if isinstance(node.get("caption"), dict) else {}
+        result["caption_id"] = str(caption.get("pk") or caption.get("id") or "").strip() or None
+        result["caption_is_edited"] = self._coerce_bool_or_none(
+            node.get("caption_is_edited") if "caption_is_edited" in node else caption.get("is_edited")
+        )
+        result["caption_has_translation"] = self._coerce_bool_or_none(
+            caption.get("has_translation") if "has_translation" in caption else caption.get("hasTranslation")
+        )
+
+        location = node.get("location") if isinstance(node.get("location"), dict) else {}
+        result["location_id"] = (
+            str(
+                node.get("locationId") or node.get("location_id") or location.get("id") or location.get("pk") or ""
+            ).strip()
+            or None
+        )
+        result["location_name"] = (
+            str(node.get("locationName") or node.get("location_name") or location.get("name") or "").strip() or None
+        )
+        result["location_raw"] = dict(location) if location else None
 
         # music_info
         music = node.get("musicInfo") or node.get("music_info")
@@ -2426,6 +2520,12 @@ class InstagramScraper:
         post_type = self._determine_post_type(node)
         video_views_observed, video_views_source, video_views_raw_candidates = self._extract_video_views(node)
         route = "reel" if post_type == "reel" else "p"
+        owner_detail = self._extract_owner_detail(node)
+        owner_username = owner_detail.username if owner_detail else None
+        owner_user_id = owner_detail.user_id if owner_detail else None
+        owner = node.get("owner", {}) if isinstance(node.get("owner"), dict) else {}
+        user = node.get("user", {}) if isinstance(node.get("user"), dict) else {}
+        username = str(node.get("ownerUsername") or owner.get("username") or user.get("username") or config.username)
 
         return InstagramPost(
             shortcode=shortcode,
@@ -2440,7 +2540,7 @@ class InstagramScraper:
             video_views=video_views_observed or 0,
             url=f"https://www.instagram.com/{route}/{shortcode}/" if shortcode else "",
             pk=str(node.get("pk") or node.get("id", "")),
-            username=str(node.get("ownerUsername") or node.get("owner", {}).get("username") or config.username),
+            username=username,
             video_views_observed=video_views_observed,
             video_views_source=video_views_source,
             video_views_raw_candidates=video_views_raw_candidates,
@@ -2454,13 +2554,34 @@ class InstagramScraper:
             person_id=config.person_id,
             tagged_users_detail=self._extract_tagged_users_detail(node),
             collaborators_detail=self._extract_collaborators_detail(node),
-            owner_detail=self._extract_owner_detail(node),
+            owner_detail=owner_detail,
+            input_url=str(node.get("inputUrl") or "").strip() or None,
+            source_post_id=str(node.get("pk") or node.get("id") or "").strip() or None,
+            caption_id=extras.get("caption_id"),
+            caption_is_edited=extras.get("caption_is_edited"),
+            caption_has_translation=extras.get("caption_has_translation"),
+            owner_user_id=owner_user_id,
+            owner_username=owner_username or username,
+            owner_profile_pic_url_hd=owner_detail.profile_pic_url_hd if owner_detail else None,
+            location_id=extras.get("location_id"),
+            location_name=extras.get("location_name"),
+            location_raw=extras.get("location_raw"),
+            original_width=extras.get("original_width"),
+            original_height=extras.get("original_height"),
             product_type=extras.get("product_type"),
             video_play_count=extras.get("video_play_count"),
             alt_text=extras.get("alt_text"),
             width=extras.get("width"),
             height=extras.get("height"),
             is_comments_disabled=extras.get("is_comments_disabled"),
+            comments_disabled=extras.get("comments_disabled"),
+            like_and_view_counts_disabled=extras.get("like_and_view_counts_disabled"),
+            commenting_disabled_for_viewer=extras.get("commenting_disabled_for_viewer"),
+            media_repost_count=extras.get("media_repost_count"),
+            is_paid_partnership=extras.get("is_paid_partnership"),
+            is_advertisement=extras.get("is_advertisement"),
+            can_viewer_reshare=extras.get("can_viewer_reshare"),
+            has_audio=extras.get("has_audio"),
             music_info=extras.get("music_info"),
             audio_url=extras.get("audio_url"),
             video_duration=extras.get("video_duration"),
@@ -2726,10 +2847,7 @@ class InstagramScraper:
         recovery_policy = self._graphql_recovery_policy(error_code)
         # ── Lightweight session rotation before escalating to interactive login ──
         _auto_rotation_attempted = getattr(self, "_auto_rotation_attempted_this_scrape", False)
-        if (
-            error_code in auth_recoverable_errors
-            and not _auto_rotation_attempted
-        ):
+        if error_code in auth_recoverable_errors and not _auto_rotation_attempted:
             logger.warning(
                 "GraphQL auth error for @%s (%s) — attempting auto cookie refresh before interactive login",
                 username,
@@ -4051,7 +4169,8 @@ class InstagramScraper:
                 # no SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH env var needed.
                 error_code = self.last_retrieval_meta.get("error_code", "")
                 if (
-                    error_code in {
+                    error_code
+                    in {
                         "instagram_graphql_cursor_unauthorized",
                         "instagram_graphql_cursor_forbidden",
                     }
@@ -4061,7 +4180,8 @@ class InstagramScraper:
                     self._pagination_session_rotated = True  # guard before attempt — don't retry even if refresh fails
                     logger.warning(
                         "Auth failure mid-pagination on page %d (%s) — opening Chrome for session refresh",
-                        page_num, error_code,
+                        page_num,
+                        error_code,
                     )
                     rotation_attempts += 1
                     refresh = self._try_interactive_login()
@@ -4410,7 +4530,9 @@ class InstagramScraper:
         if scroll_timed_out:
             logger.warning(
                 "browser_intercept: scroll loop timed out after %.0fs (limit: %.0fs), %d posts collected",
-                _scroll_elapsed, config.max_scrape_seconds, len(posts),
+                _scroll_elapsed,
+                config.max_scrape_seconds,
+                len(posts),
             )
         stop_reason = (
             "date_start_reached"

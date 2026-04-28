@@ -39,3 +39,14 @@ def test_resolve_direct_db_url_wraps_resolved_db_url(monkeypatch) -> None:
 
     assert out.source == "TRR_DB_URL"
     assert out.value.endswith("@db.vwxfvzutyufrkhfgoeaa.supabase.co:5432/postgres")
+
+
+def test_resolve_db_url_prefers_direct_env(monkeypatch) -> None:
+    monkeypatch.setenv("TRR_DB_DIRECT_URL", "postgresql://direct")
+    monkeypatch.setenv("TRR_DB_SESSION_URL", "postgresql://session")
+    monkeypatch.setenv("TRR_DB_URL", "postgresql://compat")
+
+    out = _db_url.resolve_db_url(allow_local_supabase_status=False)
+
+    assert out.source == "TRR_DB_DIRECT_URL"
+    assert out.value == "postgresql://direct"

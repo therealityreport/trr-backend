@@ -118,18 +118,27 @@ def assert_migration_safe(*, require_core_schema: bool = True) -> None:
     """
     Standalone check for migration tooling that may still use raw Postgres URLs.
 
-    Runtime code should use TRR_DB_URL and optional TRR_DB_FALLBACK_URL.
+    Runtime code should use TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, TRR_DB_URL,
+    and optional TRR_DB_FALLBACK_URL in precedence order.
     Tooling may still accept DATABASE_URL for isolated migration or psql flows.
 
     Args:
         require_core_schema: If True, warn if migrating against a DB that likely
                              doesn't have the core schema (heuristic based on URL).
     """
-    db_url = (os.getenv("TRR_DB_URL") or os.getenv("TRR_DB_FALLBACK_URL") or os.getenv("DATABASE_URL") or "").strip()
+    db_url = (
+        os.getenv("TRR_DB_DIRECT_URL")
+        or os.getenv("TRR_DB_SESSION_URL")
+        or os.getenv("TRR_DB_URL")
+        or os.getenv("TRR_DB_FALLBACK_URL")
+        or os.getenv("DATABASE_URL")
+        or ""
+    ).strip()
     if not db_url:
         raise DatabasePreflightError(
             "No database URL configured.\n"
-            "Set TRR_DB_URL for runtime use, optionally TRR_DB_FALLBACK_URL for an explicit fallback, "
+            "Set TRR_DB_DIRECT_URL for local direct use, TRR_DB_SESSION_URL or TRR_DB_URL for runtime use, "
+            "optionally TRR_DB_FALLBACK_URL for an explicit fallback, "
             "or DATABASE_URL only for tool-specific migration flows."
         )
 

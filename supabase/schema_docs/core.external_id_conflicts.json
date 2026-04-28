@@ -57,13 +57,31 @@
       "default": null,
       "is_identity": "NO",
       "is_generated": "NEVER"
+    },
+    {
+      "name": "id",
+      "data_type": "uuid",
+      "is_nullable": "NO",
+      "default": "gen_random_uuid()",
+      "is_identity": "NO",
+      "is_generated": "NEVER"
     }
   ],
-  "primary_key": [],
+  "primary_key": [
+    "id"
+  ],
   "foreign_keys": [],
   "unique_constraints": [],
-  "indexes": [],
-  "rls_enabled": false,
+  "indexes": [
+    {
+      "name": "external_id_conflicts_pkey",
+      "is_unique": true,
+      "columns": [
+        "id"
+      ]
+    }
+  ],
+  "rls_enabled": true,
   "example_row": {
     "entity_type": "example",
     "entity_id": "00000000-0000-0000-0000-000000000000",
@@ -71,6 +89,7 @@
     "external_id": "example",
     "conflict_reason": "example",
     "detected_at": "1970-01-01T00:00:00Z",
-    "payload": {}
+    "payload": {},
+    "id": "00000000-0000-0000-0000-000000000000"
   }
 }
