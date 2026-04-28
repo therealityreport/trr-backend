@@ -22,9 +22,15 @@ def _run(coro):
 
 
 class _RuntimeStub:
-    def __init__(self, name: str, *, healthy: bool = True,
-                 profile_behavior: str = "ok", posts_behavior: str = "ok",
-                 detail_behavior: str = "ok") -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        healthy: bool = True,
+        profile_behavior: str = "ok",
+        posts_behavior: str = "ok",
+        detail_behavior: str = "ok",
+    ) -> None:
         self.name = name
         self.healthy = healthy
         self._profile_behavior = profile_behavior

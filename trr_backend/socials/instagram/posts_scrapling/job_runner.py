@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - removed once the fetcher worker lands.
         error_code = "instagram_posts_warmup_failed"
         retryable = False
 
+
 from trr_backend.socials.instagram.posts_scrapling.persistence import persist_instagram_posts
 from trr_backend.socials.instagram.posts_scrapling.proxy import select_posts_proxy
 from trr_backend.socials.instagram.posts_scrapling.session import resolve_posts_scrapling_session

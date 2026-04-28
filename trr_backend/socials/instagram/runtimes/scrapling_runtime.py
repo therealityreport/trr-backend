@@ -72,15 +72,12 @@ class ScraplingRuntime:
         # JSON endpoint 429s; Scrapling's auto-match selectors survive
         # DOM churn better than hand-authored CSS selectors.
         raise RuntimeUnsupported(
-            "ScraplingRuntime.fetch_post_detail: verify Scrapling selector "
-            "API and implement permalink HTML parsing."
+            "ScraplingRuntime.fetch_post_detail: verify Scrapling selector API and implement permalink HTML parsing."
         )
 
     async def _fetch_json(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
         """Helper hook. See module TODO."""
-        raise RuntimeUnsupported(
-            "ScraplingRuntime._fetch_json: verify current Scrapling API before use."
-        )
+        raise RuntimeUnsupported("ScraplingRuntime._fetch_json: verify current Scrapling API before use.")
 
 
 # Protocol conformance check (runs at import; cheap).
