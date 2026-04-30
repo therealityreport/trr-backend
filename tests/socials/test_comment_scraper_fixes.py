@@ -2770,15 +2770,21 @@ def test_instagram_parse_comment_supports_actor_style_payload_with_nested_replie
         "id": "17949788698583607",
         "text": "Imagine scrolling to find the end of these comments! 😂",
         "ownerUsername": "gabriel2005120",
+        "ownerFullName": "Gabriel Viewer",
         "ownerProfilePicUrl": "https://scontent.example/profile.jpg",
+        "ownerProfilePicUrlHd": "https://scontent.example/profile_pic_url_hd.jpg",
         "timestamp": "2021-11-19T13:54:13.000Z",
         "likesCount": 12,
         "repliesCount": 1,
+        "media_urls": ["https://scontent.example/comment.gif"],
         "replies": [
             {
                 "id": "17891234567890123",
                 "text": "@gabriel2005120 right? It never ends 😅",
                 "ownerUsername": "maria_adventures",
+                "ownerFullName": "Maria Adventures",
+                "ownerProfilePicUrl": "https://scontent.example/reply-profile.jpg",
+                "ownerProfilePicUrlHd": "https://scontent.example/reply-profile-hd.jpg",
                 "timestamp": "2021-11-19T14:02:45.000Z",
                 "likesCount": 3,
                 "repliesCount": 0,
@@ -2796,14 +2802,103 @@ def test_instagram_parse_comment_supports_actor_style_payload_with_nested_replie
     assert parsed.username == "gabriel2005120"
     assert parsed.likes == 12
     assert parsed.reply_count == 1
-    assert parsed.owner_profile_pic_url == "https://scontent.example/profile.jpg"
+    assert parsed.reply_depth == 0
+    assert parsed.media_urls == ["https://scontent.example/comment.gif"]
+    assert parsed.owner_full_name == "Gabriel Viewer"
+    assert parsed.owner_profile_pic_url == "https://scontent.example/profile_pic_url_hd.jpg"
+    assert parsed.owner_profile_pic_url_hd == "https://scontent.example/profile_pic_url_hd.jpg"
     assert len(parsed.replies) == 1
     reply = parsed.replies[0]
     assert reply.is_reply is True
     assert reply.parent_comment_id == parsed.comment_id
+    assert reply.reply_depth == 1
     assert reply.comment_id == "17891234567890123"
     assert reply.username == "maria_adventures"
+    assert reply.owner_full_name == "Maria Adventures"
+    assert reply.owner_profile_pic_url == "https://scontent.example/reply-profile-hd.jpg"
+    assert reply.owner_profile_pic_url_hd == "https://scontent.example/reply-profile-hd.jpg"
     assert reply.likes == 3
+
+
+def test_instagram_parse_comment_synthetic_comment_media_payload_extracts_urls() -> None:
+    scraper = InstagramScraper(cookies={})
+    comment_payload = {
+        # Synthetic fixture: representative comment-media shapes seen across actor/API payload families.
+        "id": "17900000000000001",
+        "text": "media comment",
+        "owner": {
+            "id": "1001",
+            "username": "media_owner",
+            "full_name": "Media Owner",
+            "profilePicUrl": "https://scontent.example/s96x96/avatar-source.jpg",
+            "hd_profile_pic_url_info": {"url": "https://scontent.example/profile_pic_hd_1080.jpg"},
+        },
+        "timestamp": 1735689600,
+        "likes": "7",
+        "reply_count": 1,
+        "commentMedia": {
+            "image_versions2": {
+                "candidates": [
+                    {"url": "https://scontent.example/comment-image-1080.jpg"},
+                    {"url": "https://scontent.example/comment-image-640.jpg"},
+                ]
+            }
+        },
+        "attachments": [
+            {"videoUrl": "https://scontent.example/comment-video.mp4"},
+            {"mediaUrl": "https://scontent.example/comment-sticker.webp"},
+        ],
+        "hostedMediaUrls": ["https://cdn.example/comment-image-1080.jpg"],
+        "child_comments": [
+            {
+                "pk": "17900000000000002",
+                "text": "nested reply",
+                "user": {
+                    "pk": "2002",
+                    "username": "reply_owner",
+                    "fullName": "Reply Owner",
+                    "profilePicUrlHd": "https://scontent.example/reply-hd.jpg",
+                },
+                "created_at": 1735689700,
+                "comment_like_count": 2,
+            }
+        ],
+    }
+
+    parsed = scraper._parse_comment(  # noqa: SLF001
+        comment_payload,
+        "COMMENTMEDIA",
+        "https://www.instagram.com/p/COMMENTMEDIA/",
+    )
+
+    assert parsed.comment_id == "17900000000000001"
+    assert parsed.username == "media_owner"
+    assert parsed.user_id == "1001"
+    assert parsed.owner_full_name == "Media Owner"
+    assert parsed.owner_profile_pic_url == "https://scontent.example/profile_pic_hd_1080.jpg"
+    assert parsed.owner_profile_pic_url_hd == "https://scontent.example/profile_pic_hd_1080.jpg"
+    assert parsed.created_at == 1735689600
+    assert parsed.likes == 7
+    assert parsed.reply_count == 1
+    assert parsed.reply_depth == 0
+    assert parsed.media_urls == [
+        "https://scontent.example/comment-image-1080.jpg",
+        "https://scontent.example/comment-video.mp4",
+        "https://scontent.example/comment-sticker.webp",
+    ]
+    assert parsed.hosted_media_urls == ["https://cdn.example/comment-image-1080.jpg"]
+
+    reply = parsed.replies[0]
+    assert reply.is_reply is True
+    assert reply.parent_comment_id == parsed.comment_id
+    assert reply.reply_depth == 1
+    assert reply.username == "reply_owner"
+    assert reply.user_id == "2002"
+    assert reply.owner_full_name == "Reply Owner"
+    assert reply.owner_profile_pic_url == "https://scontent.example/reply-hd.jpg"
+    assert reply.owner_profile_pic_url_hd == "https://scontent.example/reply-hd.jpg"
+    assert reply.created_at == 1735689700
+    assert reply.likes == 2
 
 
 def test_instagram_scrape_graphql_backfills_owner_avatar_from_profile_payload(

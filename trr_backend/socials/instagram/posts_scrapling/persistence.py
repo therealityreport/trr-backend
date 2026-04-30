@@ -254,42 +254,70 @@ def _collect_video_versions_urls(video_versions: Any) -> list[str]:
     return urls
 
 
-def _extract_media_urls(node: dict[str, Any]) -> tuple[list[str], str | None]:
-    """Return (media_urls, thumbnail_url) handling both legacy and XDTMediaDict shapes.
+def _is_video_media_node(node: dict[str, Any]) -> bool:
+    typename = str(node.get("__typename") or "").strip()
+    if typename in {"GraphVideo", "XDTGraphVideo"}:
+        return True
+    media_type_int = node.get("media_type")
+    if media_type_int == 2:
+        return True
+    return bool(node.get("is_video") or node.get("video_url") or node.get("video_versions"))
 
-    Dedupes. Returns the first image_versions url as the thumbnail hint.
+
+def _select_primary_media_url_for_node(
+    node: dict[str, Any],
+    *,
+    image_urls: list[str],
+    video_urls: list[str],
+) -> str | None:
+    if _is_video_media_node(node) and video_urls:
+        return video_urls[0]
+    if image_urls:
+        return image_urls[0]
+    if video_urls:
+        return video_urls[0]
+    return None
+
+
+def _extract_media_urls(node: dict[str, Any]) -> tuple[list[str], str | None]:
+    """Return canonical media_urls plus thumbnail_url for legacy/XDT shapes.
+
+    ``media_urls`` stores the post payloads to mirror. Cover images stay in
+    ``thumbnail_url`` so reels mirror one cover image and one video, not a
+    duplicate cover/video candidate set.
     """
     media_urls: list[str] = []
     thumbnail_url: str | None = None
 
     # Legacy top-level display_url + video_url
     display_url = str(node.get("display_url") or "").strip()
+    top_image_urls = [display_url] if display_url else []
     if display_url:
-        media_urls.append(display_url)
         thumbnail_url = display_url
     video_url = str(node.get("video_url") or "").strip()
-    if video_url and video_url not in media_urls:
-        media_urls.append(video_url)
+    top_video_urls = [video_url] if video_url else []
 
     # XDTMediaDict top-level image_versions2 / video_versions
     image_urls = _collect_image_versions_urls(node.get("image_versions2"))
     if image_urls and not thumbnail_url:
         thumbnail_url = image_urls[0]
-    for url in image_urls:
-        if url not in media_urls:
-            media_urls.append(url)
-    for url in _collect_video_versions_urls(node.get("video_versions")):
-        if url not in media_urls:
-            media_urls.append(url)
+    top_image_urls.extend(image_urls)
+    top_video_urls.extend(_collect_video_versions_urls(node.get("video_versions")))
 
     # Legacy carousel children
     sidecar_edges = (node.get("edge_sidecar_to_children") or {}).get("edges") or []
+    child_urls: list[str] = []
     for child_edge in sidecar_edges:
         child = child_edge.get("node") or {} if isinstance(child_edge, dict) else {}
-        for url_key in ("display_url", "video_url"):
-            child_url = str(child.get(url_key) or "").strip()
-            if child_url and child_url not in media_urls:
-                media_urls.append(child_url)
+        child_image_urls = [str(child.get("display_url") or "").strip()]
+        child_video_urls = [str(child.get("video_url") or "").strip()]
+        selected = _select_primary_media_url_for_node(
+            child,
+            image_urls=[url for url in child_image_urls if url],
+            video_urls=[url for url in child_video_urls if url],
+        )
+        if selected:
+            child_urls.append(selected)
 
     # XDTMediaDict carousel_media
     carousel_media = node.get("carousel_media") or []
@@ -297,12 +325,24 @@ def _extract_media_urls(node: dict[str, Any]) -> tuple[list[str], str | None]:
         for child in carousel_media:
             if not isinstance(child, dict):
                 continue
-            for url in _collect_image_versions_urls(child.get("image_versions2")):
-                if url not in media_urls:
-                    media_urls.append(url)
-            for url in _collect_video_versions_urls(child.get("video_versions")):
-                if url not in media_urls:
-                    media_urls.append(url)
+            selected = _select_primary_media_url_for_node(
+                child,
+                image_urls=_collect_image_versions_urls(child.get("image_versions2")),
+                video_urls=_collect_video_versions_urls(child.get("video_versions")),
+            )
+            if selected:
+                child_urls.append(selected)
+
+    if child_urls:
+        media_urls.extend(child_urls)
+    else:
+        selected = _select_primary_media_url_for_node(
+            node,
+            image_urls=top_image_urls,
+            video_urls=top_video_urls,
+        )
+        if selected:
+            media_urls.append(selected)
 
     return media_urls, thumbnail_url
 

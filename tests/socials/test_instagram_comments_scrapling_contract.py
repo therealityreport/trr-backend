@@ -47,10 +47,12 @@ def test_stealth_session_contains_all_kwargs_we_use() -> None:
         "headless",
         "network_idle",
         "load_dom",
+        "page_action",
         "proxy_rotator",
         "retries",
         "retry_delay",
         "timeout",
+        "wait",
         # capture_xhr removed - Scrapling 0.4.x types it as `str | None`.
         # (XHR URL pattern), not bool. We don't need XHR capture for
         # comments so we dropped it from the _fetch call entirely.

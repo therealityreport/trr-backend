@@ -114,6 +114,24 @@ def test_select_comments_proxy_adds_decodo_sticky_session_and_duration(monkeypat
     assert config.fingerprint == "gate.decodo.com:7000:decodo"
 
 
+def test_select_comments_proxy_shard_sessions_do_not_force_sticky_affinity(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SHARD_SESSIONS", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
+    monkeypatch.setenv("DECODO_USERNAME", "user-username")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    config = select_comments_proxy(session_key="thetraitorsus:comments:3")
+
+    assert config is not None
+    assert isinstance(config.browser_proxy, dict)
+    assert config.browser_proxy["username"] == "user-username"
+    assert config.session_mode == "rotating"
+
+
 def test_select_comments_proxy_ignores_sticky_env_for_explicit_proxy_urls(monkeypatch) -> None:
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", "http://user:pass@proxy-one:8000")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")

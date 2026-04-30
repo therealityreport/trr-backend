@@ -236,7 +236,7 @@ def _resolve_optional_positive_float(
 def _default_claim_batch_size_for_stage(stage: str | None) -> int:
     # Queue claims mark jobs running up front; batching post claims creates false
     # stale-heartbeat jobs for the later entries while one worker processes the first.
-    return 1 if (stage or "").strip().lower() in {"posts", "shared_account_posts"} else 2
+    return 1 if (stage or "").strip().lower() in {"posts", "shared_account_posts", "comments_scrapling"} else 2
 
 
 def _claim_stage_candidates(stage: str | None) -> tuple[str | None, ...]:

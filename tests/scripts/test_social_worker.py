@@ -750,8 +750,9 @@ def test_main_queue_once_returns_nonzero_when_claiming_jobs_fails(monkeypatch) -
     assert rc == 1
 
 
-def test_default_claim_batch_size_for_posts_is_single_claim() -> None:
+def test_default_claim_batch_size_for_sequential_stages_is_single_claim() -> None:
     assert worker._default_claim_batch_size_for_stage("posts") == 1
+    assert worker._default_claim_batch_size_for_stage("comments_scrapling") == 1
     assert worker._default_claim_batch_size_for_stage("comments") == 2
 
 

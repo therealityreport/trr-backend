@@ -173,8 +173,7 @@ def normalize_instagram_post(payload: dict[str, Any], *, account_handle: str | N
     caption = _extract_caption(node)
     media_variants = _extract_media_variants(node)
     child_posts = _extract_child_posts(node)
-    child_urls = [variant.url for child in child_posts for variant in child.media_variants]
-    media_urls = _dedupe([variant.url for variant in media_variants] + child_urls)
+    media_urls = _extract_primary_media_urls(node, media_variants, child_posts)
     width, height = _extract_dimensions(node, media_variants)
     thumbnail_url = _extract_thumbnail_url(node, media_variants)
     shortcode = _extract_shortcode(node)
@@ -593,6 +592,45 @@ def _extract_media_variants(node: dict[str, Any]) -> list[InstagramMediaVariant]
     return variants
 
 
+def _select_primary_variant_url(
+    media_variants: list[InstagramMediaVariant],
+    *,
+    media_type: str | None,
+) -> str | None:
+    normalized_media_type = str(media_type or "").strip().lower()
+    expects_video = normalized_media_type in {"video", "reel"}
+    if expects_video:
+        for variant in media_variants:
+            if variant.media_type == "video":
+                return variant.url
+    for variant in media_variants:
+        if variant.media_type == "image":
+            return variant.url
+    for variant in media_variants:
+        if variant.media_type == "video":
+            return variant.url
+    return media_variants[0].url if media_variants else None
+
+
+def _extract_primary_media_urls(
+    node: dict[str, Any],
+    media_variants: list[InstagramMediaVariant],
+    child_posts: list[InstagramChildPost],
+) -> list[str]:
+    media_type = _determine_media_type(node)
+    if media_type == "carousel" and child_posts:
+        return _dedupe(
+            [
+                selected
+                for child in child_posts
+                for selected in [_select_primary_variant_url(child.media_variants, media_type=child.media_type)]
+                if selected
+            ]
+        )
+    selected = _select_primary_variant_url(media_variants, media_type=media_type)
+    return [selected] if selected else []
+
+
 def _extract_child_posts(node: dict[str, Any]) -> list[InstagramChildPost]:
     children: list[InstagramChildPost] = []
 
@@ -701,6 +739,8 @@ def _determine_media_type(node: dict[str, Any]) -> str | None:
     if media_type == 8 or node.get("carousel_media") or node.get("carousel_media_count") or node.get("childPosts"):
         return "carousel"
     if media_type == 2 or node.get("is_video") is True or _first_value(node, "videoUrl", "video_url"):
+        return "video"
+    if _as_list(node.get("video_versions")):
         return "video"
     if media_type == 1:
         return "image"

@@ -12,7 +12,7 @@ from scripts.socials.worker import main as worker_main
 def main() -> int:
     os.environ.setdefault("SOCIAL_WORKER_LANE", "instagram_comments_scrapling")
     os.environ.setdefault("SOCIAL_WORKER_SCRIPT", "scripts.socials.instagram.comments_worker")
-    argv = [
+    sys.argv = [
         sys.argv[0],
         "--stage",
         "comments_scrapling",
@@ -20,7 +20,7 @@ def main() -> int:
         "instagram",
         *sys.argv[1:],
     ]
-    return worker_main(argv)
+    return worker_main()
 
 
 if __name__ == "__main__":

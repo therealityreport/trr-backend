@@ -44,7 +44,7 @@ def test_active_catalog_run_fetches_progress(monkeypatch: pytest.MonkeyPatch) ->
 
     assert payload["data"]["catalog_run_progress"] == {"run_id": "run-active", "status": "running"}
     assert payload["operational_alerts"] == [{"code": "needs_review"}]
-    assert calls == [(("instagram", "thetraitorsus", "run-active"), {"recent_log_limit": 12})]
+    assert calls == [(("instagram", "thetraitorsus", "run-active"), {"recent_log_limit": 12, "fast": True})]
 
 
 def test_terminal_catalog_run_does_not_fetch_progress(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +94,7 @@ def test_explicit_run_id_overrides_inferred_active_run(monkeypatch: pytest.Monke
     )
 
     assert payload["data"]["catalog_run_progress"] == {"run_id": "run-explicit"}
-    assert calls == [(("instagram", "thetraitorsus", "run-explicit"), {"recent_log_limit": 25})]
+    assert calls == [(("instagram", "thetraitorsus", "run-explicit"), {"recent_log_limit": 25, "fast": True})]
 
 
 def test_progress_call_receives_account_identity_run_id_and_log_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,7 +131,7 @@ def test_progress_call_receives_account_identity_run_id_and_log_limit(monkeypatc
         "account_handle": "bravotv",
         "detail": "full",
     }
-    assert progress_calls == [(("tiktok", "bravotv", "run-from-id"), {"recent_log_limit": 100})]
+    assert progress_calls == [(("tiktok", "bravotv", "run-from-id"), {"recent_log_limit": 100, "fast": True})]
 
 
 def test_summary_exception_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:

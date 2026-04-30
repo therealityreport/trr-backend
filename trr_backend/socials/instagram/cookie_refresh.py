@@ -294,6 +294,7 @@ def interactive_chrome_login(
     cookie_file: str | Path = "data/instagram_cookies.json",
     timeout_seconds: int = 300,
     validation_username: str | None = None,
+    account_id: str | None = None,
     headless: bool = False,
 ) -> dict[str, str]:
     """Open Chrome with the user's real profile for Instagram login.
@@ -306,9 +307,11 @@ def interactive_chrome_login(
     if not target_file.is_absolute():
         target_file = Path(__file__).resolve().parent.parent.parent.parent / cookie_file
     normalized_validation_username = str(validation_username or "").strip().lstrip("@")
+    normalized_account_id = str(account_id or "").strip().lstrip("@")
+    session_account_id = normalized_account_id or normalized_validation_username or chrome_profile_name
     session_paths = _INSTAGRAM_BROWSER_SESSIONS.session_paths(
-        normalized_validation_username or chrome_profile_name,
-        fallback_account_id=normalized_validation_username or chrome_profile_name,
+        session_account_id,
+        fallback_account_id=session_account_id,
     )
     saved_cookies = _read_cookie_file(session_paths.cookie_file_path)
     if saved_cookies.get("sessionid"):
@@ -461,9 +464,9 @@ def interactive_chrome_login(
                 raise RuntimeError("Timed out waiting for Instagram login — no session cookie detected")
 
             _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
-                normalized_validation_username or chrome_profile_name,
+                session_account_id,
                 context.storage_state(),
-                fallback_account_id=normalized_validation_username or chrome_profile_name,
+                fallback_account_id=session_account_id,
             )
             _write_cookie_file(target_file, cookies)
             logger.info("Interactive login succeeded — cookies written to %s", target_file)

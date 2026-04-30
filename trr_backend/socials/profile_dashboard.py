@@ -58,6 +58,7 @@ def build_social_account_profile_dashboard(
             account_handle,
             progress_run_id,
             recent_log_limit=recent_log_limit,
+            fast=True,
         )
 
     payload = {

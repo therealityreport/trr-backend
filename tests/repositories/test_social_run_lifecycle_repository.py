@@ -180,6 +180,24 @@ def test_set_run_status_invalidates_week_detail_cache_on_terminal_states(
         social_repo.register_week_detail_cache_invalidator(None)
 
 
+def test_set_run_status_clears_terminal_timestamps_when_reopened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object], **_kwargs):
+        captured["sql"] = " ".join(sql.lower().split())
+        captured["params"] = list(params)
+        return {"id": "run-1"}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    social_repo._set_run_status("run-1", "running")
+
+    assert "when %s in ('queued', 'pending', 'retrying', 'running') then null" in str(captured["sql"])
+    assert captured["params"] == ["running", "running", "running", "running", "running", "running", "run-1"]
+
+
 def test_update_run_summary_prefers_incremental_counter_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
