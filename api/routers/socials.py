@@ -567,7 +567,13 @@ def _finalize_catalog_backfill_launch_task(
     selected_tasks: list[str] | None,
     launch_group_id: str | None,
 ) -> None:
-    from trr_backend.repositories.social_season_analytics import finalize_social_account_catalog_backfill_launch
+    from trr_backend.repositories.social_season_analytics import (
+        INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+        INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
+        execute_run_with_inline_worker_registration,
+        finalize_social_account_catalog_backfill_launch,
+        is_queue_enabled,
+    )
 
     normalized_platform = str(platform or "").strip().lower()
     normalized_account = str(account_handle or "").strip().lower()
@@ -585,7 +591,7 @@ def _finalize_catalog_backfill_launch_task(
             normalized_run_id,
             normalized_launch_group_id,
         )
-        finalize_social_account_catalog_backfill_launch(
+        result = finalize_social_account_catalog_backfill_launch(
             platform=normalized_platform,
             account_handle=normalized_account,
             run_id=normalized_run_id,
@@ -598,6 +604,23 @@ def _finalize_catalog_backfill_launch_task(
             selected_tasks=selected_tasks,
             launch_group_id=normalized_launch_group_id,
         )
+        if allow_local_dev_inline_bypass or not is_queue_enabled():
+            catalog_run_id = str((result or {}).get("catalog_run_id") or (result or {}).get("run_id") or "").strip()
+            comments_run_id = str((result or {}).get("comments_run_id") or "").strip()
+            if catalog_run_id:
+                execute_run_with_inline_worker_registration(
+                    catalog_run_id,
+                    worker_id=f"api-background:catalog:{normalized_platform}",
+                )
+            if comments_run_id:
+                execute_run_with_inline_worker_registration(
+                    comments_run_id,
+                    worker_id=f"api-background:comments:{normalized_platform}",
+                    stage=INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
+                    platform="instagram",
+                    supported_platforms=["instagram"],
+                    metadata_updates={"worker_lane": INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE},
+                )
     except Exception:
         logger.exception(
             "[catalog-launch] finalize_background_task_failed platform=%s account=%s run_id=%s launch_group_id=%s",
@@ -1151,6 +1174,7 @@ def _account_profile_cache_key(
     search: str | None = None,
     window: str | None = None,
     comments_only: bool | None = None,
+    comment_filter: str | None = None,
     post_source_id: str | None = None,
     extra: tuple[Any, ...] | None = None,
 ) -> tuple[Any, ...]:
@@ -1163,6 +1187,7 @@ def _account_profile_cache_key(
         str(search or "").strip().lower() or None,
         str(window or "").strip().lower() or None,
         None if comments_only is None else bool(comments_only),
+        str(comment_filter or "").strip().lower() or None,
         str(post_source_id or "").strip() or None,
         *(extra or ()),
     )
@@ -1463,7 +1488,11 @@ def _finalize_social_account_catalog_route_response(
     run_id = str(result.get("run_id") or "").strip()
     catalog_run_id = str(result.get("catalog_run_id") or run_id or "").strip()
     comments_run_id = str(result.get("comments_run_id") or "").strip()
-    if not queue_enabled and catalog_run_id:
+    launch_resolution_pending = (
+        result.get("launch_task_resolution_pending") is True
+        or str(result.get("launch_state") or "").strip().lower() in {"pending", "finalizing"}
+    )
+    if not queue_enabled and catalog_run_id and not launch_resolution_pending:
         logger.warning(
             "Catalog route using inline fallback: platform=%s queue_enabled=%s requires_modal_executor=%s",
             platform,
@@ -1475,7 +1504,7 @@ def _finalize_social_account_catalog_route_response(
             background_tasks,
             worker_prefix=f"api-background:catalog:{platform}",
         )
-    if not queue_enabled and comments_run_id:
+    if not queue_enabled and comments_run_id and not launch_resolution_pending:
         from trr_backend.repositories.social_season_analytics import (
             INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
             INSTAGRAM_COMMENTS_SCRAPLING_WORKER_LANE,
@@ -3332,12 +3361,16 @@ class SocialAccountCommentsScrapeRequest(BaseModel):
     max_posts: int | None = Field(default=None, ge=1, le=500)
     max_comments_per_post: int | None = Field(default=None, ge=1, le=1000000)
     refresh_policy: Literal["stale_or_missing", "all_saved_posts"] = Field(default="stale_or_missing")
+    target_filter: Literal["incomplete"] | None = Field(default=None)
     allow_inline_dev_fallback: bool = Field(default=False)
+    dry_run: bool = Field(default=False)
 
     @model_validator(mode="after")
     def validate_shape(self) -> SocialAccountCommentsScrapeRequest:
         if self.mode == "single_post" and not str(self.source_id or "").strip():
             raise ValueError("source_id is required for single_post comment scrapes")
+        if self.mode == "single_post" and self.target_filter is not None:
+            raise ValueError("target_filter is only supported for profile comment scrapes")
         return self
 
 
@@ -4479,6 +4512,9 @@ def get_social_account_profile_dashboard_route(
 
     detail = _normalize_social_account_profile_summary_detail(request.query_params.get("detail"))
     normalized_run_id = str(run_id or "").strip() or None
+    dashboard_cache_ttl_seconds = (
+        _ACCOUNT_PROFILE_PROGRESS_CACHE_TTL_SECONDS if normalized_run_id else _ACCOUNT_PROFILE_CACHE_TTL_SECONDS
+    )
     cache_key = _account_profile_cache_key(
         surface="dashboard",
         platform=platform,
@@ -4497,7 +4533,7 @@ def get_social_account_profile_dashboard_route(
             ),
             cache=_ACCOUNT_PROFILE_DASHBOARD_CACHE,
             cache_lock=_ACCOUNT_PROFILE_DASHBOARD_CACHE_LOCK,
-            ttl_seconds=_ACCOUNT_PROFILE_CACHE_TTL_SECONDS,
+            ttl_seconds=dashboard_cache_ttl_seconds,
             max_entries=_ACCOUNT_PROFILE_CACHE_MAX_ENTRIES,
         )
     except ValueError as exc:
@@ -4644,6 +4680,7 @@ def get_social_account_profile_posts_route(
     page_size: int = Query(default=25, ge=1, le=100),
     search: str | None = Query(default=None),
     comments_only: bool = Query(default=False),
+    comment_filter: str | None = Query(default=None),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_profile_posts
@@ -4656,6 +4693,7 @@ def get_social_account_profile_posts_route(
         page_size=page_size,
         search=search,
         comments_only=comments_only,
+        comment_filter=comment_filter,
     )
     cached_payload = _get_ttl_cached_payload(_ACCOUNT_PROFILE_POSTS_CACHE, _ACCOUNT_PROFILE_POSTS_CACHE_LOCK, cache_key)
     if cached_payload is not None:
@@ -4668,6 +4706,7 @@ def get_social_account_profile_posts_route(
             page_size=page_size,
             search=search,
             comments_only=comments_only,
+            comment_filter=comment_filter,
         )
         _set_ttl_cached_payload(
             _ACCOUNT_PROFILE_POSTS_CACHE,
@@ -4830,6 +4869,7 @@ async def post_social_account_comments_scrape_route(
     payload: SocialAccountCommentsScrapeRequest,
     background_tasks: BackgroundTasks,
     user: InternalAdminUser,
+    dry_run: bool = Query(default=False),
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         INSTAGRAM_COMMENTS_SCRAPLING_STAGE,
@@ -4838,8 +4878,24 @@ async def post_social_account_comments_scrape_route(
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
         _dispatch_due_social_jobs_in_background,
+        preview_social_account_comments_scrape,
         start_social_account_comments_scrape,
     )
+
+    if dry_run or payload.dry_run:
+        try:
+            return await run_in_threadpool(
+                preview_social_account_comments_scrape,
+                platform=platform,
+                account_handle=account_handle,
+                mode=payload.mode,
+                source_id=payload.source_id,
+                max_posts=payload.max_posts,
+                refresh_policy=payload.refresh_policy,
+                target_filter=payload.target_filter,
+            )
+        except SocialIngestValidationError as exc:
+            raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
 
     execution_state = _resolve_social_account_comments_route_execution(
         allow_inline_dev_fallback=payload.allow_inline_dev_fallback,
@@ -4859,6 +4915,7 @@ async def post_social_account_comments_scrape_route(
             max_posts=payload.max_posts,
             max_comments_per_post=payload.max_comments_per_post,
             refresh_policy=payload.refresh_policy,
+            target_filter=payload.target_filter,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:comments:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
@@ -4928,6 +4985,30 @@ def get_social_account_comments_scrape_progress_route(
                 run_id=str(run_id),
             ),
         )
+    except ValueError as exc:
+        raise _value_error_to_bad_request(exc) from exc
+    except LookupError as exc:
+        raise _lookup_error_to_not_found(exc) from exc
+
+
+@router.post("/profiles/{platform}/{account_handle}/comments/runs/{run_id}/cancel")
+def post_social_account_comments_run_cancel_route(
+    platform: str,
+    account_handle: str,
+    run_id: UUID,
+    user: InternalAdminUser,
+) -> dict[str, Any]:
+    from trr_backend.repositories.social_season_analytics import cancel_social_account_comments_run
+
+    try:
+        result = cancel_social_account_comments_run(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            cancelled_by=(user or {}).get("email"),
+        )
+        _clear_account_profile_caches()
+        return result
     except ValueError as exc:
         raise _value_error_to_bad_request(exc) from exc
     except LookupError as exc:
@@ -5138,6 +5219,7 @@ def get_social_account_catalog_run_progress_route(
     account_handle: str,
     run_id: UUID,
     recent_log_limit: int = Query(default=20, ge=1, le=100),
+    fast: bool = Query(default=False),
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import get_social_account_catalog_run_progress
@@ -5146,7 +5228,7 @@ def get_social_account_catalog_run_progress_route(
         surface="catalog-run-progress",
         platform=platform,
         account_handle=account_handle,
-        extra=(str(run_id), recent_log_limit),
+        extra=(str(run_id), recent_log_limit, "fast" if fast else "full"),
     )
     try:
         return _resolve_account_profile_singleflight(
@@ -5156,6 +5238,7 @@ def get_social_account_catalog_run_progress_route(
                 account_handle=account_handle,
                 run_id=str(run_id),
                 recent_log_limit=recent_log_limit,
+                fast=fast,
             ),
             cache=_ACCOUNT_PROFILE_PROGRESS_CACHE,
             cache_lock=_ACCOUNT_PROFILE_PROGRESS_CACHE_LOCK,
@@ -5508,9 +5591,7 @@ async def post_social_account_catalog_backfill_route(
             date_end=date_end,
         )
         use_async_instagram_kickoff = (
-            platform == "instagram"
-            and queue_enabled
-            and not used_inline_fallback
+            str(platform or "").strip().lower() == "instagram"
             and list(payload.selected_tasks or []) != ["comments"]
         )
         if use_async_instagram_kickoff:

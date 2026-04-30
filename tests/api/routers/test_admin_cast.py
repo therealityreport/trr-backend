@@ -5,7 +5,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from api.auth import require_admin
+from api.auth import require_admin, require_internal_admin
 from api.main import app
 from api.routers import admin_cast as router_module
 
@@ -16,13 +16,16 @@ def _compact_sql(sql: str) -> str:
 
 @pytest.fixture(autouse=True)
 def override_admin() -> Iterator[None]:
-    app.dependency_overrides[require_admin] = lambda: {
+    admin_user = {
         "id": "admin:test",
         "role": "admin",
         "email": "admin@example.com",
     }
+    app.dependency_overrides[require_admin] = lambda: admin_user
+    app.dependency_overrides[require_internal_admin] = lambda: admin_user
     yield
     app.dependency_overrides.pop(require_admin, None)
+    app.dependency_overrides.pop(require_internal_admin, None)
 
 
 def test_cast_summary_includes_available_photo_url_with_person_card_photo_ranking(

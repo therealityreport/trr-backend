@@ -56,8 +56,8 @@ def test_adapt_graph_node_carousel():
     }
     dto = _graph_node_to_post_dto(node, account_handle="testuser")
     assert dto.post_type == "carousel"
-    # display_url + child display_urls + child video_url (deduped)
-    assert len(dto.media_urls) >= 3
+    assert dto.thumbnail_url == "https://example.com/img.jpg"
+    assert dto.media_urls == ["https://example.com/1.jpg", "https://example.com/2.mp4"]
 
 
 def test_adapt_graph_node_image():
@@ -114,8 +114,7 @@ def test_adapt_xdt_media_dict_video():
     assert dto.caption == "Hello world #fyp"  # from caption.text dict
     assert dto.username == "bravotv"  # from user.username
     assert dto.pk == "3875927249152668787"  # prefers pk over composite id
-    assert "https://cdn.example.com/thumb1.jpg" in dto.media_urls
-    assert "https://cdn.example.com/video1.mp4" in dto.media_urls
+    assert dto.media_urls == ["https://cdn.example.com/video1.mp4"]
     assert dto.thumbnail_url == "https://cdn.example.com/thumb1.jpg"
 
 
@@ -143,7 +142,7 @@ def test_adapt_xdt_media_dict_carousel():
     }
     dto = _graph_node_to_post_dto(node, account_handle="u")
     assert dto.post_type == "carousel"  # media_type=8 → carousel
-    assert len(dto.media_urls) >= 3  # 2 image urls + 1 video url
+    assert dto.media_urls == ["https://cdn.example.com/c1.jpg", "https://cdn.example.com/c2.mp4"]
 
 
 def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadata(

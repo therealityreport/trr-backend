@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from api.auth import AdminUser
+from api.auth import AdminUser, InternalAdminUser
 from api.deps import SupabaseAdminClient, get_list_result
 from trr_backend.db import pg
 
@@ -88,7 +88,7 @@ def _group_cast_summary_rows(
 @router.post("/shows/cast-summary", response_model=CastSummaryBatchResponse)
 def get_admin_cast_summary(
     payload: CastSummaryBatchRequest,
-    _: AdminUser,
+    _: InternalAdminUser,
 ) -> CastSummaryBatchResponse:
     show_ids = [show_id.strip() for show_id in payload.show_ids if show_id.strip()]
     if not show_ids:

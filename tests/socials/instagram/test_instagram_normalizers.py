@@ -95,8 +95,8 @@ def test_normalize_xdt_post_extracts_rich_post_fields() -> None:
     assert post.tagged_users[0].tag_x == 0.25
     assert post.tagged_users[0].tag_y == 0.75
     assert post.collaborators[0].username == "iss"
-    assert "https://cdn.example.com/thumb-1080.jpg" in post.media_urls
-    assert "https://cdn.example.com/video.mp4" in post.media_urls
+    assert post.thumbnail_url == "https://cdn.example.com/thumb-1080.jpg"
+    assert post.media_urls == ["https://cdn.example.com/video.mp4"]
     assert post.width == 1080
     assert post.height == 1350
     assert post.location is not None
@@ -172,7 +172,8 @@ def test_normalize_media_info_shortcode_style_fixture_extracts_children() -> Non
     assert post.child_posts[0].media_type == "image"
     assert post.child_posts[0].alt_text == "Earth from space"
     assert post.child_posts[1].media_type == "video"
-    assert "https://cdn.example.com/child-2.mp4" in post.media_urls
+    assert post.thumbnail_url == "https://cdn.example.com/cover.jpg"
+    assert post.media_urls == ["https://cdn.example.com/child-1.jpg", "https://cdn.example.com/child-2.mp4"]
     assert post.tagged_users[0].username == "earthobservatory"
     assert post.tagged_users[0].tag_position_source == "rest_usertags.position_object"
 

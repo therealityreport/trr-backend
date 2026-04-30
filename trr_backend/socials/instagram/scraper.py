@@ -208,9 +208,13 @@ class InstagramComment:
     is_reply: bool
     parent_comment_id: str | None  # ID of parent comment if this is a reply
     reply_count: int
+    reply_depth: int = 0
     replies: list["InstagramComment"] = field(default_factory=list)
     media_urls: list[str] = field(default_factory=list)
+    hosted_media_urls: list[str] = field(default_factory=list)
+    owner_full_name: str | None = None
     owner_profile_pic_url: str | None = None
+    owner_profile_pic_url_hd: str | None = None
     owner_is_verified: bool | None = None
 
     # Post reference
@@ -3464,21 +3468,53 @@ class InstagramScraper:
         post_url: str,
         is_reply: bool = False,
         parent_id: str | None = None,
+        reply_depth: int | None = None,
     ) -> InstagramComment:
         """Parse comment data into InstagramComment object."""
         user = data.get("user", {}) if isinstance(data.get("user"), dict) else {}
         owner = data.get("owner", {}) if isinstance(data.get("owner"), dict) else {}
+        owner_hd_info = owner.get("hd_profile_pic_url_info")
+        if not isinstance(owner_hd_info, dict):
+            owner_hd_info = {}
+        user_hd_info = user.get("hd_profile_pic_url_info")
+        if not isinstance(user_hd_info, dict):
+            user_hd_info = {}
         created_at = self._coerce_timestamp(data.get("created_at") or data.get("timestamp"))
         username = data.get("ownerUsername") or owner.get("username") or user.get("username") or ""
-        user_id = data.get("ownerId") or owner.get("id") or user.get("pk") or user.get("id") or ""
+        user_id = data.get("ownerId") or owner.get("id") or owner.get("pk") or user.get("pk") or user.get("id") or ""
+        owner_full_name = (
+            data.get("ownerFullName")
+            or data.get("ownerDisplayName")
+            or owner.get("full_name")
+            or owner.get("fullName")
+            or user.get("full_name")
+            or user.get("fullName")
+        )
+        owner_profile_pic_url_hd = (
+            data.get("ownerProfilePicUrlHd")
+            or owner.get("profile_pic_url_hd")
+            or owner.get("profilePicUrlHd")
+            or user.get("profile_pic_url_hd")
+            or user.get("profilePicUrlHd")
+            or owner_hd_info.get("url")
+            or user_hd_info.get("url")
+        )
         likes = data.get("comment_like_count")
         if likes is None:
             likes = data.get("likesCount")
         if likes is None:
             likes = data.get("like_count")
+        if likes is None:
+            likes = data.get("likes")
         reply_count = data.get("child_comment_count")
         if reply_count is None:
             reply_count = data.get("repliesCount")
+        if reply_count is None:
+            reply_count = data.get("reply_count")
+        if reply_count is None:
+            reply_count = data.get("replies_count")
+        fallback_reply_depth = 1 if is_reply or parent_id else 0
+        normalized_reply_depth = max(0, int(reply_depth if reply_depth is not None else fallback_reply_depth))
 
         comment = InstagramComment(
             comment_id=str(data.get("pk") or data.get("id") or ""),
@@ -3491,15 +3527,19 @@ class InstagramScraper:
             is_reply=is_reply,
             parent_comment_id=parent_id,
             reply_count=self._coerce_int(reply_count, 0),
+            reply_depth=normalized_reply_depth,
             media_urls=self._extract_comment_media_urls(data),
+            hosted_media_urls=self._extract_hosted_comment_media_urls(data),
+            owner_full_name=str(owner_full_name or "").strip() or None,
             owner_profile_pic_url=self._pick_best_profile_pic_url(
-                data.get("ownerProfilePicUrlHd"),
+                owner_profile_pic_url_hd,
                 data.get("ownerProfilePicUrl"),
-                owner.get("profile_pic_url_hd") or owner.get("profilePicUrlHd"),
                 owner.get("profile_pic_url"),
-                user.get("profile_pic_url_hd") or user.get("profilePicUrlHd"),
+                owner.get("profilePicUrl"),
                 user.get("profile_pic_url"),
+                user.get("profilePicUrl"),
             ),
+            owner_profile_pic_url_hd=str(owner_profile_pic_url_hd or "").strip() or None,
             owner_is_verified=(
                 bool(owner.get("is_verified"))
                 if "is_verified" in owner
@@ -3511,15 +3551,37 @@ class InstagramScraper:
             post_url=post_url,
         )
         nested_replies = data.get("replies")
+        if not isinstance(nested_replies, list):
+            nested_replies = data.get("child_comments")
         if isinstance(nested_replies, list):
             comment.replies = [
-                self._parse_comment(reply, shortcode, post_url, is_reply=True, parent_id=comment.comment_id)
+                self._parse_comment(
+                    reply,
+                    shortcode,
+                    post_url,
+                    is_reply=True,
+                    parent_id=comment.comment_id,
+                    reply_depth=comment.reply_depth + 1,
+                )
                 for reply in nested_replies
                 if isinstance(reply, dict)
             ]
             if comment.reply_count <= 0:
                 comment.reply_count = len(comment.replies)
         return comment
+
+    @staticmethod
+    def _extract_hosted_comment_media_urls(data: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
+        for key in ("hosted_media_urls", "hostedMediaUrls"):
+            candidates = data.get(key)
+            if not isinstance(candidates, list):
+                continue
+            for candidate in candidates:
+                value = str(candidate or "").strip()
+                if value.startswith(("http://", "https://")) and value not in urls:
+                    urls.append(value)
+        return urls
 
     def _extract_comment_media_urls(self, data: dict[str, Any]) -> list[str]:
         """Extract media URLs from Instagram comment payloads when present."""
@@ -3534,6 +3596,12 @@ class InstagramScraper:
         if isinstance(explicit_media_urls, list):
             for candidate in explicit_media_urls:
                 _append(candidate)
+        explicit_media_urls = data.get("mediaUrls")
+        if isinstance(explicit_media_urls, list):
+            for candidate in explicit_media_urls:
+                _append(candidate)
+        for key in ("media_url", "mediaUrl"):
+            _append(data.get(key))
 
         def _collect_media_node(node: Any) -> None:
             if isinstance(node, list):
@@ -3556,25 +3624,46 @@ class InstagramScraper:
                 "imageUrl",
                 "thumbnail_url",
                 "thumbnailUrl",
+                "media_url",
+                "mediaUrl",
+                "src",
             ):
                 _append(node.get(key))
 
             for nested_key in (
                 "media",
+                "comment_media",
+                "commentMedia",
                 "media_versions",
                 "attachment",
                 "attachments",
                 "content",
                 "preview",
+                "image",
                 "image_versions2",
                 "video_versions",
                 "carousel_media",
+                "giphy_media_info",
+                "giphyMediaInfo",
+                "animated_media",
+                "animatedMedia",
             ):
                 nested = node.get(nested_key)
                 if isinstance(nested, (dict, list)):
                     _collect_media_node(nested)
 
-        for key in ("media", "attachment", "attachments", "content", "preview", "clip"):
+        for key in (
+            "media",
+            "comment_media",
+            "commentMedia",
+            "attachment",
+            "attachments",
+            "content",
+            "preview",
+            "clip",
+            "giphy_media_info",
+            "giphyMediaInfo",
+        ):
             nested = data.get(key)
             if isinstance(nested, (dict, list)):
                 _collect_media_node(nested)

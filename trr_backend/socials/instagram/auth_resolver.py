@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import fcntl
 import hashlib
@@ -92,6 +93,9 @@ def _default_session_account_id() -> str | None:
     validation_username = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME") or "").strip().lstrip("@")
     if validation_username:
         return validation_username.lower()
+    auth_username, _ = _auth_credentials()
+    if auth_username:
+        return auth_username.strip().lstrip("@").lower()
     return None
 
 
@@ -117,6 +121,14 @@ def _is_local_environment() -> bool:
     return not (os.getenv("MODAL_TASK_ID") or os.getenv("MODAL_ENVIRONMENT"))
 
 
+def _running_event_loop_active() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _auth_credentials() -> tuple[str | None, str | None]:
     username = (
         (os.getenv("SOCIAL_AUTH_INSTAGRAM_USERNAME") or "").strip()
@@ -132,6 +144,8 @@ def _auth_credentials() -> tuple[str | None, str | None]:
 
 
 def _auto_refresh_enabled() -> bool:
+    if _running_event_loop_active():
+        return False
     raw = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") or "").strip().lower()
     if raw:
         return raw not in {"0", "false", "off", "no"}
@@ -142,6 +156,8 @@ def _auto_refresh_enabled() -> bool:
 def _interactive_login_enabled() -> bool:
     raw = (os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") or "").strip().lower()
     if raw in {"0", "false", "off", "no"}:
+        return False
+    if _running_event_loop_active():
         return False
     return _is_local_environment()
 
@@ -154,14 +170,21 @@ def _looks_like_shortcode(value: str) -> bool:
     return bool(_SHORTCODE_RE.fullmatch(value) and any(ch.isupper() for ch in value))
 
 
+def _looks_like_handle(value: str) -> bool:
+    normalized = str(value or "").strip().lstrip("@")
+    return bool(_HANDLE_RE.fullmatch(normalized.lower()) and not _looks_like_shortcode(normalized))
+
+
 def _normalize_session_account_id(browser_account_id: str | None) -> tuple[str | None, str | None]:
     normalized = str(browser_account_id or "").strip().lstrip("@")
-    if not normalized:
-        return _default_session_account_id(), None
-    lower = normalized.lower()
-    if _HANDLE_RE.fullmatch(lower) and not _looks_like_shortcode(normalized):
-        return lower, None
     default_account_id = _default_session_account_id()
+    if not normalized:
+        return default_account_id, None
+    lower = normalized.lower()
+    if default_account_id and default_account_id != lower:
+        return default_account_id, normalized
+    if _looks_like_handle(normalized):
+        return lower, None
     if default_account_id:
         return default_account_id, normalized
     return None, normalized
@@ -388,15 +411,21 @@ def _cache_evict(fingerprint: str | None) -> None:
     _VALIDATION_CACHE.pop(fingerprint, None)
 
 
-def _validation_username(session_account_id: str | None) -> str:
+def _validation_username(session_account_id: str | None, *, caller_context: str | None = None) -> str:
     fallback = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME") or "").strip().lstrip("@")
-    return (session_account_id or fallback or "bravotv").lower()
+    if fallback:
+        return fallback.lower()
+    normalized_context = str(caller_context or "").strip().lstrip("@")
+    if _looks_like_handle(normalized_context):
+        return normalized_context.lower()
+    return (session_account_id or "bravotv").lower()
 
 
 def _validate_cookies_via_graphql(
     cookies: dict[str, str],
     *,
     session_account_id: str | None,
+    caller_context: str | None = None,
     require_validation: bool,
 ) -> tuple[bool, str | None, str, bool]:
     structurally_valid, structural_reason = _structural_validation(cookies)
@@ -421,7 +450,7 @@ def _validate_cookies_via_graphql(
 
     from trr_backend.socials.instagram.scraper import InstagramScraper
 
-    validation_username = _validation_username(session_account_id)
+    validation_username = _validation_username(session_account_id, caller_context=caller_context)
     scraper = InstagramScraper(cookies=dict(cookies), browser_account_id=session_account_id or validation_username)
     payload = scraper.fetch_posts_graphql(
         validation_username,
@@ -478,6 +507,7 @@ def _promote_browser_session_to_canonical_file(
     cookie_file_path: Path,
     browser_candidate: _CookieCandidate | None,
     observed_mtime: float | None,
+    caller_context: str | None = None,
 ) -> bool:
     if browser_candidate is None:
         return False
@@ -491,6 +521,7 @@ def _promote_browser_session_to_canonical_file(
         current_valid, _, _, _ = _validate_cookies_via_graphql(
             current_cookies,
             session_account_id=None,
+            caller_context=caller_context,
             require_validation=True,
         )
         if current_valid:
@@ -502,6 +533,7 @@ def _promote_browser_session_to_canonical_file(
 def _refresh_with_credentials(
     *,
     session_account_id: str | None,
+    caller_context: str | None = None,
     cookie_file_path: Path,
 ) -> tuple[dict[str, str], str | None]:
     if not _auto_refresh_enabled():
@@ -517,7 +549,7 @@ def _refresh_with_credentials(
         headless=(os.getenv("SOCIAL_INSTAGRAM_COOKIE_REFRESH_HEADLESS") or "true").strip().lower()
         not in {"0", "false", "off", "no"},
         timeout_seconds=max(30, int(os.getenv("SOCIAL_INSTAGRAM_COOKIE_REFRESH_TIMEOUT_SECONDS") or "120")),
-        validation_username=_validation_username(session_account_id),
+        validation_username=_validation_username(session_account_id, caller_context=caller_context),
     )
     return cookies, "credential_refresh"
 
@@ -525,6 +557,7 @@ def _refresh_with_credentials(
 def _refresh_interactively(
     *,
     session_account_id: str | None,
+    caller_context: str | None = None,
     cookie_file_path: Path,
 ) -> tuple[dict[str, str], str | None]:
     if not _interactive_login_enabled():
@@ -534,7 +567,8 @@ def _refresh_interactively(
         or "entertainmentdatagroup@gmail.com",
         cookie_file=str(cookie_file_path),
         timeout_seconds=max(60, int(os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_TIMEOUT_SECONDS") or "300")),
-        validation_username=_validation_username(session_account_id),
+        validation_username=_validation_username(session_account_id, caller_context=caller_context),
+        account_id=session_account_id,
         headless=(os.getenv("SOCIAL_INSTAGRAM_BROWSER_MODE") or "").strip().lower() == "headless",
     )
     return cookies, "interactive_login"
@@ -606,6 +640,9 @@ def resolve_instagram_auth_session(
 ) -> InstagramAuthSession:
     session_account_id, normalized_caller_context = _normalize_session_account_id(browser_account_id)
     caller_context = str(caller_context or normalized_caller_context or "").strip() or None
+    validation_context = caller_context if _looks_like_handle(caller_context or "") else normalized_caller_context
+    if not _looks_like_handle(validation_context or ""):
+        validation_context = None
     if session_account_id is None and require_validation:
         raise RuntimeError("instagram_auth_session_account_unresolved")
 
@@ -667,6 +704,7 @@ def resolve_instagram_auth_session(
         validated, validation_reason, validation_category, stale_ok = _validate_cookies_via_graphql(
             cookies,
             session_account_id=session_account_id,
+            caller_context=validation_context,
             require_validation=require_validation,
         )
         refreshed = False
@@ -683,6 +721,7 @@ def resolve_instagram_auth_session(
                 validated, validation_reason, validation_category, stale_ok = _validate_cookies_via_graphql(
                     cookies,
                     session_account_id=session_account_id,
+                    caller_context=validation_context,
                     require_validation=require_validation,
                 )
 
@@ -695,6 +734,7 @@ def resolve_instagram_auth_session(
                 validated_browser, reason_browser, category_browser, stale_ok_browser = _validate_cookies_via_graphql(
                     browser_candidate.cookies,
                     session_account_id=session_account_id,
+                    caller_context=validation_context,
                     require_validation=True,
                 )
                 if validated_browser:
@@ -708,6 +748,7 @@ def resolve_instagram_auth_session(
             if not validated and validation_category not in {"checkpoint_required", "unauthorized", "redirect_login"}:
                 refreshed_cookies, refresh_method = _refresh_with_credentials(
                     session_account_id=session_account_id,
+                    caller_context=validation_context,
                     cookie_file_path=cookie_file_path,
                 )
                 if refreshed_cookies:
@@ -718,12 +759,14 @@ def resolve_instagram_auth_session(
                     validated, validation_reason, validation_category, stale_ok = _validate_cookies_via_graphql(
                         cookies,
                         session_account_id=session_account_id,
+                        caller_context=validation_context,
                         require_validation=True,
                     )
 
             if not validated and validation_category in {"graphql_validation_failed", "unauthorized", "redirect_login"}:
                 interactive_cookies, interactive_method = _refresh_interactively(
                     session_account_id=session_account_id,
+                    caller_context=validation_context,
                     cookie_file_path=cookie_file_path,
                 )
                 if interactive_cookies:
@@ -735,6 +778,7 @@ def resolve_instagram_auth_session(
                     validated, validation_reason, validation_category, stale_ok = _validate_cookies_via_graphql(
                         cookies,
                         session_account_id=session_account_id,
+                        caller_context=validation_context,
                         require_validation=True,
                     )
 
@@ -745,6 +789,7 @@ def resolve_instagram_auth_session(
                 cookie_file_path=cookie_file_path,
                 browser_candidate=browser_candidate,
                 observed_mtime=observed_cookie_file_mtime,
+                caller_context=validation_context,
             )
 
         auth_session = _build_auth_session(

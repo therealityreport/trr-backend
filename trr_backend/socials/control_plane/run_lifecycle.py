@@ -33,6 +33,7 @@ def _create_run(
     initiated_by: str | None,
     config: dict[str, Any],
     status: str,
+    conn: Any | None = None,
 ) -> str:
     initial_summary = _build_run_summary_payload(
         total_jobs=0,
@@ -42,7 +43,8 @@ def _create_run(
         items_found_total=0,
         stage_counts={},
     )
-    row = legacy.pg.fetch_one(
+    row = _call_with_optional_conn(
+        legacy.pg.fetch_one,
         """
         insert into social.scrape_runs (
           season_id,
@@ -76,6 +78,7 @@ def _create_run(
             legacy.json.dumps(initial_summary),
             status,
         ],
+        conn=conn,
     )
     if not row:
         raise RuntimeError("Failed to create social scrape run")
@@ -86,7 +89,8 @@ def _create_run(
         pass_attempt = legacy._normalize_non_negative_int(config.get("pass_attempt")) or None
         pass_sequence = legacy._normalize_non_negative_int(config.get("pass_sequence")) or None
         if sync_session_id or pass_kind or pass_attempt is not None or pass_sequence is not None:
-            legacy.pg.fetch_one(
+            _call_with_optional_conn(
+                legacy.pg.fetch_one,
                 """
                 update social.scrape_runs
                 set
@@ -98,6 +102,7 @@ def _create_run(
                 returning id::text
                 """,
                 [sync_session_id, pass_kind, pass_attempt, pass_sequence, run_id],
+                conn=conn,
             )
     return run_id
 
@@ -114,17 +119,19 @@ def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> Non
             else started_at
           end,
           completed_at = case
+            when %s in ('queued', 'pending', 'retrying', 'running') then null
             when %s in ('completed', 'failed', 'cancelled') then coalesce(completed_at, now())
             else completed_at
           end,
           cancelled_at = case
+            when %s in ('queued', 'pending', 'retrying', 'running') then null
             when %s = 'cancelled' then coalesce(cancelled_at, now())
             else cancelled_at
           end
         where id = %s
         returning id::text
         """,
-        [status, status, status, status, run_id],
+        [status, status, status, status, status, status, run_id],
         conn=conn,
     )
     legacy._invalidate_queue_status_cache()
@@ -166,7 +173,7 @@ def _maybe_start_deferred_comments_followup(
 ) -> None:
     if str(run_status or "").strip().lower() != "completed":
         return
-    if not legacy._shared_account_catalog_scrape_complete(run_config=run_config, summary=summary):
+    if not legacy._shared_account_catalog_scrape_complete(run_config=run_config, summary=summary, conn=conn):
         return
     followup = legacy._metadata_dict(run_config.get("deferred_comments_followup"))
     if str(followup.get("state") or "").strip().lower() != "pending":
@@ -177,19 +184,29 @@ def _maybe_start_deferred_comments_followup(
     attached_followups = legacy._normalize_attached_followups(run_config.get("attached_followups"))
     now_iso = legacy._iso(legacy._now_utc())
     try:
-        comments_result = legacy.start_social_account_comments_scrape(
-            str(followup.get("platform") or "").strip(),
-            str(followup.get("account_handle") or "").strip(),
-            mode="profile",
-            source_scope=str(followup.get("source_scope") or "bravo"),
-            max_posts=None,
-            max_comments_per_post=None,
-            refresh_policy=str(followup.get("refresh_policy") or "all_saved_posts"),
-            initiated_by="catalog_completion_followup",
-            allow_local_dev_inline_bypass=bool(followup.get("allow_local_dev_inline_bypass")),
-            comments_enable_media_followups=bool(followup.get("comments_enable_media_followups")),
-            launch_group_id=str(followup.get("launch_group_id") or "").strip() or None,
-        )
+        comments_source = "deferred_after_catalog"
+        try:
+            comments_result = legacy.start_social_account_comments_scrape(
+                str(followup.get("platform") or "").strip(),
+                str(followup.get("account_handle") or "").strip(),
+                mode="profile",
+                source_scope=str(followup.get("source_scope") or "bravo"),
+                max_posts=None,
+                max_comments_per_post=None,
+                refresh_policy=str(followup.get("refresh_policy") or "all_saved_posts"),
+                initiated_by="catalog_completion_followup",
+                allow_local_dev_inline_bypass=bool(followup.get("allow_local_dev_inline_bypass")),
+                comments_enable_media_followups=bool(followup.get("comments_enable_media_followups")),
+                launch_group_id=str(followup.get("launch_group_id") or "").strip() or None,
+            )
+        except legacy.SocialIngestConflictError as exc:
+            if exc.code != "SOCIAL_ACCOUNT_COMMENTS_RUN_ALREADY_ACTIVE":
+                raise
+            comments_result = {
+                "run_id": str(exc.detail.get("run_id") or "").strip() or None,
+                "status": str(exc.detail.get("status") or "running").strip().lower() or "running",
+            }
+            comments_source = "reused_run"
         _merge_run_config(
             run_id,
             config_updates={
@@ -198,7 +215,7 @@ def _maybe_start_deferred_comments_followup(
                     "comments": legacy._build_attached_comments_followup(
                         run_id=str((comments_result or {}).get("run_id") or "").strip() or None,
                         status=str((comments_result or {}).get("status") or "").strip().lower() or "pending",
-                        source="deferred_after_catalog",
+                        source=comments_source,
                     ),
                 },
                 "deferred_comments_followup": {
@@ -357,11 +374,17 @@ def _increment_stage_counter(
     return stage_counts
 
 
-def _increment_run_counters_on_job_create(*, run_id: str, stage: str, status: str) -> None:
+def _increment_run_counters_on_job_create(
+    *,
+    run_id: str,
+    stage: str,
+    status: str,
+    conn: Any | None = None,
+) -> None:
     if not run_id or not legacy._run_counter_columns_ready():
         return
     stage_key = str(stage or "unknown").strip() or "unknown"
-    with legacy.pg.db_connection() as conn:
+    if conn is not None:
         with legacy.pg.db_cursor(conn=conn) as cur:
             row = (
                 legacy.pg.fetch_one_with_cursor(
@@ -382,29 +405,75 @@ def _increment_run_counters_on_job_create(*, run_id: str, stage: str, status: st
                 )
                 or {}
             )
-            if not row:
-                return
-            total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs")) + 1
-            completed_jobs = legacy._normalize_non_negative_int(row.get("completed_jobs"))
-            failed_jobs = legacy._normalize_non_negative_int(row.get("failed_jobs"))
-            active_jobs = legacy._normalize_non_negative_int(row.get("active_jobs")) + (
-                1 if _status_is_active(status) else 0
-            )
-            items_found_total = legacy._normalize_non_negative_int(row.get("items_found_total"))
-            stage_counts = _normalize_stage_counts(row.get("stage_counts"))
-            stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=1)
-            if _status_is_active(status):
-                stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=1)
-            _persist_run_counters_and_summary(
+            _persist_incremented_run_create_counters(
                 conn=conn,
                 run_id=run_id,
-                total_jobs=total_jobs,
-                completed_jobs=completed_jobs,
-                failed_jobs=failed_jobs,
-                active_jobs=active_jobs,
-                items_found_total=items_found_total,
-                stage_counts=stage_counts,
+                row=row,
+                stage_key=stage_key,
+                status=status,
             )
+        return
+    with legacy.pg.db_connection() as write_conn:
+        with legacy.pg.db_cursor(conn=write_conn) as cur:
+            row = (
+                legacy.pg.fetch_one_with_cursor(
+                    cur,
+                    """
+                select
+                  total_jobs,
+                  completed_jobs,
+                  failed_jobs,
+                  active_jobs,
+                  items_found_total,
+                  stage_counts
+                from social.scrape_runs
+                where id = %s
+                for update
+                """,
+                    [run_id],
+                )
+                or {}
+            )
+            _persist_incremented_run_create_counters(
+                conn=write_conn,
+                run_id=run_id,
+                row=row,
+                stage_key=stage_key,
+                status=status,
+            )
+
+
+def _persist_incremented_run_create_counters(
+    *,
+    conn: Any,
+    run_id: str,
+    row: dict[str, Any],
+    stage_key: str,
+    status: str,
+) -> None:
+    if not row:
+        return
+    total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs")) + 1
+    completed_jobs = legacy._normalize_non_negative_int(row.get("completed_jobs"))
+    failed_jobs = legacy._normalize_non_negative_int(row.get("failed_jobs"))
+    active_jobs = legacy._normalize_non_negative_int(row.get("active_jobs")) + (
+        1 if _status_is_active(status) else 0
+    )
+    items_found_total = legacy._normalize_non_negative_int(row.get("items_found_total"))
+    stage_counts = _normalize_stage_counts(row.get("stage_counts"))
+    stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=1)
+    if _status_is_active(status):
+        stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="active", delta=1)
+    _persist_run_counters_and_summary(
+        conn=conn,
+        run_id=run_id,
+        total_jobs=total_jobs,
+        completed_jobs=completed_jobs,
+        failed_jobs=failed_jobs,
+        active_jobs=active_jobs,
+        items_found_total=items_found_total,
+        stage_counts=stage_counts,
+    )
 
 
 def _increment_run_counters_on_job_finish(

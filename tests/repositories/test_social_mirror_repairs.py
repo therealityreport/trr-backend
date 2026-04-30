@@ -533,7 +533,7 @@ def test_run_platform_media_mirror_stage_instagram_selects_asset_manifest(monkey
     monkeypatch.setattr(
         social_repo,
         "_platform_posts_has_column",
-        lambda _platform, column: column in {"media_urls", "asset_manifest"},
+        lambda _platform, column, **_kwargs: column in {"media_urls", "asset_manifest"},
     )
     monkeypatch.setattr(
         social_repo,

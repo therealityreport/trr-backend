@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import multiprocessing as mp
 import time
@@ -34,6 +35,10 @@ def _clear_auth_resolver_state(monkeypatch: pytest.MonkeyPatch) -> None:
         "INSTAGRAM_COOKIES_FILE",
         "SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID",
         "SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME",
+        "SOCIAL_AUTH_INSTAGRAM_USERNAME",
+        "SOCIAL_AUTH_INSTAGRAM_PASSWORD",
+        "INSTAGRAM_USERNAME",
+        "INSTAGRAM_PASSWORD",
         "SOCIAL_BROWSER_SESSION_DIR",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -93,6 +98,124 @@ def test_resolve_instagram_auth_session_normalizes_invalid_session_key(
     assert auth_session.caller_context == "comment-avatar-refresh"
     assert auth_session.cookies["sessionid"] == "browser-session"
     assert auth_session.source in {"browser_session", "browser_session_promoted"}
+
+
+def test_resolve_instagram_auth_session_uses_login_account_for_target_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("SOCIAL_AUTH_INSTAGRAM_USERNAME", "thommycodex")
+
+    manager = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
+    manager.import_bootstrapped_session(
+        "thommycodex",
+        {"sessionid": "browser-session", "csrftoken": "browser-csrf", "ds_user_id": "456"},
+    )
+
+    auth_session = resolve_instagram_auth_session(
+        browser_account_id="thetraitorsus",
+        require_validation=False,
+        browser_session_manager=manager,
+    )
+
+    assert auth_session.session_account_id == "thommycodex"
+    assert auth_session.caller_context == "thetraitorsus"
+    assert auth_session.cookies["sessionid"] == "browser-session"
+    assert auth_session.source in {"browser_session", "browser_session_promoted"}
+
+
+def test_resolve_instagram_auth_session_validates_against_target_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_FILE", str(tmp_path / "instagram-cookies.json"))
+    monkeypatch.setenv("SOCIAL_AUTH_INSTAGRAM_USERNAME", "thommycodex")
+
+    manager = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
+    manager.import_bootstrapped_session(
+        "thommycodex",
+        {"sessionid": "browser-session", "csrftoken": "browser-csrf", "ds_user_id": "456"},
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FakeInstagramScraper:
+        def __init__(self, *, cookies: dict[str, str] | None = None, browser_account_id: str | None = None) -> None:
+            captured["browser_account_id"] = browser_account_id
+            captured["cookies"] = dict(cookies or {})
+            self.last_retrieval_meta = {}
+
+        def fetch_posts_graphql(self, username: str, **_kwargs: object) -> dict[str, object]:
+            captured["validation_username"] = username
+            return {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "post"}}],
+                    },
+                },
+            }
+
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.InstagramScraper", _FakeInstagramScraper)
+
+    auth_session = resolve_instagram_auth_session(
+        browser_account_id="thetraitorsus",
+        caller_context="comments_scrapling:gap:thetraitorsus",
+        require_validation=True,
+        browser_session_manager=manager,
+    )
+
+    assert auth_session.session_account_id == "thommycodex"
+    assert auth_session.caller_context == "comments_scrapling:gap:thetraitorsus"
+    assert auth_session.validated is True
+    assert captured["browser_account_id"] == "thommycodex"
+    assert captured["validation_username"] == "thetraitorsus"
+
+
+def test_refresh_interactively_skips_sync_playwright_inside_async_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trr_backend.socials.instagram import auth_resolver
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+
+    def _unexpected_interactive_login(**_kwargs: object) -> dict[str, str]:
+        raise AssertionError("interactive login should not run inside async worker loop")
+
+    monkeypatch.setattr(auth_resolver, "interactive_chrome_login", _unexpected_interactive_login)
+
+    async def _probe() -> tuple[dict[str, str], str | None]:
+        return auth_resolver._refresh_interactively(
+            session_account_id="thommycodex",
+            cookie_file_path=tmp_path / "cookies.json",
+        )
+
+    assert asyncio.run(_probe()) == ({}, None)
+
+
+def test_credential_refresh_skips_sync_playwright_inside_async_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trr_backend.socials.instagram import auth_resolver
+
+    monkeypatch.setenv("SOCIAL_AUTH_INSTAGRAM_USERNAME", "thommycodex")
+    monkeypatch.setenv("SOCIAL_AUTH_INSTAGRAM_PASSWORD", "secret")
+
+    def _unexpected_refresh(**_kwargs: object) -> dict[str, str]:
+        raise AssertionError("credential refresh should not run inside async worker loop")
+
+    monkeypatch.setattr(auth_resolver, "refresh_instagram_cookies", _unexpected_refresh)
+
+    async def _probe() -> tuple[dict[str, str], str | None]:
+        return auth_resolver._refresh_with_credentials(
+            session_account_id="thommycodex",
+            cookie_file_path=tmp_path / "cookies.json",
+        )
+
+    assert asyncio.run(_probe()) == ({}, None)
 
 
 def test_resolve_instagram_auth_session_promotes_browser_session_with_strict_file_permissions(

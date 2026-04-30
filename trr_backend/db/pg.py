@@ -94,13 +94,15 @@ def _pool_size_env_names(pool_name: str) -> tuple[str, str]:
         return "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN", "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN"
     if pool_name == "social_control":
         return "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN", "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"
+    if pool_name == "social_progress":
+        return "TRR_SOCIAL_PROGRESS_DB_POOL_MINCONN", "TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN"
     if pool_name == "health":
         return "TRR_HEALTH_DB_POOL_MINCONN", "TRR_HEALTH_DB_POOL_MAXCONN"
     return "TRR_DB_POOL_MINCONN", "TRR_DB_POOL_MAXCONN"
 
 
 def _known_pool_names() -> tuple[str, ...]:
-    return ("default", "social_profile", "social_control", "health")
+    return ("default", "social_profile", "social_control", "social_progress", "health")
 
 
 def _session_pooler_warning_maxconn(pool_name: str) -> int:

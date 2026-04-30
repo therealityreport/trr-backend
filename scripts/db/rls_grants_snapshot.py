@@ -111,11 +111,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def resolve_output_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return (Path.cwd() / path).resolve()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     load_env()
     rendered = render_snapshot()
-    output = args.output if args.output.is_absolute() else WORKSPACE_ROOT / args.output
+    output = resolve_output_path(args.output)
     if args.check:
         existing = output.read_text(encoding="utf-8") if output.is_file() else ""
         if existing != rendered:
@@ -129,4 +135,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
