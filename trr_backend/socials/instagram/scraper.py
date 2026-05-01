@@ -56,6 +56,7 @@ from trr_backend.socials.instagram.constants import (
     QUERY_TYPE_GRAPHQL_PROFILE_POSTS,
     QUERY_TYPE_LEGACY,
     QUERY_TYPE_PROFILE_INFO,
+    resolve_comment_sort_order,
 )
 from trr_backend.socials.instagram.constants import (
     WEB_X_ASBD_ID as IG_WEB_X_ASBD_ID,
@@ -216,10 +217,27 @@ class InstagramComment:
     owner_profile_pic_url: str | None = None
     owner_profile_pic_url_hd: str | None = None
     owner_is_verified: bool | None = None
+    # Phase 2: Apify-source owner-metadata fields the parser now extracts.
+    owner_fbid_v2: str | None = None
+    owner_is_mentionable: bool | None = None
+    owner_is_private: bool | None = None
+    owner_latest_reel_media: int | None = None
+    owner_profile_pic_id: str | None = None
+    is_hidden_by_instagram: bool = False
+    source_snapshot_type: str = "full_comments_scrape"
 
     # Post reference
     post_shortcode: str = ""
     post_url: str = ""
+
+    # Phase 2: comment URL + ISO-8601 timestamp built at parse time. Optional so
+    # tests/fixtures that construct InstagramComment directly do not break.
+    comment_url: str | None = None
+    created_at_iso: str | None = None
+    # Phase 1.2 / audit: separate observed-nested-reply count from IG's reported
+    # reply_count. Previously _parse_comment overwrote reply_count to
+    # len(replies) when no count was present, masking the gap during pagination.
+    reply_count_observed: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -1467,6 +1485,10 @@ class InstagramScraper:
         if request_cookies.get("csrftoken"):
             headers["x-csrftoken"] = request_cookies["csrftoken"]
         return headers
+
+    def get_headers(self, referer: str | None = None) -> dict:
+        """Public header builder for shared Instagram transports."""
+        return self._get_headers(referer)
 
     @staticmethod
     def _graphql_error_response_message(response: requests.Response | None) -> str | None:
@@ -3086,6 +3108,7 @@ class InstagramScraper:
         comments_fetched = 0
         pages_seen = 0
         seen_cursors: set[str] = set()
+        comment_sort_order = resolve_comment_sort_order()
         deadline = time.monotonic() + self._resolve_positive_float_env(
             "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS",
             _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT,
@@ -3108,8 +3131,11 @@ class InstagramScraper:
             self._rate_limit_with_lock(delay, fast_mode=fast_mode, rate_lock=rate_lock)
             url = self.COMMENTS_URL.format(media_id=media_id)
             params = {"can_support_threading": "true", "permalink_enabled": "false"}
+            if comment_sort_order:
+                params["sort_order"] = comment_sort_order
             if cursor:
-                params["min_id"] = cursor
+                cursor_param_name, cursor_value = cursor
+                params[cursor_param_name] = cursor_value
 
             headers = self._get_headers(post_url)
 
@@ -3176,8 +3202,8 @@ class InstagramScraper:
                 comments.append(comment)
                 comments_fetched += 1
 
-                # Fetch replies if requested and comment has replies
-                if fetch_replies and comment.reply_count > 0 and not comment.replies:
+                # Fetch reply tails when Instagram only embedded a preview subset.
+                if fetch_replies and comment.reply_count > self._observed_reply_count(comment):
                     replies = self._fetch_comment_replies(
                         media_id,
                         comment.comment_id,
@@ -3187,7 +3213,11 @@ class InstagramScraper:
                         fast_mode=fast_mode,
                         rate_lock=rate_lock,
                     )
-                    comment.replies = replies
+                    comment.replies = self._merge_comment_replies(
+                        comment.replies,
+                        replies,
+                        parent_comment_id=comment.comment_id,
+                    )
                     logger.info(f"  Comment {comment.comment_id}: {comment.reply_count} replies fetched")
 
                 if max_comments and comments_fetched >= max_comments:
@@ -3205,11 +3235,24 @@ class InstagramScraper:
                 has_more = has_more or bool(data.get("has_more_headload_comments", False))
             if not has_more:
                 break
-            next_cursor = (data.get("next_min_id") or data.get("next_max_id")) if isinstance(data, dict) else None
+            next_cursor = None
+            cursor_param_name = "min_id"
+            if isinstance(data, dict):
+                if data.get("has_more_comments") and data.get("next_max_id"):
+                    next_cursor = data.get("next_max_id")
+                    cursor_param_name = "max_id"
+                elif data.get("has_more_headload_comments") and data.get("next_min_id"):
+                    next_cursor = data.get("next_min_id")
+                    cursor_param_name = "min_id"
+                else:
+                    next_cursor = data.get("next_min_id") or data.get("next_max_id")
+                    cursor_param_name = "min_id" if data.get("next_min_id") else "max_id"
             if not next_cursor:
                 break
             next_cursor = str(next_cursor)
-            if next_cursor == cursor or next_cursor in seen_cursors:
+            next_cursor_key = f"{cursor_param_name}:{next_cursor}"
+            current_cursor_key = f"{cursor[0]}:{cursor[1]}" if cursor else None
+            if next_cursor_key == current_cursor_key or next_cursor_key in seen_cursors:
                 self.last_comment_fetch_reason = "pagination_repeated_cursor"
                 logger.warning(
                     "Instagram comments pagination repeated cursor for shortcode=%s cursor=%s",
@@ -3225,11 +3268,45 @@ class InstagramScraper:
                     page_cap,
                 )
                 break
-            seen_cursors.add(next_cursor)
-            cursor = next_cursor
+            seen_cursors.add(next_cursor_key)
+            cursor = (cursor_param_name, next_cursor)
 
         logger.info(f"Total: {len(comments)} comments fetched for {shortcode}")
         return comments
+
+    @staticmethod
+    def _observed_reply_count(comment: InstagramComment) -> int:
+        seen_ids: set[str] = set()
+        count = 0
+        for reply in list(comment.replies or []):
+            reply_id = str(getattr(reply, "comment_id", "") or "").strip()
+            if reply_id:
+                if reply_id in seen_ids:
+                    continue
+                seen_ids.add(reply_id)
+            count += 1
+        return count
+
+    @staticmethod
+    def _merge_comment_replies(
+        existing_replies: list[InstagramComment],
+        fetched_replies: list[InstagramComment],
+        *,
+        parent_comment_id: str | None,
+    ) -> list[InstagramComment]:
+        merged: list[InstagramComment] = []
+        seen_ids: set[str] = set()
+        for reply in [*list(existing_replies or []), *list(fetched_replies or [])]:
+            reply_id = str(getattr(reply, "comment_id", "") or "").strip()
+            if reply_id:
+                if reply_id in seen_ids:
+                    continue
+                seen_ids.add(reply_id)
+            if parent_comment_id and not reply.parent_comment_id:
+                reply.parent_comment_id = parent_comment_id
+            reply.is_reply = True
+            merged.append(reply)
+        return merged
 
     def _fetch_comment_replies(
         self,
@@ -3245,6 +3322,7 @@ class InstagramScraper:
         """Fetch replies to a specific comment."""
         replies = []
         cursor = None
+        cursor_param_name = None
         pages_seen = 0
         seen_cursors: set[str] = set()
         deadline = time.monotonic() + self._resolve_positive_float_env(
@@ -3270,7 +3348,7 @@ class InstagramScraper:
             url = self.COMMENT_REPLIES_URL.format(media_id=media_id, comment_id=comment_id)
             params = {}
             if cursor:
-                params["min_id"] = cursor
+                params[cursor_param_name or "min_id"] = cursor
 
             headers = self._get_headers(post_url)
 
@@ -3333,19 +3411,26 @@ class InstagramScraper:
                 replies.append(reply)
 
             # Check for more pages
-            has_more_tail = bool(data.get("has_more_tail_child_comments", False)) if isinstance(data, dict) else False
-            if not has_more_tail:
+            if not isinstance(data, dict):
                 break
-            cursor = data.get("next_min_child_cursor") if isinstance(data, dict) else None
-            if not cursor:
+            has_more_tail = bool(data.get("has_more_tail_child_comments", False))
+            has_more_head = bool(data.get("has_more_head_child_comments", False))
+            if has_more_tail and data.get("next_min_child_cursor"):
+                next_cursor = str(data["next_min_child_cursor"])
+                next_cursor_param_name = "min_id"
+            elif has_more_head and data.get("next_max_child_cursor"):
+                next_cursor = str(data["next_max_child_cursor"])
+                next_cursor_param_name = "max_id"
+            else:
                 break
-            cursor = str(cursor)
-            if cursor in seen_cursors:
+            next_cursor_key = f"{next_cursor_param_name}:{next_cursor}"
+            current_cursor_key = f"{cursor_param_name}:{cursor}" if cursor and cursor_param_name else None
+            if next_cursor_key == current_cursor_key or next_cursor_key in seen_cursors:
                 self.last_comment_fetch_reason = "pagination_repeated_cursor"
                 logger.warning(
                     "Instagram reply pagination repeated cursor for comment_id=%s cursor=%s",
                     comment_id,
-                    cursor,
+                    next_cursor,
                 )
                 break
             if pages_seen >= page_cap:
@@ -3356,7 +3441,9 @@ class InstagramScraper:
                     page_cap,
                 )
                 break
-            seen_cursors.add(cursor)
+            seen_cursors.add(next_cursor_key)
+            cursor = next_cursor
+            cursor_param_name = next_cursor_param_name
 
         return replies
 
@@ -3516,8 +3603,60 @@ class InstagramScraper:
         fallback_reply_depth = 1 if is_reply or parent_id else 0
         normalized_reply_depth = max(0, int(reply_depth if reply_depth is not None else fallback_reply_depth))
 
+        # Phase 2: extract Apify-source owner-metadata fields. Each falls back
+        # across data/owner/user payload variants; absent -> None so persistence
+        # can leave the column null.
+        def _first_present(*keys: str) -> Any:
+            for source in (data, owner, user):
+                if not isinstance(source, dict):
+                    continue
+                for key in keys:
+                    if key in source and source.get(key) is not None:
+                        return source.get(key)
+            return None
+
+        def _coerce_optional_bool(value: Any) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return None
+            return bool(value)
+
+        def _coerce_optional_nonneg_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed >= 0 else None
+
+        owner_fbid_v2 = _first_present("fbid_v2", "fbidV2")
+        owner_is_mentionable = _coerce_optional_bool(_first_present("is_mentionable", "isMentionable"))
+        owner_is_private = _coerce_optional_bool(_first_present("is_private", "isPrivate"))
+        owner_latest_reel_media = _coerce_optional_nonneg_int(_first_present("latest_reel_media", "latestReelMedia"))
+        owner_profile_pic_id = _first_present("profile_pic_id", "profilePicId")
+
+        comment_id_str = str(data.get("pk") or data.get("id") or "")
+        normalized_shortcode = str(shortcode or "").strip()
+        comment_url = (
+            f"https://www.instagram.com/p/{normalized_shortcode}/c/{comment_id_str}/"
+            if normalized_shortcode and comment_id_str
+            else None
+        )
+        created_at_iso: str | None = None
+        if created_at:
+            try:
+                created_at_iso = (
+                    datetime.fromtimestamp(int(created_at), tz=UTC)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                )
+            except (TypeError, ValueError, OSError, OverflowError):
+                created_at_iso = None
+
         comment = InstagramComment(
-            comment_id=str(data.get("pk") or data.get("id") or ""),
+            comment_id=comment_id_str,
             text=str(data.get("text") or ""),
             username=str(username or ""),
             user_id=str(user_id or ""),
@@ -3547,8 +3686,15 @@ class InstagramScraper:
                 if "is_verified" in user
                 else None
             ),
+            owner_fbid_v2=str(owner_fbid_v2).strip() if owner_fbid_v2 else None,
+            owner_is_mentionable=owner_is_mentionable,
+            owner_is_private=owner_is_private,
+            owner_latest_reel_media=owner_latest_reel_media,
+            owner_profile_pic_id=str(owner_profile_pic_id).strip() if owner_profile_pic_id else None,
             post_shortcode=shortcode,
             post_url=post_url,
+            comment_url=comment_url,
+            created_at_iso=created_at_iso,
         )
         nested_replies = data.get("replies")
         if not isinstance(nested_replies, list):
@@ -3566,9 +3712,32 @@ class InstagramScraper:
                 for reply in nested_replies
                 if isinstance(reply, dict)
             ]
-            if comment.reply_count <= 0:
-                comment.reply_count = len(comment.replies)
+            # Phase 1.2 / audit: previously this overwrote reply_count to
+            # len(comment.replies) when no count shipped, hiding tail gaps from
+            # the fetcher's reply guard. Now we record the observed nested-reply
+            # count in a separate field so reply_count keeps representing IG's
+            # reported total (or 0 when IG didn't ship one).
+            comment.reply_count_observed = len(comment.replies)
         return comment
+
+    def parse_comment(
+        self,
+        data: dict,
+        shortcode: str,
+        post_url: str,
+        is_reply: bool = False,
+        parent_id: str | None = None,
+        reply_depth: int | None = None,
+    ) -> InstagramComment:
+        """Public comment parser for shared comments fetcher integrations."""
+        return self._parse_comment(
+            data,
+            shortcode,
+            post_url,
+            is_reply=is_reply,
+            parent_id=parent_id,
+            reply_depth=reply_depth,
+        )
 
     @staticmethod
     def _extract_hosted_comment_media_urls(data: dict[str, Any]) -> list[str]:
@@ -3616,6 +3785,7 @@ class InstagramScraper:
 
             for key in (
                 "url",
+                "uri",
                 "display_url",
                 "displayUrl",
                 "video_url",
@@ -3626,6 +3796,13 @@ class InstagramScraper:
                 "thumbnailUrl",
                 "media_url",
                 "mediaUrl",
+                "animated_image_url",
+                "animatedImageUrl",
+                "fixed_height_url",
+                "fixedHeightUrl",
+                "fixed_width_url",
+                "fixedWidthUrl",
+                "webp",
                 "src",
             ):
                 _append(node.get(key))
@@ -3634,19 +3811,45 @@ class InstagramScraper:
                 "media",
                 "comment_media",
                 "commentMedia",
+                "comment_gif",
+                "commentGif",
                 "media_versions",
                 "attachment",
                 "attachments",
                 "content",
                 "preview",
                 "image",
+                "images",
                 "image_versions2",
                 "video_versions",
                 "carousel_media",
+                "sticker",
+                "stickers",
+                "sticker_asset",
+                "stickerAsset",
+                "static_sticker",
+                "staticSticker",
+                "gift",
+                "gifts",
+                "gift_media",
+                "giftMedia",
+                "gif",
+                "gif_media",
+                "gifMedia",
                 "giphy_media_info",
                 "giphyMediaInfo",
+                "tenor_media_info",
+                "tenorMediaInfo",
+                "visual_media",
+                "visualMedia",
                 "animated_media",
                 "animatedMedia",
+                "original",
+                "downsized",
+                "fixed_height",
+                "fixedHeight",
+                "fixed_width",
+                "fixedWidth",
             ):
                 nested = node.get(nested_key)
                 if isinstance(nested, (dict, list)):
@@ -3661,8 +3864,22 @@ class InstagramScraper:
             "content",
             "preview",
             "clip",
+            "sticker",
+            "stickers",
+            "gift",
+            "gifts",
+            "comment_gif",
+            "commentGif",
+            "gif",
+            "gifMedia",
             "giphy_media_info",
             "giphyMediaInfo",
+            "tenor_media_info",
+            "tenorMediaInfo",
+            "visual_media",
+            "visualMedia",
+            "animated_media",
+            "animatedMedia",
         ):
             nested = data.get(key)
             if isinstance(nested, (dict, list)):

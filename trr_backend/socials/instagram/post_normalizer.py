@@ -203,8 +203,12 @@ def normalize_instagram_post(payload: dict[str, Any], *, account_handle: str | N
         audio_url=_string_or_none(_first_value(node, "audioUrl", "audio_url")),
         video_duration=_coerce_float(_first_value(node, "videoDuration", "video_duration", "duration")),
         video_play_count=_coerce_int_or_none(_first_value(node, "videoPlayCount", "video_play_count", "play_count")),
+        # Phase 3.3 / audit: original list duplicated "video_view_count"; the
+        # second slot now falls back to "play_count" so reels lacking
+        # videoViewCount but exposing play_count get a real number instead of
+        # None. Keep snake_case + camelCase variants for cross-payload coverage.
         video_view_count=_coerce_int_or_none(
-            _first_value(node, "videoViewCount", "video_view_count", "video_view_count", "view_count")
+            _first_value(node, "videoViewCount", "video_view_count", "play_count", "view_count")
         ),
         context_items=_extract_context_items(node),
         child_posts=child_posts,
@@ -482,13 +486,50 @@ def _extract_tagged_users(node: dict[str, Any]) -> list[InstagramTaggedUser]:
             user = item.get("user") if isinstance(item.get("user"), dict) else item
             add_user(user, _extract_position(item, source_prefix="apify_tagged_users"))
 
+    # Phase 3.4: also read users_in_photo (alt REST shape) and any nested
+    # usertags inside image_versions2.candidates[]. Both are payload variants
+    # IG sometimes returns when the standard usertags / taggedUsers blocks are
+    # absent or sparse.
+    users_in_photo = node.get("users_in_photo")
+    if isinstance(users_in_photo, list):
+        for item in users_in_photo:
+            if not isinstance(item, dict):
+                continue
+            user = item.get("user") if isinstance(item.get("user"), dict) else item
+            add_user(user, _extract_position(item, source_prefix="rest_users_in_photo"))
+
+    image_versions2 = node.get("image_versions2")
+    if isinstance(image_versions2, dict):
+        candidates = image_versions2.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_usertags = candidate.get("usertags")
+                if not isinstance(candidate_usertags, dict):
+                    continue
+                for item in candidate_usertags.get("in") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    user = item.get("user") if isinstance(item.get("user"), dict) else {}
+                    add_user(user, _extract_position(item, source_prefix="rest_image_versions2_usertags"))
+
     return tagged
 
 
 def _extract_collaborators(node: dict[str, Any]) -> list[InstagramUser]:
     collaborators: list[InstagramUser] = []
     seen: set[str] = set()
-    for key in ("coauthor_producers", "invited_coauthor_producers", "coauthorProducers", "coauthors"):
+    # Phase 3.5: include coauthor_producer_users / coauthor_invited_users which
+    # IG ships on some web GraphQL responses where the original key list misses.
+    for key in (
+        "coauthor_producers",
+        "invited_coauthor_producers",
+        "coauthorProducers",
+        "coauthors",
+        "coauthor_producer_users",
+        "coauthor_invited_users",
+    ):
         values = node.get(key)
         if not isinstance(values, list):
             continue

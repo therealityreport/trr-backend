@@ -10,6 +10,7 @@ are private helpers.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -52,9 +53,20 @@ def _split_proxy_values(raw: str) -> list[str]:
     return values
 
 
-def _build_proxy_rotator(browser_proxy: str | dict[str, str] | None) -> Any | None:
-    """Build a ProxyRotator for the browser warmup path. Accepts both dict
-    (Decodo — bypasses URL-parsing bug) and str (explicit PROXY_URLS).
+def _build_proxy_rotator(
+    browser_proxy: str | dict[str, str] | list[str | dict[str, str]] | None,
+) -> Any | None:
+    """Build a ProxyRotator for the browser warmup path.
+
+    Accepts:
+      * ``None``                                   → returns None (local-dev mode)
+      * ``str`` / ``dict``                         → wrapped in a single-element list
+      * ``list[str | dict[str, str]]``             → passed through unchanged
+
+    Phase 5.1: explicit PROXY_URLS callers can now pass the full env-supplied
+    URL list so the Scrapling ``ProxyRotator`` sees every IP, instead of the
+    previous one-element stub. The Decodo path still passes a single dict
+    because its gateway rotates IPs server-side.
     """
     if browser_proxy is None:
         return None
@@ -62,6 +74,11 @@ def _build_proxy_rotator(browser_proxy: str | dict[str, str] | None) -> Any | No
         from scrapling.fetchers import ProxyRotator
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Scrapling proxy rotation is unavailable. Install scrapling[fetchers].") from exc
+    if isinstance(browser_proxy, list):
+        normalized = [value for value in browser_proxy if value]
+        if not normalized:
+            return None
+        return ProxyRotator(normalized)
     return ProxyRotator([browser_proxy])
 
 
@@ -76,6 +93,18 @@ def _fingerprint_from_url(url: str) -> str:
     host = parsed.hostname or "unknown"
     port = parsed.port or 0
     return f"{host}:{port}:explicit"
+
+
+def _explicit_proxy_url_for_session(proxy_urls: list[str], session_key: str | None) -> str:
+    """Pick one explicit proxy URL deterministically for a session/shard key."""
+    urls = [str(url or "").strip() for url in proxy_urls if str(url or "").strip()]
+    if not urls:
+        raise ValueError("proxy_urls must contain at least one URL")
+    normalized_key = str(session_key or "").strip().lower()
+    if not normalized_key or len(urls) == 1:
+        return urls[0]
+    digest = hashlib.sha256(normalized_key.encode("utf-8")).hexdigest()
+    return urls[int(digest[:16], 16) % len(urls)]
 
 
 # ---------------------------------------------------------------------------
@@ -119,14 +148,20 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
     # 1. Explicit proxy URLs take precedence.
     explicit_urls = _load_proxy_urls_from_env()
     if explicit_urls:
-        first_url = explicit_urls[0]
-        rotator = _build_proxy_rotator(first_url)
+        selected_url = _explicit_proxy_url_for_session(explicit_urls, session_key)
+        # Phase 5.1: hand the full URL list to the rotator so Scrapling can
+        # rotate across IPs during warmup, while keeping browser_proxy and
+        # api_proxy_url pinned to the deterministic per-shard selection so
+        # api-side requests stay on a stable session.
+        rotator = _build_proxy_rotator(list(explicit_urls)) if len(explicit_urls) > 1 else _build_proxy_rotator(
+            selected_url
+        )
         return CommentsProxyConfig(
-            browser_proxy=first_url,
-            api_proxy_url=first_url,
+            browser_proxy=selected_url,
+            api_proxy_url=selected_url,
             proxy_rotator=rotator,
-            fingerprint=_fingerprint_from_url(first_url),
-            session_mode="explicit",
+            fingerprint=_fingerprint_from_url(selected_url),
+            session_mode="explicit_sharded" if len(explicit_urls) > 1 and session_key else "explicit",
         )
 
     # 2. Decodo provider (default when env has credentials).

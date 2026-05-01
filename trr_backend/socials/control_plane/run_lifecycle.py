@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from psycopg2 import InterfaceError, OperationalError
+from psycopg2.pool import PoolError
+
 import trr_backend.repositories.social_season_analytics as legacy
 
 SOCIAL_CONTROL_POOL_NAME = "social_control"
@@ -548,26 +551,50 @@ def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
     summary_row = (
         legacy.pg.fetch_one(
             """
-        with stats as (
+        with job_rows as (
+          select
+            j.*,
+            coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type, 'unknown') as effective_stage,
+            (
+              j.status = 'failed'
+              and j.platform = 'instagram'
+              and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) = %s
+              and exists (
+                select 1
+                from social.scrape_jobs child
+                where child.run_id = j.run_id
+                  and child.id <> j.id
+                  and coalesce(child.config->>'stage', child.metadata->>'stage', child.job_type) =
+                    coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type)
+                  and child.config->>'comments_retry_rebalance_source_job_id' = j.id::text
+              )
+            ) as superseded_by_comments_rebalance
+          from social.scrape_jobs j
+          where j.run_id = %s
+        ),
+        effective_jobs as (
+          select *
+          from job_rows
+          where not superseded_by_comments_rebalance
+        ),
+        stats as (
           select
             count(*)::int as total_jobs,
             count(*) filter (where status = 'completed')::int as completed_jobs,
             count(*) filter (where status = 'failed')::int as failed_jobs,
             count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active_jobs,
             coalesce(sum(items_found), 0)::int as items_found_total
-          from social.scrape_jobs
-          where run_id = %s
+          from effective_jobs
         ),
         stage_stats as (
           select
-            coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown') as stage,
+            effective_stage as stage,
             count(*)::int as total,
             count(*) filter (where status = 'completed')::int as completed,
             count(*) filter (where status = 'failed')::int as failed,
             count(*) filter (where status in ('queued', 'pending', 'retrying', 'running'))::int as active
-          from social.scrape_jobs
-          where run_id = %s
-          group by coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown')
+          from effective_jobs
+          group by effective_stage
         )
         select
           (select row_to_json(stats) from stats) as stats,
@@ -578,7 +605,7 @@ def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
             'active', active
           )) from stage_stats), '{}'::jsonb) as stage_counts
         """,
-            [run_id, run_id],
+            [legacy.INSTAGRAM_COMMENTS_SCRAPLING_STAGE, run_id],
         )
         or {}
     )
@@ -762,6 +789,18 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
             or {}
         )
         return {"status": current.get("status", "running")}
+    except (
+        legacy.pg.DatabaseServiceUnavailableError,
+        InterfaceError,
+        OperationalError,
+        PoolError,
+    ) as exc:
+        legacy.logger.warning(
+            "[finalize_run_status] deferred after database connection failure run=%s error=%s",
+            run_id[:8],
+            exc,
+        )
+        return {"status": "finalize_deferred", "finalize_deferred": True, "error": str(exc)}
 
 
 def _finalize_run_status_locked(
@@ -796,6 +835,10 @@ def _finalize_run_status_locked(
             conn=lock_conn,
         )
     if classify_jobs_created > 0:
+        summary = _update_run_summary(run_id, force_recompute=True, conn=lock_conn)
+        active_jobs = int(summary.get("active_jobs") or 0)
+        failed_jobs = int(summary.get("failed_jobs") or 0)
+    if active_jobs <= 0 and failed_jobs > 0 and not force_recompute:
         summary = _update_run_summary(run_id, force_recompute=True, conn=lock_conn)
         active_jobs = int(summary.get("active_jobs") or 0)
         failed_jobs = int(summary.get("failed_jobs") or 0)

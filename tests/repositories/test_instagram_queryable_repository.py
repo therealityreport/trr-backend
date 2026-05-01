@@ -28,6 +28,7 @@ def test_apply_instagram_comment_queryable_columns_uses_full_comment_payload(
     comment = SimpleNamespace(
         owner_full_name="Comment Author",
         owner_profile_pic_url_hd="https://cdn.example.com/author-hd.jpg",
+        source_snapshot_type="rendered_hidden_comments",
         to_dict=lambda: {
             "owner": {
                 "full_name": "Raw Name",
@@ -48,7 +49,7 @@ def test_apply_instagram_comment_queryable_columns_uses_full_comment_payload(
         "author_profile_pic_url_hd": "https://cdn.example.com/author-hd.jpg",
         "parent_comment_external_id": "parent-1",
         "reply_depth": 2,
-        "source_snapshot_type": "full_comments_scrape",
+        "source_snapshot_type": "rendered_hidden_comments",
     }
 
 

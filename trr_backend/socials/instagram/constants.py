@@ -37,12 +37,44 @@ COMMENTS_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/"
 COMMENT_REPLIES_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/{comment_id}/child_comments/"
 PROFILE_PAGE_URL = "https://www.instagram.com/{username}/"
 PERMALINK_URL = "https://www.instagram.com/p/{shortcode}/"
+COMMENT_SORT_ORDER_ENV = "SOCIAL_INSTAGRAM_COMMENTS_SORT_ORDER"
+DEFAULT_COMMENT_SORT_ORDER = "recent"
+VALID_COMMENT_SORT_ORDERS = frozenset({"popular", "recent"})
 
-PROFILE_POSTS_DOC_IDS = (
+PROFILE_POSTS_DOC_IDS_ENV = "SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS"
+_PROFILE_POSTS_DOC_IDS_FALLBACK = (
     "25645538101792896",
     "26035927152742158",
     "33944389991841132",
 )
+
+
+def resolve_profile_posts_doc_ids(raw_value: str | None = None) -> tuple[str, ...]:
+    """Phase 4.1: env-driven hot rotation for IG profile-posts GraphQL doc IDs.
+
+    Comma-separated values from ``SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS`` are
+    parsed, whitespace-stripped, deduplicated, and validated as digit-only
+    strings. When the env var is unset, empty, or every entry is invalid, the
+    hardcoded fallback tuple is returned instead. Operators can hot-rotate
+    without a deploy when IG bumps doc IDs.
+    """
+    raw = raw_value if raw_value is not None else os.getenv(PROFILE_POSTS_DOC_IDS_ENV)
+    if not raw:
+        return _PROFILE_POSTS_DOC_IDS_FALLBACK
+    seen: set[str] = set()
+    chosen: list[str] = []
+    for token in str(raw).split(","):
+        candidate = token.strip()
+        if not candidate or not candidate.isdigit():
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        chosen.append(candidate)
+    return tuple(chosen) if chosen else _PROFILE_POSTS_DOC_IDS_FALLBACK
+
+
+PROFILE_POSTS_DOC_IDS = resolve_profile_posts_doc_ids()
 
 WEB_X_ASBD_ID = "359341"
 PROFILE_POSTS_PAGE_SIZE = int(os.getenv("SOCIAL_INSTAGRAM_PAGE_SIZE", "33"))
@@ -64,3 +96,19 @@ AUTH_FATAL_MESSAGES = {
     "sentry_block",
 }
 
+
+def resolve_comment_sort_order(raw_value: str | None = None) -> str | None:
+    """Resolve the Instagram comments ordering used for full pagination.
+
+    Instagram's default ranked ordering can cycle through headload cursors on
+    high-volume posts. The `recent` order is the safer default for coverage
+    backfills; operators can set the env var to `popular` for one-off parity
+    checks, or `none` to omit the parameter during upstream debugging.
+    """
+    raw = raw_value if raw_value is not None else os.getenv(COMMENT_SORT_ORDER_ENV)
+    value = str(raw or DEFAULT_COMMENT_SORT_ORDER).strip().lower()
+    if value in {"", "none", "default", "off", "false"}:
+        return None
+    if value in VALID_COMMENT_SORT_ORDERS:
+        return value
+    return DEFAULT_COMMENT_SORT_ORDER

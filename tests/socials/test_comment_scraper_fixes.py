@@ -2901,6 +2901,47 @@ def test_instagram_parse_comment_synthetic_comment_media_payload_extracts_urls()
     assert reply.likes == 2
 
 
+def test_instagram_parse_comment_extracts_sticker_gift_and_giphy_media_shapes() -> None:
+    scraper = InstagramScraper(cookies={})
+    comment_payload = {
+        "pk": "17900000000000003",
+        "text": "",
+        "user": {"pk": "3003", "username": "visual_commenter"},
+        "created_at": 1735689800,
+        "sticker": {
+            "image_versions2": {
+                "candidates": [
+                    {"url": "https://scontent.example/sticker-1080.webp"},
+                ]
+            }
+        },
+        "gift": {
+            "media": {
+                "uri": "https://scontent.example/gift-image.webp",
+            }
+        },
+        "giphy_media_info": {
+            "images": {
+                "original": {"url": "https://media.giphy.example/original.gif"},
+                "fixed_height": {"webp": "https://media.giphy.example/fixed-height.webp"},
+            }
+        },
+    }
+
+    parsed = scraper.parse_comment(
+        comment_payload,
+        "COMMENTMEDIA",
+        "https://www.instagram.com/p/COMMENTMEDIA/",
+    )
+
+    assert parsed.media_urls == [
+        "https://scontent.example/sticker-1080.webp",
+        "https://scontent.example/gift-image.webp",
+        "https://media.giphy.example/original.gif",
+        "https://media.giphy.example/fixed-height.webp",
+    ]
+
+
 def test_instagram_scrape_graphql_backfills_owner_avatar_from_profile_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2988,6 +3029,8 @@ def test_instagram_fetch_comments_paginates_with_headload_flag(monkeypatch: pyte
     comments = scraper.fetch_comments("ABC123", fetch_replies=False, delay=0)
     assert len(comments) == 2
     assert len(seen_params) == 2
+    assert seen_params[0].get("sort_order") == "recent"
+    assert seen_params[1].get("sort_order") == "recent"
     assert seen_params[1].get("min_id") == "cursor-1"
 
 

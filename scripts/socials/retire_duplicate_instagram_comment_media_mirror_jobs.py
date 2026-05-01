@@ -31,6 +31,17 @@ coalesce(
   end
 )
 """.strip()
+ACCOUNT_SQL = """
+ltrim(lower(coalesce(
+  config->>'account',
+  metadata->>'account',
+  config->>'account_handle',
+  metadata->>'account_handle',
+  config->>'owner_username',
+  metadata->>'owner_username',
+  ''
+)), '@')
+""".strip()
 
 
 @dataclass(slots=True)
@@ -46,8 +57,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--season-id", action="append", default=[], help="Optional season UUID filter.")
     parser.add_argument("--show-id", action="append", default=[], help="Optional show UUID filter.")
+    parser.add_argument("--account", action="append", default=[], help="Optional Instagram account handle filter.")
     parser.add_argument("--dry-run", action="store_true", help="Preview matching duplicate rows (default).")
     parser.add_argument("--apply", action="store_true", help="Retire duplicate rows by marking them cancelled.")
+    parser.add_argument(
+        "--confirm-destructive",
+        action="store_true",
+        help="Required with --apply; confirms duplicate jobs will be cancelled.",
+    )
+    parser.add_argument(
+        "--confirm-account",
+        help="Required with --apply; must match the single --account value.",
+    )
     parser.set_defaults(dry_run=True)
     return parser.parse_args(argv)
 
@@ -64,7 +85,32 @@ def _normalize_text_filters(values: list[str] | tuple[str, ...] | None) -> list[
     return normalized
 
 
-def _duplicate_comment_media_where_clause(*, season_ids: list[str], show_ids: list[str]) -> tuple[str, list[object]]:
+def _normalize_account_filters(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    return _normalize_text_filters([str(value or "").strip().lstrip("@").lower() for value in values or []])
+
+
+def _destructive_refusal_reasons(args: argparse.Namespace, *, accounts: list[str]) -> list[str]:
+    if not bool(args.apply):
+        return []
+    reasons: list[str] = []
+    if not args.confirm_destructive:
+        reasons.append("missing --confirm-destructive")
+    if len(accounts) != 1:
+        reasons.append("destructive cleanup requires exactly one --account")
+    confirm_account = _normalize_account_filters([args.confirm_account] if args.confirm_account else [])
+    if not confirm_account:
+        reasons.append("missing --confirm-account")
+    elif len(accounts) == 1 and confirm_account[0] != accounts[0]:
+        reasons.append("--confirm-account must match --account")
+    return reasons
+
+
+def _duplicate_comment_media_where_clause(
+    *,
+    season_ids: list[str],
+    show_ids: list[str],
+    accounts: list[str],
+) -> tuple[str, list[object]]:
     filters = [
         "platform = 'instagram'",
         "status in ('queued', 'pending', 'retrying', 'running')",
@@ -78,11 +124,18 @@ def _duplicate_comment_media_where_clause(*, season_ids: list[str], show_ids: li
     if show_ids:
         filters.append("show_id::text = any(%s)")
         params.append(show_ids)
+    if accounts:
+        filters.append(f"({ACCOUNT_SQL}) = any(%s)")
+        params.append(accounts)
     return " and ".join(filters), params
 
 
-def _fetch_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[str, object]]:
-    where_clause, params = _duplicate_comment_media_where_clause(season_ids=season_ids, show_ids=show_ids)
+def _fetch_matches(*, season_ids: list[str], show_ids: list[str], accounts: list[str]) -> list[dict[str, object]]:
+    where_clause, params = _duplicate_comment_media_where_clause(
+        season_ids=season_ids,
+        show_ids=show_ids,
+        accounts=accounts,
+    )
     return pg.fetch_all(
         f"""
         with ranked as (
@@ -90,21 +143,22 @@ def _fetch_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[s
             id::text as id,
             season_id::text as season_id,
             show_id::text as show_id,
+            {ACCOUNT_SQL} as account_handle,
             config->>'comment_id' as comment_id,
             config->>'comment_db_id' as comment_db_id,
             config->>'post_id' as post_id,
             {IDENTITY_SQL} as identity_key,
             created_at,
             first_value(id::text) over (
-              partition by platform, ({IDENTITY_SQL})
+              partition by platform, ({ACCOUNT_SQL}), ({IDENTITY_SQL})
               order by created_at desc, id desc
             ) as keep_job_id,
             row_number() over (
-              partition by platform, ({IDENTITY_SQL})
+              partition by platform, ({ACCOUNT_SQL}), ({IDENTITY_SQL})
               order by created_at desc, id desc
             ) as row_num,
             count(*) over (
-              partition by platform, ({IDENTITY_SQL})
+              partition by platform, ({ACCOUNT_SQL}), ({IDENTITY_SQL})
             ) as duplicate_count
           from social.scrape_jobs
           where {where_clause}
@@ -113,6 +167,7 @@ def _fetch_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[s
           id,
           season_id,
           show_id,
+          account_handle,
           comment_id,
           comment_db_id,
           post_id,
@@ -128,8 +183,8 @@ def _fetch_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[s
     )
 
 
-def _retire_matches(*, season_ids: list[str], show_ids: list[str]) -> list[dict[str, object]]:
-    matched_rows = _fetch_matches(season_ids=season_ids, show_ids=show_ids)
+def _retire_matches(*, season_ids: list[str], show_ids: list[str], accounts: list[str]) -> list[dict[str, object]]:
+    matched_rows = _fetch_matches(season_ids=season_ids, show_ids=show_ids, accounts=accounts)
     duplicate_ids = [str(row.get("id") or "").strip() for row in matched_rows if str(row.get("id") or "").strip()]
     if not duplicate_ids:
         return []
@@ -155,17 +210,37 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
     season_ids = _normalize_text_filters(args.season_id)
     show_ids = _normalize_text_filters(args.show_id)
+    accounts = _normalize_account_filters(args.account)
     dry_run = bool(args.dry_run and not args.apply)
 
-    matched_rows = _fetch_matches(season_ids=season_ids, show_ids=show_ids)
+    refusal_reasons = _destructive_refusal_reasons(args, accounts=accounts)
+    if refusal_reasons:
+        print(
+            json.dumps(
+                {
+                    "status": "refused",
+                    "dry_run": True,
+                    "accounts": accounts,
+                    "season_ids": season_ids,
+                    "show_ids": show_ids,
+                    "refusal_reasons": refusal_reasons,
+                    "totals": {"matched_rows": 0, "retired_rows": 0},
+                }
+            )
+        )
+        return 2
+
+    matched_rows = _fetch_matches(season_ids=season_ids, show_ids=show_ids, accounts=accounts)
     stats = CleanupStats(matched_rows=len(matched_rows), retired_rows=0)
     if not dry_run and matched_rows:
-        stats.retired_rows = len(_retire_matches(season_ids=season_ids, show_ids=show_ids))
+        stats.retired_rows = len(_retire_matches(season_ids=season_ids, show_ids=show_ids, accounts=accounts))
 
     print(
         json.dumps(
             {
+                "status": "ok",
                 "dry_run": dry_run,
+                "accounts": accounts,
                 "season_ids": season_ids,
                 "show_ids": show_ids,
                 "totals": {"matched_rows": stats.matched_rows, "retired_rows": stats.retired_rows},
