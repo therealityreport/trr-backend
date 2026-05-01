@@ -318,6 +318,13 @@ class InstagramPostsScraplingFetcher:
         self._proxy_session_mode: str = proxy_config.session_mode if proxy_config else "none"
         self._page_tokens: dict[str, str] = {}
         self._retry_reason_counts: dict[str, int] = {}
+        # Phase 4.2: doc-ID rotation observability — record which doc IDs were
+        # tried this run and which one ultimately succeeded. Operators can
+        # cross-reference http_400 / non_json_response spikes with rotation
+        # events and decide when to update SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS.
+        self._doc_ids_configured: tuple[str, ...] = tuple(PROFILE_POSTS_DOC_IDS)
+        self._doc_ids_attempted: list[str] = []
+        self._doc_id_used: str | None = None
         self._api_delay_seconds = _resolve_positive_float_env(
             "SOCIAL_INSTAGRAM_DELAY_SEC",
             _POSTS_REQUEST_DELAY_DEFAULT,
@@ -354,6 +361,12 @@ class InstagramPostsScraplingFetcher:
             "request_count": self._request_count,
             "transport": "httpx_after_browser_warmup",
             "retry_reason_counts": dict(sorted(self._retry_reason_counts.items())),
+            # Phase 4.2: doc-ID rotation telemetry.
+            "profile_posts_doc_ids": {
+                "configured": list(self._doc_ids_configured),
+                "attempted": list(self._doc_ids_attempted),
+                "used": self._doc_id_used,
+            },
         }
 
     async def warmup(self, username: str) -> None:
@@ -417,6 +430,9 @@ class InstagramPostsScraplingFetcher:
         retryable = False
 
         for doc_id in PROFILE_POSTS_DOC_IDS:
+            # Phase 4.2: track every doc_id this run actually tried.
+            if doc_id not in self._doc_ids_attempted:
+                self._doc_ids_attempted.append(doc_id)
             data = _build_graphql_form_data(
                 username=username,
                 cursor=cursor,
@@ -473,6 +489,9 @@ class InstagramPostsScraplingFetcher:
                 if isinstance(node, dict) and node:
                     posts.append(node)
 
+            # Phase 4.2: record the doc_id that produced data so operators can
+            # see which IDs are healthy without grepping logs.
+            self._doc_id_used = doc_id
             return InstagramPostsFetchResult(
                 posts=posts,
                 fetch_failed=False,

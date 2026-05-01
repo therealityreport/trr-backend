@@ -41,11 +41,40 @@ COMMENT_SORT_ORDER_ENV = "SOCIAL_INSTAGRAM_COMMENTS_SORT_ORDER"
 DEFAULT_COMMENT_SORT_ORDER = "recent"
 VALID_COMMENT_SORT_ORDERS = frozenset({"popular", "recent"})
 
-PROFILE_POSTS_DOC_IDS = (
+PROFILE_POSTS_DOC_IDS_ENV = "SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS"
+_PROFILE_POSTS_DOC_IDS_FALLBACK = (
     "25645538101792896",
     "26035927152742158",
     "33944389991841132",
 )
+
+
+def resolve_profile_posts_doc_ids(raw_value: str | None = None) -> tuple[str, ...]:
+    """Phase 4.1: env-driven hot rotation for IG profile-posts GraphQL doc IDs.
+
+    Comma-separated values from ``SOCIAL_INSTAGRAM_PROFILE_POSTS_DOC_IDS`` are
+    parsed, whitespace-stripped, deduplicated, and validated as digit-only
+    strings. When the env var is unset, empty, or every entry is invalid, the
+    hardcoded fallback tuple is returned instead. Operators can hot-rotate
+    without a deploy when IG bumps doc IDs.
+    """
+    raw = raw_value if raw_value is not None else os.getenv(PROFILE_POSTS_DOC_IDS_ENV)
+    if not raw:
+        return _PROFILE_POSTS_DOC_IDS_FALLBACK
+    seen: set[str] = set()
+    chosen: list[str] = []
+    for token in str(raw).split(","):
+        candidate = token.strip()
+        if not candidate or not candidate.isdigit():
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        chosen.append(candidate)
+    return tuple(chosen) if chosen else _PROFILE_POSTS_DOC_IDS_FALLBACK
+
+
+PROFILE_POSTS_DOC_IDS = resolve_profile_posts_doc_ids()
 
 WEB_X_ASBD_ID = "359341"
 PROFILE_POSTS_PAGE_SIZE = int(os.getenv("SOCIAL_INSTAGRAM_PAGE_SIZE", "33"))
