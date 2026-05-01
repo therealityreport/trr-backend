@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import pytest
+from psycopg2 import OperationalError
 
 import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
@@ -234,6 +235,45 @@ def test_update_run_summary_prefers_incremental_counter_columns(monkeypatch: pyt
     assert any("select total_jobs" in call for call in calls)
 
 
+def test_recompute_run_summary_ignores_superseded_instagram_comments_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_one(sql: str, params: list[object]):
+        captured["sql"] = " ".join(sql.lower().split())
+        captured["params"] = list(params)
+        return {
+            "stats": {
+                "total_jobs": 2,
+                "completed_jobs": 2,
+                "failed_jobs": 0,
+                "active_jobs": 0,
+                "items_found_total": 44,
+            },
+            "stage_counts": {
+                social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE: {
+                    "total": 2,
+                    "completed": 2,
+                    "failed": 0,
+                    "active": 0,
+                }
+            },
+        }
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", _fake_fetch_one)
+
+    summary = run_lifecycle._recompute_run_summary_from_jobs("run-1")
+
+    assert summary["failed_jobs"] == 0
+    assert summary["stage_counts"][social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE]["failed"] == 0
+    assert captured["params"] == [social_repo.INSTAGRAM_COMMENTS_SCRAPLING_STAGE, "run-1"]
+    sql_text = str(captured["sql"])
+    assert "superseded_by_comments_rebalance" in sql_text
+    assert "comments_retry_rebalance_source_job_id" in sql_text
+    assert "where not superseded_by_comments_rebalance" in sql_text
+
+
 def test_finalize_run_status_reuses_lock_connection_for_all_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -270,13 +310,70 @@ def test_finalize_run_status_reuses_lock_connection_for_all_reads(
     monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
     monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
-    monkeypatch.setattr(run_lifecycle.legacy, "_shared_catalog_fetch_has_terminal_error", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_shared_catalog_fetch_has_terminal_error",
+        lambda *_args, **_kwargs: False,
+    )
     monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
 
     run_lifecycle._finalize_run_status("run-1")
 
     assert seen_fetch_conns == [lock_conn]
     assert seen_lock_pools == ["social_control"]
+
+
+def test_finalize_run_status_force_recomputes_before_failed_terminal_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_conn = object()
+    update_calls: list[bool] = []
+    statuses: list[str] = []
+
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        yield lock_conn
+
+    def fake_fetch_one(sql: str, params=None, *, conn=None):
+        del params
+        assert conn is lock_conn
+        normalized = " ".join(sql.split()).lower()
+        if "select status, config from social.scrape_runs" in normalized:
+            return {"status": "running", "config": {"pipeline_ingest_mode": "manual"}}
+        if "select sync_session_id::text" in normalized:
+            return {"sync_session_id": None}
+        raise AssertionError(f"Unexpected query: {normalized}")
+
+    def fake_update_summary(_run_id: str, *, force_recompute: bool = False, conn=None):
+        assert conn is lock_conn
+        update_calls.append(force_recompute)
+        if not force_recompute:
+            return {"active_jobs": 0, "failed_jobs": 1, "stage_counts": {}}
+        return {"active_jobs": 0, "failed_jobs": 0, "stage_counts": {}}
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "fetch_one", fake_fetch_one)
+    monkeypatch.setattr(run_lifecycle, "_update_run_summary", fake_update_summary)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "_run_job_status_breakdown",
+        lambda *_args, **_kwargs: {"running_jobs": 0, "queued_jobs": 0, "cancelling_jobs": 0},
+    )
+    monkeypatch.setattr(run_lifecycle, "_set_run_status", lambda _run_id, status, **_kwargs: statuses.append(status))
+    monkeypatch.setattr(run_lifecycle, "_maybe_start_deferred_comments_followup", lambda **_kwargs: None)
+    monkeypatch.setattr(run_lifecycle.legacy, "_resolve_pipeline_ingest_mode", lambda value: value)
+    monkeypatch.setattr(
+        run_lifecycle.legacy,
+        "_shared_catalog_fetch_has_terminal_error",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(run_lifecycle.legacy, "_column_exists", lambda *_args, **_kwargs: False)
+
+    run_lifecycle._finalize_run_status("run-1")
+
+    assert update_calls == [False, True]
+    assert statuses == ["completed"]
 
 
 def test_finalize_run_status_lock_contention_reads_from_social_control_pool(
@@ -303,3 +400,19 @@ def test_finalize_run_status_lock_contention_reads_from_social_control_pool(
 
     assert payload == {"status": "running"}
     assert seen_fetch_pools == ["social_control"]
+
+
+def test_finalize_run_status_defers_connection_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def fake_advisory_lock(lock_key, *, label, pool_name="default"):
+        del lock_key, label, pool_name
+        raise OperationalError("server closed the connection unexpectedly")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(run_lifecycle.legacy.pg, "advisory_session_lock", fake_advisory_lock)
+
+    payload = run_lifecycle._finalize_run_status("run-1")
+
+    assert payload["status"] == "finalize_deferred"
+    assert payload["finalize_deferred"] is True
+    assert "server closed the connection unexpectedly" in str(payload["error"])

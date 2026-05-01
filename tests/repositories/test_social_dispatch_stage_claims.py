@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from trr_backend.repositories import social_season_analytics as repo
+from trr_backend.socials.instagram.comments_scrapling import job_runner as comments_job_runner
 
 
 def test_stage_claim_candidates_do_not_let_comments_workers_borrow_posts() -> None:
@@ -36,3 +39,22 @@ def test_effective_runtime_version_tracks_stage_specific_modal_function(monkeypa
     assert comments_runtime["modal_function"] == "run_social_comments_job"
     assert media_runtime["modal_function"] == "run_social_media_job"
     assert posts_runtime["modal_function"] == "run_social_posts_job"
+
+
+def test_comments_scrapling_attempt_defaults_match_queue_defaults() -> None:
+    assert comments_job_runner._job_attempt_state({}) == (1, 3)  # noqa: SLF001
+    assert comments_job_runner._job_attempt_state({"attempt_count": 3, "max_attempts": 3}) == (3, 3)  # noqa: SLF001
+
+
+def test_comments_scrapling_completion_uses_flattened_reply_count() -> None:
+    result = SimpleNamespace(
+        comments=[
+            SimpleNamespace(replies=[SimpleNamespace(replies=[]), SimpleNamespace(replies=[])]),
+            SimpleNamespace(replies=[]),
+        ],
+        fetch_failed=False,
+        auth_failed=False,
+        reported_comment_count=4,
+    )
+
+    assert comments_job_runner._comments_scrape_is_complete(result=result, max_comments_per_post=0) is True  # noqa: SLF001

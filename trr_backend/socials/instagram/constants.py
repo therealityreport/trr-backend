@@ -37,6 +37,9 @@ COMMENTS_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/"
 COMMENT_REPLIES_URL = "https://www.instagram.com/api/v1/media/{media_id}/comments/{comment_id}/child_comments/"
 PROFILE_PAGE_URL = "https://www.instagram.com/{username}/"
 PERMALINK_URL = "https://www.instagram.com/p/{shortcode}/"
+COMMENT_SORT_ORDER_ENV = "SOCIAL_INSTAGRAM_COMMENTS_SORT_ORDER"
+DEFAULT_COMMENT_SORT_ORDER = "recent"
+VALID_COMMENT_SORT_ORDERS = frozenset({"popular", "recent"})
 
 PROFILE_POSTS_DOC_IDS = (
     "25645538101792896",
@@ -64,3 +67,19 @@ AUTH_FATAL_MESSAGES = {
     "sentry_block",
 }
 
+
+def resolve_comment_sort_order(raw_value: str | None = None) -> str | None:
+    """Resolve the Instagram comments ordering used for full pagination.
+
+    Instagram's default ranked ordering can cycle through headload cursors on
+    high-volume posts. The `recent` order is the safer default for coverage
+    backfills; operators can set the env var to `popular` for one-off parity
+    checks, or `none` to omit the parameter during upstream debugging.
+    """
+    raw = raw_value if raw_value is not None else os.getenv(COMMENT_SORT_ORDER_ENV)
+    value = str(raw or DEFAULT_COMMENT_SORT_ORDER).strip().lower()
+    if value in {"", "none", "default", "off", "false"}:
+        return None
+    if value in VALID_COMMENT_SORT_ORDERS:
+        return value
+    return DEFAULT_COMMENT_SORT_ORDER

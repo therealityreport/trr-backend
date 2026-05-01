@@ -45,6 +45,16 @@ def _load_repo_helpers():
     return repo
 
 
+def _comment_effective_reply_depth(comment: InstagramComment, parent_external_id: str | None, *, fallback: int) -> int:
+    try:
+        parsed_depth = int(getattr(comment, "reply_depth", 0) or 0)
+    except (TypeError, ValueError):
+        parsed_depth = 0
+    if parsed_depth > 0 or not parent_external_id:
+        return max(0, parsed_depth)
+    return max(0, int(fallback or 0))
+
+
 def find_instagram_post_for_comments(
     *,
     account_handle: str,
@@ -162,6 +172,7 @@ def persist_instagram_comments_for_post(
     job_id: str | None,
     is_complete: bool,
     source_scope: str = "bravo",
+    enable_media_followups: bool = True,
     conn: Any | None = None,
 ) -> PersistedInstagramComments:
     if conn is None:
@@ -174,6 +185,7 @@ def persist_instagram_comments_for_post(
                 job_id=job_id,
                 is_complete=is_complete,
                 source_scope=source_scope,
+                enable_media_followups=enable_media_followups,
                 conn=managed_conn,
             )
 
@@ -203,6 +215,7 @@ def persist_instagram_comments_for_post(
             observed_comment_ids=observed_comment_ids,
             persist_stats=persist_stats,
             source_scope=source_scope,
+            enable_media_followups=enable_media_followups,
             conn=conn,
         )
     else:
@@ -215,9 +228,10 @@ def persist_instagram_comments_for_post(
             job_id=job_id,
             observed_comment_ids=observed_comment_ids,
             persist_stats=persist_stats,
+            enable_media_followups=enable_media_followups,
             conn=conn,
         )
-    if is_complete:
+    if isinstance(is_complete, bool) and is_complete:
         comments_marked_missing = repo._mark_missing_comments_for_anchor(
             platform="instagram",
             anchor_id=post_id,
@@ -251,11 +265,15 @@ def _persist_without_season_context(
     job_id: str | None,
     observed_comment_ids: set[str],
     persist_stats: dict[str, int],
+    enable_media_followups: bool,
     conn: Any,
 ) -> int:
     has_profile_pic = repo._column_exists("social", "instagram_comments", "author_profile_pic_url")
     has_verified = repo._column_exists("social", "instagram_comments", "author_is_verified")
     has_media = repo._column_exists("social", "instagram_comments", "media_urls")
+    has_hosted_media = repo._column_exists("social", "instagram_comments", "hosted_media_urls")
+    has_media_mirror_status = repo._column_exists("social", "instagram_comments", "media_mirror_status")
+    has_media_mirror_error = repo._column_exists("social", "instagram_comments", "media_mirror_error")
     has_lifecycle = repo._comment_lifecycle_supported("instagram_comments")
     flat: list[tuple[InstagramComment, str | None]] = []
     for comment in comments:
@@ -304,15 +322,33 @@ def _persist_without_season_context(
             )
         if has_verified:
             payload["author_is_verified"] = getattr(comment_obj, "owner_is_verified", None)
+        media_urls = [str(url).strip() for url in (getattr(comment_obj, "media_urls", []) or []) if str(url).strip()]
         if has_media:
-            payload["media_urls"] = [
-                str(url).strip() for url in (getattr(comment_obj, "media_urls", []) or []) if str(url).strip()
+            payload["media_urls"] = media_urls
+        if has_hosted_media:
+            payload["hosted_media_urls"] = [
+                str(url).strip() for url in (getattr(comment_obj, "hosted_media_urls", []) or []) if str(url).strip()
             ]
+        if has_media_mirror_status:
+            payload["media_mirror_status"] = "deferred" if media_urls else None
+        if has_media_mirror_error:
+            payload["media_mirror_error"] = (
+                None
+                if not media_urls
+                else "season_context_missing"
+                if enable_media_followups
+                else "media_followups_disabled"
+            )
+        reply_depth = _comment_effective_reply_depth(
+            comment_obj,
+            parent_external_id,
+            fallback=1 if parent_external_id else 0,
+        )
         repo._apply_instagram_comment_queryable_columns(
             payload,
             comment_obj,
             parent_external_id=parent_external_id,
-            reply_depth=1 if parent_external_id else 0,
+            reply_depth=reply_depth,
         )
         if parent_external_id is None:
             top_level.append(payload)

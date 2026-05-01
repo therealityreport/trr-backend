@@ -10,6 +10,7 @@ are private helpers.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -78,6 +79,18 @@ def _fingerprint_from_url(url: str) -> str:
     return f"{host}:{port}:explicit"
 
 
+def _explicit_proxy_url_for_session(proxy_urls: list[str], session_key: str | None) -> str:
+    """Pick one explicit proxy URL deterministically for a session/shard key."""
+    urls = [str(url or "").strip() for url in proxy_urls if str(url or "").strip()]
+    if not urls:
+        raise ValueError("proxy_urls must contain at least one URL")
+    normalized_key = str(session_key or "").strip().lower()
+    if not normalized_key or len(urls) == 1:
+        return urls[0]
+    digest = hashlib.sha256(normalized_key.encode("utf-8")).hexdigest()
+    return urls[int(digest[:16], 16) % len(urls)]
+
+
 # ---------------------------------------------------------------------------
 # Internal env readers
 # ---------------------------------------------------------------------------
@@ -119,14 +132,14 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
     # 1. Explicit proxy URLs take precedence.
     explicit_urls = _load_proxy_urls_from_env()
     if explicit_urls:
-        first_url = explicit_urls[0]
-        rotator = _build_proxy_rotator(first_url)
+        selected_url = _explicit_proxy_url_for_session(explicit_urls, session_key)
+        rotator = _build_proxy_rotator(selected_url)
         return CommentsProxyConfig(
-            browser_proxy=first_url,
-            api_proxy_url=first_url,
+            browser_proxy=selected_url,
+            api_proxy_url=selected_url,
             proxy_rotator=rotator,
-            fingerprint=_fingerprint_from_url(first_url),
-            session_mode="explicit",
+            fingerprint=_fingerprint_from_url(selected_url),
+            session_mode="explicit_sharded" if len(explicit_urls) > 1 and session_key else "explicit",
         )
 
     # 2. Decodo provider (default when env has credentials).
