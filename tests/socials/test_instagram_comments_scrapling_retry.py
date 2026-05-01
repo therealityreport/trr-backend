@@ -2666,6 +2666,11 @@ def test_job_runner_tracks_isolated_post_auth_failure_for_retry(monkeypatch: pyt
             "max_comments_per_post": 10,
             "fetch_replies": False,
         },
+        # Phase 1.3 / audit: with max_attempts == attempt_count, the job_runner
+        # used to short-circuit can_retry to False on the first transient
+        # failure. _job_attempt_state now enforces max_attempts >= attempt_count
+        # + 1, so this row reaches "retrying" instead of "failed" — which is
+        # the correct behavior the test name (..._for_retry) already implied.
         "attempt_count": 1,
         "max_attempts": 1,
     }
@@ -2681,7 +2686,7 @@ def test_job_runner_tracks_isolated_post_auth_failure_for_retry(monkeypatch: pyt
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
-    assert finish_calls[-1]["status"] == "failed"
+    assert finish_calls[-1]["status"] == "retrying"
     assert finish_calls[-1]["last_error_code"] == "instagram_comments_incomplete_retryable"
     assert persist_calls == ["OKPOST"]
     metadata = finish_calls[-1]["metadata"]

@@ -701,6 +701,56 @@ class InstagramCommentsWarmupError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def _failed_comment_entries_from_checkpoints(
+    *,
+    shortcode: str,
+    reply_checkpoints: list[dict[str, Any]],
+    top_level_checkpoint: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Phase 1.7: derive per-comment failure attribution from checkpoint data.
+
+    Each entry carries the parent comment id (or empty for top-level pagination
+    failures), stage, last error code and message. This is operational metadata
+    that the job runner persists into ``social.scrape_jobs.metadata.comment_failures``.
+    No new comments-table column is required.
+    """
+    entries: list[dict[str, Any]] = []
+    normalized_shortcode = str(shortcode or "").strip() or None
+    for checkpoint in reply_checkpoints or []:
+        if not isinstance(checkpoint, dict):
+            continue
+        parent_comment_id = str(checkpoint.get("parent_comment_id") or "").strip()
+        stop_reason = str(checkpoint.get("stop_reason") or checkpoint.get("last_error_code") or "").strip()
+        error_code = str(checkpoint.get("last_error_code") or stop_reason or "").strip() or None
+        if not parent_comment_id and not error_code:
+            continue
+        entries.append(
+            {
+                "comment_id": parent_comment_id or None,
+                "stage": "reply",
+                "error_code": error_code,
+                "error_message": stop_reason or None,
+                "shortcode": normalized_shortcode,
+            }
+        )
+    if isinstance(top_level_checkpoint, dict):
+        stop_reason = str(
+            top_level_checkpoint.get("stop_reason") or top_level_checkpoint.get("last_error_code") or ""
+        ).strip()
+        error_code = str(top_level_checkpoint.get("last_error_code") or stop_reason or "").strip() or None
+        if error_code:
+            entries.append(
+                {
+                    "comment_id": None,
+                    "stage": "top_level",
+                    "error_code": error_code,
+                    "error_message": stop_reason or None,
+                    "shortcode": normalized_shortcode,
+                }
+            )
+    return entries
+
+
 @dataclass(slots=True)
 class InstagramCommentsFetchResult:
     comments: list[InstagramComment] = field(default_factory=list)
@@ -712,6 +762,12 @@ class InstagramCommentsFetchResult:
     retryable: bool = False
     reply_checkpoints: list[dict[str, Any]] = field(default_factory=list)
     top_level_checkpoint: dict[str, Any] | None = None
+    # Phase 1.7: per-comment failure attribution. Each entry is
+    # {"comment_id": str, "stage": "top_level" | "reply", "error_code": str,
+    #  "error_message": str, "shortcode": str | None}. Persisted into
+    # social.scrape_jobs.metadata.comment_failures by the job runner.
+    # Operational metadata only; not promoted to a comments-table column.
+    failed_comment_ids: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1356,6 +1412,15 @@ class InstagramCommentsScraplingFetcher:
                             else "hidden_comments_unresolved"
                         )
 
+        # Phase 1.7: derive failed_comment_ids from accumulated checkpoints so
+        # the job runner can persist per-comment failure attribution into
+        # social.scrape_jobs.metadata.comment_failures without each call site
+        # having to track failures separately.
+        failed_comment_ids = _failed_comment_entries_from_checkpoints(
+            shortcode=shortcode,
+            reply_checkpoints=reply_checkpoints,
+            top_level_checkpoint=top_level_checkpoint,
+        )
         return InstagramCommentsFetchResult(
             comments=comments,
             fetch_failed=fetch_failed,
@@ -1366,6 +1431,7 @@ class InstagramCommentsScraplingFetcher:
             retryable=retryable,
             reply_checkpoints=reply_checkpoints,
             top_level_checkpoint=top_level_checkpoint,
+            failed_comment_ids=failed_comment_ids,
         )
 
     async def _fetch_persisted_reply_tails(

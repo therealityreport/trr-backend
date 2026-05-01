@@ -35,6 +35,22 @@ _QUEUE_DEFAULT_ATTEMPT_COUNT = 1
 _QUEUE_DEFAULT_MAX_ATTEMPTS = 12
 _DEFAULT_CANCEL_CHECK_EVERY_POSTS = 5
 _DEFAULT_JOB_HEARTBEAT_INTERVAL_SECONDS = 30
+# Phase 1.5: mid-run warmup refresh defaults. Triggered when the runner sees
+# >= _DEFAULT_MID_RUN_WARMUP_AUTH_THRESHOLD consecutive auth-failed posts OR
+# every _DEFAULT_MID_RUN_WARMUP_EVERY_POSTS successful posts (whichever first).
+# Both are env-overridable through the job config so tests can flip them.
+_DEFAULT_MID_RUN_WARMUP_AUTH_THRESHOLD = 3
+_DEFAULT_MID_RUN_WARMUP_EVERY_POSTS = 50
+# Phase 1.4: incomplete-run raise threshold. The shard only raises
+# instagram_comments_incomplete_retryable when at least this fraction of the
+# target list is incomplete, so a single bad post does not force the whole
+# shard into retrying.
+_DEFAULT_INCOMPLETE_RAISE_RATIO = 4  # raise when ratio is >= 1/_RAISE_RATIO
+_MIN_INCOMPLETE_RAISE_TARGETS = 1
+# Phase 1.7: cap on per-comment failure entries persisted in
+# social.scrape_jobs.metadata.comment_failures so a runaway shard cannot bloat
+# the job-metadata column.
+_COMMENT_FAILURE_METADATA_MAX_ENTRIES = 200
 _RECONCILABLE_REPORTED_GAP_MAX_DEFAULT = 2
 _RECONCILABLE_REPORTED_GAP_RATIO_DEFAULT = 0.02
 _RECONCILABLE_REPORTED_GAP_REASONS = {
@@ -406,10 +422,14 @@ def _safe_int(value: Any) -> int | None:
 def _job_attempt_state(job: dict[str, Any]) -> tuple[int, int]:
     attempt_count = _safe_int(job.get("attempt_count"))
     max_attempts = _safe_int(job.get("max_attempts"))
-    return (
-        max(1, attempt_count if attempt_count is not None else _QUEUE_DEFAULT_ATTEMPT_COUNT),
-        max(1, max_attempts if max_attempts is not None else _QUEUE_DEFAULT_MAX_ATTEMPTS),
-    )
+    normalized_attempt_count = max(1, attempt_count if attempt_count is not None else _QUEUE_DEFAULT_ATTEMPT_COUNT)
+    normalized_max_attempts = max(1, max_attempts if max_attempts is not None else _QUEUE_DEFAULT_MAX_ATTEMPTS)
+    # Phase 1.3 / audit: enforce max_attempts >= attempt_count + 1 when retryable
+    # state is missing or malformed so transient transport blips actually retry.
+    # Without this, a row carrying attempt_count = max_attempts (e.g. 1 == 1)
+    # would short-circuit can_retry to False on the first transient failure.
+    normalized_max_attempts = max(normalized_max_attempts, normalized_attempt_count + 1)
+    return (normalized_attempt_count, normalized_max_attempts)
 
 
 def _attach_incomplete_activity(
@@ -1272,6 +1292,23 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     successful_target_fetches = 0
     post_auth_failure_circuit_limit = _safe_int(config.get("post_auth_failure_circuit_limit")) or 3
     post_fetch_failure_circuit_limit = _safe_int(config.get("post_fetch_failure_circuit_limit")) or 3
+    # Phase 1.5: mid-run warmup refresh state.
+    mid_run_warmup_auth_threshold = (
+        _safe_int(config.get("comments_warmup_refresh_auth_threshold"))
+        or _DEFAULT_MID_RUN_WARMUP_AUTH_THRESHOLD
+    )
+    mid_run_warmup_every_posts = (
+        _safe_int(config.get("comments_warmup_refresh_every_posts"))
+        or _DEFAULT_MID_RUN_WARMUP_EVERY_POSTS
+    )
+    posts_since_last_warmup = 0
+    mid_run_warmup_count = 0
+    last_mid_run_warmup_reason: str | None = None
+    # Phase 1.7: accumulator for per-comment failure attribution. Capped via
+    # _COMMENT_FAILURE_METADATA_MAX_ENTRIES so a runaway shard cannot bloat
+    # social.scrape_jobs.metadata. Persisted under metadata.comment_failures.
+    failed_comment_ids: list[dict[str, Any]] = []
+    failed_comment_ids_truncated = False
     warmup_completed_at = None
     first_post_persisted_at = None
     auth_context: dict[str, Any] = {}
@@ -1295,6 +1332,22 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
             "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
             "top_level_checkpoints": list(top_level_checkpoints_by_shortcode.values()),
+            # Phase 1.5: mid-run warmup-refresh telemetry.
+            "mid_run_warmup": {
+                "count": mid_run_warmup_count,
+                "auth_threshold": mid_run_warmup_auth_threshold,
+                "every_posts": mid_run_warmup_every_posts,
+                "last_reason": last_mid_run_warmup_reason,
+                "posts_since_last_warmup": posts_since_last_warmup,
+            },
+            # Phase 1.7: per-comment failure attribution. Operational metadata
+            # only — comments-table column expansion is intentionally deferred.
+            "comment_failures": {
+                "entries": list(failed_comment_ids),
+                "count": len(failed_comment_ids),
+                "truncated": failed_comment_ids_truncated,
+                "max_entries": _COMMENT_FAILURE_METADATA_MAX_ENTRIES,
+            },
         }
 
     def terminal_metadata_common() -> dict[str, Any]:
@@ -1324,6 +1377,11 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         nonlocal activity, fetcher_metadata
         nonlocal consecutive_post_auth_failures, consecutive_post_fetch_failures, successful_target_fetches
         nonlocal warmup_completed_at, first_post_persisted_at, auth_context
+        # Phase 1.5 / 1.7: scope mid-run warmup counters and per-comment failure
+        # truncation flag to the outer function so progress_metadata_common()
+        # reads the live values and _maybe_refresh_warmup() writes propagate.
+        nonlocal posts_since_last_warmup, mid_run_warmup_count, last_mid_run_warmup_reason
+        nonlocal failed_comment_ids_truncated
 
         session = resolve_comments_scrapling_session(
             browser_account_id=account_handle,
@@ -1411,6 +1469,43 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     or (post_index - 1) % cancel_check_every_posts == 0
                 )
 
+            async def _maybe_refresh_warmup(*, reason: str) -> bool:
+                """Phase 1.5: re-run fetcher.warmup() mid-run.
+
+                Returns True when a refresh actually fired so callers can reset
+                their counters. Failures are logged and swallowed — a stale
+                warmup will still pass through the normal auth-failed circuit.
+                """
+                nonlocal posts_since_last_warmup, mid_run_warmup_count, last_mid_run_warmup_reason
+                try:
+                    await fetcher.warmup()
+                except InstagramCommentsWarmupError as exc:
+                    logger.warning(
+                        "Mid-run Instagram comments warmup refresh failed: job_id=%s reason=%s error=%s",
+                        job_id,
+                        reason,
+                        exc,
+                    )
+                    return False
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Mid-run Instagram comments warmup refresh raised unexpectedly: job_id=%s reason=%s",
+                        job_id,
+                        reason,
+                        exc_info=True,
+                    )
+                    return False
+                posts_since_last_warmup = 0
+                mid_run_warmup_count += 1
+                last_mid_run_warmup_reason = reason
+                logger.info(
+                    "Instagram comments warmup refreshed mid-run: job_id=%s reason=%s count=%d",
+                    job_id,
+                    reason,
+                    mid_run_warmup_count,
+                )
+                return True
+
             for index, shortcode in enumerate(target_source_ids, start=1):
                 post_started_at = time.monotonic()
                 if not repo._touch_job_heartbeat(job_id, worker_id=worker_id):
@@ -1430,6 +1525,22 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     worker_id=worker_id,
                     runtime_metadata=dict(fetcher.runtime_metadata),
                 )
+                # Phase 1.5: mid-run warmup refresh trigger. Fires when the
+                # consecutive auth-failure threshold is reached OR when
+                # mid_run_warmup_every_posts successful posts have elapsed
+                # since the last warmup. Skipped for shortcodes pre-classified
+                # as already-complete because no fetch will run for them.
+                if shortcode not in skipped_complete_target_source_ids:
+                    if (
+                        mid_run_warmup_auth_threshold > 0
+                        and consecutive_post_auth_failures >= mid_run_warmup_auth_threshold
+                    ):
+                        await _maybe_refresh_warmup(reason="consecutive_auth_failures")
+                    elif (
+                        mid_run_warmup_every_posts > 0
+                        and posts_since_last_warmup >= mid_run_warmup_every_posts
+                    ):
+                        await _maybe_refresh_warmup(reason="post_count_threshold")
                 if shortcode in skipped_complete_target_source_ids:
                     total_elapsed_ms = int((time.monotonic() - post_started_at) * 1000)
                     post_latency_samples.append(
@@ -1532,6 +1643,16 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 top_level_checkpoint = getattr(result, "top_level_checkpoint", None)
                 if isinstance(top_level_checkpoint, dict):
                     top_level_checkpoints_by_shortcode[shortcode] = dict(top_level_checkpoint)
+                # Phase 1.7: accumulate per-comment failure attribution into the
+                # bounded shard-level list so it lands in scrape_jobs metadata.
+                result_failed_comment_ids = getattr(result, "failed_comment_ids", None) or []
+                for entry in result_failed_comment_ids:
+                    if not isinstance(entry, dict):
+                        continue
+                    if len(failed_comment_ids) >= _COMMENT_FAILURE_METADATA_MAX_ENTRIES:
+                        failed_comment_ids_truncated = True
+                        break
+                    failed_comment_ids.append(entry)
                 _raise_if_job_lease_lost(
                     job_id=job_id,
                     worker_id=worker_id,
@@ -1612,6 +1733,10 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         },
                     )
                 consecutive_post_auth_failures = 0
+                # Phase 1.5: every successful (or non-auth-failed) post advances the
+                # mid-run-warmup post counter. Skip-paths above continued before
+                # this point so they do not advance the counter spuriously.
+                posts_since_last_warmup += 1
                 if result.fetch_failed and not result.comments:
                     normalized_incomplete_shortcode = str(shortcode or "").strip()
                     consecutive_post_fetch_failures += 1
@@ -1838,7 +1963,15 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             retryable_incomplete_targets = list(
                 dict.fromkeys([*incomplete_target_source_ids, *auth_failed_target_source_ids])
             )
-            if retryable_incomplete_targets:
+            # Phase 1.4 / audit: only raise when at least 1/_DEFAULT_INCOMPLETE_RAISE_RATIO
+            # of the target list is incomplete. Single-post failures persist their
+            # retry targets in metadata via _retry_rebalance_metadata(...) without
+            # forcing the whole shard into retrying.
+            incomplete_raise_threshold = max(
+                _MIN_INCOMPLETE_RAISE_TARGETS,
+                len(target_source_ids) // _DEFAULT_INCOMPLETE_RAISE_RATIO,
+            )
+            if retryable_incomplete_targets and len(retryable_incomplete_targets) >= incomplete_raise_threshold:
                 retry_fetch_reasons = {
                     shortcode: incomplete_fetch_reasons.get(shortcode) or auth_failed_fetch_reasons.get(shortcode)
                     for shortcode in retryable_incomplete_targets
@@ -1852,6 +1985,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         "incomplete_fetch_reasons": retry_fetch_reasons,
                         "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
                         "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                        "incomplete_raise_threshold": incomplete_raise_threshold,
+                        "target_source_ids_count": len(target_source_ids),
                     },
                 )
 

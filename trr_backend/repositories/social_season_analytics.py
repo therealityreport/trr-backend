@@ -19098,6 +19098,22 @@ def _upsert_instagram_comment_tree(
         payload["media_mirror_status"] = "pending"
     if media_urls and _column_exists("social", "instagram_comments", "media_mirror_error"):
         payload["media_mirror_error"] = None
+    # Phase 2: Apify-source owner-metadata columns (migration
+    # 20260501210512_instagram_comments_owner_metadata.sql).
+    if _column_exists("social", "instagram_comments", "comment_url"):
+        payload["comment_url"] = str(getattr(comment, "comment_url", "") or "").strip() or None
+    if _column_exists("social", "instagram_comments", "author_fbid_v2"):
+        payload["author_fbid_v2"] = str(getattr(comment, "owner_fbid_v2", "") or "").strip() or None
+    if _column_exists("social", "instagram_comments", "author_is_mentionable"):
+        payload["author_is_mentionable"] = getattr(comment, "owner_is_mentionable", None)
+    if _column_exists("social", "instagram_comments", "author_is_private"):
+        payload["author_is_private"] = getattr(comment, "owner_is_private", None)
+    if _column_exists("social", "instagram_comments", "author_latest_reel_media"):
+        payload["author_latest_reel_media"] = getattr(comment, "owner_latest_reel_media", None)
+    if _column_exists("social", "instagram_comments", "author_profile_pic_id"):
+        payload["author_profile_pic_id"] = (
+            str(getattr(comment, "owner_profile_pic_id", "") or "").strip() or None
+        )
     effective_reply_depth = _instagram_comment_effective_reply_depth(
         comment,
         parent_external_id=parent_comment_external_id,
@@ -19187,6 +19203,14 @@ _instagram_comment_has_media: bool | None = None
 _instagram_comment_has_hosted_media: bool | None = None
 _instagram_comment_has_media_mirror_status: bool | None = None
 _instagram_comment_has_media_mirror_error: bool | None = None
+# Phase 2: Apify-source owner-metadata column flags
+# (migration 20260501210512_instagram_comments_owner_metadata.sql).
+_instagram_comment_has_comment_url: bool | None = None
+_instagram_comment_has_author_fbid_v2: bool | None = None
+_instagram_comment_has_author_is_mentionable: bool | None = None
+_instagram_comment_has_author_is_private: bool | None = None
+_instagram_comment_has_author_latest_reel_media: bool | None = None
+_instagram_comment_has_author_profile_pic_id: bool | None = None
 
 
 def _instagram_comment_effective_reply_depth(comment: Any, *, parent_external_id: str | None, fallback: int) -> int:
@@ -19224,6 +19248,12 @@ def _batch_upsert_instagram_comments(
     global _instagram_comment_has_media_mirror_status  # noqa: PLW0603
     global _instagram_comment_has_profile_pic  # noqa: PLW0603
     global _instagram_comment_has_verified  # noqa: PLW0603
+    global _instagram_comment_has_comment_url  # noqa: PLW0603
+    global _instagram_comment_has_author_fbid_v2  # noqa: PLW0603
+    global _instagram_comment_has_author_is_mentionable  # noqa: PLW0603
+    global _instagram_comment_has_author_is_private  # noqa: PLW0603
+    global _instagram_comment_has_author_latest_reel_media  # noqa: PLW0603
+    global _instagram_comment_has_author_profile_pic_id  # noqa: PLW0603
 
     if not comments:
         return 0
@@ -19244,6 +19274,28 @@ def _batch_upsert_instagram_comments(
     if _instagram_comment_has_media_mirror_error is None:
         _instagram_comment_has_media_mirror_error = _column_exists(
             "social", "instagram_comments", "media_mirror_error"
+        )
+    if _instagram_comment_has_comment_url is None:
+        _instagram_comment_has_comment_url = _column_exists("social", "instagram_comments", "comment_url")
+    if _instagram_comment_has_author_fbid_v2 is None:
+        _instagram_comment_has_author_fbid_v2 = _column_exists(
+            "social", "instagram_comments", "author_fbid_v2"
+        )
+    if _instagram_comment_has_author_is_mentionable is None:
+        _instagram_comment_has_author_is_mentionable = _column_exists(
+            "social", "instagram_comments", "author_is_mentionable"
+        )
+    if _instagram_comment_has_author_is_private is None:
+        _instagram_comment_has_author_is_private = _column_exists(
+            "social", "instagram_comments", "author_is_private"
+        )
+    if _instagram_comment_has_author_latest_reel_media is None:
+        _instagram_comment_has_author_latest_reel_media = _column_exists(
+            "social", "instagram_comments", "author_latest_reel_media"
+        )
+    if _instagram_comment_has_author_profile_pic_id is None:
+        _instagram_comment_has_author_profile_pic_id = _column_exists(
+            "social", "instagram_comments", "author_profile_pic_id"
         )
     has_lifecycle = _comment_lifecycle_supported("instagram_comments")
 
@@ -19313,6 +19365,25 @@ def _batch_upsert_instagram_comments(
             payload["media_mirror_status"] = "pending" if media_urls else None
         if _instagram_comment_has_media_mirror_error:
             payload["media_mirror_error"] = None
+        # Phase 2: Apify-source owner-metadata column writes.
+        if _instagram_comment_has_comment_url:
+            payload["comment_url"] = (
+                str(getattr(comment_obj, "comment_url", "") or "").strip() or None
+            )
+        if _instagram_comment_has_author_fbid_v2:
+            payload["author_fbid_v2"] = (
+                str(getattr(comment_obj, "owner_fbid_v2", "") or "").strip() or None
+            )
+        if _instagram_comment_has_author_is_mentionable:
+            payload["author_is_mentionable"] = getattr(comment_obj, "owner_is_mentionable", None)
+        if _instagram_comment_has_author_is_private:
+            payload["author_is_private"] = getattr(comment_obj, "owner_is_private", None)
+        if _instagram_comment_has_author_latest_reel_media:
+            payload["author_latest_reel_media"] = getattr(comment_obj, "owner_latest_reel_media", None)
+        if _instagram_comment_has_author_profile_pic_id:
+            payload["author_profile_pic_id"] = (
+                str(getattr(comment_obj, "owner_profile_pic_id", "") or "").strip() or None
+            )
         effective_reply_depth = _instagram_comment_effective_reply_depth(
             comment_obj,
             parent_external_id=parent_ext_id,

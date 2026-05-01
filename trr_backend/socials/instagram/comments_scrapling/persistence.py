@@ -274,6 +274,14 @@ def _persist_without_season_context(
     has_hosted_media = repo._column_exists("social", "instagram_comments", "hosted_media_urls")
     has_media_mirror_status = repo._column_exists("social", "instagram_comments", "media_mirror_status")
     has_media_mirror_error = repo._column_exists("social", "instagram_comments", "media_mirror_error")
+    # Phase 2: Apify-source owner-metadata columns. Each gated independently so
+    # partial migrations remain safe.
+    has_comment_url = repo._column_exists("social", "instagram_comments", "comment_url")
+    has_author_fbid_v2 = repo._column_exists("social", "instagram_comments", "author_fbid_v2")
+    has_author_is_mentionable = repo._column_exists("social", "instagram_comments", "author_is_mentionable")
+    has_author_is_private = repo._column_exists("social", "instagram_comments", "author_is_private")
+    has_author_latest_reel_media = repo._column_exists("social", "instagram_comments", "author_latest_reel_media")
+    has_author_profile_pic_id = repo._column_exists("social", "instagram_comments", "author_profile_pic_id")
     has_lifecycle = repo._comment_lifecycle_supported("instagram_comments")
     flat: list[tuple[InstagramComment, str | None]] = []
     for comment in comments:
@@ -338,6 +346,25 @@ def _persist_without_season_context(
                 else "season_context_missing"
                 if enable_media_followups
                 else "media_followups_disabled"
+            )
+        # Phase 2: write Apify-source owner-metadata columns when present.
+        if has_comment_url:
+            payload["comment_url"] = (
+                str(getattr(comment_obj, "comment_url", "") or "").strip() or None
+            )
+        if has_author_fbid_v2:
+            payload["author_fbid_v2"] = (
+                str(getattr(comment_obj, "owner_fbid_v2", "") or "").strip() or None
+            )
+        if has_author_is_mentionable:
+            payload["author_is_mentionable"] = getattr(comment_obj, "owner_is_mentionable", None)
+        if has_author_is_private:
+            payload["author_is_private"] = getattr(comment_obj, "owner_is_private", None)
+        if has_author_latest_reel_media:
+            payload["author_latest_reel_media"] = getattr(comment_obj, "owner_latest_reel_media", None)
+        if has_author_profile_pic_id:
+            payload["author_profile_pic_id"] = (
+                str(getattr(comment_obj, "owner_profile_pic_id", "") or "").strip() or None
             )
         reply_depth = _comment_effective_reply_depth(
             comment_obj,

@@ -217,12 +217,27 @@ class InstagramComment:
     owner_profile_pic_url: str | None = None
     owner_profile_pic_url_hd: str | None = None
     owner_is_verified: bool | None = None
+    # Phase 2: Apify-source owner-metadata fields the parser now extracts.
+    owner_fbid_v2: str | None = None
+    owner_is_mentionable: bool | None = None
+    owner_is_private: bool | None = None
+    owner_latest_reel_media: int | None = None
+    owner_profile_pic_id: str | None = None
     is_hidden_by_instagram: bool = False
     source_snapshot_type: str = "full_comments_scrape"
 
     # Post reference
     post_shortcode: str = ""
     post_url: str = ""
+
+    # Phase 2: comment URL + ISO-8601 timestamp built at parse time. Optional so
+    # tests/fixtures that construct InstagramComment directly do not break.
+    comment_url: str | None = None
+    created_at_iso: str | None = None
+    # Phase 1.2 / audit: separate observed-nested-reply count from IG's reported
+    # reply_count. Previously _parse_comment overwrote reply_count to
+    # len(replies) when no count was present, masking the gap during pagination.
+    reply_count_observed: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -3588,8 +3603,60 @@ class InstagramScraper:
         fallback_reply_depth = 1 if is_reply or parent_id else 0
         normalized_reply_depth = max(0, int(reply_depth if reply_depth is not None else fallback_reply_depth))
 
+        # Phase 2: extract Apify-source owner-metadata fields. Each falls back
+        # across data/owner/user payload variants; absent -> None so persistence
+        # can leave the column null.
+        def _first_present(*keys: str) -> Any:
+            for source in (data, owner, user):
+                if not isinstance(source, dict):
+                    continue
+                for key in keys:
+                    if key in source and source.get(key) is not None:
+                        return source.get(key)
+            return None
+
+        def _coerce_optional_bool(value: Any) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return None
+            return bool(value)
+
+        def _coerce_optional_nonneg_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed >= 0 else None
+
+        owner_fbid_v2 = _first_present("fbid_v2", "fbidV2")
+        owner_is_mentionable = _coerce_optional_bool(_first_present("is_mentionable", "isMentionable"))
+        owner_is_private = _coerce_optional_bool(_first_present("is_private", "isPrivate"))
+        owner_latest_reel_media = _coerce_optional_nonneg_int(_first_present("latest_reel_media", "latestReelMedia"))
+        owner_profile_pic_id = _first_present("profile_pic_id", "profilePicId")
+
+        comment_id_str = str(data.get("pk") or data.get("id") or "")
+        normalized_shortcode = str(shortcode or "").strip()
+        comment_url = (
+            f"https://www.instagram.com/p/{normalized_shortcode}/c/{comment_id_str}/"
+            if normalized_shortcode and comment_id_str
+            else None
+        )
+        created_at_iso: str | None = None
+        if created_at:
+            try:
+                created_at_iso = (
+                    datetime.fromtimestamp(int(created_at), tz=UTC)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                )
+            except (TypeError, ValueError, OSError, OverflowError):
+                created_at_iso = None
+
         comment = InstagramComment(
-            comment_id=str(data.get("pk") or data.get("id") or ""),
+            comment_id=comment_id_str,
             text=str(data.get("text") or ""),
             username=str(username or ""),
             user_id=str(user_id or ""),
@@ -3619,8 +3686,15 @@ class InstagramScraper:
                 if "is_verified" in user
                 else None
             ),
+            owner_fbid_v2=str(owner_fbid_v2).strip() if owner_fbid_v2 else None,
+            owner_is_mentionable=owner_is_mentionable,
+            owner_is_private=owner_is_private,
+            owner_latest_reel_media=owner_latest_reel_media,
+            owner_profile_pic_id=str(owner_profile_pic_id).strip() if owner_profile_pic_id else None,
             post_shortcode=shortcode,
             post_url=post_url,
+            comment_url=comment_url,
+            created_at_iso=created_at_iso,
         )
         nested_replies = data.get("replies")
         if not isinstance(nested_replies, list):
@@ -3638,8 +3712,12 @@ class InstagramScraper:
                 for reply in nested_replies
                 if isinstance(reply, dict)
             ]
-            if comment.reply_count <= 0:
-                comment.reply_count = len(comment.replies)
+            # Phase 1.2 / audit: previously this overwrote reply_count to
+            # len(comment.replies) when no count shipped, hiding tail gaps from
+            # the fetcher's reply guard. Now we record the observed nested-reply
+            # count in a separate field so reply_count keeps representing IG's
+            # reported total (or 0 when IG didn't ship one).
+            comment.reply_count_observed = len(comment.replies)
         return comment
 
     def parse_comment(
