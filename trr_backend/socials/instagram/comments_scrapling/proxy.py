@@ -53,9 +53,20 @@ def _split_proxy_values(raw: str) -> list[str]:
     return values
 
 
-def _build_proxy_rotator(browser_proxy: str | dict[str, str] | None) -> Any | None:
-    """Build a ProxyRotator for the browser warmup path. Accepts both dict
-    (Decodo — bypasses URL-parsing bug) and str (explicit PROXY_URLS).
+def _build_proxy_rotator(
+    browser_proxy: str | dict[str, str] | list[str | dict[str, str]] | None,
+) -> Any | None:
+    """Build a ProxyRotator for the browser warmup path.
+
+    Accepts:
+      * ``None``                                   → returns None (local-dev mode)
+      * ``str`` / ``dict``                         → wrapped in a single-element list
+      * ``list[str | dict[str, str]]``             → passed through unchanged
+
+    Phase 5.1: explicit PROXY_URLS callers can now pass the full env-supplied
+    URL list so the Scrapling ``ProxyRotator`` sees every IP, instead of the
+    previous one-element stub. The Decodo path still passes a single dict
+    because its gateway rotates IPs server-side.
     """
     if browser_proxy is None:
         return None
@@ -63,6 +74,11 @@ def _build_proxy_rotator(browser_proxy: str | dict[str, str] | None) -> Any | No
         from scrapling.fetchers import ProxyRotator
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Scrapling proxy rotation is unavailable. Install scrapling[fetchers].") from exc
+    if isinstance(browser_proxy, list):
+        normalized = [value for value in browser_proxy if value]
+        if not normalized:
+            return None
+        return ProxyRotator(normalized)
     return ProxyRotator([browser_proxy])
 
 
@@ -133,7 +149,13 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
     explicit_urls = _load_proxy_urls_from_env()
     if explicit_urls:
         selected_url = _explicit_proxy_url_for_session(explicit_urls, session_key)
-        rotator = _build_proxy_rotator(selected_url)
+        # Phase 5.1: hand the full URL list to the rotator so Scrapling can
+        # rotate across IPs during warmup, while keeping browser_proxy and
+        # api_proxy_url pinned to the deterministic per-shard selection so
+        # api-side requests stay on a stable session.
+        rotator = _build_proxy_rotator(list(explicit_urls)) if len(explicit_urls) > 1 else _build_proxy_rotator(
+            selected_url
+        )
         return CommentsProxyConfig(
             browser_proxy=selected_url,
             api_proxy_url=selected_url,

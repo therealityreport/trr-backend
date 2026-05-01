@@ -563,6 +563,70 @@ def _record_global_api_cooldown(*, key: str, delay_seconds: float) -> None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+_RATE_LIMIT_ADVISORY_LOCK_NAMESPACE = 0x49_47_43_4D  # "IGCM" — IG comments lane.
+_RATE_LIMIT_MODE_ENV = "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"
+_RATE_LIMIT_MODE_DEFAULT = "advisory"
+_RATE_LIMIT_VALID_MODES = frozenset({"advisory", "file_lock"})
+
+
+def _resolve_rate_limit_mode(raw_value: str | None = None) -> str:
+    """Phase 5.2: choose between Postgres-advisory-lock + file-lock fallback
+    (default, cross-container) and pure file-lock (legacy, per-container)."""
+    raw = raw_value if raw_value is not None else os.getenv(_RATE_LIMIT_MODE_ENV)
+    value = str(raw or _RATE_LIMIT_MODE_DEFAULT).strip().lower()
+    return value if value in _RATE_LIMIT_VALID_MODES else _RATE_LIMIT_MODE_DEFAULT
+
+
+def _advisory_lock_keys_for(key: str) -> tuple[int, int]:
+    """Derive a deterministic (namespace, key) pair from the rate-limit key.
+
+    pg_advisory_lock takes two int4 args. The namespace is fixed so this
+    lane never collides with other advisory-lock users; the key is a
+    sha256-derived 32-bit slice so two containers using the same
+    ``_global_rate_limit_key`` serialize.
+    """
+    digest = hashlib.sha256(str(key or "instagram").encode("utf-8")).digest()
+    key_int = int.from_bytes(digest[:4], byteorder="big", signed=True)
+    return _RATE_LIMIT_ADVISORY_LOCK_NAMESPACE, key_int
+
+
+def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float | None) -> dict[str, Any]:
+    """Phase 5.2: try cross-container advisory-lock pacing first.
+
+    Returns ``{"acquired": bool, "paced": bool, "wait_ms": int, "error": str|None}``.
+    On any DB-side error, ``acquired`` is False and the caller falls back to
+    the per-container file-lock path. Wall-clock waits are still respected
+    inside the lock so the rate-limit semantics stay identical.
+    """
+    delay = max(0.0, float(delay_seconds or 0))
+    namespace, lock_key = _advisory_lock_keys_for(key)
+    started_at = time.monotonic()
+    try:
+        from trr_backend.db import pg
+    except Exception as exc:  # noqa: BLE001
+        return {"acquired": False, "paced": True, "wait_ms": 0, "error": f"pg_import_failed:{exc}"}
+    try:
+        with pg.db_connection(label="instagram-comments-rate-limit-advisory") as conn:
+            with pg.db_cursor(conn=conn) as cur:
+                cur.execute("select pg_advisory_lock(%s::int, %s::int)", (namespace, lock_key))
+                wait_ms = int((time.monotonic() - started_at) * 1000)
+                try:
+                    if delay > 0:
+                        deadline_remaining = _deadline_remaining_seconds(deadline)
+                        if deadline_remaining is not None and deadline_remaining <= 0:
+                            return {"acquired": True, "paced": False, "wait_ms": wait_ms, "error": None}
+                        sleep_for = delay
+                        if deadline_remaining is not None:
+                            sleep_for = min(sleep_for, deadline_remaining)
+                        if sleep_for > 0:
+                            time.sleep(sleep_for)
+                    return {"acquired": True, "paced": True, "wait_ms": wait_ms, "error": None}
+                finally:
+                    cur.execute("select pg_advisory_unlock(%s::int, %s::int)", (namespace, lock_key))
+    except Exception as exc:  # noqa: BLE001
+        return {"acquired": False, "paced": True, "wait_ms": 0, "error": str(exc)}
+
+
 def _pace_global_api_request(*, key: str, delay_seconds: float, deadline: float | None = None) -> bool:
     delay = max(0.0, float(delay_seconds or 0))
     cooldown_path = _global_rate_cooldown_path(key)
@@ -838,6 +902,18 @@ class InstagramCommentsScraplingFetcher:
             self._browser_account_id,
             self._selected_proxy_fingerprint,
         )
+        # Phase 5.2: cross-container Postgres-advisory-lock pacing with
+        # per-container fcntl fallback. Operators can pin to ``file_lock`` via
+        # SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE for environments
+        # without DB connectivity. Counters surface in runtime_metadata so
+        # silent slowdowns are visible in job metadata.
+        self._global_rate_limit_mode_configured = _resolve_rate_limit_mode()
+        self._global_rate_limit_mode_last: str | None = None
+        self._global_rate_limit_advisory_attempts = 0
+        self._global_rate_limit_advisory_acquires = 0
+        self._global_rate_limit_advisory_fallback_count = 0
+        self._global_rate_limit_advisory_total_wait_ms = 0
+        self._global_rate_limit_advisory_last_error: str | None = None
         self._max_transient_retries = _resolve_positive_int_env(
             "SOCIAL_INSTAGRAM_COMMENT_TRANSIENT_RETRIES",
             self._MAX_TRANSIENT_RETRIES,
@@ -907,6 +983,15 @@ class InstagramCommentsScraplingFetcher:
             "global_api_delay_seconds": self._global_api_delay_seconds,
             "comment_sort_order": self._comment_sort_order,
             "global_rate_limit_key": self._global_rate_limit_key,
+            "global_rate_limit": {
+                "mode_configured": self._global_rate_limit_mode_configured,
+                "mode_last_used": self._global_rate_limit_mode_last,
+                "advisory_attempts": self._global_rate_limit_advisory_attempts,
+                "advisory_acquires": self._global_rate_limit_advisory_acquires,
+                "advisory_fallback_count": self._global_rate_limit_advisory_fallback_count,
+                "advisory_total_wait_ms": self._global_rate_limit_advisory_total_wait_ms,
+                "advisory_last_error": self._global_rate_limit_advisory_last_error,
+            },
             "rate_limit_cooldown_min_seconds": self._rate_limit_cooldown_min_seconds,
             "rate_limit_cooldown_multiplier": self._rate_limit_cooldown_multiplier,
             "max_transient_retries": self._max_transient_retries,
@@ -2041,12 +2126,40 @@ class InstagramCommentsScraplingFetcher:
 
     async def _pace_api_requests(self, *, deadline: float | None = None) -> bool:
         if self._global_api_delay_seconds > 0:
-            paced = await asyncio.to_thread(
-                _pace_global_api_request,
-                key=self._global_rate_limit_key,
-                delay_seconds=self._global_api_delay_seconds,
-                deadline=deadline,
-            )
+            # Phase 5.2: try Postgres advisory lock for cross-container coordination
+            # when configured; fall through to per-container file lock otherwise.
+            paced: bool
+            if self._global_rate_limit_mode_configured == "advisory":
+                self._global_rate_limit_advisory_attempts += 1
+                advisory_result = await asyncio.to_thread(
+                    _try_advisory_lock_pace,
+                    key=self._global_rate_limit_key,
+                    delay_seconds=self._global_api_delay_seconds,
+                    deadline=deadline,
+                )
+                self._global_rate_limit_advisory_total_wait_ms += int(advisory_result.get("wait_ms") or 0)
+                if advisory_result.get("acquired"):
+                    self._global_rate_limit_advisory_acquires += 1
+                    self._global_rate_limit_mode_last = "advisory"
+                    paced = bool(advisory_result.get("paced", True))
+                else:
+                    self._global_rate_limit_advisory_fallback_count += 1
+                    self._global_rate_limit_advisory_last_error = advisory_result.get("error")
+                    self._global_rate_limit_mode_last = "file_lock_fallback"
+                    paced = await asyncio.to_thread(
+                        _pace_global_api_request,
+                        key=self._global_rate_limit_key,
+                        delay_seconds=self._global_api_delay_seconds,
+                        deadline=deadline,
+                    )
+            else:
+                self._global_rate_limit_mode_last = "file_lock"
+                paced = await asyncio.to_thread(
+                    _pace_global_api_request,
+                    key=self._global_rate_limit_key,
+                    delay_seconds=self._global_api_delay_seconds,
+                    deadline=deadline,
+                )
             if not paced:
                 return False
         if self._api_delay_seconds <= 0:
