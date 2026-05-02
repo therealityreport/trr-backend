@@ -416,7 +416,15 @@ def _extract_page_metadata(
 def _extract_top_level_page(
     payload: Any,
     response: dict[str, Any],
-) -> tuple[list[dict[str, Any]], bool, str | None, str | None]:
+) -> tuple[list[dict[str, Any]], bool, str | None, str | None, str | None, str | None]:
+    """Parse a top-level comments page.
+
+    Returns ``(rows, has_more, primary_cursor, primary_cursor_param,
+    alt_cursor, alt_cursor_param)``. The primary cursor is the one the loop
+    should follow first. The alt cursor is the cross-direction value (when IG
+    ships both ``next_min_id`` and ``next_max_id``) so the caller can swap
+    directions when the primary loops on a repeated cursor.
+    """
     rows: list[dict[str, Any]] = []
     if isinstance(payload, dict):
         raw_rows = payload.get("comments") or []
@@ -434,23 +442,46 @@ def _extract_top_level_page(
     metadata = _extract_page_metadata(payload, response, keys=_TOP_LEVEL_PAGINATION_KEYS)
     has_more_comments = bool(metadata.get("has_more_comments"))
     has_more_headload = bool(metadata.get("has_more_headload_comments"))
-    next_max = metadata.get("next_max_id")
-    next_min = metadata.get("next_min_id")
+    next_max_raw = metadata.get("next_max_id")
+    next_min_raw = metadata.get("next_min_id")
+    next_max = str(next_max_raw) if next_max_raw else None
+    next_min = str(next_min_raw) if next_min_raw else None
+
+    primary_cursor: str | None = None
+    primary_param: str | None = None
+    alt_cursor: str | None = None
+    alt_param: str | None = None
     if has_more_comments and next_max:
-        return rows, True, str(next_max), "max_id"
-    if has_more_headload and next_min:
-        return rows, True, str(next_min), "min_id"
-    if has_more_comments and next_min:
-        return rows, True, str(next_min), "min_id"
-    if has_more_headload and next_max:
-        return rows, True, str(next_max), "max_id"
-    return rows, has_more_comments or has_more_headload, None, None
+        primary_cursor, primary_param = next_max, "max_id"
+        if next_min:
+            alt_cursor, alt_param = next_min, "min_id"
+    elif has_more_headload and next_min:
+        primary_cursor, primary_param = next_min, "min_id"
+        if next_max:
+            alt_cursor, alt_param = next_max, "max_id"
+    elif has_more_comments and next_min:
+        primary_cursor, primary_param = next_min, "min_id"
+        if next_max:
+            alt_cursor, alt_param = next_max, "max_id"
+    elif has_more_headload and next_max:
+        primary_cursor, primary_param = next_max, "max_id"
+        if next_min:
+            alt_cursor, alt_param = next_min, "min_id"
+
+    has_more = bool(primary_cursor) or has_more_comments or has_more_headload
+    return rows, has_more, primary_cursor, primary_param, alt_cursor, alt_param
 
 
 def _extract_reply_page(
     payload: Any,
     response: dict[str, Any],
-) -> tuple[list[dict[str, Any]], str | None, str | None]:
+) -> tuple[list[dict[str, Any]], str | None, str | None, str | None, str | None]:
+    """Parse a reply (child-comments) page.
+
+    Returns ``(rows, primary_cursor, primary_cursor_param, alt_cursor,
+    alt_cursor_param)``. The alt cursor is exposed so a stuck reply pagination
+    can swap min_id <-> max_id once before declaring repeated_cursor terminal.
+    """
     rows: list[dict[str, Any]] = []
     if isinstance(payload, dict):
         raw_rows = payload.get("child_comments")
@@ -472,13 +503,24 @@ def _extract_reply_page(
     metadata = _extract_page_metadata(payload, response, keys=_REPLY_PAGINATION_KEYS)
     has_more_tail = bool(metadata.get("has_more_tail_child_comments"))
     has_more_head = bool(metadata.get("has_more_head_child_comments"))
-    next_min = metadata.get("next_min_child_cursor")
-    next_max = metadata.get("next_max_child_cursor")
+    next_min_raw = metadata.get("next_min_child_cursor")
+    next_max_raw = metadata.get("next_max_child_cursor")
+    next_min = str(next_min_raw) if next_min_raw else None
+    next_max = str(next_max_raw) if next_max_raw else None
+
+    primary_cursor: str | None = None
+    primary_param: str | None = None
+    alt_cursor: str | None = None
+    alt_param: str | None = None
     if (has_more_tail or has_more_head) and next_min:
-        return rows, str(next_min), "min_id"
-    if (has_more_head or has_more_tail) and next_max:
-        return rows, str(next_max), "max_id"
-    return rows, None, None
+        primary_cursor, primary_param = next_min, "min_id"
+        if next_max:
+            alt_cursor, alt_param = next_max, "max_id"
+    elif (has_more_head or has_more_tail) and next_max:
+        primary_cursor, primary_param = next_max, "max_id"
+        if next_min:
+            alt_cursor, alt_param = next_min, "min_id"
+    return rows, primary_cursor, primary_param, alt_cursor, alt_param
 
 
 def _expected_target_count(expected_comment_count: int | None, max_comments: int) -> int | None:
@@ -940,6 +982,11 @@ class InstagramCommentsScraplingFetcher:
         self._reply_checkpoints: list[dict[str, Any]] = []
         self._reply_checkpoint_total_count = 0
         self._reply_checkpoint_dropped_count = 0
+        # Phase A5 follow-up: cursor-direction swap telemetry. Non-zero values
+        # indicate IG returned a repeated cursor and we recovered (or tried to)
+        # by swapping min_id <-> max_id on the same page payload.
+        self._top_level_cursor_direction_swaps = 0
+        self._reply_cursor_direction_swaps = 0
         self._hidden_comments_render_attempts = 0
         self._hidden_comments_rendered_comments = 0
         self._hidden_comments_merged = 0
@@ -1018,6 +1065,13 @@ class InstagramCommentsScraplingFetcher:
                 "max_items": self._reply_checkpoint_max_items,
                 "dropped_count": self._reply_checkpoint_dropped_count,
                 "truncated": self._reply_checkpoint_dropped_count > 0,
+            },
+            # Phase A5 follow-up: cursor-direction swap counters across the
+            # whole shard. Non-zero indicates IG returned repeated cursors and
+            # the fetcher recovered (or attempted to) by switching directions.
+            "cursor_direction_swaps": {
+                "top_level": self._top_level_cursor_direction_swaps,
+                "reply": self._reply_cursor_direction_swaps,
             },
         }
 
@@ -1119,6 +1173,11 @@ class InstagramCommentsScraplingFetcher:
         api_top_level_reveal_candidate = False
         hidden_reveal_attempted = False
         post_deadline_reached = False
+        # Phase A5 follow-up: track cursor-direction swaps so we can recover
+        # from IG cursor-loops by switching min_id <-> max_id once before
+        # falling back to terminal repeated_cursor.
+        cursor_directions_attempted: set[str] = set()
+        cursor_direction_swaps = 0
         deadline = time.monotonic() + _resolve_positive_float_env(
             "SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS",
             _COMMENT_PAGINATION_MAX_SECONDS_DEFAULT,
@@ -1211,7 +1270,14 @@ class InstagramCommentsScraplingFetcher:
                 break
             pages_seen += 1
 
-            comment_rows, has_more, next_cursor, next_cursor_param_name = _extract_top_level_page(payload, response)
+            (
+                comment_rows,
+                has_more,
+                next_cursor,
+                next_cursor_param_name,
+                alt_next_cursor,
+                alt_next_cursor_param_name,
+            ) = _extract_top_level_page(payload, response)
             for comment_data in comment_rows:
                 if time.monotonic() >= deadline:
                     fetch_failed = True
@@ -1358,7 +1424,45 @@ class InstagramCommentsScraplingFetcher:
                 next_cursor_param_name = "min_id"
             next_cursor_key = _normalized_cursor_key(next_cursor_param_name, next_cursor)
             current_cursor_key = _normalized_cursor_key(cursor_param_name, cursor)
+            # Only record an "attempt" of a direction when we actually issued a
+            # paginated request with that cursor — the initial seed page
+            # (cursor is None) doesn't exercise either direction.
+            if cursor is not None and cursor_param_name in {"min_id", "max_id"}:
+                cursor_directions_attempted.add(cursor_param_name)
             if next_cursor_key == current_cursor_key or (next_cursor_key and next_cursor_key in seen_cursors):
+                # Phase A5 follow-up: try the cross-direction cursor (min_id <-> max_id)
+                # before declaring repeated_cursor terminal. IG sometimes ships both
+                # next_min_id and next_max_id in the same response; switching
+                # direction often unblocks a stuck cursor without re-fetching pages.
+                alt_param = (
+                    str(alt_next_cursor_param_name or "").strip()
+                    if alt_next_cursor and alt_next_cursor_param_name
+                    else None
+                )
+                if (
+                    alt_param in {"min_id", "max_id"}
+                    and alt_param not in cursor_directions_attempted
+                    and alt_next_cursor
+                ):
+                    alt_cursor_key = _normalized_cursor_key(alt_param, alt_next_cursor)
+                    if alt_cursor_key and alt_cursor_key not in seen_cursors:
+                        logger.info(
+                            "Instagram comments pagination swapping cursor direction "
+                            "from %s to %s on shortcode=%s repeated_cursor=%s",
+                            cursor_param_name,
+                            alt_param,
+                            shortcode,
+                            next_cursor,
+                        )
+                        seen_cursors.add(alt_cursor_key)
+                        cursor_direction_swaps += 1
+                        cursor_directions_attempted.add(alt_param)
+                        cursor = str(alt_next_cursor)
+                        cursor_param_name = alt_param
+                        self._record_retry_reason("pagination_repeated_cursor_swap_direction")
+                        self._top_level_cursor_direction_swaps += 1
+                        continue
+
                 has_gap = _has_expected_gap(
                     expected_comment_count=expected_comments,
                     max_comments=max_comments,
@@ -1368,7 +1472,21 @@ class InstagramCommentsScraplingFetcher:
                     has_gap = True
                 fetch_failed = fetch_failed or has_gap
                 fetch_reason = "pagination_repeated_cursor"
-                retryable = retryable or has_gap
+                # Phase A5 follow-up: once BOTH cursor directions have actually been
+                # attempted (we swapped at least once and still hit a repeat), the
+                # IG state is genuinely stuck — retrying the same shard re-loops on
+                # the same payload. Mark non-retryable so the job-level Phase 1.4
+                # raise stops firing on this stop reason. When only one direction
+                # has been tried (alt unavailable), preserve the legacy retryable
+                # behavior so the next attempt has a chance to see different cursors.
+                both_directions_attempted = (
+                    "min_id" in cursor_directions_attempted
+                    and "max_id" in cursor_directions_attempted
+                )
+                if both_directions_attempted:
+                    retryable = retryable and not has_gap
+                else:
+                    retryable = retryable or has_gap
                 api_top_level_reveal_candidate = api_top_level_reveal_candidate or has_gap
                 if has_gap:
                     top_level_checkpoint = self._record_top_level_checkpoint(
@@ -1385,9 +1503,12 @@ class InstagramCommentsScraplingFetcher:
                         pages_seen=pages_seen,
                     )
                 logger.warning(
-                    "Instagram comments pagination repeated cursor for shortcode=%s cursor=%s",
+                    "Instagram comments pagination repeated cursor for shortcode=%s cursor=%s "
+                    "directions_attempted=%s direction_swaps=%d",
                     shortcode,
                     next_cursor,
+                    sorted(cursor_directions_attempted),
+                    cursor_direction_swaps,
                 )
                 break
             if pages_seen >= page_cap:
@@ -1828,6 +1949,11 @@ class InstagramCommentsScraplingFetcher:
         retryable = False
         pages_seen = 0
         seen_cursors: set[str] = set()
+        # Phase A5 follow-up: track which directions have been attempted on this
+        # parent so reply pagination can swap min_id <-> max_id once before
+        # declaring repeated_cursor terminal.
+        cursor_directions_attempted: set[str] = set()
+        cursor_direction_swaps = 0
         last_attempt_count = 0
         last_reply_cursor: str | None = None
         last_reply_cursor_param: str | None = None
@@ -1874,7 +2000,13 @@ class InstagramCommentsScraplingFetcher:
                 break
             pages_seen += 1
 
-            reply_rows, next_cursor, next_cursor_param_name = _extract_reply_page(payload, response)
+            (
+                reply_rows,
+                next_cursor,
+                next_cursor_param_name,
+                alt_next_reply_cursor,
+                alt_next_reply_cursor_param_name,
+            ) = _extract_reply_page(payload, response)
             for reply_data in reply_rows:
                 if not isinstance(reply_data, dict):
                     continue
@@ -1902,7 +2034,42 @@ class InstagramCommentsScraplingFetcher:
             next_reply_cursor_param = next_cursor_param_name
             next_cursor_key = f"{next_cursor_param_name}:{next_cursor}"
             current_cursor_key = f"{cursor_param_name}:{cursor}" if cursor and cursor_param_name else None
+            # Only record a "direction attempt" for an actually-paginated request;
+            # the initial seed (cursor is None) doesn't exercise either direction.
+            if cursor is not None and cursor_param_name in {"min_id", "max_id"}:
+                cursor_directions_attempted.add(cursor_param_name)
             if next_cursor_key == current_cursor_key or next_cursor_key in seen_cursors:
+                # Phase A5 follow-up: try the cross-direction reply cursor
+                # (min_id <-> max_id) before declaring repeated_cursor terminal.
+                alt_param = (
+                    str(alt_next_reply_cursor_param_name or "").strip()
+                    if alt_next_reply_cursor and alt_next_reply_cursor_param_name
+                    else None
+                )
+                if (
+                    alt_param in {"min_id", "max_id"}
+                    and alt_param not in cursor_directions_attempted
+                    and alt_next_reply_cursor
+                ):
+                    alt_cursor_key = f"{alt_param}:{alt_next_reply_cursor}"
+                    if alt_cursor_key not in seen_cursors:
+                        logger.info(
+                            "Instagram reply pagination swapping cursor direction "
+                            "from %s to %s on comment_id=%s repeated_cursor=%s",
+                            cursor_param_name,
+                            alt_param,
+                            comment_id,
+                            next_cursor,
+                        )
+                        seen_cursors.add(alt_cursor_key)
+                        cursor_direction_swaps += 1
+                        cursor_directions_attempted.add(alt_param)
+                        cursor = str(alt_next_reply_cursor)
+                        cursor_param_name = alt_param
+                        self._record_retry_reason("pagination_repeated_cursor_swap_direction_reply")
+                        self._reply_cursor_direction_swaps += 1
+                        continue
+
                 observed_reply_total = len(
                     merge_comment_replies(
                         preview_replies,
@@ -1913,11 +2080,25 @@ class InstagramCommentsScraplingFetcher:
                 has_gap = expected_reply_count is None or observed_reply_total < expected_reply_count
                 fetch_failed = fetch_failed or has_gap
                 fetch_reason = "pagination_repeated_cursor"
-                retryable = retryable or has_gap
+                # Phase A5 follow-up: only mark non-retryable when BOTH cursor
+                # directions have been actually attempted on this parent. When
+                # alt was never available, preserve legacy retryable behavior
+                # so the next attempt can see different IG state.
+                both_directions_attempted = (
+                    "min_id" in cursor_directions_attempted
+                    and "max_id" in cursor_directions_attempted
+                )
+                if both_directions_attempted:
+                    retryable = retryable and not has_gap
+                else:
+                    retryable = retryable or has_gap
                 logger.warning(
-                    "Instagram reply pagination repeated cursor for comment_id=%s cursor=%s",
+                    "Instagram reply pagination repeated cursor for comment_id=%s cursor=%s "
+                    "directions_attempted=%s direction_swaps=%d",
                     comment_id,
                     next_cursor,
+                    sorted(cursor_directions_attempted),
+                    cursor_direction_swaps,
                 )
                 break
             if pages_seen >= page_cap:
