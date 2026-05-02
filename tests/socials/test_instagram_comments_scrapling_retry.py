@@ -2557,6 +2557,53 @@ def _active_comments_job_fetch_one(final_status: str = "completed"):
     return _fake_fetch_one
 
 
+def test_incomplete_retry_stall_stops_repeated_hidden_gap() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    job = {
+        "items_found": 53,
+        "metadata": {
+            "incomplete_target_source_ids": ["SHORT1"],
+            "incomplete_fetch_reasons": {"SHORT1": "hidden_comments_unresolved"},
+            "retry_rebalance": {"remaining_target_source_ids": ["SHORT1"]},
+        },
+    }
+
+    stalled = jr._incomplete_retry_has_stalled(
+        job=job,
+        attempt_count=3,
+        retryable_incomplete_targets=["SHORT1"],
+        retry_fetch_reasons={"SHORT1": "hidden_comments_unresolved"},
+        comments_fetched=53,
+    )
+
+    assert stalled is not None
+    assert stalled["target_source_ids"] == ["SHORT1"]
+    assert stalled["prior_items_found"] == 53
+
+
+def test_incomplete_retry_stall_does_not_stop_transient_reasons() -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    job = {
+        "items_found": 2,
+        "metadata": {
+            "incomplete_target_source_ids": ["SHORT1"],
+            "retry_rebalance": {"remaining_target_source_ids": ["SHORT1"]},
+        },
+    }
+
+    stalled = jr._incomplete_retry_has_stalled(
+        job=job,
+        attempt_count=3,
+        retryable_incomplete_targets=["SHORT1"],
+        retry_fetch_reasons={"SHORT1": "http_429"},
+        comments_fetched=2,
+    )
+
+    assert stalled is None
+
+
 def test_job_runner_aborts_queued_sibling_shards_after_run_level_auth_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5124,3 +5171,112 @@ def test_job_runner_returns_degraded_summary_when_final_job_read_hits_db_saturat
     assert payload["id"] == "job-1"
     assert payload["status"] == "completed"
     assert payload["metadata"]["degraded_summary"] is True
+
+
+def test_fetch_comments_swaps_cursor_direction_when_min_id_repeats(monkeypatch) -> None:
+    """Phase A5 follow-up: when IG returns the same next_min_id twice but
+    also ships a next_max_id, the fetcher swaps direction and continues
+    paginating instead of declaring repeated_cursor terminal.
+    """
+    fetcher = _build_fetcher()
+    fetcher._parser._parse_comment = MagicMock(
+        side_effect=[
+            InstagramComment(
+                comment_id="c1",
+                text="one",
+                username="alpha",
+                user_id="1",
+                created_at=1,
+                date_time="1970-01-01T00:00:01+00:00",
+                likes=0,
+                is_reply=False,
+                parent_comment_id=None,
+                reply_count=0,
+            ),
+            InstagramComment(
+                comment_id="c2",
+                text="two",
+                username="beta",
+                user_id="2",
+                created_at=2,
+                date_time="1970-01-01T00:00:02+00:00",
+                likes=0,
+                is_reply=False,
+                parent_comment_id=None,
+                reply_count=0,
+            ),
+            InstagramComment(
+                comment_id="c3",
+                text="three",
+                username="gamma",
+                user_id="3",
+                created_at=3,
+                date_time="1970-01-01T00:00:03+00:00",
+                likes=0,
+                is_reply=False,
+                parent_comment_id=None,
+                reply_count=0,
+            ),
+        ]
+    )
+    fetcher._fetch_json_response = AsyncMock(
+        side_effect=[
+            # Page 1: primary follows next_max_id but next_min_id is also exposed.
+            {
+                "payload": {
+                    "comments": [{"id": "c1"}],
+                    "has_more_comments": True,
+                    "next_max_id": "max-2",
+                    "next_min_id": "min-9",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            # Page 2: max_id repeats (max-2 again) -> fetcher should swap to min_id.
+            {
+                "payload": {
+                    "comments": [{"id": "c2"}],
+                    "has_more_comments": True,
+                    "next_max_id": "max-2",
+                    "next_min_id": "min-9",
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+            # Page 3 (after swap): served with min_id=min-9; loop terminates cleanly.
+            {
+                "payload": {
+                    "comments": [{"id": "c3"}],
+                    "has_more_comments": False,
+                    "has_more_headload_comments": False,
+                },
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+            },
+        ]
+    )
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "ABC123",
+            max_comments=10,
+            fetch_replies=False,
+        )
+    )
+
+    # All three comments persisted.
+    assert [c.comment_id for c in result.comments] == ["c1", "c2", "c3"]
+    # Loop terminated cleanly — pagination ran to completion via the alt cursor.
+    assert result.fetch_failed is False
+    assert result.fetch_reason is None
+    # Direction swap surfaced in runtime metadata.
+    assert fetcher.runtime_metadata["cursor_direction_swaps"]["top_level"] == 1
+    assert fetcher.runtime_metadata["retry_reason_counts"].get(
+        "pagination_repeated_cursor_swap_direction"
+    ) == 1

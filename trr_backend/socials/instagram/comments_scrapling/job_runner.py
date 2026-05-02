@@ -78,6 +78,12 @@ _TERMINAL_COVERAGE_GAP_REASONS = {
     "transport_error",
     "transport_timeout",
 }
+_INCOMPLETE_RETRY_STALL_ATTEMPTS_DEFAULT = 3
+_INCOMPLETE_RETRY_STALL_REASONS = {
+    "hidden_comments_unresolved",
+    "hidden_comments_unavailable",
+    "hidden_comments_blocked",
+}
 
 
 @dataclass(slots=True)
@@ -646,6 +652,17 @@ def _json_list(value: Any) -> list[str]:
     return []
 
 
+def _comment_url_from_row(row: dict[str, Any], *, shortcode: str, comment_id: str) -> str | None:
+    existing = str(row.get("comment_url") or "").strip()
+    if existing:
+        return existing
+    normalized_shortcode = str(shortcode or "").strip()
+    normalized_comment_id = str(comment_id or "").strip()
+    if not (normalized_shortcode and normalized_comment_id):
+        return None
+    return f"https://www.instagram.com/p/{normalized_shortcode}/c/{normalized_comment_id}/"
+
+
 def _load_persisted_replies_by_parent(
     *,
     account_handle: str,
@@ -672,6 +689,12 @@ def _load_persisted_replies_by_parent(
           reply.author_profile_pic_url,
           reply.author_profile_pic_url_hd,
           reply.author_is_verified,
+          reply.comment_url,
+          reply.author_fbid_v2,
+          reply.author_is_mentionable,
+          reply.author_is_private,
+          reply.author_latest_reel_media,
+          reply.author_profile_pic_id,
           reply.raw_data,
           reply.source_snapshot_type
         from social.instagram_comments reply
@@ -713,12 +736,22 @@ def _load_persisted_replies_by_parent(
             owner_is_verified=(
                 bool(row.get("author_is_verified")) if row.get("author_is_verified") is not None else None
             ),
+            owner_fbid_v2=str(row.get("author_fbid_v2") or "") or None,
+            owner_is_mentionable=(
+                bool(row.get("author_is_mentionable")) if row.get("author_is_mentionable") is not None else None
+            ),
+            owner_is_private=(
+                bool(row.get("author_is_private")) if row.get("author_is_private") is not None else None
+            ),
+            owner_latest_reel_media=_safe_int(row.get("author_latest_reel_media")),
+            owner_profile_pic_id=str(row.get("author_profile_pic_id") or "") or None,
             is_hidden_by_instagram=bool((row.get("raw_data") or {}).get("is_hidden_by_instagram"))
             if isinstance(row.get("raw_data"), dict)
             else False,
             source_snapshot_type=str(row.get("source_snapshot_type") or "full_comments_scrape"),
             post_shortcode=normalized_shortcode,
             post_url=f"https://www.instagram.com/p/{normalized_shortcode}/",
+            comment_url=_comment_url_from_row(row, shortcode=normalized_shortcode, comment_id=comment_id),
         )
         replies_by_parent.setdefault(parent_id, []).append(reply)
     return replies_by_parent
@@ -749,6 +782,12 @@ def _load_persisted_top_level_comments_for_reply_retry(
           top.author_profile_pic_url,
           top.author_profile_pic_url_hd,
           top.author_is_verified,
+          top.comment_url,
+          top.author_fbid_v2,
+          top.author_is_mentionable,
+          top.author_is_private,
+          top.author_latest_reel_media,
+          top.author_profile_pic_id,
           top.raw_data,
           top.source_snapshot_type,
           coalesce(reply_counts.saved_reply_count, 0)::int as saved_reply_count
@@ -805,12 +844,22 @@ def _load_persisted_top_level_comments_for_reply_retry(
                 owner_is_verified=(
                     bool(row.get("author_is_verified")) if row.get("author_is_verified") is not None else None
                 ),
+                owner_fbid_v2=str(row.get("author_fbid_v2") or "") or None,
+                owner_is_mentionable=(
+                    bool(row.get("author_is_mentionable")) if row.get("author_is_mentionable") is not None else None
+                ),
+                owner_is_private=(
+                    bool(row.get("author_is_private")) if row.get("author_is_private") is not None else None
+                ),
+                owner_latest_reel_media=_safe_int(row.get("author_latest_reel_media")),
+                owner_profile_pic_id=str(row.get("author_profile_pic_id") or "") or None,
                 is_hidden_by_instagram=bool((row.get("raw_data") or {}).get("is_hidden_by_instagram"))
                 if isinstance(row.get("raw_data"), dict)
                 else False,
                 source_snapshot_type=str(row.get("source_snapshot_type") or "full_comments_scrape"),
                 post_shortcode=normalized_shortcode,
                 post_url=f"https://www.instagram.com/p/{normalized_shortcode}/",
+                comment_url=_comment_url_from_row(row, shortcode=normalized_shortcode, comment_id=comment_id),
             )
         )
     return comments
@@ -1064,6 +1113,82 @@ def _reply_resume_cursor_params_from_job(job: dict[str, Any]) -> dict[str, str]:
     return params
 
 
+def _metadata_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(item or "").strip() for item in value if str(item or "").strip()))
+
+
+def _prior_retry_incomplete_targets(job: dict[str, Any]) -> list[str]:
+    metadata = job.get("metadata")
+    if not isinstance(metadata, dict):
+        return []
+    candidates: list[Any] = [
+        metadata.get("incomplete_target_source_ids"),
+        metadata.get("auth_failed_target_source_ids"),
+    ]
+    runtime_metadata = metadata.get("runtime_metadata")
+    if isinstance(runtime_metadata, dict):
+        candidates.extend(
+            [
+                runtime_metadata.get("incomplete_target_source_ids"),
+                runtime_metadata.get("auth_failed_target_source_ids"),
+            ]
+        )
+    retry_rebalance = metadata.get("retry_rebalance")
+    if isinstance(retry_rebalance, dict):
+        candidates.append(retry_rebalance.get("remaining_target_source_ids"))
+    targets: list[str] = []
+    for candidate in candidates:
+        targets.extend(_metadata_string_list(candidate))
+    return list(dict.fromkeys(targets))
+
+
+def _incomplete_retry_has_stalled(
+    *,
+    job: dict[str, Any],
+    attempt_count: int,
+    retryable_incomplete_targets: list[str],
+    retry_fetch_reasons: dict[str, str | None],
+    comments_fetched: int,
+) -> dict[str, Any] | None:
+    try:
+        stall_attempts = int(
+            os.environ.get("SOCIAL_INSTAGRAM_COMMENTS_INCOMPLETE_STALL_ATTEMPTS")
+            or _INCOMPLETE_RETRY_STALL_ATTEMPTS_DEFAULT
+        )
+    except (TypeError, ValueError):
+        stall_attempts = _INCOMPLETE_RETRY_STALL_ATTEMPTS_DEFAULT
+    stall_attempts = max(2, min(stall_attempts, 20))
+    if attempt_count < stall_attempts:
+        return None
+    current_targets = list(dict.fromkeys(str(item or "").strip() for item in retryable_incomplete_targets if item))
+    if not current_targets:
+        return None
+    prior_targets = _prior_retry_incomplete_targets(job)
+    if set(prior_targets) != set(current_targets):
+        return None
+    normalized_reasons = {
+        str(reason or "").strip().lower()
+        for shortcode, reason in retry_fetch_reasons.items()
+        if shortcode in current_targets
+    }
+    if not normalized_reasons or not normalized_reasons.issubset(_INCOMPLETE_RETRY_STALL_REASONS):
+        return None
+    prior_items_found = _safe_int(job.get("items_found")) or 0
+    if prior_items_found > 0 and comments_fetched > prior_items_found:
+        return None
+    return {
+        "stalled": True,
+        "attempt_count": attempt_count,
+        "stall_attempts": stall_attempts,
+        "target_source_ids": current_targets,
+        "fetch_reasons": {target: retry_fetch_reasons.get(target) for target in current_targets},
+        "prior_items_found": prior_items_found,
+        "current_comments_fetched": comments_fetched,
+    }
+
+
 def _prior_incomplete_fetch_reason(job: dict[str, Any], shortcode: str) -> str:
     metadata = job.get("metadata")
     if not isinstance(metadata, dict):
@@ -1309,6 +1434,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     # social.scrape_jobs.metadata. Persisted under metadata.comment_failures.
     failed_comment_ids: list[dict[str, Any]] = []
     failed_comment_ids_truncated = False
+    incomplete_retry_stall_metadata: dict[str, Any] | None = None
     warmup_completed_at = None
     first_post_persisted_at = None
     auth_context: dict[str, Any] = {}
@@ -1348,6 +1474,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "truncated": failed_comment_ids_truncated,
                 "max_entries": _COMMENT_FAILURE_METADATA_MAX_ENTRIES,
             },
+            "incomplete_retry_stalled": incomplete_retry_stall_metadata,
         }
 
     def terminal_metadata_common() -> dict[str, Any]:
@@ -1381,7 +1508,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         # truncation flag to the outer function so progress_metadata_common()
         # reads the live values and _maybe_refresh_warmup() writes propagate.
         nonlocal posts_since_last_warmup, mid_run_warmup_count, last_mid_run_warmup_reason
-        nonlocal failed_comment_ids_truncated
+        nonlocal failed_comment_ids_truncated, incomplete_retry_stall_metadata
 
         session = resolve_comments_scrapling_session(
             browser_account_id=account_handle,
@@ -1904,6 +2031,16 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     completion_reason = "stored_comment_coverage_reconciled_gap"
                 elif stored_coverage_terminal_gap and not is_complete:
                     completion_reason = "stored_comment_coverage_terminal_gap_reconciled"
+                top_level_checkpoint_for_sample = getattr(result, "top_level_checkpoint", None)
+                pages_seen_for_post: int | None = None
+                last_cursor_param_for_post: str | None = None
+                if isinstance(top_level_checkpoint_for_sample, dict):
+                    raw_pages_seen = top_level_checkpoint_for_sample.get("pages_seen")
+                    if isinstance(raw_pages_seen, int) and raw_pages_seen >= 0:
+                        pages_seen_for_post = raw_pages_seen
+                    raw_cursor_param = top_level_checkpoint_for_sample.get("last_top_level_cursor_param")
+                    if isinstance(raw_cursor_param, str) and raw_cursor_param.strip():
+                        last_cursor_param_for_post = raw_cursor_param.strip()
                 post_latency_samples.append(
                     {
                         "shortcode": shortcode,
@@ -1920,6 +2057,11 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         "is_complete": effective_is_complete,
                         "completion_reason": completion_reason,
                         "reported_comment_count": _extract_reported_comment_count(result),
+                        # Phase A5 follow-up diagnostics: surface pagination
+                        # depth + last cursor direction so operators can
+                        # spot repeated_cursor stops without grepping logs.
+                        "pages_seen": pages_seen_for_post,
+                        "last_cursor_param": last_cursor_param_for_post,
                     }
                 )
                 processed_posts += 1
@@ -1976,19 +2118,36 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     shortcode: incomplete_fetch_reasons.get(shortcode) or auth_failed_fetch_reasons.get(shortcode)
                     for shortcode in retryable_incomplete_targets
                 }
-                raise CommentsScraplingRuntimeError(
-                    "Instagram comments Scrapling job had retryable incomplete posts.",
-                    error_code="instagram_comments_incomplete_retryable",
-                    retryable=True,
-                    runtime_metadata={
-                        "incomplete_target_source_ids": retryable_incomplete_targets,
-                        "incomplete_fetch_reasons": retry_fetch_reasons,
-                        "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
-                        "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
-                        "incomplete_raise_threshold": incomplete_raise_threshold,
-                        "target_source_ids_count": len(target_source_ids),
-                    },
+                stalled_retry = _incomplete_retry_has_stalled(
+                    job=job,
+                    attempt_count=attempt_count,
+                    retryable_incomplete_targets=retryable_incomplete_targets,
+                    retry_fetch_reasons=retry_fetch_reasons,
+                    comments_fetched=comments_fetched,
                 )
+                if stalled_retry:
+                    incomplete_retry_stall_metadata = stalled_retry
+                    logger.info(
+                        "Instagram comments incomplete retry stalled; completing shard without requeue: "
+                        "job_id=%s attempt=%s targets=%s",
+                        job_id,
+                        attempt_count,
+                        retryable_incomplete_targets,
+                    )
+                else:
+                    raise CommentsScraplingRuntimeError(
+                        "Instagram comments Scrapling job had retryable incomplete posts.",
+                        error_code="instagram_comments_incomplete_retryable",
+                        retryable=True,
+                        runtime_metadata={
+                            "incomplete_target_source_ids": retryable_incomplete_targets,
+                            "incomplete_fetch_reasons": retry_fetch_reasons,
+                            "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
+                            "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                            "incomplete_raise_threshold": incomplete_raise_threshold,
+                            "target_source_ids_count": len(target_source_ids),
+                        },
+                    )
 
             return auth_metadata, dict(fetcher.runtime_metadata)
         finally:
