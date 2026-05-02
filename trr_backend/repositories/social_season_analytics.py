@@ -19101,7 +19101,11 @@ def _upsert_instagram_comment_tree(
     # Phase 2: Apify-source owner-metadata columns (migration
     # 20260501210512_instagram_comments_owner_metadata.sql).
     if _column_exists("social", "instagram_comments", "comment_url"):
-        payload["comment_url"] = str(getattr(comment, "comment_url", "") or "").strip() or None
+        payload["comment_url"] = _instagram_comment_url_for_payload(
+            comment,
+            post_shortcode=getattr(comment, "post_shortcode", None),
+            comment_id=comment_external_id,
+        )
     if _column_exists("social", "instagram_comments", "author_fbid_v2"):
         payload["author_fbid_v2"] = str(getattr(comment, "owner_fbid_v2", "") or "").strip() or None
     if _column_exists("social", "instagram_comments", "author_is_mentionable"):
@@ -19221,6 +19225,17 @@ def _instagram_comment_effective_reply_depth(comment: Any, *, parent_external_id
     if parsed_depth > 0 or not parent_external_id:
         return max(0, parsed_depth)
     return max(0, int(fallback or 0))
+
+
+def _instagram_comment_url_for_payload(comment: Any, *, post_shortcode: str | None, comment_id: str) -> str | None:
+    existing = str(getattr(comment, "comment_url", "") or "").strip()
+    if existing:
+        return existing
+    shortcode = str(post_shortcode or "").strip()
+    external_id = str(comment_id or "").strip()
+    if not (shortcode and external_id):
+        return None
+    return f"https://www.instagram.com/p/{shortcode}/c/{external_id}/"
 
 
 def _batch_upsert_instagram_comments(
@@ -19367,8 +19382,10 @@ def _batch_upsert_instagram_comments(
             payload["media_mirror_error"] = None
         # Phase 2: Apify-source owner-metadata column writes.
         if _instagram_comment_has_comment_url:
-            payload["comment_url"] = (
-                str(getattr(comment_obj, "comment_url", "") or "").strip() or None
+            payload["comment_url"] = _instagram_comment_url_for_payload(
+                comment_obj,
+                post_shortcode=getattr(comment_obj, "post_shortcode", None),
+                comment_id=external_id,
             )
         if _instagram_comment_has_author_fbid_v2:
             payload["author_fbid_v2"] = (

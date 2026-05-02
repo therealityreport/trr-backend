@@ -55,6 +55,17 @@ def _comment_effective_reply_depth(comment: InstagramComment, parent_external_id
     return max(0, int(fallback or 0))
 
 
+def _comment_url_for_payload(*, comment: InstagramComment, shortcode: str, external_id: str) -> str | None:
+    existing = str(getattr(comment, "comment_url", "") or "").strip()
+    if existing:
+        return existing
+    normalized_shortcode = str(shortcode or "").strip()
+    normalized_external_id = str(external_id or "").strip()
+    if not (normalized_shortcode and normalized_external_id):
+        return None
+    return f"https://www.instagram.com/p/{normalized_shortcode}/c/{normalized_external_id}/"
+
+
 def find_instagram_post_for_comments(
     *,
     account_handle: str,
@@ -223,6 +234,7 @@ def persist_instagram_comments_for_post(
             repo=repo,
             post_id=post_id,
             account_handle=account_handle,
+            shortcode=shortcode,
             comments=comments,
             run_id=run_id,
             job_id=job_id,
@@ -260,6 +272,7 @@ def _persist_without_season_context(
     repo: Any,
     post_id: str,
     account_handle: str,
+    shortcode: str,
     comments: list[InstagramComment],
     run_id: str | None,
     job_id: str | None,
@@ -349,8 +362,10 @@ def _persist_without_season_context(
             )
         # Phase 2: write Apify-source owner-metadata columns when present.
         if has_comment_url:
-            payload["comment_url"] = (
-                str(getattr(comment_obj, "comment_url", "") or "").strip() or None
+            payload["comment_url"] = _comment_url_for_payload(
+                comment=comment_obj,
+                shortcode=str(getattr(comment_obj, "post_shortcode", "") or shortcode),
+                external_id=external_id,
             )
         if has_author_fbid_v2:
             payload["author_fbid_v2"] = (

@@ -64,6 +64,12 @@ def test_no_season_persistence_preserves_media_and_reply_metadata() -> None:
     fake_repo = SimpleNamespace(
         _column_exists=lambda _schema, _table, column: column
         in {
+            "comment_url",
+            "author_fbid_v2",
+            "author_is_mentionable",
+            "author_is_private",
+            "author_latest_reel_media",
+            "author_profile_pic_id",
             "media_urls",
             "hosted_media_urls",
             "media_mirror_status",
@@ -93,18 +99,25 @@ def test_no_season_persistence_preserves_media_and_reply_metadata() -> None:
         media_urls=["https://images.example/reply-sticker.gif"],
         hosted_media_urls=["https://cdn.example/reply-sticker.gif"],
     )
+    reply.owner_fbid_v2 = "reply-fbid"
+    reply.owner_is_mentionable = True
+    reply.owner_is_private = False
+    reply.owner_latest_reel_media = 1_775_000_001
+    reply.owner_profile_pic_id = "reply-pic"
     comment = _comment(
         "comment-1",
         media_urls=["https://images.example/comment-gift.gif"],
         hosted_media_urls=["https://cdn.example/comment-gift.gif"],
         replies=[reply],
     )
+    comment.comment_url = "https://www.instagram.com/p/ABC123/c/comment-1/"
     stats: dict[str, int] = {}
 
     written = persistence._persist_without_season_context(
         repo=fake_repo,
         post_id="post-1",
         account_handle="bravotv",
+        shortcode="ABC123",
         comments=[comment],
         run_id="run-1",
         job_id="job-1",
@@ -119,11 +132,18 @@ def test_no_season_persistence_preserves_media_and_reply_metadata() -> None:
     assert captured_batches[0][0]["hosted_media_urls"] == ["https://cdn.example/comment-gift.gif"]
     assert captured_batches[0][0]["media_mirror_status"] == "deferred"
     assert captured_batches[0][0]["media_mirror_error"] == "season_context_missing"
+    assert captured_batches[0][0]["comment_url"] == "https://www.instagram.com/p/ABC123/c/comment-1/"
     assert captured_batches[0][0]["source_snapshot_type"] == "full_comments_scrape"
     assert captured_batches[1][0]["media_urls"] == ["https://images.example/reply-sticker.gif"]
     assert captured_batches[1][0]["hosted_media_urls"] == ["https://cdn.example/reply-sticker.gif"]
     assert captured_batches[1][0]["media_mirror_status"] == "deferred"
     assert captured_batches[1][0]["media_mirror_error"] == "season_context_missing"
+    assert captured_batches[1][0]["comment_url"] == "https://www.instagram.com/p/ABC123/c/reply-1/"
+    assert captured_batches[1][0]["author_fbid_v2"] == "reply-fbid"
+    assert captured_batches[1][0]["author_is_mentionable"] is True
+    assert captured_batches[1][0]["author_is_private"] is False
+    assert captured_batches[1][0]["author_latest_reel_media"] == 1_775_000_001
+    assert captured_batches[1][0]["author_profile_pic_id"] == "reply-pic"
     assert captured_batches[1][0]["parent_comment_id"] == "row-comment-1"
     assert captured_batches[1][0]["parent_comment_external_id"] == "comment-1"
     assert captured_batches[1][0]["reply_depth"] == 1
