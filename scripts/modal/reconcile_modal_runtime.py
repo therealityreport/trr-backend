@@ -73,7 +73,9 @@ def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
     fingerprint_files = [
         repo_root / "trr_backend" / "modal_jobs.py",
         repo_root / "trr_backend" / "modal_dispatch.py",
+        repo_root / "trr_backend" / "repositories" / "social_sync_orchestrator.py",
         repo_root / "trr_backend" / "socials" / "social_season_analytics_impl.py",
+        repo_root / "trr_backend" / "socials" / "pipelines" / "comments" / "instagram.py",
         repo_root / "trr_backend" / "socials" / "instagram" / "comments_scrapling" / "fetcher.py",
         repo_root / "trr_backend" / "socials" / "instagram" / "comments_scrapling" / "job_runner.py",
         repo_root / "trr_backend" / "socials" / "instagram" / "comments_scrapling" / "persistence.py",

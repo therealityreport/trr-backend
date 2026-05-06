@@ -6731,9 +6731,39 @@ def test_instagram_incomplete_comment_targets_mirror_comments_tab_filter_without
     assert "greatest(d.comments_count - greatest(coalesce(" in captured["sql"]
     assert ") > 1" in captured["sql"]
     assert "order by greatest(d.comments_count - greatest(coalesce(" in captured["sql"]
-    assert ") asc, d.posted_at desc nulls last" in captured["sql"]
+    assert ") desc, d.comments_count desc nulls last, d.posted_at desc nulls last" in captured["sql"]
     assert "limit %s" in captured["sql"]
     assert captured["params"] == ["thetraitorsus", 2]
+
+
+def test_instagram_incomplete_comment_targets_count_saved_comments_by_shortcode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["sql"] = " ".join(sql.split()).lower()
+        captured["params"] = params
+        return [{"shortcode": "COLLAB"}]
+
+    monkeypatch.setattr(social_repo, "_instagram_catalog_collaborator_membership_available", lambda **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    targets = social_repo._instagram_social_account_incomplete_comment_target_shortcodes(
+        "TheTraitorsUS",
+        limit=2,
+    )
+
+    assert targets == ["COLLAB"]
+    assert "collaborator_rows as materialized" in captured["sql"]
+    assert "max(comments_count)::bigint as comments_count" in captured["sql"]
+    assert "join social.instagram_posts p on p.id = c.post_id" in captured["sql"]
+    assert "on p.shortcode = d.shortcode" in captured["sql"]
+    assert "group by p.shortcode" in captured["sql"]
+    assert "profile_row_id" not in captured["sql"]
+    assert captured["params"] == ["thetraitorsus", "thetraitorsus", "thetraitorsus", 2]
 
 
 def test_instagram_filter_incomplete_comment_targets_ignores_tolerable_stale_count_gap(
@@ -7045,8 +7075,12 @@ def test_start_social_account_comments_scrape_incomplete_fill_uses_incomplete_ta
     assert payload["incomplete_fill"] is True
     assert created_runs[0]["target_filter"] == "incomplete"
     assert created_runs[0]["incomplete_fill"] is True
+    assert created_runs[0]["comments_max_attempts"] == 1
+    assert created_runs[0]["comments_auth_validation_mode"] == "schema_only"
     assert created_jobs[0]["target_filter"] == "incomplete"
     assert created_jobs[0]["incomplete_fill"] is True
+    assert created_jobs[0]["comments_max_attempts"] == 1
+    assert created_jobs[0]["comments_auth_validation_mode"] == "schema_only"
     assert created_jobs[0]["target_source_ids"] == ["GAP1", "GAP2"]
 
 

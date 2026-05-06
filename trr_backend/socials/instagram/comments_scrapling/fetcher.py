@@ -1198,17 +1198,25 @@ _TARGET_METADATA_TEXT_KEYS = (
     "source_id",
     "post_id",
     "materialized_post_id",
+    "profile_account",
+    "selected_profile_account",
     "source_account",
     "account_handle",
+    "caption_author",
+    "caption_writer",
+    "original_author",
     "owner_username",
     "owner",
     "username",
     "media_type",
     "product_type",
+    "profile_source_surface",
+    "profile_match_mode",
 )
 _TARGET_METADATA_COLLABORATOR_KEYS = (
     "collaborator_handles",
     "collaborators",
+    "collaborators_detail",
     "coauthors",
     "coauthor_handles",
     "collab_handles",
@@ -1310,6 +1318,8 @@ def _top_level_payload_is_status_only(
 def _target_metadata_list_values(value: Any) -> list[str]:
     if isinstance(value, str):
         candidates = re.split(r"[,;\s]+", value)
+    elif isinstance(value, Mapping):
+        candidates = [value]
     elif isinstance(value, Iterable) and not isinstance(value, (dict, bytes, bytearray)):
         candidates = list(value)
     else:
@@ -1317,7 +1327,25 @@ def _target_metadata_list_values(value: Any) -> list[str]:
     values: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
-        text = _compact_metadata_text(candidate, max_length=96)
+        text: str | None = None
+        if isinstance(candidate, Mapping):
+            for key in ("username", "handle", "user_name", "collaborator_handle", "source_account"):
+                text = _compact_metadata_text(candidate.get(key), max_length=96)
+                if text:
+                    break
+            if not text:
+                for key in ("user", "owner", "profile"):
+                    nested = candidate.get(key)
+                    if not isinstance(nested, Mapping):
+                        continue
+                    for nested_key in ("username", "handle", "user_name"):
+                        text = _compact_metadata_text(nested.get(nested_key), max_length=96)
+                        if text:
+                            break
+                    if text:
+                        break
+        else:
+            text = _compact_metadata_text(candidate, max_length=96)
         if not text:
             continue
         normalized = _normalize_instagram_handle(text)
@@ -1350,7 +1378,7 @@ def _target_metadata_context(target_metadata: Mapping[str, Any] | None) -> dict[
             collaborator_handles.append(handle)
     if collaborator_handles:
         context["collaborator_handles"] = collaborator_handles
-    for key in ("is_coauthor", "is_collaborator", "has_collaborators"):
+    for key in ("is_coauthor", "is_collaborator", "is_collaborator_post", "has_collaborators"):
         if key in target_metadata:
             context[key] = bool(target_metadata.get(key))
     return context
@@ -1358,23 +1386,42 @@ def _target_metadata_context(target_metadata: Mapping[str, Any] | None) -> dict[
 
 def _target_metadata_indicates_coauthor(target_metadata: Mapping[str, Any] | None) -> bool:
     context = _target_metadata_context(target_metadata)
-    if any(bool(context.get(key)) for key in ("is_coauthor", "is_collaborator", "has_collaborators")):
+    if any(
+        bool(context.get(key))
+        for key in ("is_coauthor", "is_collaborator", "is_collaborator_post", "has_collaborators")
+    ):
         return True
-    source_account = _normalize_instagram_handle(
-        context.get("source_account") or context.get("account_handle")
+    selected_profile = _normalize_instagram_handle(
+        context.get("selected_profile_account")
+        or context.get("profile_account")
+        or context.get("account_handle")
+        or context.get("source_account")
     )
-    owner_username = _normalize_instagram_handle(context.get("owner_username") or context.get("owner"))
+    source_account = _normalize_instagram_handle(context.get("source_account"))
+    owner_username = _normalize_instagram_handle(
+        context.get("caption_author")
+        or context.get("caption_writer")
+        or context.get("original_author")
+        or context.get("owner_username")
+        or context.get("owner")
+    )
     post_username = _normalize_instagram_handle(context.get("username"))
     collaborator_handles = {
         _normalize_instagram_handle(handle)
         for handle in context.get("collaborator_handles", [])
         if _normalize_instagram_handle(handle)
     }
-    if source_account and owner_username and owner_username != source_account:
+    profile_for_match = selected_profile or source_account
+    if profile_for_match and owner_username and owner_username != profile_for_match:
+        if not collaborator_handles or profile_for_match in collaborator_handles:
+            return True
+    if source_account and selected_profile and source_account != selected_profile:
         return True
-    if source_account and post_username and post_username != source_account and source_account in collaborator_handles:
+    if source_account and owner_username and owner_username != source_account and source_account in collaborator_handles:
         return True
-    return bool(source_account and source_account in collaborator_handles and (owner_username or post_username))
+    if profile_for_match and post_username and post_username != profile_for_match and profile_for_match in collaborator_handles:
+        return True
+    return bool(profile_for_match and profile_for_match in collaborator_handles and (owner_username or post_username))
 
 
 def _status_only_fetch_reason(target_metadata: Mapping[str, Any] | None) -> str:
@@ -4677,11 +4724,17 @@ class InstagramCommentsScraplingFetcher:
         context = _target_metadata_context(target_metadata)
         ignored_usernames = [
             self._browser_account_id or "",
+            context.get("profile_account") or "",
+            context.get("selected_profile_account") or "",
             context.get("source_account") or "",
             context.get("account_handle") or "",
+            context.get("caption_author") or "",
+            context.get("caption_writer") or "",
+            context.get("original_author") or "",
             context.get("owner_username") or "",
             context.get("owner") or "",
             context.get("username") or "",
+            *(context.get("collaborator_handles") or []),
         ]
 
         async def load_visible_comments(page: Any) -> None:

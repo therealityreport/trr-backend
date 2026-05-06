@@ -1427,7 +1427,8 @@ def _build_missing_comment_targets(
               and p.{posted_at_column} <= %s
               {account_filter}
               and greatest(({expected_expr}) - coalesce(cc.saved_comments, 0), 0) > %s
-            order by greatest(({expected_expr}) - coalesce(cc.saved_comments, 0), 0) asc,
+            order by greatest(({expected_expr}) - coalesce(cc.saved_comments, 0), 0) desc,
+                     ({expected_expr}) desc nulls last,
                      p.{posted_at_column} desc nulls last,
                      p.{source_id_column} asc
             limit 5000
