@@ -8,7 +8,7 @@ import requests
 from trr_backend.socials.instagram.constants import AUTH_FATAL_MESSAGES
 
 
-class InstagramRequestFailure(RuntimeError):
+class InstagramRequestFailure(RuntimeError):  # noqa: N818
     def __init__(
         self,
         error_code: str,

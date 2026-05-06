@@ -1,0 +1,45 @@
+{
+  "artifactVersion": 1,
+  "generatedAt": "2026-05-05T08:13:58-04:00",
+  "repoRoot": "/Users/thomashulihan/Projects/TRR/TRR-Backend",
+  "sourcePlan": "docs/codex/plans/2026-05-05-threads-twitter-facebook-architecture-parity.md",
+  "artifactDir": ".plan-grader/threads-twitter-facebook-architecture-parity-20260505-081358",
+  "verdict": "APPROVE_AFTER_REVISION",
+  "originalScore": 86.76,
+  "revisedScore": 92.14,
+  "recommendedNextExecutionSkill": "orchestrate-subagents",
+  "cleanupAfterImplementation": true,
+  "archivePlanAfterImplementation": true,
+  "requiredArtifacts": [
+    "AUDIT.md",
+    "SCORECARD.md",
+    "REVISED_PLAN.md",
+    "PATCHES.md",
+    "COMPARISON.md",
+    "SUGGESTIONS.md",
+    "VALIDATION.md",
+    "result.json"
+  ],
+  "gates": {
+    "thirtySecondTriage": "PASS",
+    "hardFailConditions": "PASS",
+    "wrongThingGuardrail": "PASS",
+    "automaticDowngradeCap": "NONE"
+  },
+  "primaryRevisions": [
+    "Added exact Phase 0 test node IDs and expected pre-fix failures.",
+    "Made Twitter/X and Facebook no-new-lane boundaries enforceable.",
+    "Required registry-aligned safe remote auth structure flags.",
+    "Separated Threads claimed-job lane and shared catalog ownership.",
+    "Defined disjoint subagent write scopes with main-session integration ownership.",
+    "Preserved batch-upsert safety gate.",
+    "Added operator fixture and queue-status evidence requirements."
+  ],
+  "implementationStatus": "not_started",
+  "testsRun": [],
+  "notes": [
+    "Planning artifact validation only; implementation tests were not run.",
+    "Worktree was dirty at grading time and overlaps target files.",
+    "Use REVISED_PLAN.md as the execution source."
+  ]
+}

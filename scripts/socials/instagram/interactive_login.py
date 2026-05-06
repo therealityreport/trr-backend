@@ -40,6 +40,17 @@ def main() -> int:
         help="Instagram handle to visit after login for session warm-up (default: bravotv)",
     )
     parser.add_argument(
+        "--validation-mode",
+        choices=["comments_endpoint", "schema_only", "graphql_profile"],
+        default="graphql_profile",
+        help="Validation mode to use after login (default: graphql_profile)",
+    )
+    parser.add_argument(
+        "--comments-mode",
+        action="store_true",
+        help="Use comments-lane validation semantics without profile GraphQL probing.",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=300,
@@ -60,6 +71,7 @@ def main() -> int:
             cookie_file=args.cookie_file,
             timeout_seconds=args.timeout,
             validation_username=args.validation_username,
+            validation_mode="comments_endpoint" if args.comments_mode else args.validation_mode,
         )
     except Exception as exc:
         print(f"\nLogin failed: {exc}", file=sys.stderr)

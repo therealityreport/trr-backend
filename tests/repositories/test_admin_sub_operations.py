@@ -7,7 +7,6 @@ import pytest
 
 import trr_backend.repositories.admin_operations as admin_operations
 
-
 # ---------------------------------------------------------------------------
 # create_sub_operation
 # ---------------------------------------------------------------------------

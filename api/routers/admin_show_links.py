@@ -4574,7 +4574,7 @@ def _discover_show_links(show_id: str, *, stats: dict[str, Any] | None = None) -
         )
 
     if "bravo" in networks:
-        discovered.extend(_build_shared_social_source_links(show_id, source_scope="bravo"))
+        discovered.extend(_build_shared_social_source_links(show_id, source_scope="network"))
 
     if isinstance(external_ids, dict):
         for kind in ("instagram", "tiktok", "twitter", "youtube"):
@@ -8067,7 +8067,7 @@ def add_show_links(
             db=db,
             actor=actor,
             discovered_by="shared_account_source",
-            source_scope="bravo",
+            source_scope="network",
         )
 
     return {

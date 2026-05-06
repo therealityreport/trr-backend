@@ -27,6 +27,16 @@ _COMMENT_SAMPLE_KEYS = (
     "edge_media_preview_comment",
 )
 
+_REPOST_COUNT_ALIASES = (
+    "media_repost_count",
+    "reshare_count",
+    "reshareCount",
+    "repost_count",
+    "repostCount",
+    "share_count",
+    "shareCount",
+)
+
 
 @dataclass(slots=True)
 class InstagramUser:
@@ -112,6 +122,7 @@ class InstagramComment:
     replies_count: int = 0
     parent_comment_id: str | None = None
     replies: list[InstagramComment] = field(default_factory=list)
+    source_snapshot_type: str = "full_comments_scrape"
     raw_data: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -121,6 +132,38 @@ class InstagramComment:
     @property
     def user_id(self) -> str | None:
         return self.author.user_id
+
+    @property
+    def likes(self) -> int:
+        return self.likes_count
+
+    @property
+    def reply_count(self) -> int:
+        return self.replies_count
+
+    @property
+    def owner_full_name(self) -> str | None:
+        return self.author.full_name
+
+    @property
+    def owner_profile_pic_url(self) -> str | None:
+        return self.author.profile_pic_url
+
+    @property
+    def owner_profile_pic_url_hd(self) -> str | None:
+        return self.author.profile_pic_url_hd
+
+    @property
+    def owner_is_verified(self) -> bool | None:
+        return self.author.is_verified
+
+    @property
+    def is_reply(self) -> bool:
+        return bool(self.parent_comment_id)
+
+    @property
+    def reply_depth(self) -> int:
+        return 1 if self.parent_comment_id else 0
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -147,6 +190,7 @@ class InstagramPost:
     thumbnail_url: str | None = None
     width: int | None = None
     height: int | None = None
+    alt_text: str | None = None
     location: InstagramLocation | None = None
     flags: dict[str, bool] = field(default_factory=dict)
     music_info: dict[str, Any] | None = None
@@ -154,9 +198,11 @@ class InstagramPost:
     video_duration: float | None = None
     video_play_count: int | None = None
     video_view_count: int | None = None
+    media_repost_count: int | None = None
     context_items: list[dict[str, Any]] = field(default_factory=list)
     child_posts: list[InstagramChildPost] = field(default_factory=list)
     comments: list[InstagramComment] = field(default_factory=list)
+    inline_comment_samples: list[InstagramComment] = field(default_factory=list)
     comment_samples_excluded: list[str] = field(default_factory=list)
     raw_data: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -197,6 +243,7 @@ def normalize_instagram_post(payload: dict[str, Any], *, account_handle: str | N
         thumbnail_url=thumbnail_url,
         width=width,
         height=height,
+        alt_text=_string_or_none(_first_value(node, "alt", "accessibility_caption", "accessibilityCaption")),
         location=_extract_location(node),
         flags=flags,
         music_info=_extract_music_info(node),
@@ -210,8 +257,10 @@ def normalize_instagram_post(payload: dict[str, Any], *, account_handle: str | N
         video_view_count=_coerce_int_or_none(
             _first_value(node, "videoViewCount", "video_view_count", "play_count", "view_count")
         ),
+        media_repost_count=_extract_repost_count(node),
         context_items=_extract_context_items(node),
         child_posts=child_posts,
+        inline_comment_samples=_extract_inline_comment_samples(node),
         comment_samples_excluded=_detect_comment_sample_keys(node),
         raw_data=dict(node),
     )
@@ -221,6 +270,7 @@ def normalize_instagram_comment(
     payload: dict[str, Any],
     *,
     parent_comment_id: str | None = None,
+    source_snapshot_type: str = "full_comments_scrape",
 ) -> InstagramComment:
     """Normalize a full comments-lane comment or reply payload.
 
@@ -233,7 +283,11 @@ def normalize_instagram_comment(
     author = _extract_comment_author(payload)
     created_at = _coerce_timestamp(_first_value(payload, "created_at", "timestamp"))
     replies = [
-        normalize_instagram_comment(reply, parent_comment_id=comment_id)
+        normalize_instagram_comment(
+            reply,
+            parent_comment_id=comment_id,
+            source_snapshot_type=source_snapshot_type,
+        )
         for reply in _extract_reply_rows(payload)
         if isinstance(reply, dict)
     ]
@@ -257,6 +311,7 @@ def normalize_instagram_comment(
         replies_count=replies_count,
         parent_comment_id=parent_comment_id,
         replies=replies,
+        source_snapshot_type=source_snapshot_type,
         raw_data=dict(payload),
     )
 
@@ -855,12 +910,74 @@ def _extract_context_items(node: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+def _extract_repost_count(node: dict[str, Any]) -> int | None:
+    """Source of truth for public Instagram repost aliases; add new aliases here, not at call sites."""
+    for key in _REPOST_COUNT_ALIASES:
+        if key not in node:
+            continue
+        parsed = _coerce_non_negative_int_or_none(node.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _detect_comment_sample_keys(node: dict[str, Any]) -> list[str]:
-    keys = [key for key in _COMMENT_SAMPLE_KEYS if key in node]
+    normalized_keys = {
+        sample.raw_data.get("_inline_sample_source_key")
+        for sample in _extract_inline_comment_samples(node)
+    }
+    keys = [key for key in _COMMENT_SAMPLE_KEYS if key in node and key not in normalized_keys]
     comments_edge = node.get("edge_media_to_comment")
-    if isinstance(comments_edge, dict) and comments_edge.get("edges"):
+    if (
+        isinstance(comments_edge, dict)
+        and comments_edge.get("edges")
+        and "edge_media_to_comment.edges" not in normalized_keys
+    ):
         keys.append("edge_media_to_comment.edges")
     return keys
+
+
+def _extract_inline_comment_samples(node: dict[str, Any]) -> list[InstagramComment]:
+    samples: list[InstagramComment] = []
+    seen: set[str] = set()
+
+    def add_sample(raw_comment: Any, source_key: str) -> None:
+        if not isinstance(raw_comment, dict):
+            return
+        payload = dict(raw_comment)
+        payload["_inline_sample_source_key"] = source_key
+        comment = normalize_instagram_comment(payload, source_snapshot_type="listing_inline_sample")
+        comment_id = str(comment.comment_id or "").strip()
+        if not comment_id or comment_id in seen:
+            return
+        seen.add(comment_id)
+        samples.append(comment)
+
+    for key in ("latestComments", "latest_comments"):
+        value = node.get(key)
+        if isinstance(value, list):
+            for item in value:
+                add_sample(item, key)
+        elif isinstance(value, dict):
+            add_sample(value, key)
+
+    for key in ("firstComment", "first_comment"):
+        add_sample(node.get(key), key)
+
+    for key in (
+        "edge_media_to_parent_comment",
+        "edge_media_to_preview_comment",
+        "edge_media_preview_comment",
+        "edge_media_to_comment",
+    ):
+        value = node.get(key)
+        if not isinstance(value, dict):
+            continue
+        source_key = f"{key}.edges" if key == "edge_media_to_comment" else key
+        for edge_node in _edge_nodes(value):
+            add_sample(edge_node, source_key)
+
+    return samples
 
 
 def _extract_comment_author(payload: dict[str, Any]) -> InstagramCommentAuthor:
@@ -878,7 +995,11 @@ def _extract_comment_author(payload: dict[str, Any]) -> InstagramCommentAuthor:
             or user.get("pk")
         ),
         full_name=_string_or_none(
-            owner.get("full_name") or owner.get("fullName") or user.get("full_name") or user.get("fullName")
+            _first_value(payload, "ownerFullName", "owner_full_name", "authorFullName", "author_full_name")
+            or owner.get("full_name")
+            or owner.get("fullName")
+            or user.get("full_name")
+            or user.get("fullName")
         ),
         profile_pic_url=_pick_profile_pic(
             _first_value(payload, "ownerProfilePicUrlHd", "ownerProfilePicUrl"),
@@ -1048,6 +1169,24 @@ def _coerce_int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_non_negative_int_or_none(value: Any) -> int | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.isdigit():
+            return None
+        return int(text)
+    return None
 
 
 def _coerce_float(value: Any) -> float | None:

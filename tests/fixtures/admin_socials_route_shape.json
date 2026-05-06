@@ -1,0 +1,617 @@
+[
+  {
+    "method": "GET",
+    "path": "/admin/socials/facebook/preview/{page_handle}",
+    "name": "preview_facebook_page"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/facebook/scrape",
+    "name": "scrape_facebook"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/facebook/scrape-post",
+    "name": "scrape_facebook_post"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/facebook/search-posts",
+    "name": "search_facebook_posts"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/active-jobs/cancel",
+    "name": "cancel_social_ingest_active_jobs"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/dispatch-blocked-jobs/cancel",
+    "name": "cancel_social_ingest_dispatch_blocked_jobs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/ingest/health-dot",
+    "name": "get_social_ingest_health_dot"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/jobs/{job_id}/debug",
+    "name": "debug_social_ingest_job"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/ingest/queue-status",
+    "name": "get_social_ingest_queue_status"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/recent-failures/dismiss",
+    "name": "dismiss_social_ingest_recent_failures"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/reset-health",
+    "name": "reset_social_ingest_health_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/stuck-jobs/cancel",
+    "name": "cancel_social_ingest_stuck_jobs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/ingest/worker-health",
+    "name": "get_social_ingest_worker_health"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/ingest/workers/purge-inactive",
+    "name": "purge_social_ingest_inactive_workers"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/ingest/workers/{worker_id}/detail",
+    "name": "get_social_ingest_worker_detail"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/instagram/preview/{username}",
+    "name": "preview_instagram_profile"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/instagram/scrape",
+    "name": "scrape_instagram"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/instagram/scrape/async",
+    "name": "scrape_instagram_async"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/landing-socialblade-rows",
+    "name": "post_social_landing_socialblade_rows"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/landing-summary",
+    "name": "get_social_landing_summary"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/live-status",
+    "name": "get_social_live_status"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/live-status/stream",
+    "name": "stream_social_live_status"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/instagram/{account_handle}/profile",
+    "name": "get_instagram_profile_detail_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/instagram/{account_handle}/relationships",
+    "name": "get_instagram_profile_relationships_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/apify-backfill",
+    "name": "post_social_account_apify_backfill_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/backfill",
+    "name": "post_social_account_catalog_backfill_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/freshness",
+    "name": "post_social_account_catalog_freshness_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/gap-analysis",
+    "name": "get_social_account_catalog_gap_analysis_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/gap-analysis/run",
+    "name": "post_social_account_catalog_gap_analysis_run_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/posts",
+    "name": "get_social_account_catalog_posts_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/posts/{source_id}/detail",
+    "name": "get_social_account_catalog_post_detail_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/remediate-drift",
+    "name": "post_social_account_catalog_remediate_drift_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/resume-tail",
+    "name": "post_social_account_catalog_resume_tail_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/review-queue",
+    "name": "get_social_account_catalog_review_queue_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/review-queue/{item_id}/resolve",
+    "name": "post_social_account_catalog_review_queue_resolve_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/cancel",
+    "name": "post_social_account_catalog_run_cancel_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/dismiss",
+    "name": "post_social_account_catalog_run_dismiss_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/progress",
+    "name": "get_social_account_catalog_run_progress_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/repair-auth",
+    "name": "post_social_account_catalog_run_repair_auth_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/sync-newer",
+    "name": "post_social_account_catalog_sync_newer_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/sync-recent",
+    "name": "post_social_account_catalog_sync_recent_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/verification",
+    "name": "get_social_account_catalog_verification_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/collaborators-tags",
+    "name": "get_social_account_profile_collaborators_tags_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments",
+    "name": "get_social_account_profile_comments_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/cancel",
+    "name": "post_social_account_comments_run_cancel_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/progress",
+    "name": "get_social_account_comments_scrape_progress_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/scrape",
+    "name": "post_social_account_comments_scrape_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/cookies/health",
+    "name": "get_cookie_health_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/cookies/refresh",
+    "name": "post_cookie_refresh_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/dashboard",
+    "name": "get_social_account_profile_dashboard_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/hashtags",
+    "name": "get_social_account_profile_hashtags_route"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/hashtags",
+    "name": "put_social_account_profile_hashtags_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/hashtags/timeline",
+    "name": "get_social_account_profile_hashtag_timeline_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/live-profile-total",
+    "name": "get_social_account_live_profile_total_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/posts",
+    "name": "get_social_account_profile_posts_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/socialblade",
+    "name": "get_social_account_profile_socialblade_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/socialblade/refresh",
+    "name": "refresh_social_account_profile_socialblade_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/summary",
+    "name": "get_social_account_profile_summary_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/analytics/community/{community_id}/flairs",
+    "name": "get_reddit_community_analytics_flairs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/analytics/community/{community_id}/flairs/{flair_key}",
+    "name": "get_reddit_community_analytics_flair_detail"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/analytics/community/{community_id}/posts",
+    "name": "get_reddit_community_analytics_posts"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/analytics/community/{community_id}/shows",
+    "name": "get_reddit_community_analytics_shows"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/analytics/community/{community_id}/summary",
+    "name": "get_reddit_community_analytics_summary"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/auto-categorize-flairs-batch",
+    "name": "auto_categorize_flairs_batch"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/cache",
+    "name": "get_reddit_cached_period_payload"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/cache/bulk",
+    "name": "get_reddit_cached_period_payload_bulk"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/communities/{community_id}/auto-categorize-flairs",
+    "name": "auto_categorize_community_flairs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/runs",
+    "name": "list_reddit_refresh_runs"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/runs",
+    "name": "start_reddit_refresh_run"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/reddit/runs/backfill",
+    "name": "backfill_reddit_refresh_runs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/reddit/runs/{run_id}",
+    "name": "get_reddit_refresh_run"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics",
+    "name": "get_season_analytics"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/comments-coverage",
+    "name": "get_season_comments_coverage"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/export.csv",
+    "name": "export_season_analytics_csv"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/export.pdf",
+    "name": "export_season_analytics_pdf"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/mirror-coverage",
+    "name": "get_season_mirror_coverage"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/posts/{platform}/{source_id}",
+    "name": "get_post_comments"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/analytics/posts/{platform}/{source_id}/refresh",
+    "name": "refresh_post_comments_for_post"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/week/{week_index}",
+    "name": "get_season_analytics_week_detail"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/week/{week_index}/live-health",
+    "name": "get_season_analytics_week_live_health"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/analytics/week/{week_index}/summary",
+    "name": "get_season_analytics_week_summary"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/ingest",
+    "name": "ingest_season_social"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/ingest/jobs",
+    "name": "get_season_ingest_jobs"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/ingest/orchestrations",
+    "name": "orchestrate_season_social_ingest"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/ingest/runs",
+    "name": "get_season_ingest_runs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/ingest/runs/summary",
+    "name": "get_season_ingest_runs_summary"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/cancel",
+    "name": "cancel_season_ingest_run"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/ingest/runs/{run_id}/progress",
+    "name": "get_season_ingest_run_progress"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/ingest/schedule-preview",
+    "name": "get_season_ingest_schedule_preview"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/instagram/mirror/requeue",
+    "name": "requeue_instagram_mirror_jobs"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/shared-status",
+    "name": "get_season_shared_status_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/sync-sessions",
+    "name": "create_season_sync_session"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}",
+    "name": "get_season_sync_session"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}/cancel",
+    "name": "cancel_season_sync_session"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}/retry",
+    "name": "retry_season_sync_session"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/sync-sessions/{sync_session_id}/stream",
+    "name": "stream_season_sync_session"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/targets",
+    "name": "get_season_targets"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/socials/seasons/{season_id}/targets",
+    "name": "put_season_targets"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/cast-members",
+    "name": "get_season_tiktok_cast_members"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/content-health",
+    "name": "get_season_tiktok_content_health"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/hashtags",
+    "name": "get_season_tiktok_hashtags"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/overview",
+    "name": "get_season_tiktok_overview"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/posts/{post_id}/detail",
+    "name": "get_season_tiktok_post_detail"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/sentiment-trends",
+    "name": "get_season_tiktok_sentiment_trends"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/sounds",
+    "name": "get_season_tiktok_sounds"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/sounds/{sound_id}",
+    "name": "get_season_tiktok_sound_detail"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/seasons/{season_id}/tiktok/sounds/{sound_id}/posts",
+    "name": "get_season_tiktok_sound_posts"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/seasons/{season_id}/{platform}/mirror/requeue",
+    "name": "requeue_platform_mirror_jobs"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/shared/ingest",
+    "name": "ingest_shared_social_accounts"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/shared/ingest/runs",
+    "name": "get_shared_ingest_runs"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/shared/ingest/runs/{run_id}/cancel",
+    "name": "cancel_shared_ingest_run"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/shared/review-queue",
+    "name": "get_shared_review_queue"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/shared/review-queue/{item_id}/resolve",
+    "name": "resolve_shared_review_queue"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/shared/sources",
+    "name": "get_shared_account_sources_route"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/socials/shared/sources",
+    "name": "put_shared_account_sources_route"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/threads/preview/{username}",
+    "name": "preview_threads_profile"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/threads/scrape",
+    "name": "scrape_threads"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/socials/tiktok/preview/{username}",
+    "name": "preview_tiktok_profile"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/tiktok/scrape",
+    "name": "scrape_tiktok"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/twitter/quotes",
+    "name": "fetch_tweet_quotes"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/twitter/replies",
+    "name": "fetch_tweet_replies"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/twitter/search",
+    "name": "search_twitter"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/youtube/scrape",
+    "name": "scrape_youtube"
+  }
+]

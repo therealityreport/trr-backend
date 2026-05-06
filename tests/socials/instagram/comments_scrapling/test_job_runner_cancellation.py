@@ -26,6 +26,7 @@ def _patch_common_runner_dependencies(monkeypatch: pytest.MonkeyPatch, jr: Any, 
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(repo, "_iso", lambda _value: "2026-04-28T00:00:00+00:00")
     monkeypatch.setattr(repo, "_now_utc", lambda: None)
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
 
 
 def test_comments_job_runner_checks_cancellation_after_warmup_before_opening_persist_conn(
@@ -74,7 +75,11 @@ def test_comments_job_runner_checks_cancellation_after_warmup_before_opening_per
         {
             "id": "job-1",
             "run_id": "run-1",
-            "config": {"account": "thetraitorsus", "target_source_ids": ["SHORT1"]},
+            "config": {
+                "account": "thetraitorsus",
+                "target_source_ids": ["SHORT1"],
+                "comments_cancel_check_every_posts": 1,
+            },
         },
         worker_id="worker-1",
     )
@@ -105,7 +110,7 @@ def test_comments_job_runner_reuses_persist_conn_for_loop_cancellation(
             return None
 
         async def fetch_comments_for_shortcode(self, _shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
-            raise AssertionError("loop cancellation should happen before comment fetch")
+            return InstagramCommentsFetchResult(comments=[], fetch_failed=False, auth_failed=False)
 
         async def aclose(self) -> None:
             return None
@@ -117,8 +122,10 @@ def test_comments_job_runner_reuses_persist_conn_for_loop_cancellation(
     def fake_fetch_one(sql: str, _params: list[object] | None = None, **kwargs: Any) -> dict[str, Any]:
         normalized = " ".join(sql.split()).lower()
         fetch_one_calls.append({"sql": normalized, "conn": kwargs.get("conn")})
-        if "select status from social.scrape_jobs" in normalized:
-            return {"status": "running"}
+        if "select id::text" in normalized and "from social.scrape_jobs" in normalized:
+            return {"id": "job-1", "status": "cancelled", "items_found": 0}
+        if "from social.scrape_jobs" in normalized:
+            return {"status": "running", "worker_id": "worker-1", "claimed_at": "2026-04-28T00:00:00+00:00"}
         if "select status from social.scrape_runs" in normalized:
             if kwargs.get("conn") is persist_conn:
                 return {"status": "cancelled"}
@@ -135,7 +142,12 @@ def test_comments_job_runner_reuses_persist_conn_for_loop_cancellation(
         {
             "id": "job-1",
             "run_id": "run-1",
-            "config": {"account": "thetraitorsus", "target_source_ids": ["SHORT1"]},
+            "config": {
+                "account": "thetraitorsus",
+                "target_source_ids": ["SHORT1"],
+                "comments_cancel_check_every_posts": 1,
+                "fetch_replies": False,
+            },
         },
         worker_id="worker-1",
     )

@@ -62,6 +62,93 @@ def test_select_posts_proxy_decodo_sticky_session(monkeypatch):
     assert "sessionduration-10" in result.api_proxy_url
 
 
+def test_proxy_diagnostics_redact_credentials():
+    from trr_backend.socials.instagram.posts_scrapling.proxy import (
+        PostsProxyConfig,
+        build_posts_proxy_identity,
+        redact_proxy_url,
+    )
+
+    config = PostsProxyConfig(
+        browser_proxy={"server": "http://proxy.example:8080", "username": "user1", "password": "secret"},
+        api_proxy_url="http://user1:secret@proxy.example:8080",
+        proxy_rotator=None,
+        fingerprint="proxy.example:8080:explicit",
+        session_mode="explicit",
+    )
+
+    metadata = build_posts_proxy_identity(config).to_metadata()
+    serialized = repr(metadata)
+
+    assert redact_proxy_url(config.api_proxy_url) == "http://***:***@proxy.example:8080"
+    assert "secret" not in serialized
+    assert "user1" not in serialized
+    assert metadata["redacted_browser_proxy"]["password"] == "***"
+    assert metadata["redacted_browser_proxy"]["username"] == "***"
+
+
+def test_proxy_pacing_identity_uses_observed_fingerprint_only_when_enabled(monkeypatch):
+    from trr_backend.socials.instagram.posts_scrapling.proxy import PostsProxyConfig, build_posts_proxy_identity
+
+    config = PostsProxyConfig(
+        browser_proxy="http://user:pass@proxy.example:8080",
+        api_proxy_url="http://user:pass@proxy.example:8080",
+        proxy_rotator=None,
+        fingerprint="proxy.example:8080:explicit",
+        session_mode="explicit",
+    )
+
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PER_IP_PACING_ENABLED", raising=False)
+    disabled = build_posts_proxy_identity(
+        config,
+        observed_identity="203.0.113.10",
+        observed_fingerprint="203.0.113.10:asn64500",
+    )
+    enabled = build_posts_proxy_identity(
+        config,
+        observed_identity="203.0.113.10",
+        observed_fingerprint="203.0.113.10:asn64500",
+        per_ip_pacing_enabled=True,
+    )
+
+    assert disabled.pacing_identity == "instagram:global"
+    assert enabled.pacing_identity == "203.0.113.10:asn64500"
+    assert enabled.observed_identity == "203.0.113.10"
+    assert enabled.observed_fingerprint == "203.0.113.10:asn64500"
+
+
+def test_posts_proxy_acceleration_flags_default_disabled(monkeypatch):
+    from trr_backend.socials.instagram.posts_scrapling.proxy import posts_proxy_feature_flags
+
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PER_IP_PACING_ENABLED", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PAGE_PROXY_ROTATION_ENABLED", raising=False)
+
+    assert posts_proxy_feature_flags() == {
+        "per_ip_pacing_enabled": False,
+        "page_proxy_rotation_enabled": False,
+    }
+
+
+def test_select_posts_proxy_rotates_explicit_urls_per_page_when_enabled(monkeypatch):
+    from trr_backend.socials.instagram.posts_scrapling.proxy import select_posts_proxy
+
+    monkeypatch.setenv(
+        "SOCIAL_INSTAGRAM_POSTS_PROXY_URLS",
+        "http://user:pass@proxy-a:8080,http://user:pass@proxy-b:8080",
+    )
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PAGE_PROXY_ROTATION_ENABLED", "1")
+
+    first = select_posts_proxy(session_key="same-shard", page_index=0)
+    second = select_posts_proxy(session_key="same-shard", page_index=1)
+    third = select_posts_proxy(session_key="same-shard", page_index=2)
+
+    assert first is not None and first.fingerprint == "proxy-a:8080:explicit"
+    assert second is not None and second.fingerprint == "proxy-b:8080:explicit"
+    assert third is not None and third.fingerprint == "proxy-a:8080:explicit"
+    assert second.session_mode == "explicit_page_rotation"
+    assert second.rotation_index == 1
+
+
 def test_resolve_posts_scrapling_session(monkeypatch):
     """Session adapter wraps auth_resolver and converts cookies."""
     from unittest.mock import MagicMock

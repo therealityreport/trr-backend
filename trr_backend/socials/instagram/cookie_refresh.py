@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -177,6 +178,82 @@ def _raise_if_login_failed(page: Any) -> None:
         raise RuntimeError("Instagram rejected the configured credentials")
 
 
+def _validate_saved_cookies_via_graphql(
+    cookies: dict[str, str],
+    *,
+    validation_username: str,
+    timeout_seconds: int,
+) -> tuple[bool, str | None]:
+    normalized = str(validation_username or "").strip().lstrip("@")
+    if not normalized:
+        return True, None
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # noqa: BLE001
+        return False, f"playwright_unavailable:{type(exc).__name__}"
+
+    deadline = time.monotonic() + min(max(20, int(timeout_seconds)), 45)
+    with sync_playwright() as playwright:
+        launch_kwargs: dict[str, Any] = {
+            "headless": True,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        try:
+            browser = playwright.chromium.launch(channel="chrome", **launch_kwargs)
+        except Exception:
+            browser = playwright.chromium.launch(**launch_kwargs)
+        try:
+            context = browser.new_context(viewport={"width": 1_280, "height": 1_400})
+            context.add_cookies(
+                [
+                    {
+                        "name": name,
+                        "value": value,
+                        "domain": ".instagram.com",
+                        "path": "/",
+                        "secure": True,
+                    }
+                    for name, value in cookies.items()
+                    if value
+                ]
+            )
+            page = context.new_page()
+            try:
+                page.goto(
+                    f"https://www.instagram.com/{normalized}/",
+                    wait_until="domcontentloaded",
+                    timeout=_remaining_timeout_ms(deadline, floor_ms=5_000),
+                )
+                page.wait_for_timeout(1_500)
+            except PlaywrightTimeoutError:
+                return False, "graphql_validation_timeout"
+            current_url = str(page.url or "").lower()
+            if "accounts/login" in current_url:
+                return False, "graphql_validation_redirected_to_login"
+            if any(marker in current_url for marker in CHALLENGE_URL_MARKERS):
+                return False, "graphql_validation_challenge"
+            if not _validate_session_via_graphql(page, normalized, deadline):
+                return False, "graphql_validation_failed"
+            return True, None
+        finally:
+            browser.close()
+
+
+_INSTAGRAM_COOKIE_VALIDATION_MODES = {"comments_endpoint", "schema_only", "graphql_profile"}
+
+
+def _normalize_validation_mode(value: str | None) -> str:
+    normalized = str(value or "").strip().lower() or "graphql_profile"
+    return normalized if normalized in _INSTAGRAM_COOKIE_VALIDATION_MODES else "graphql_profile"
+
+
+def _wait_for_manual_instagram_auth(reason: str) -> None:
+    print(f"\n*** Instagram requires manual auth: {reason}. ***")
+    print("*** Complete Instagram auth/checkpoint in Chrome, then press Enter. ***\n")
+    input("Press Enter after manual Instagram auth is complete...")
+
+
 def refresh_instagram_cookies(
     *,
     username: str,
@@ -187,6 +264,7 @@ def refresh_instagram_cookies(
     timeout_seconds: int = 120,
     validation_username: str | None = None,
     validator: Callable[[dict[str, str]], tuple[bool, str | None]] | None = None,
+    validation_mode: str | None = "graphql_profile",
 ) -> dict[str, str]:
     """Log into Instagram and persist fresh cookies to disk."""
 
@@ -199,18 +277,22 @@ def refresh_instagram_cookies(
     target_file = Path(cookie_file).expanduser()
     deadline = time.monotonic() + max(30, int(timeout_seconds))
     normalized_validation_username = str(validation_username or "").strip().lstrip("@")
+    normalized_validation_mode = _normalize_validation_mode(validation_mode)
 
-    with sync_playwright() as playwright:
-        launch_kwargs: dict[str, Any] = {
-            "headless": bool(headless),
-            "args": ["--disable-blink-features=AutomationControlled"],
-        }
-        try:
-            browser = playwright.chromium.launch(channel="chrome", **launch_kwargs)
-        except Exception:
-            browser = playwright.chromium.launch(**launch_kwargs)
+    browser = None
+    cookies: dict[str, str] = {}
+    storage_state: dict[str, Any] | None = None
+    try:
+        with sync_playwright() as playwright:
+            launch_kwargs: dict[str, Any] = {
+                "headless": bool(headless),
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            try:
+                browser = playwright.chromium.launch(channel="chrome", **launch_kwargs)
+            except Exception:
+                browser = playwright.chromium.launch(**launch_kwargs)
 
-        try:
             context = browser.new_context(viewport={"width": 1_280, "height": 1_500})
             page = context.new_page()
             page.goto(
@@ -266,26 +348,33 @@ def refresh_instagram_cookies(
             if not cookies.get("sessionid"):
                 raise RuntimeError("Instagram session cookie disappeared before refresh completed")
 
-            if validator is not None:
-                is_valid, validation_reason = validator(cookies)
-                if not is_valid:
-                    normalized_reason = str(validation_reason or "").strip() or "graphql_validation_failed"
-                    raise RuntimeError(
-                        f"Instagram login produced cookies that failed GraphQL validation ({normalized_reason})"
-                    )
-
-            _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
-                account_id,
-                context.storage_state(),
-                fallback_account_id=normalized_validation_username or username,
-            )
-            _write_cookie_file(target_file, cookies)
-            logger.info("Refreshed Instagram cookies into %s", target_file)
-            return cookies
-        except PlaywrightTimeoutError as exc:
-            raise RuntimeError("Timed out while refreshing Instagram cookies") from exc
-        finally:
+            storage_state = context.storage_state()
             browser.close()
+            browser = None
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError("Timed out while refreshing Instagram cookies") from exc
+    finally:
+        if browser is not None:
+            browser.close()
+
+    if validator is not None and normalized_validation_mode == "graphql_profile":
+        is_valid, validation_reason = validator(cookies)
+        if not is_valid:
+            normalized_reason = str(validation_reason or "").strip() or "graphql_validation_failed"
+            raise RuntimeError(
+                f"Instagram login produced cookies that failed GraphQL validation ({normalized_reason})"
+            )
+
+    if storage_state is None:
+        raise RuntimeError("Instagram login completed without browser storage state")
+    _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
+        account_id,
+        storage_state,
+        fallback_account_id=normalized_validation_username or username,
+    )
+    _write_cookie_file(target_file, cookies)
+    logger.info("Refreshed Instagram cookies into %s", target_file)
+    return cookies
 
 
 def interactive_chrome_login(
@@ -296,6 +385,7 @@ def interactive_chrome_login(
     validation_username: str | None = None,
     account_id: str | None = None,
     headless: bool = False,
+    validation_mode: str | None = "graphql_profile",
 ) -> dict[str, str]:
     """Open Chrome with the user's real profile for Instagram login.
 
@@ -307,13 +397,23 @@ def interactive_chrome_login(
     if not target_file.is_absolute():
         target_file = Path(__file__).resolve().parent.parent.parent.parent / cookie_file
     normalized_validation_username = str(validation_username or "").strip().lstrip("@")
+    normalized_validation_mode = _normalize_validation_mode(validation_mode)
     normalized_account_id = str(account_id or "").strip().lstrip("@")
     session_account_id = normalized_account_id or normalized_validation_username or chrome_profile_name
     session_paths = _INSTAGRAM_BROWSER_SESSIONS.session_paths(
         session_account_id,
         fallback_account_id=session_account_id,
     )
-    saved_cookies = _read_cookie_file(session_paths.cookie_file_path)
+    skip_saved_session_reuse = (
+        (os.getenv("SOCIAL_INSTAGRAM_SKIP_SAVED_BROWSER_SESSION_REUSE") or "").strip().lower()
+        in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    )
+    saved_cookies = {} if skip_saved_session_reuse else _read_cookie_file(session_paths.cookie_file_path)
     if saved_cookies.get("sessionid"):
         validation_url = (
             f"https://www.instagram.com/{normalized_validation_username}/"
@@ -330,14 +430,39 @@ def interactive_chrome_login(
             timeout_seconds=min(max(20, int(timeout_seconds)), 45),
         )
         if valid:
-            _write_cookie_file(target_file, saved_cookies)
-            logger.info(
-                "Reusing saved Instagram browser session for %s from %s",
-                normalized_validation_username or chrome_profile_name,
-                session_paths.cookie_file_path,
-            )
-            print("\n*** Reusing saved Instagram browser session. ***\n")
-            return saved_cookies
+            if normalized_validation_mode == "graphql_profile":
+                graphql_valid, graphql_reason = _validate_saved_cookies_via_graphql(
+                    saved_cookies,
+                    validation_username=normalized_validation_username,
+                    timeout_seconds=timeout_seconds,
+                )
+                if not graphql_valid:
+                    logger.info(
+                        "Saved Instagram browser session failed GraphQL validation for %s (%s); "
+                        "falling back to interactive Chrome login",
+                        normalized_validation_username or chrome_profile_name,
+                        graphql_reason,
+                    )
+                    saved_cookies = {}
+                else:
+                    _write_cookie_file(target_file, saved_cookies)
+                    logger.info(
+                        "Reusing saved Instagram browser session for %s from %s",
+                        normalized_validation_username or chrome_profile_name,
+                        session_paths.cookie_file_path,
+                    )
+                    print("\n*** Reusing saved Instagram browser session. ***\n")
+                    return saved_cookies
+            else:
+                _write_cookie_file(target_file, saved_cookies)
+                logger.info(
+                    "Reusing saved Instagram browser session for %s from %s with %s validation",
+                    normalized_validation_username or chrome_profile_name,
+                    session_paths.cookie_file_path,
+                    normalized_validation_mode,
+                )
+                print("\n*** Reusing saved Instagram browser session. ***\n")
+                return saved_cookies
         logger.info(
             "Saved Instagram browser session invalid for %s (%s); falling back to interactive Chrome login",
             normalized_validation_username or chrome_profile_name,
@@ -400,14 +525,19 @@ def interactive_chrome_login(
                     and not any(marker in current_url for marker in CHALLENGE_URL_MARKERS)
                 )
                 if not session_looks_valid:
-                    logger.info("[instagram] existing session cookie is stale — clearing for fresh login")
-                    # Delete Instagram cookies so we wait for a fresh login
-                    context.clear_cookies()
-                    page.goto(
-                        INSTAGRAM_LOGIN_URL,
-                        wait_until="domcontentloaded",
-                        timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
-                    )
+                    if not headless and normalized_validation_mode in {"comments_endpoint", "schema_only"}:
+                        logger.info("[instagram] existing session needs manual auth; leaving cookies/browser intact")
+                        _wait_for_manual_instagram_auth("session needs login/checkpoint")
+                        deadline = time.monotonic() + max(60, int(timeout_seconds))
+                    else:
+                        logger.info("[instagram] existing session cookie is stale — clearing for fresh login")
+                        # Delete Instagram cookies so we wait for a fresh login
+                        context.clear_cookies()
+                        page.goto(
+                            INSTAGRAM_LOGIN_URL,
+                            wait_until="domcontentloaded",
+                            timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
+                        )
 
             # Poll for sessionid cookie — user handles auth manually
             cookies: dict[str, str] = {}
@@ -430,8 +560,17 @@ def interactive_chrome_login(
                             )
                             page.wait_for_timeout(3_000)
                             post_nav_url = str(page.url or "").lower()
-                            if "accounts/login" in post_nav_url:
-                                logger.info("[instagram] session cookie invalid — redirected to login, waiting for fresh auth")
+                            if "accounts/login" in post_nav_url or any(
+                                marker in post_nav_url for marker in CHALLENGE_URL_MARKERS
+                            ):
+                                logger.info(
+                                    "[instagram] session cookie invalid — redirected to auth flow, "
+                                    "waiting for fresh auth"
+                                )
+                                if not headless:
+                                    _wait_for_manual_instagram_auth("session redirected to login/checkpoint")
+                                    deadline = time.monotonic() + max(60, int(timeout_seconds))
+                                    continue
                                 print("\n*** Session expired — please log in again. ***\n")
                                 context.clear_cookies()
                                 page.goto(
@@ -441,19 +580,27 @@ def interactive_chrome_login(
                                 )
                                 page.wait_for_timeout(2_000)
                                 continue
-                            # Validate via a lightweight GraphQL probe
-                            graphql_ok = _validate_session_via_graphql(page, normalized, deadline)
-                            if not graphql_ok:
-                                logger.info("[instagram] session cookies failed GraphQL validation — clearing for re-login")
-                                print("\n*** Session cookies don't work for GraphQL API — please log in again. ***\n")
-                                context.clear_cookies()
-                                page.goto(
-                                    INSTAGRAM_LOGIN_URL,
-                                    wait_until="domcontentloaded",
-                                    timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
-                                )
-                                page.wait_for_timeout(2_000)
-                                continue
+                            if normalized_validation_mode == "graphql_profile":
+                                # Validate via a lightweight GraphQL probe
+                                graphql_ok = _validate_session_via_graphql(page, normalized, deadline)
+                                if not graphql_ok:
+                                    logger.info("[instagram] session cookies failed GraphQL validation")
+                                    if not headless:
+                                        _wait_for_manual_instagram_auth("GraphQL validation failed")
+                                        deadline = time.monotonic() + max(60, int(timeout_seconds))
+                                        continue
+                                    print(
+                                        "\n*** Session cookies don't work for GraphQL API — "
+                                        "please log in again. ***\n"
+                                    )
+                                    context.clear_cookies()
+                                    page.goto(
+                                        INSTAGRAM_LOGIN_URL,
+                                        wait_until="domcontentloaded",
+                                        timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
+                                    )
+                                    page.wait_for_timeout(2_000)
+                                    continue
                             cookies = _cookie_payload(context.cookies())
                         except Exception:  # noqa: BLE001
                             pass

@@ -26,13 +26,18 @@ def test_start_instagram_posts_sets_required_worker_lane(monkeypatch) -> None:
     """The created job must carry required_worker_lane in its config so the
     lane-enforcement filter kicks in when queue is enabled."""
     created_job_config: dict = {}
+    created_run_status: str | None = None
+    created_job_status: str | None = None
 
     def fake_create_run(*args, **kwargs):
+        nonlocal created_run_status
+        created_run_status = kwargs.get("status")
         return "fake-run-id"
 
     def fake_create_job(*args, **kwargs):
-        nonlocal created_job_config
+        nonlocal created_job_config, created_job_status
         created_job_config = dict(kwargs.get("config") or {})
+        created_job_status = kwargs.get("status")
         return "fake-job-id"
 
     monkeypatch.setattr(repo, "_create_run", fake_create_run)
@@ -65,6 +70,10 @@ def test_start_instagram_posts_sets_required_worker_lane(monkeypatch) -> None:
     assert result["required_worker_lane"] == repo.INSTAGRAM_POSTS_SCRAPLING_WORKER_LANE
     assert result["platform"] == "instagram"
     assert result["account_handle"] == "bravotv"
+    assert result["status"] == "running"
+    assert result["job_status"] == "pending"
+    assert created_run_status == "running"
+    assert created_job_status == "pending"
     assert created_job_config.get("required_worker_lane") == repo.INSTAGRAM_POSTS_SCRAPLING_WORKER_LANE
     assert created_job_config.get("stage") == repo.INSTAGRAM_POSTS_SCRAPLING_STAGE
     assert created_job_config.get("max_pages") == 1

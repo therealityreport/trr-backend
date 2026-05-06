@@ -1051,8 +1051,8 @@ def _get_connection_with_retry(
 
 
 @contextmanager
-def db_connection(*, label: str = "write"):
-    pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name="default")
+def db_connection(*, label: str = "write", pool_name: str = "default"):
+    pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name=pool_name)
     try:
         # Pin search_path for the duration of this transaction so pooled connections
         # cannot inherit a prior caller's SET search_path. psycopg2 starts the
@@ -1093,7 +1093,7 @@ def db_connection(*, label: str = "write"):
             except PoolError as error:
                 if "pool is closed" not in _error_message(error):
                     raise
-        _finalize_retired_pool(pool, pool_name="default")
+        _finalize_retired_pool(pool, pool_name=pool_name)
 
 
 @contextmanager

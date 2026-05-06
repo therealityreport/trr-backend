@@ -2640,6 +2640,28 @@ def test_instagram_parse_post_node_preserves_xdt_queryable_fields() -> None:
     assert parsed.collaborators == ["hroien"]
 
 
+def test_instagram_parse_post_node_extracts_media_repost_count_camel_alias() -> None:
+    scraper = InstagramScraper(cookies={})
+    config = InstagramScrapeConfig(username="fallback-user")
+    node = {
+        "id": "3885259576224942999_61503085324",
+        "pk": "3885259576224942999",
+        "code": "DXrRepost",
+        "media_type": 1,
+        "taken_at": 1777379165,
+        "user": {"pk": "61503085324", "username": "jographicss"},
+        "caption": {"text": "non-snake repost alias"},
+        "like_count": 3,
+        "comment_count": 1,
+        "image_versions2": {"candidates": [{"url": "https://cdn.test/repost.jpg", "height": 1800, "width": 1440}]},
+        "reshareCount": "9",
+    }
+
+    parsed = scraper._parse_post_node(node, config)  # noqa: SLF001
+
+    assert parsed.media_repost_count == 9
+
+
 def test_instagram_parse_post_node_keeps_one_source_url_for_single_image_with_mixed_variants() -> None:
     scraper = InstagramScraper(cookies={})
     config = InstagramScrapeConfig(username="bravotv")

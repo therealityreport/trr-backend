@@ -18,6 +18,7 @@ logger = logging.getLogger("socials.tiktok.posts_scrapling.persistence")
 class PersistedTikTokPosts:
     posts_upserted: int
     posts_skipped: int
+    posts_skipped_by_reason: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -116,15 +117,21 @@ def persist_tiktok_posts(
     context = repo.get_season_context(season_id) if season_id else None
     posts_upserted = 0
     posts_skipped = 0
+    posts_skipped_by_reason: dict[str, int] = {}
+
+    def _record_skip(reason: str) -> None:
+        nonlocal posts_skipped
+        posts_skipped += 1
+        posts_skipped_by_reason[reason] = int(posts_skipped_by_reason.get(reason) or 0) + 1
 
     with pg.db_connection() as conn:
         for item in post_items:
             if not isinstance(item, dict):
-                posts_skipped += 1
+                _record_skip("invalid_item")
                 continue
             video_id = str(item.get("id") or "").strip()
             if not video_id:
-                posts_skipped += 1
+                _record_skip("missing_video_id")
                 continue
             try:
                 dto = _tiktok_item_to_post_dto(item, account_handle=account_handle)
@@ -138,6 +145,10 @@ def persist_tiktok_posts(
                 posts_upserted += 1
             except Exception:  # noqa: BLE001
                 logger.exception("Failed to upsert TikTok post %s via canonical helper", video_id)
-                posts_skipped += 1
+                _record_skip("upsert_failed")
 
-    return PersistedTikTokPosts(posts_upserted=posts_upserted, posts_skipped=posts_skipped)
+    return PersistedTikTokPosts(
+        posts_upserted=posts_upserted,
+        posts_skipped=posts_skipped,
+        posts_skipped_by_reason=posts_skipped_by_reason,
+    )

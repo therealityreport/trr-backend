@@ -47,6 +47,9 @@ def test_run_repair_stops_when_local_validation_fails(monkeypatch: pytest.Monkey
     assert summary["steps"][-1]["status"] == "failed"
     assert summary["failure_reason"] == "local_validation_failed"
     assert all("sessionid" not in json.dumps(step, sort_keys=True) for step in summary["steps"])
+    refresh_commands = [command for command in commands if "refresh_cookies.py" in " ".join(command)]
+    assert refresh_commands
+    assert all(command[command.index("--validation-mode") + 1] == "comments_endpoint" for command in refresh_commands)
     assert not any("prepare_named_secrets.py" in " ".join(command) for command in commands)
 
 
@@ -109,6 +112,9 @@ def test_run_repair_stops_when_remote_probe_fails(monkeypatch: pytest.MonkeyPatc
     assert summary["steps"][-1]["status"] == "failed"
     assert summary["failure_reason"] == "remote_probe_failed"
     assert summary["remote_auth_probe"]["reason"] == "checkpoint_required"
+    refresh_commands = [command for command in commands if "refresh_cookies.py" in " ".join(command)]
+    assert refresh_commands
+    assert all(command[command.index("--validation-mode") + 1] == "comments_endpoint" for command in refresh_commands)
 
 
 def test_run_repair_ignores_unrelated_missing_getty_probe_when_instagram_remote_auth_is_ready(

@@ -1,0 +1,27 @@
+{
+  "platform": "youtube",
+  "job_type": "posts",
+  "status": "failed",
+  "last_error_code": "youtube_empty_channel_page",
+  "last_error_class": "YouTubeEmptyChannelPage",
+  "error_message": "YouTube scrape returned no videos or shorts on the first page",
+  "metadata": {
+    "runtime_metadata": {
+      "ytdlp_available": true,
+      "data_api_enabled": false
+    },
+    "retrieval_meta": {
+      "error_code": "youtube_empty_channel_page",
+      "error_class": "YouTubeEmptyChannelPage",
+      "retryable": true,
+      "first_page_counts": {
+        "videos": 0,
+        "shorts": 0
+      }
+    },
+    "persist_counters": {
+      "posts_upserted": 0,
+      "comments_upserted": 0
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "sourcePath": "docs/codex/plans/2026-05-05-tiktok-youtube-architecture-parity.md",
+  "rubricPath": "/Users/thomashulihan/Documents/Codex/2026-04-21-create-a-rubric-for-scoring-an/implementation-plan-rubric.md",
+  "verdict": "APPROVE_AFTER_REVISION",
+  "gates": {
+    "triage": "pass",
+    "hardFail": "pass",
+    "shortReview": "pass_with_fixes",
+    "automaticDowngradeCap": null
+  },
+  "scores": {
+    "original": 81.2,
+    "revisedEstimate": 90.92
+  },
+  "artifactPaths": {
+    "audit": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/AUDIT.md",
+    "scorecard": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/SCORECARD.md",
+    "revisedPlan": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/REVISED_PLAN.md",
+    "patches": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/PATCHES.md",
+    "comparison": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/COMPARISON.md",
+    "suggestions": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/SUGGESTIONS.md",
+    "validation": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/VALIDATION.md",
+    "result": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/result.json"
+  },
+  "suggestionsPath": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/SUGGESTIONS.md",
+  "archivePlanAfterImplementation": true,
+  "cleanupAfterImplementation": true,
+  "recommendedNextExecutionSkill": "orchestrate-subagents",
+  "suppliedContextSummary": "User invoked Plan Grader for the just-created TikTok and YouTube architecture parity plan.",
+  "threadFileConflictSummary": "Dirty backend worktree overlaps social control plane, TikTok posts runner, Modal readiness scripts, and social tests. Execution must inspect diffs and avoid reverting unrelated changes.",
+  "topFixes": [
+    "Add Phase 0 expected failing tests before implementation.",
+    "Clarify YouTube posts_catalog extraction without adding a new worker lane.",
+    "Gate TikTok/YouTube batch upsert behind contract equivalence.",
+    "Add TikTok remote auth safe payload and readiness-script coverage.",
+    "Use orchestrate-subagents with disjoint TikTok and YouTube ownership."
+  ]
+}

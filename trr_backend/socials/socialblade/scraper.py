@@ -45,7 +45,11 @@ _JS_EXTRACT_TABLE = """(() => {
         normalizedHeaders.length === 4 &&
         normalizedHeaders[0] === "date" &&
         normalizedHeaders.includes("following") &&
-        (normalizedHeaders.includes("followers") || normalizedHeaders.includes("subscribers") || normalizedHeaders.includes("likes"));
+        (
+            normalizedHeaders.includes("followers") ||
+            normalizedHeaders.includes("subscribers") ||
+            normalizedHeaders.includes("likes")
+        );
     const titleCase = value => value.replace(/\\b\\w/g, letter => letter.toUpperCase());
     const expandedHeaders = isMetricSummaryTable
         ? [

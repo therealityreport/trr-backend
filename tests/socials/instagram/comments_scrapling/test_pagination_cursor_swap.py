@@ -18,7 +18,16 @@ extensive Patchright/httpx scaffolding.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from trr_backend.socials.instagram.comments_scrapling import fetcher as comments_fetcher
+
+_FIXTURE_DIR = Path(__file__).parents[3] / "fixtures" / "instagram" / "scrapling"
+
+
+def _fixture_json(name: str) -> dict:
+    return json.loads((_FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
 def _make_top_level_payload(
@@ -93,6 +102,89 @@ def test_extract_top_level_page_handles_no_more_pages():
     assert primary_param is None
     assert alt_cursor is None
     assert alt_param is None
+
+
+def test_extract_top_level_page_envelope_captures_explicit_cursor_shapes():
+    payload = _fixture_json("comments_cursor_envelope.json")
+
+    envelope = comments_fetcher._extract_top_level_page_envelope(payload, {})
+
+    assert envelope.has_more is True
+    assert envelope.primary_cursor == "cached-comments-cursor-redacted"
+    assert envelope.primary_cursor_param == "cached_comments_cursor"
+    assert envelope.phase_signal == "ranked"
+    assert envelope.cursor_payload["next_min_id"] == "min-cursor-redacted"
+    assert envelope.cursor_payload["next_max_id"] == "max-cursor-redacted"
+    assert envelope.cursor_payload["cached_comments_cursor"] == "cached-comments-cursor-redacted"
+    assert envelope.cursor_payload["bifilter_token"] == "bifilter-token-redacted"
+    assert envelope.cursor_payload["tao_cursor"] == "tao-cursor-redacted"
+    assert set(envelope.cursor_shape_names) == {
+        "next_min_id",
+        "next_max_id",
+        "cached_comments_cursor",
+        "bifilter_token",
+        "tao_cursor",
+    }
+
+
+def test_extract_top_level_page_headload_prefers_next_min_cursor():
+    payload = _fixture_json("comments_headload.json")
+
+    envelope = comments_fetcher._extract_top_level_page_envelope(payload, {})
+
+    assert envelope.has_more is True
+    assert envelope.primary_cursor == "headload-min-cursor-redacted"
+    assert envelope.primary_cursor_param == "min_id"
+    assert envelope.phase_signal == "headload"
+    assert envelope.comment_filter_param == "headload"
+
+
+def test_extract_top_level_page_bifilter_only_has_no_phase_signal():
+    payload = {
+        "status": "ok",
+        "comments": [],
+        "bifilter_token": "bifilter-token-redacted",
+    }
+
+    envelope = comments_fetcher._extract_top_level_page_envelope(payload, {})
+
+    assert envelope.has_more is True
+    assert envelope.primary_cursor == "bifilter-token-redacted"
+    assert envelope.primary_cursor_param == "bifilter_token"
+    assert envelope.phase_signal is None
+
+
+def test_fb_crosspost_fixture_converts_to_collision_safe_comment_row():
+    payload = _fixture_json("comments_fb_crosspost.json")
+    rows = comments_fetcher._extract_fb_crosspost_comment_rows(payload)
+
+    assert len(rows) == 1
+    comment = comments_fetcher._fb_crosspost_comment_to_instagram_comment(
+        rows[0],
+        shortcode="ABC123",
+        post_url="https://www.instagram.com/p/ABC123/",
+        cursor_payload={"source": "fixture"},
+        comment_filter_param=None,
+    )
+
+    assert comment is not None
+    assert comment.comment_id == "fb:fb-comment-raw-id-redacted"
+    assert comment.phase == "fb_crosspost"
+    assert comment.source_snapshot_type == "instagram_fb_crosspost_comments"
+    assert comment.username == "Facebook Fixture Author"
+    assert comment.cursor_payload["raw_fb_comment_id"] == "fb-comment-raw-id-redacted"
+    assert comments_fetcher._instagram_comment_phase_counts([comment]) == {"fb_crosspost": 1}
+
+
+def test_fb_crosspost_has_more_flag_is_detected_as_incomplete_lane():
+    payload = {
+        "status": "ok",
+        "comments": [],
+        "fb_comments": [],
+        "has_more_headload_fb_comments": True,
+    }
+
+    assert comments_fetcher._payload_has_more_fb_crosspost_comments(payload, {}) is True
 
 
 def _make_reply_payload(

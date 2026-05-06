@@ -1,0 +1,25 @@
+{
+  "platform": "facebook",
+  "job_type": "posts",
+  "status": "completed",
+  "last_error_code": null,
+  "last_error_class": null,
+  "error_message": null,
+  "metadata": {
+    "retrieval_meta": {
+      "posts_checked": 2,
+      "pages_scanned": 1,
+      "persist_counters": {
+        "posts_upserted": 2,
+        "comments_upserted": 0
+      },
+      "profile_snapshot": {
+        "username": "Bravo",
+        "display_name": "Bravo",
+        "avatar_url": "https://example.invalid/facebook-avatar.jpg",
+        "is_verified": true,
+        "profile_url": "https://www.facebook.com/Bravo"
+      }
+    }
+  }
+}

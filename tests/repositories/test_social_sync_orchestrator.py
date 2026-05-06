@@ -463,6 +463,10 @@ def test_build_missing_comment_targets_uses_threads_reply_and_quote_counts(monke
     assert len(captured_queries) == 1
     assert "coalesce(p.replies_count, 0) + coalesce(p.quotes, 0)" in captured_queries[0]
     assert "coalesce(p.comments_count, 0)" not in captured_queries[0]
+    assert (
+        "greatest((coalesce(p.replies_count, 0) + coalesce(p.quotes, 0)) - coalesce(cc.saved_comments, 0), 0) > %s"
+        in " ".join(captured_queries[0].split())
+    )
 
 
 def test_create_sync_session_preserves_attached_status(monkeypatch) -> None:

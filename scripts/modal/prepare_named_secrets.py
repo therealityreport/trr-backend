@@ -42,6 +42,15 @@ CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",
     "SOCIAL_QUEUE_ENABLED": "true",
 }
+CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS = {
+    "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "12",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "12",
+    "SOCIAL_WORKER_POOL_POSTS": "1",
+    "SOCIAL_WORKER_POOL_COMMENTS": "8",
+    "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "3",
+    "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "2",
+    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "8",
+}
 LOCAL_ONLY_ENV_KEYS = {
     "FIREBASE_SERVICE_ACCOUNT_FILE",
     "GOOGLE_APPLICATION_CREDENTIALS",
@@ -235,12 +244,14 @@ def _apply_runtime_overrides(values: dict[str, str], *, disabled: bool) -> dict[
     if disabled:
         return merged
     merged.update(CANONICAL_REMOTE_RUNTIME_OVERRIDES)
+    for key, value in CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS.items():
+        merged.setdefault(key, value)
     return merged
 
 
 def _write_env_file(path: Path, values: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{key}={value}" for key, value in sorted(values.items())]
+    lines = [f"{key}={json.dumps(str(value))}" for key, value in sorted(values.items())]
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 

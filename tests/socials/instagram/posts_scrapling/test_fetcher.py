@@ -281,3 +281,283 @@ def test_warmup_allows_no_new_cookies_when_prior_session_exists(_mock_scrapling)
     asyncio.run(fetcher.warmup("bravotv"))
 
     fetcher._rebuild_http_client.assert_awaited_once()
+
+
+def test_shared_warmup_pool_reuses_tokens_without_second_browser_fetch(_mock_scrapling, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from trr_backend.socials.instagram.posts_scrapling import fetcher as fetcher_mod
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", "1")
+    fetcher_mod._POSTS_WARMUP_POOL.clear()
+
+    first = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "x", "csrftoken": "old", "ds_user_id": "1"},
+        browser_account_id="test-account",
+    )
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.text = '"LSD",[],{"token":"pooled_lsd"} bloks_version":"deadbeef1234567890abcdef12345678"'
+    fake_resp.cookies = {"csrftoken": "fresh-csrf"}
+    first._fetcher.async_fetch = AsyncMock(return_value=fake_resp)
+
+    asyncio.run(first.warmup("bravotv"))
+
+    second = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "x", "csrftoken": "old", "ds_user_id": "1"},
+        browser_account_id="test-account",
+    )
+    second._fetcher.async_fetch = AsyncMock(side_effect=AssertionError("warmup should come from pool"))
+
+    asyncio.run(second.warmup("bravotv"))
+
+    assert second.runtime_metadata["warmup_pool"]["hit"] is True
+    assert set(second.runtime_metadata["page_tokens_found"]) == {"bloks_version", "lsd"}
+    assert second._raw_cookies["csrftoken"] == "fresh-csrf"
+
+
+def test_doc_id_pin_tries_successful_id_first_after_initial_fallback(_mock_scrapling, monkeypatch):
+    import asyncio
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing", "csrftoken": "csrf", "ds_user_id": "123"},
+        browser_account_id="t",
+    )
+    fetcher._doc_ids_configured = ("stale-a", "stale-b", "healthy-c")
+
+    attempted: list[str] = []
+
+    async def fake_fetch_json_response(*_args, **kwargs):
+        doc_id = kwargs["data"]["doc_id"]
+        attempted.append(doc_id)
+        if doc_id != "healthy-c":
+            return {
+                "failed": False,
+                "auth_failed": False,
+                "reason": None,
+                "retryable": False,
+                "payload": {"data": {}},
+            }
+        return {
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+            "payload": {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "1", "code": "AAA"}}],
+                        "page_info": {"has_next_page": True, "end_cursor": "cursor-1"},
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr(fetcher, "_fetch_json_response", fake_fetch_json_response)
+
+    first = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+    second = asyncio.run(fetcher.fetch_posts_page("bravotv", cursor=first.end_cursor))
+
+    assert [post["code"] for post in first.posts] == ["AAA"]
+    assert [post["code"] for post in second.posts] == ["AAA"]
+    assert attempted == ["stale-a", "stale-b", "healthy-c", "healthy-c"]
+    telemetry = fetcher.runtime_metadata["profile_posts_doc_ids"]
+    assert telemetry["final_selected"] == "healthy-c"
+    assert telemetry["attempts"] == {"healthy-c": 2, "stale-a": 1, "stale-b": 1}
+    assert telemetry["successes"] == {"healthy-c": 2}
+
+
+def test_empty_page_with_pagination_state_is_doc_id_stale_not_complete(_mock_scrapling, monkeypatch):
+    import asyncio
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing", "csrftoken": "csrf", "ds_user_id": "123"},
+        browser_account_id="t",
+    )
+    fetcher._doc_ids_configured = ("stale-doc",)
+
+    async def fake_fetch_json_response(*_args, **_kwargs):
+        return {
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+            "payload": {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [],
+                        "page_info": {"has_next_page": True, "end_cursor": "cursor-still-present"},
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr(fetcher, "_fetch_json_response", fake_fetch_json_response)
+
+    result = asyncio.run(fetcher.fetch_posts_page("bravotv"))
+
+    assert result.fetch_failed is True
+    assert result.fetch_reason == "pagination_doc_id_stale"
+    assert result.has_next_page is False
+    assert result.end_cursor is None
+    telemetry = fetcher.runtime_metadata["profile_posts_doc_ids"]
+    assert telemetry["pagination_doc_id_stale_count"] == 1
+    assert telemetry["empty_connection_count"] == {"stale-doc": 1}
+
+
+def test_bidirectional_probe_metadata_records_disabled_failure_shape(monkeypatch):
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_BIDIRECTIONAL_WALK_ENABLED", raising=False)
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import build_bidirectional_probe_metadata
+
+    result = build_bidirectional_probe_metadata(
+        request_shape={"variables": {"before": "cursor-old", "last": 33}},
+        forward_posts=[{"id": "1"}, {"id": "2"}],
+        reverse_posts=[{"id": "2"}, {"id": "3"}],
+        cursor_fields={"before": "cursor-old", "has_previous_page": True},
+    )
+
+    assert result.enabled is False
+    assert result.passed is False
+    assert result.reason == "bidirectional_walk_disabled"
+    assert result.request_shape["variables"]["last"] == 33
+    assert result.response_order == ["2", "3"]
+    assert result.overlap_count == 1
+    assert result.cursor_fields["has_previous_page"] is True
+
+
+def test_bidirectional_probe_metadata_records_pass_and_overlap_failure():
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import build_bidirectional_probe_metadata
+
+    passing = build_bidirectional_probe_metadata(
+        enabled=True,
+        request_shape={"variables": {"before": "cursor-old", "last": 33}},
+        forward_posts=[{"id": "1"}, {"id": "2"}],
+        reverse_posts=[{"id": "9"}, {"id": "8"}],
+    )
+    duplicate = build_bidirectional_probe_metadata(
+        enabled=True,
+        request_shape={"variables": {"before": "cursor-old", "last": 33}},
+        forward_posts=[{"id": "1"}, {"id": "2"}],
+        reverse_posts=[{"id": "1"}, {"id": "2"}],
+    )
+
+    assert passing.passed is True
+    assert passing.reason == "reverse_probe_passed"
+    assert duplicate.passed is False
+    assert duplicate.reason == "reverse_probe_duplicate_forward_page"
+
+
+def test_rate_limit_key_shards_by_proxy_only_when_per_ip_pacing_enabled(monkeypatch):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import _global_rate_limit_key
+    from trr_backend.socials.instagram.posts_scrapling.proxy import PostsProxyConfig
+
+    proxy_a = PostsProxyConfig(
+        browser_proxy="http://user:pass@proxy-a:8080",
+        api_proxy_url="http://user:pass@proxy-a:8080",
+        proxy_rotator=None,
+        fingerprint="proxy-a:8080:explicit",
+        session_mode="explicit",
+    )
+    proxy_b = PostsProxyConfig(
+        browser_proxy="http://user:pass@proxy-b:8080",
+        api_proxy_url="http://user:pass@proxy-b:8080",
+        proxy_rotator=None,
+        fingerprint="proxy-b:8080:explicit",
+        session_mode="explicit",
+    )
+
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PER_IP_PACING_ENABLED", raising=False)
+    assert _global_rate_limit_key(proxy_a) == _global_rate_limit_key(proxy_b)
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PER_IP_PACING_ENABLED", "1")
+    assert _global_rate_limit_key(proxy_a) != _global_rate_limit_key(proxy_b)
+
+
+def test_proxy_pacing_identity_updates_from_observed_response_header(_mock_scrapling, monkeypatch):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+    from trr_backend.socials.instagram.posts_scrapling.proxy import PostsProxyConfig
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PER_IP_PACING_ENABLED", "1")
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing"},
+        browser_account_id="t",
+        proxy_config=PostsProxyConfig(
+            browser_proxy="http://user:pass@proxy-a:8080",
+            api_proxy_url="http://user:pass@proxy-a:8080",
+            proxy_rotator=None,
+            fingerprint="proxy-a:8080:explicit",
+            session_mode="explicit",
+        ),
+    )
+    initial_key = fetcher.runtime_metadata["proxy_pacing"]["global_rate_limit_key"]
+    response = MagicMock()
+    response.status_code = 200
+    response.text = "{}"
+    response.headers = {"x-trr-proxy-ip": "203.0.113.10"}
+
+    fetcher._record_proxy_response(response)
+    metadata = fetcher.runtime_metadata
+
+    assert metadata["proxy_pacing"]["global_rate_limit_key"] != initial_key
+    assert metadata["proxy_pacing"]["identity"]["observed_identity"] == "203.0.113.10"
+    assert metadata["proxy_pacing"]["identity"]["observed_fingerprint"]
+
+
+def test_bidirectional_probe_executes_reverse_request_when_enabled(_mock_scrapling, monkeypatch):
+    import asyncio
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_BIDIRECTIONAL_WALK_ENABLED", "1")
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing", "csrftoken": "csrf", "ds_user_id": "123"},
+        browser_account_id="t",
+    )
+    fetcher._doc_id_used = "healthy-doc"
+
+    requests: list[dict[str, str]] = []
+
+    async def fake_fetch_json_response(*_args, **kwargs):
+        requests.append(kwargs["data"])
+        return {
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+            "payload": {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "old-1", "code": "OLD"}}],
+                        "page_info": {
+                            "has_previous_page": False,
+                            "has_next_page": True,
+                            "start_cursor": "start-old",
+                            "end_cursor": "end-old",
+                        },
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr(fetcher, "_fetch_json_response", fake_fetch_json_response)
+
+    metadata = asyncio.run(fetcher.probe_bidirectional_walk("bravotv", forward_posts=[{"id": "new-1"}]))
+
+    variables = json.loads(requests[0]["variables"])
+    assert variables["first"] is None
+    assert variables["last"] == fetcher._page_size
+    assert metadata["passed"] is True
+    assert metadata["reason"] == "reverse_probe_passed"
+    assert metadata["response_order"] == ["old-1"]

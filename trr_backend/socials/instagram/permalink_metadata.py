@@ -44,7 +44,14 @@ _GRAPHQL_URL = "https://www.instagram.com/graphql/query/"
 _MEDIA_INFO_URL = "https://www.instagram.com/api/v1/media/{media_id}/info/"
 _SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _SHORTCODE_CHAR_MAP = {char: index for index, char in enumerate(_SHORTCODE_ALPHABET)}
-_DEFAULT_GRAPHQL_SHORTCODE_DOC_ID = "8845758582119845"
+_DEFAULT_GRAPHQL_SHORTCODE_DOC_IDS = (
+    "27075730382013528",
+    "27017844554484188",
+    "8845758582119845",
+)
+_DEFAULT_GRAPHQL_SHORTCODE_DOC_ID = _DEFAULT_GRAPHQL_SHORTCODE_DOC_IDS[-1]
+_DEFAULT_POST_ROOT_DOC_ID = "26767101476259141"
+_POST_ROOT_FRIENDLY_NAME = "PolarisPostRootQuery"
 
 _DEFAULT_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -86,6 +93,37 @@ class InstagramMediaResolution:
     attempts: list[dict[str, Any]]
 
 
+@dataclass(slots=True)
+class InstagramFacebookCrosspostMetadata:
+    comments_count: int | None
+    likes_count: int | None
+    is_shared_to_fb: bool | None
+    crosspost_metadata: dict[str, Any]
+    social_context: dict[str, Any]
+    facebook_post_id: str | None
+    facebook_post_url: str | None
+    observed_at: datetime
+    source: str
+    doc_id_used: str | None
+    auth_state: str
+    raw_media: dict[str, Any]
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "comments_count": self.comments_count,
+            "likes_count": self.likes_count,
+            "is_shared_to_fb": self.is_shared_to_fb,
+            "post_id": self.facebook_post_id,
+            "post_url": self.facebook_post_url,
+            "metadata": dict(self.crosspost_metadata or {}),
+            "social_context": dict(self.social_context or {}),
+            "observed_at": self.observed_at.isoformat(),
+            "source": self.source,
+            "doc_id_used": self.doc_id_used,
+            "auth_state": self.auth_state,
+        }
+
+
 def _normalize_unique(values: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -99,6 +137,36 @@ def _normalize_unique(values: list[str]) -> list[str]:
         seen.add(key)
         out.append(value)
     return out
+
+
+def _coerce_non_negative_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return max(0, int(value))
+    text = str(value or "").strip()
+    if not text:
+        return None
+    digits = re.sub(r"[^0-9]", "", text)
+    if not digits:
+        return None
+    try:
+        return max(0, int(digits))
+    except ValueError:
+        return None
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
 
 
 def _normalize_tag_coord(value: Any) -> float | None:
@@ -242,6 +310,140 @@ def _find_shortcode_media_item(node: Any) -> dict[str, Any] | None:
             if found is not None:
                 return found
     return None
+
+
+def _iter_nested_dicts(node: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            out.append(current)
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return out
+
+
+def _extract_post_root_doc_ids_from_payload(payload: dict[str, Any]) -> list[str]:
+    doc_ids: list[str] = []
+    for item in _iter_nested_dicts(payload):
+        expected = item.get("expectedPreloaders")
+        if isinstance(expected, list):
+            for preloader in expected:
+                if not isinstance(preloader, dict):
+                    continue
+                serialized = json.dumps(preloader, sort_keys=True, default=str)
+                if _POST_ROOT_FRIENDLY_NAME not in serialized:
+                    continue
+                query_id = str(
+                    preloader.get("queryID")
+                    or preloader.get("queryId")
+                    or preloader.get("doc_id")
+                    or preloader.get("docId")
+                    or ""
+                ).strip()
+                if query_id and query_id not in doc_ids:
+                    doc_ids.append(query_id)
+        serialized = json.dumps(item, sort_keys=True, default=str)
+        if _POST_ROOT_FRIENDLY_NAME not in serialized:
+            continue
+        query_id = str(
+            item.get("queryID") or item.get("queryId") or item.get("doc_id") or item.get("docId") or ""
+        ).strip()
+        if query_id and query_id not in doc_ids:
+            doc_ids.append(query_id)
+    return doc_ids
+
+
+def _post_root_doc_ids_from_html(html: str) -> list[str]:
+    doc_ids: list[str] = []
+    for payload in _iter_data_sjs_payloads(html):
+        for doc_id in _extract_post_root_doc_ids_from_payload(payload):
+            if doc_id not in doc_ids:
+                doc_ids.append(doc_id)
+    return doc_ids
+
+
+def _post_root_doc_ids_from_env_and_fallback() -> list[str]:
+    ids: list[str] = []
+    override = str(os.getenv("INSTAGRAM_POST_ROOT_GRAPHQL_DOC_ID") or "").strip()
+    if override:
+        ids.append(override)
+    if _DEFAULT_POST_ROOT_DOC_ID not in ids:
+        ids.append(_DEFAULT_POST_ROOT_DOC_ID)
+    return ids
+
+
+def _extract_facebook_url_from_crosspost_payload(*payloads: Any) -> str | None:
+    for payload in payloads:
+        for item in _iter_nested_dicts(payload):
+            for value in item.values():
+                if not isinstance(value, str):
+                    continue
+                text = value.strip()
+                if text.startswith("https://www.facebook.com/") or text.startswith("https://facebook.com/"):
+                    return text
+    return None
+
+
+def _extract_facebook_post_id_from_crosspost_payload(*payloads: Any) -> str | None:
+    preferred_keys = {
+        "facebook_post_id",
+        "fb_post_id",
+        "post_id",
+        "postid",
+        "target_id",
+        "fbid",
+        "id",
+    }
+    for payload in payloads:
+        for item in _iter_nested_dicts(payload):
+            for raw_key, value in item.items():
+                key = str(raw_key or "").strip().lower()
+                if key not in preferred_keys:
+                    continue
+                text = str(value or "").strip()
+                if text and "facebook.com" not in text:
+                    return text
+    return None
+
+
+def _facebook_crosspost_metadata_from_media(
+    media: dict[str, Any],
+    *,
+    observed_at: datetime,
+    doc_id_used: str | None,
+    auth_state: str,
+) -> InstagramFacebookCrosspostMetadata | None:
+    comments_count = _coerce_non_negative_int(media.get("fb_comment_count"))
+    likes_count = _coerce_non_negative_int(media.get("fb_like_count"))
+    is_shared_to_fb = _coerce_optional_bool(media.get("is_shared_to_fb"))
+    crosspost_metadata = media.get("crosspost_metadata") if isinstance(media.get("crosspost_metadata"), dict) else {}
+    social_context = media.get("social_context") if isinstance(media.get("social_context"), dict) else {}
+    has_field = (
+        comments_count is not None
+        or likes_count is not None
+        or is_shared_to_fb is not None
+        or bool(crosspost_metadata)
+        or bool(social_context)
+    )
+    if not has_field:
+        return None
+    return InstagramFacebookCrosspostMetadata(
+        comments_count=comments_count,
+        likes_count=likes_count,
+        is_shared_to_fb=is_shared_to_fb,
+        crosspost_metadata=dict(crosspost_metadata),
+        social_context=dict(social_context),
+        facebook_post_id=_extract_facebook_post_id_from_crosspost_payload(crosspost_metadata, social_context),
+        facebook_post_url=_extract_facebook_url_from_crosspost_payload(crosspost_metadata, social_context),
+        observed_at=observed_at,
+        source=_POST_ROOT_FRIENDLY_NAME,
+        doc_id_used=doc_id_used,
+        auth_state=auth_state,
+        raw_media=dict(media),
+    )
 
 
 def fetch_permalink_media_item(
@@ -653,12 +855,20 @@ def _resolution_attempt(
 
 
 def _graphql_doc_ids() -> list[str]:
-    override = str(os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_ID") or "").strip()
+    override = str(
+        os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_IDS")
+        or os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_ID")
+        or ""
+    ).strip()
     ids: list[str] = []
     if override:
-        ids.append(override)
-    if _DEFAULT_GRAPHQL_SHORTCODE_DOC_ID not in ids:
-        ids.append(_DEFAULT_GRAPHQL_SHORTCODE_DOC_ID)
+        for candidate in override.split(","):
+            normalized = candidate.strip()
+            if normalized and normalized not in ids:
+                ids.append(normalized)
+    for fallback in _DEFAULT_GRAPHQL_SHORTCODE_DOC_IDS:
+        if fallback not in ids:
+            ids.append(fallback)
     return ids
 
 
@@ -946,6 +1156,43 @@ def _fetch_shortcode_graphql_node(
     return None, None
 
 
+def _fetch_post_root_graphql_media(
+    *,
+    shortcode: str,
+    doc_id: str,
+    client: requests.Session,
+    timeout: tuple[int, int],
+    headers: dict[str, str],
+    cookies: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    body = {
+        "fb_api_caller_class": "RelayModern",
+        "fb_api_req_friendly_name": _POST_ROOT_FRIENDLY_NAME,
+        "variables": json.dumps({"shortcode": shortcode}),
+        "server_timestamps": "true",
+        "doc_id": doc_id,
+    }
+    req_headers = {
+        **headers,
+        "content-type": "application/x-www-form-urlencoded",
+        "x-fb-friendly-name": _POST_ROOT_FRIENDLY_NAME,
+        "x-ig-app-id": str(headers.get("x-ig-app-id") or headers.get("X-IG-App-ID") or "936619743392459"),
+    }
+    csrftoken = (cookies or {}).get("csrftoken")
+    if csrftoken:
+        req_headers["x-csrftoken"] = str(csrftoken)
+    response = client.post(
+        _GRAPHQL_URL,
+        data=body,
+        headers=req_headers,
+        cookies=(cookies or None),
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return _find_shortcode_media_item(payload)
+
+
 def _html_shared_data_node(html: str) -> dict[str, Any] | None:
     shared = _SHARED_DATA_RE.search(html or "")
     if shared:
@@ -1089,6 +1336,76 @@ def _fetch_permalink_html(
     if last_error is not None:
         raise last_error
     return None, None
+
+
+def fetch_instagram_facebook_crosspost_metadata(
+    shortcode_or_url: str,
+    *,
+    session: requests.Session | None = None,
+    timeout: tuple[int, int] = (10, 45),
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+) -> InstagramFacebookCrosspostMetadata | None:
+    shortcode, _ = _extract_shortcode_and_route(shortcode_or_url)
+    if not shortcode:
+        return None
+    req_headers = {**_DEFAULT_HEADERS, "x-ig-app-id": "936619743392459", **(headers or {})}
+    client = session or requests.Session()
+    observed_at = datetime.now(tz=UTC)
+    html_doc_ids: list[str] = []
+    try:
+        html, _ = _fetch_permalink_html(
+            shortcode_or_url=shortcode,
+            client=client,
+            timeout=timeout,
+            headers=req_headers,
+            cookies=cookies,
+        )
+    except Exception:
+        html = None
+    if html:
+        html_doc_ids = _post_root_doc_ids_from_html(html)
+        for payload in _iter_data_sjs_payloads(html):
+            media = _find_shortcode_media_item(payload)
+            if media is None:
+                continue
+            metadata = _facebook_crosspost_metadata_from_media(
+                media,
+                observed_at=observed_at,
+                doc_id_used=html_doc_ids[0] if html_doc_ids else None,
+                auth_state="inline",
+            )
+            if metadata and metadata.comments_count is not None:
+                return metadata
+
+    doc_ids: list[str] = []
+    for doc_id in [*html_doc_ids, *_post_root_doc_ids_from_env_and_fallback()]:
+        normalized = str(doc_id or "").strip()
+        if normalized and normalized not in doc_ids:
+            doc_ids.append(normalized)
+    for doc_id in doc_ids:
+        try:
+            media = _fetch_post_root_graphql_media(
+                shortcode=shortcode,
+                doc_id=doc_id,
+                client=client,
+                timeout=timeout,
+                headers=req_headers,
+                cookies=cookies,
+            )
+        except requests.RequestException:
+            continue
+        if not isinstance(media, dict):
+            continue
+        metadata = _facebook_crosspost_metadata_from_media(
+            media,
+            observed_at=observed_at,
+            doc_id_used=doc_id,
+            auth_state="authenticated" if (cookies or {}).get("sessionid") else "anonymous",
+        )
+        if metadata is not None:
+            return metadata
+    return None
 
 
 def _fetch_media_info_via_shortcode(

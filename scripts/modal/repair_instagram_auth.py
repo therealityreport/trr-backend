@@ -10,9 +10,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from trr_backend.utils.env import load_env
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from trr_backend.utils.env import load_env  # noqa: E402
 
 
 def _python_command() -> str:
@@ -71,6 +73,8 @@ def _refresh_command(*, python_command: str, force: bool) -> list[str]:
         str(REPO_ROOT / "scripts" / "socials" / "refresh_cookies.py"),
         "--platform",
         "instagram",
+        "--validation-mode",
+        "comments_endpoint",
     ]
     if force:
         command.extend(["--force", "--headed"])

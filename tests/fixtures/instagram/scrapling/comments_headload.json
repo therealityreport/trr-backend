@@ -1,0 +1,22 @@
+{
+  "status": "ok",
+  "comment_filter_param": "headload",
+  "has_more_comments": false,
+  "has_more_headload_comments": true,
+  "next_min_id": "headload-min-cursor-redacted",
+  "comments": [
+    {
+      "pk": "headload-parent-1",
+      "text": "Headload fixture comment",
+      "created_at": 1770000200,
+      "comment_like_count": 5,
+      "user": {
+        "username": "headload_author",
+        "pk": "headload-author-id"
+      },
+      "is_covered": false,
+      "status": "Active",
+      "child_comment_count": 0
+    }
+  ]
+}

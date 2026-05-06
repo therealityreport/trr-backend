@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from trr_backend.repositories.social_season_analytics import (
+from trr_backend.socials.social_season_analytics_impl import (
     COMMENT_MEDIA_MIRROR_STAGE,
     IngestOptions,
     SeasonContext,

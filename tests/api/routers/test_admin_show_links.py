@@ -5493,7 +5493,10 @@ def test_cleanup_invalid_show_knowledge_links_keeps_cached_canonical_fandom_page
                             if candidate_url and "real-housewives.fandom.com" in candidate_url
                             else None,
                         ):
-                            with patch("api.routers.admin_show_links.pg.db_connection", return_value=nullcontext(object())):
+                            with patch(
+                                "api.routers.admin_show_links.pg.db_connection",
+                                return_value=nullcontext(object()),
+                            ):
                                 with patch("api.routers.admin_show_links._delete_entity_links_by_id", return_value=0):
                                     result = _cleanup_invalid_show_knowledge_links(show_id)
 

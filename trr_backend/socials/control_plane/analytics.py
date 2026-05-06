@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from trr_backend.repositories.social_season_analytics import (
+from trr_backend.socials.analytics.read_models import (
     _build_drivers,
     _build_ingest_shard_schedule,
     _normalize_week_totals_payload,

@@ -1,0 +1,43 @@
+{
+  "status": "ok",
+  "comment_filter_param": "ranked",
+  "has_more_comments": true,
+  "cached_comments_cursor": "ranked-cursor-redacted",
+  "tao_cursor": "tao-cursor-redacted",
+  "comments": [
+    {
+      "pk": "ranked-parent-1",
+      "text": "Ranked fixture comment",
+      "created_at": 1770000000,
+      "comment_like_count": 17,
+      "user": {
+        "username": "fixture_author",
+        "pk": "fixture-author-id",
+        "is_verified": true
+      },
+      "is_covered": false,
+      "is_ranked": true,
+      "comment_index": 0,
+      "did_report_as_spam": false,
+      "status": "Active",
+      "is_edited": true,
+      "is_pinned": true,
+      "meta_ai_comment_type": "NONE",
+      "child_comment_count": 1,
+      "liked_by_media_coauthors": true,
+      "replies": [
+        {
+          "pk": "ranked-child-1",
+          "text": "Nested reply fixture",
+          "created_at": 1770000100,
+          "comment_like_count": 3,
+          "user": {
+            "username": "fixture_reply_author",
+            "pk": "fixture-reply-author-id"
+          },
+          "status": "Active"
+        }
+      ]
+    }
+  ]
+}

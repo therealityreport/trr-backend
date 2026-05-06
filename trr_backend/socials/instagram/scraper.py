@@ -16,7 +16,7 @@ import random
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -68,6 +68,7 @@ from trr_backend.socials.instagram.identity_pool import (
 from trr_backend.socials.instagram.permalink_metadata import (
     _shortcode_to_media_id as permalink_shortcode_to_media_id,
 )
+from trr_backend.socials.instagram.post_normalizer import _extract_repost_count
 from trr_backend.socials.instagram.rate_controller import InstagramRateController
 from trr_backend.socials.instagram.request_client import InstagramRequestClient, InstagramRequestFailure
 from trr_backend.socials.instagram.resume_state import InstagramResumeState
@@ -238,6 +239,24 @@ class InstagramComment:
     # reply_count. Previously _parse_comment overwrote reply_count to
     # len(replies) when no count was present, masking the gap during pagination.
     reply_count_observed: int | None = None
+
+    # API phase/capture metadata. Defaults mirror the additive DB defaults so
+    # existing direct InstagramComment construction remains compatible.
+    is_covered: bool = False
+    is_ranked: bool = False
+    comment_index: int | None = None
+    phase: str | None = None
+    did_report_as_spam: bool = False
+    status: str = "Active"
+    is_edited: bool = False
+    is_pinned: bool = False
+    meta_ai_comment_type: str = "NONE"
+    child_comment_count: int = 0
+    liked_by_media_coauthors: bool = False
+    cursor_min_id: str | None = None
+    cursor_param: str | None = None
+    cursor_payload: dict[str, Any] = field(default_factory=dict)
+    comment_filter_param: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -2430,9 +2449,7 @@ class InstagramScraper:
         )
         result["can_viewer_reshare"] = self._coerce_bool_or_none(node.get("can_viewer_reshare"))
         result["has_audio"] = self._coerce_bool_or_none(node.get("has_audio"))
-        result["media_repost_count"] = (
-            self._coerce_int(node.get("media_repost_count"), 0) if node.get("media_repost_count") is not None else None
-        )
+        result["media_repost_count"] = _extract_repost_count(node)
 
         caption = node.get("caption") if isinstance(node.get("caption"), dict) else {}
         result["caption_id"] = str(caption.get("pk") or caption.get("id") or "").strip() or None
@@ -3305,6 +3322,7 @@ class InstagramScraper:
             if parent_comment_id and not reply.parent_comment_id:
                 reply.parent_comment_id = parent_comment_id
             reply.is_reply = True
+            reply.phase = "child"
             merged.append(reply)
         return merged
 
@@ -3556,6 +3574,12 @@ class InstagramScraper:
         is_reply: bool = False,
         parent_id: str | None = None,
         reply_depth: int | None = None,
+        phase: str | None = None,
+        cursor_param: str | None = None,
+        cursor_min_id: str | None = None,
+        cursor_payload: Mapping[str, Any] | None = None,
+        comment_filter_param: str | None = None,
+        comment_index: int | None = None,
     ) -> InstagramComment:
         """Parse comment data into InstagramComment object."""
         user = data.get("user", {}) if isinstance(data.get("user"), dict) else {}
@@ -3631,11 +3655,124 @@ class InstagramScraper:
                 return None
             return parsed if parsed >= 0 else None
 
+        def _coerce_bool(value: Any, default: bool = False) -> bool:
+            coerced = self._coerce_bool_or_none(value)
+            return default if coerced is None else coerced
+
+        def _first_text(*keys: str) -> str | None:
+            value = _first_present(*keys)
+            text = str(value or "").strip()
+            return text or None
+
+        def _coerce_comment_index(value: Any) -> int | None:
+            if value is None:
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed >= 0 else None
+
+        def _normalize_cursor_param(value: Any) -> str | None:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            aliases = {
+                "next_min_id": "min_id",
+                "nextMinId": "min_id",
+                "next_max_id": "max_id",
+                "nextMaxId": "max_id",
+            }
+            return aliases.get(text, text)
+
+        def _compact_cursor_payload(value: Mapping[str, Any] | None) -> dict[str, Any]:
+            if not isinstance(value, Mapping):
+                return {}
+            payload: dict[str, Any] = {}
+            for key, raw_value in value.items():
+                key_text = str(key or "").strip()
+                if not key_text or raw_value is None:
+                    continue
+                if isinstance(raw_value, bool | int | float):
+                    payload[key_text] = raw_value
+                    continue
+                if isinstance(raw_value, str):
+                    raw_text = raw_value.strip()
+                    if raw_text:
+                        payload[key_text] = raw_text
+                    continue
+                try:
+                    payload[key_text] = json.loads(json.dumps(raw_value))
+                except (TypeError, ValueError):
+                    payload[key_text] = str(raw_value)
+            return payload
+
         owner_fbid_v2 = _first_present("fbid_v2", "fbidV2")
         owner_is_mentionable = _coerce_optional_bool(_first_present("is_mentionable", "isMentionable"))
         owner_is_private = _coerce_optional_bool(_first_present("is_private", "isPrivate"))
         owner_latest_reel_media = _coerce_optional_nonneg_int(_first_present("latest_reel_media", "latestReelMedia"))
         owner_profile_pic_id = _first_present("profile_pic_id", "profilePicId")
+        raw_child_comment_count = _first_present(
+            "child_comment_count",
+            "childCommentCount",
+            "repliesCount",
+            "reply_count",
+            "replies_count",
+        )
+        child_comment_count = _coerce_optional_nonneg_int(raw_child_comment_count) or 0
+        normalized_phase = (
+            "child"
+            if is_reply or parent_id
+            else str(phase or _first_present("phase", "comment_phase", "commentPhase", "source_phase") or "").strip()
+            or None
+        )
+        raw_is_ranked = _first_present("is_ranked", "isRanked", "ranked")
+        parsed_comment_index = _coerce_comment_index(
+            comment_index
+            if comment_index is not None
+            else _first_present("comment_index", "commentIndex", "ranked_index", "rankedIndex", "index")
+        )
+        raw_cursor_payload = _first_present("cursor_payload", "cursorPayload")
+        parsed_cursor_payload = _compact_cursor_payload(raw_cursor_payload if isinstance(raw_cursor_payload, Mapping) else None)
+        parsed_cursor_payload.update(_compact_cursor_payload(cursor_payload))
+        row_cursor_values = {
+            "next_min_id": _first_present("next_min_id", "nextMinId"),
+            "next_max_id": _first_present("next_max_id", "nextMaxId"),
+            "cached_comments_cursor": _first_present("cached_comments_cursor", "cachedCommentsCursor"),
+            "bifilter_token": _first_present("bifilter_token", "bifilterToken"),
+            "tao_cursor": _first_present("tao_cursor", "taoCursor"),
+        }
+        for key, value in row_cursor_values.items():
+            text = str(value or "").strip()
+            if text and key not in parsed_cursor_payload:
+                parsed_cursor_payload[key] = text
+        normalized_cursor_param = _normalize_cursor_param(
+            cursor_param
+            or _first_present("cursor_param", "cursorParam", "cursor_name", "cursorName", "cursor_param_name")
+        )
+        normalized_cursor_min_id = (
+            str(
+                cursor_min_id
+                or _first_present("cursor_min_id", "cursorMinId", "min_id", "next_min_id", "nextMinId")
+                or ""
+            ).strip()
+            or None
+        )
+        normalized_comment_filter_param = (
+            str(
+                comment_filter_param
+                or _first_present(
+                    "comment_filter_param",
+                    "commentFilterParam",
+                    "comment_filter",
+                    "commentFilter",
+                    "filter_param",
+                    "filterParam",
+                )
+                or ""
+            ).strip()
+            or None
+        )
 
         comment_id_str = str(data.get("pk") or data.get("id") or "")
         normalized_shortcode = str(shortcode or "").strip()
@@ -3695,6 +3832,32 @@ class InstagramScraper:
             post_url=post_url,
             comment_url=comment_url,
             created_at_iso=created_at_iso,
+            is_covered=_coerce_bool(_first_present("is_covered", "isCovered", "covered"), False),
+            is_ranked=_coerce_bool(raw_is_ranked, normalized_phase == "ranked"),
+            comment_index=parsed_comment_index,
+            phase=normalized_phase,
+            did_report_as_spam=_coerce_bool(
+                _first_present("did_report_as_spam", "didReportAsSpam", "reported_as_spam", "reportedAsSpam"),
+                False,
+            ),
+            status=_first_text("status", "comment_status", "commentStatus") or "Active",
+            is_edited=_coerce_bool(_first_present("is_edited", "isEdited", "edited"), False),
+            is_pinned=_coerce_bool(_first_present("is_pinned", "isPinned", "pinned"), False),
+            meta_ai_comment_type=_first_text("meta_ai_comment_type", "metaAiCommentType") or "NONE",
+            child_comment_count=child_comment_count,
+            liked_by_media_coauthors=_coerce_bool(
+                _first_present(
+                    "liked_by_media_coauthors",
+                    "likedByMediaCoauthors",
+                    "liked_by_media_coauthor",
+                    "likedByMediaCoauthor",
+                ),
+                False,
+            ),
+            cursor_min_id=normalized_cursor_min_id,
+            cursor_param=normalized_cursor_param,
+            cursor_payload=parsed_cursor_payload,
+            comment_filter_param=normalized_comment_filter_param,
         )
         nested_replies = data.get("replies")
         if not isinstance(nested_replies, list):
@@ -3708,6 +3871,8 @@ class InstagramScraper:
                     is_reply=True,
                     parent_id=comment.comment_id,
                     reply_depth=comment.reply_depth + 1,
+                    phase="child",
+                    comment_filter_param=normalized_comment_filter_param,
                 )
                 for reply in nested_replies
                 if isinstance(reply, dict)
@@ -3728,6 +3893,12 @@ class InstagramScraper:
         is_reply: bool = False,
         parent_id: str | None = None,
         reply_depth: int | None = None,
+        phase: str | None = None,
+        cursor_param: str | None = None,
+        cursor_min_id: str | None = None,
+        cursor_payload: Mapping[str, Any] | None = None,
+        comment_filter_param: str | None = None,
+        comment_index: int | None = None,
     ) -> InstagramComment:
         """Public comment parser for shared comments fetcher integrations."""
         return self._parse_comment(
@@ -3737,6 +3908,12 @@ class InstagramScraper:
             is_reply=is_reply,
             parent_id=parent_id,
             reply_depth=reply_depth,
+            phase=phase,
+            cursor_param=cursor_param,
+            cursor_min_id=cursor_min_id,
+            cursor_payload=cursor_payload,
+            comment_filter_param=comment_filter_param,
+            comment_index=comment_index,
         )
 
     @staticmethod
