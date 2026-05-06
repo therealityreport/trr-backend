@@ -22,16 +22,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
-import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(REPO_ROOT / ".env", override=True)
 
@@ -62,127 +60,22 @@ def main() -> int:
         logger.error("--account is required")
         return 1
 
-    from trr_backend.socials.instagram.scraper import InstagramScraper, ScrapeConfig
-
-    if not args.dry_run:
-        from trr_backend.socials.control_plane import (
-            _batch_upsert_shared_catalog_instagram_posts,
-        )
-
-    scrape_config = ScrapeConfig(username=account_handle)
-
-    cookie_file = REPO_ROOT / "data" / "instagram_cookies.json"
-    cookies = {}
-    if cookie_file.is_file():
-        raw = json.loads(cookie_file.read_text())
-        cookies = {k: v for k, v in raw.items() if not k.startswith("_")}
-    logger.info("Loaded %d cookies", len(cookies))
-
-    scraper = InstagramScraper(cookies=cookies)
-    cursor = args.resume_cursor
-    total_posts = 0
-    total_saved = 0
-    page = 0
-    start_time = time.monotonic()
-
-    mode = "DRY RUN" if args.dry_run else "LIVE (saving to DB)"
-    logger.info(
-        "Starting direct catalog backfill for @%s [%s] (max_pages=%d, page_size=%d, delay=%.1fs)",
-        account_handle,
-        mode,
-        args.max_pages,
-        args.page_size,
-        args.delay,
+    from trr_backend.socials.ops.instagram_direct_catalog import (
+        DirectInstagramCatalogBackfillOptions,
+        run_direct_instagram_catalog_backfill,
     )
-    if cursor:
-        logger.info("Resuming from cursor: %s", cursor[:40])
 
-    while page < args.max_pages:
-        page += 1
-        logger.info("--- Page %d (cursor=%s) ---", page, (cursor or "START")[:30])
-
-        result = scraper.fetch_posts_graphql(
-            account_handle,
-            cursor=cursor,
-            delay=args.delay,
-            request_timeout=30,
-            fast_mode=False,
-            allow_browser_fallback=True,
+    run_direct_instagram_catalog_backfill(
+        DirectInstagramCatalogBackfillOptions(
+            account=account_handle,
+            max_pages=args.max_pages,
             page_size=args.page_size,
+            delay=args.delay,
+            dry_run=bool(args.dry_run),
+            resume_cursor=args.resume_cursor,
+            repo_root=REPO_ROOT,
         )
-
-        transport = scraper.last_retrieval_meta.get("transport", "unknown")
-
-        if result is None:
-            logger.error("Page %d returned None — stopping. Meta: %s", page, scraper.last_retrieval_meta)
-            if cursor:
-                logger.info("To resume, run with: --resume-cursor '%s'", cursor)
-            break
-
-        # Parse posts using the scraper's own methods
-        page_posts = []
-        page_info = {}
-        for node, pi in scraper._iter_posts_from_graphql(result):
-            page_info = pi
-            page_posts.append(scraper._parse_post_node(node, scrape_config))
-
-        has_next = page_info.get("has_next_page", False)
-        next_cursor = page_info.get("end_cursor")
-        post_count = len(page_posts)
-        total_posts += post_count
-
-        # Preview first post
-        first_preview = ""
-        if page_posts:
-            first_preview = (page_posts[0].caption or "")[:60]
-
-        elapsed = time.monotonic() - start_time
-        rate = total_posts / elapsed if elapsed > 0 else 0
-
-        logger.info(
-            "Page %d: %d posts (total=%d, %.1f posts/s), transport=%s, has_next=%s, preview='%s'",
-            page,
-            post_count,
-            total_posts,
-            rate,
-            transport,
-            has_next,
-            first_preview,
-        )
-
-        # Save to database using batch upsert (single INSERT for the whole page)
-        if page_posts and not args.dry_run:
-            try:
-                saved_rows = _batch_upsert_shared_catalog_instagram_posts(
-                    run_id=None,
-                    account_handle=account_handle,
-                    posts=page_posts,
-                )
-                saved_count = len(saved_rows)
-                total_saved += saved_count
-                logger.info(
-                    "Page %d: saved %d/%d posts to DB (total saved=%d)", page, saved_count, post_count, total_saved
-                )
-            except Exception:
-                logger.exception("Page %d: DB upsert failed — continuing to next page", page)
-
-        if not has_next or not next_cursor:
-            logger.info("Reached end of feed at page %d", page)
-            break
-
-        cursor = next_cursor
-        time.sleep(args.delay)
-
-    elapsed = time.monotonic() - start_time
-    logger.info(
-        "=== DONE: %d pages, %d total posts scraped, %d saved to DB (%.0fs elapsed) ===",
-        page,
-        total_posts,
-        total_saved,
-        elapsed,
     )
-    if cursor and page >= args.max_pages:
-        logger.info("Hit max-pages limit. To continue: --resume-cursor '%s'", cursor)
     return 0
 
 

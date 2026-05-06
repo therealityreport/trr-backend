@@ -1349,6 +1349,7 @@ def _build_missing_comment_targets(
     date_end: datetime,
     conn: Any | None = None,
 ) -> dict[str, list[str]]:
+    allowed_missing_comments = 1
     social_repo = _social_repo()
     target_accounts_by_platform = _call_with_optional_conn(
         social_repo._target_accounts_by_platform,  # noqa: SLF001
@@ -1425,11 +1426,13 @@ def _build_missing_comment_targets(
               and p.{posted_at_column} >= %s
               and p.{posted_at_column} <= %s
               {account_filter}
-              and coalesce(cc.saved_comments, 0) < {expected_expr}
-            order by {expected_expr} desc, p.{source_id_column} asc
+              and greatest(({expected_expr}) - coalesce(cc.saved_comments, 0), 0) > %s
+            order by greatest(({expected_expr}) - coalesce(cc.saved_comments, 0), 0) asc,
+                     p.{posted_at_column} desc nulls last,
+                     p.{source_id_column} asc
             limit 5000
             """,
-            params,
+            [*params, allowed_missing_comments],
             conn=conn,
         )
         source_ids = [
@@ -1530,7 +1533,7 @@ def _start_sync_pass(
         raise ValueError("sync_session_not_found")
     sync_config = dict(session.get("sync_config") or {})
     season_id = str(session.get("season_id") or "")
-    source_scope = str(session.get("source_scope") or "bravo")
+    source_scope = str(session.get("source_scope") or "network")
     date_start = _coerce_dt(session.get("date_start"))
     date_end = _coerce_dt(session.get("date_end"))
     if not season_id or date_start is None or date_end is None:
@@ -1855,7 +1858,7 @@ def get_sync_session(sync_session_id: str) -> dict[str, Any]:
             row = dict(row)
             row["completeness_snapshot"] = _build_completeness_snapshot(
                 season_id=str(row.get("season_id") or ""),
-                source_scope=str(row.get("source_scope") or "bravo"),
+                source_scope=str(row.get("source_scope") or "network"),
                 platforms=_normalize_platforms(row.get("platforms")),
                 date_start=date_start,
                 date_end=date_end,
@@ -1924,7 +1927,7 @@ def evaluate_sync_session(sync_session_id: str) -> dict[str, Any]:
             return _serialize_sync_session(row)
     completeness_snapshot = _build_completeness_snapshot(
         season_id=str(row.get("season_id") or ""),
-        source_scope=str(row.get("source_scope") or "bravo"),
+        source_scope=str(row.get("source_scope") or "network"),
         platforms=list(state["session_platforms"]),
         date_start=state["date_start"],
         date_end=state["date_end"],

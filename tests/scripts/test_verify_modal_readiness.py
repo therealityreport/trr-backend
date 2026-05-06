@@ -39,6 +39,7 @@ class _StubFunctionHandle:
 def test_expected_function_names_includes_reddit_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION", raising=False)
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_POSTS_JOB_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_MEDIA_JOB_FUNCTION", raising=False)
@@ -49,6 +50,7 @@ def test_expected_function_names_includes_reddit_runtime_probe(monkeypatch: pyte
 
     assert "probe_reddit_refresh_runtime" in function_names
     assert "probe_social_remote_auth" in function_names
+    assert "probe_instagram_posts_auth" in function_names
     assert "probe_getty_remote_access" in function_names
     assert "run_social_posts_job" in function_names
     assert "run_social_media_job" in function_names
@@ -65,6 +67,7 @@ def test_expected_function_names_skips_social_functions_when_queue_disabled(monk
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "false")
     monkeypatch.delenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION", raising=False)
+    monkeypatch.delenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION", raising=False)
 
     function_names = cli.expected_function_names()
@@ -95,6 +98,16 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "probe_social_remote_auth": _StubFunctionHandle(
                 remote_payload={"platform": "instagram", "ready": True, "reason": None}
             ),
+            "probe_instagram_posts_auth": _StubFunctionHandle(
+                remote_payload={
+                    "platform": "instagram",
+                    "account_handle": "thetraitorsus",
+                    "status": "valid",
+                    "ready": True,
+                    "reason": None,
+                    "execution_backend": "modal",
+                }
+            ),
             "probe_getty_remote_access": _StubFunctionHandle(
                 remote_payload={"platform": "getty", "ready": True, "reason": None}
             ),
@@ -114,9 +127,11 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "run_social_comments_job",
             "run_socialblade_scrape",
             "probe_social_remote_auth",
+            "probe_instagram_posts_auth",
             "probe_getty_remote_access",
         ),
         probe_remote_auth_platform="instagram",
+        probe_instagram_posts_auth_handle="thetraitorsus",
         probe_getty_remote_access=True,
     )
 
@@ -144,7 +159,103 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
     assert summary["blocking_probe_failures"] == []
     assert summary["advisory_probe_failures"] == []
     assert summary["remote_auth_probe"] == {"platform": "instagram", "ready": True, "reason": None}
+    assert summary["instagram_posts_auth_probe"] == {
+        "platform": "instagram",
+        "account_handle": "thetraitorsus",
+        "status": "valid",
+        "ready": True,
+        "reason": None,
+        "execution_backend": "modal",
+    }
     assert summary["getty_remote_probe"] == {"platform": "getty", "ready": True, "reason": None}
+
+
+def test_verify_modal_readiness_accepts_tiktok_remote_auth_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "run_admin_operation": _StubFunctionHandle(),
+            "run_social_job": _StubFunctionHandle(),
+            "run_social_posts_job": _StubFunctionHandle(),
+            "run_social_media_job": _StubFunctionHandle(),
+            "run_social_comments_job": _StubFunctionHandle(),
+            "probe_social_remote_auth": _StubFunctionHandle(
+                remote_payload={
+                    "platform": "tiktok",
+                    "ready": True,
+                    "reason": None,
+                    "has_sessionid": True,
+                    "has_sid_tt": False,
+                    "has_ms_token": True,
+                }
+            ),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=(
+            "serve_backend_api",
+            "run_admin_operation",
+            "run_social_job",
+            "run_social_posts_job",
+            "run_social_media_job",
+            "run_social_comments_job",
+            "probe_social_remote_auth",
+        ),
+        probe_remote_auth_platform="tiktok",
+    )
+
+    assert summary["ok"] is True
+    assert summary["remote_auth_probe"] == {
+        "platform": "tiktok",
+        "ready": True,
+        "reason": None,
+        "has_sessionid": True,
+        "has_sid_tt": False,
+        "has_ms_token": True,
+    }
+    assert summary["blocking_probe_failures"] == []
+
+
+def test_parse_args_accepts_tiktok_remote_auth_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify_modal_readiness.py", "--probe-remote-auth", "tiktok", "--json"],
+    )
+
+    args = cli._parse_args()
+
+    assert args.probe_remote_auth == "tiktok"
+    assert args.json is True
+
+
+@pytest.mark.parametrize("platform", ["twitter", "facebook", "threads"])
+def test_parse_args_accepts_additional_remote_auth_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify_modal_readiness.py", "--probe-remote-auth", platform, "--json"],
+    )
+
+    args = cli._parse_args()
+
+    assert args.probe_remote_auth == platform
+    assert args.json is True
 
 
 def test_verify_modal_readiness_reports_missing_secret_and_function(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +313,11 @@ def test_verify_modal_readiness_reports_missing_secret_and_function(monkeypatch:
 
 def test_verify_modal_readiness_reports_missing_social_comments_function(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "true")
-    monkeypatch.setattr(cli, "list_secret_names", lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"})
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
     monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
     monkeypatch.setattr(
         cli,
@@ -242,7 +357,11 @@ def test_verify_modal_readiness_requires_missing_social_comments_function_even_i
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "true")
-    monkeypatch.setattr(cli, "list_secret_names", lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"})
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
     monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
     monkeypatch.setattr(
         cli,
@@ -338,7 +457,11 @@ def test_verify_modal_readiness_ignores_missing_social_comments_function_when_qu
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "false")
-    monkeypatch.setattr(cli, "list_secret_names", lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"})
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
     monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
     monkeypatch.setattr(
         cli,
@@ -502,6 +625,7 @@ def test_main_emits_json_and_returns_nonzero_when_not_ready(
                 "env": "main",
                 "json": True,
                 "probe_remote_auth": "instagram",
+                "probe_instagram_posts_auth": "",
                 "probe_getty_remote_access": True,
                 "strict_probes": False,
             },
@@ -561,6 +685,7 @@ def test_main_returns_zero_when_only_advisory_probe_fails_without_strict_mode(
                 "env": "",
                 "json": True,
                 "probe_remote_auth": "",
+                "probe_instagram_posts_auth": "",
                 "probe_getty_remote_access": True,
                 "strict_probes": False,
             },
@@ -617,6 +742,7 @@ def test_main_returns_nonzero_when_only_advisory_probe_fails_in_strict_mode(
                 "env": "",
                 "json": True,
                 "probe_remote_auth": "",
+                "probe_instagram_posts_auth": "",
                 "probe_getty_remote_access": True,
                 "strict_probes": True,
             },
@@ -680,6 +806,7 @@ def test_main_applies_workspace_runtime_env_before_parsing(
                 "env": "",
                 "json": True,
                 "probe_remote_auth": "",
+                "probe_instagram_posts_auth": "",
                 "probe_getty_remote_access": False,
                 "strict_probes": False,
             },

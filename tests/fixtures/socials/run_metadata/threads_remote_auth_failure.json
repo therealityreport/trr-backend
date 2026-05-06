@@ -1,0 +1,21 @@
+{
+  "platform": "threads",
+  "job_type": "posts",
+  "status": "failed",
+  "last_error_code": "threads_remote_auth_not_ready",
+  "last_error_class": "RemoteAuthNotReady",
+  "error_message": "Threads remote auth probe failed before catalog backfill",
+  "metadata": {
+    "remote_auth_probe": {
+      "platform": "threads",
+      "ready": false,
+      "reason": "checkpoint_required",
+      "has_sessionid": true,
+      "has_csrftoken": true
+    },
+    "runtime_metadata": {
+      "execution_backend": "modal",
+      "probe_source": "modal_remote_auth_probe"
+    }
+  }
+}

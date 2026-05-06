@@ -5,6 +5,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = REPO_ROOT / "supabase/migrations/20260428145222_instagram_queryable_profile_schema.sql"
+COMMENT_PHASE_MIGRATION = (
+    REPO_ROOT
+    / "supabase/migrations/20260505173000_instagram_comment_api_phase_metadata.sql"
+)
 
 
 def _read_sql() -> str:
@@ -13,6 +17,14 @@ def _read_sql() -> str:
 
 def _normalized_sql() -> str:
     return re.sub(r"\s+", " ", _read_sql().lower())
+
+
+def _read_comment_phase_sql() -> str:
+    return COMMENT_PHASE_MIGRATION.read_text(encoding="utf-8")
+
+
+def _normalized_comment_phase_sql() -> str:
+    return re.sub(r"\s+", " ", _read_comment_phase_sql().lower())
 
 
 def _table_body(table_name: str) -> str:
@@ -283,3 +295,146 @@ def test_migration_is_additive_and_does_not_revoke_legacy_raw_tables() -> None:
     ):
         assert f"revoke all on table {legacy_table}" not in sql
         assert f"revoke select on table {legacy_table}" not in sql
+
+
+def test_instagram_comment_phase_metadata_columns_are_guarded() -> None:
+    sql = _normalized_comment_phase_sql()
+
+    for column in (
+        "add column if not exists is_covered boolean not null default false",
+        "add column if not exists is_ranked boolean not null default false",
+        "add column if not exists comment_index integer",
+        "add column if not exists phase text",
+        "add column if not exists did_report_as_spam boolean not null default false",
+        "add column if not exists status text not null default 'active'",
+        "add column if not exists is_edited boolean not null default false",
+        "add column if not exists is_pinned boolean not null default false",
+        "add column if not exists meta_ai_comment_type text not null default 'none'",
+        "add column if not exists child_comment_count integer not null default 0",
+        "add column if not exists liked_by_media_coauthors boolean not null default false",
+        "add column if not exists cursor_min_id text",
+        "add column if not exists cursor_param text",
+        "add column if not exists cursor_payload jsonb not null default '{}'::jsonb",
+        "add column if not exists comment_filter_param text",
+    ):
+        assert column in sql
+
+
+def test_instagram_comment_phase_checks_indexes_and_comments_exist() -> None:
+    sql = _normalized_comment_phase_sql()
+
+    assert "constraint instagram_comments_phase_check" in sql
+    assert "phase in ('ranked', 'headload', 'fb_crosspost', 'child')" in sql
+    assert "constraint instagram_comments_cursor_param_check" in sql
+    for cursor_name in (
+        "'min_id'",
+        "'max_id'",
+        "'cached_comments_cursor'",
+        "'bifilter_token'",
+        "'tao_cursor'",
+    ):
+        assert cursor_name in sql
+
+    assert "create index if not exists instagram_comments_post_phase_comment_index_idx" in sql
+    assert "on social.instagram_comments (post_id, phase, comment_index)" in sql
+    assert "create index if not exists instagram_comments_post_covered_status_idx" in sql
+    assert "where is_covered or status <> 'active'" in sql
+    assert "create index if not exists instagram_comments_post_child_count_idx" in sql
+    assert "where child_comment_count > 0" in sql
+
+    for comment_target in (
+        "comment on column social.instagram_comments.phase is",
+        "comment on column social.instagram_comments.is_ranked is",
+        "comment on column social.instagram_comments.comment_index is",
+        "comment on column social.instagram_comments.reply_count is",
+        "comment on column social.instagram_comments.child_comment_count is",
+        "comment on column social.instagram_comments.is_edited is",
+        "comment on column social.instagram_comments.is_pinned is",
+        "comment on column social.instagram_comments.cursor_payload is",
+        "comment on column social.instagram_comments.comment_filter_param is",
+    ):
+        assert comment_target in sql
+
+    assert "legacy scraper-observed reply count" in sql
+    assert "authoritative child-comment total" in sql
+    assert "preserve ranked ordinals" in sql
+
+
+def test_instagram_comment_capture_health_view_exists() -> None:
+    sql = _normalized_comment_phase_sql()
+
+    assert "create or replace view social.comment_capture_health as" in sql
+    assert "from social.instagram_posts p" in sql
+    assert "from social.instagram_comments" in sql
+    assert "phase is distinct from 'fb_crosspost'" in sql
+    for field in (
+        "instagram_reported_comments",
+        "facebook_reported_comments",
+        "saved_parent_comments",
+        "saved_child_replies",
+        "phase_ranked_count",
+        "phase_headload_count",
+        "phase_fb_crosspost_count",
+        "phase_child_count",
+        "covered_comment_count",
+        "spam_report_count",
+        "inactive_status_count",
+        "parent_capture_gap",
+        "parent_capture_rate_pct",
+    ):
+        assert field in sql
+
+    assert "alter view social.comment_capture_health set (security_invoker = on)" in sql
+    assert "comment on view social.comment_capture_health is" in sql
+
+
+def test_instagram_post_comments_audit_table_and_indexes_exist() -> None:
+    sql = _normalized_comment_phase_sql()
+
+    assert "create table if not exists social.instagram_post_comments_audit" in sql
+    for column in (
+        "scrape_run_id uuid references social.scrape_runs(id) on delete set null",
+        "scrape_job_id uuid references social.scrape_jobs(id) on delete set null",
+        "post_id uuid not null references social.instagram_posts(id) on delete cascade",
+        "reported_comment_count integer not null default 0",
+        "reported_fb_comment_count integer not null default 0",
+        "fetched_comment_count integer not null default 0",
+        "fetched_parent_comment_count integer not null default 0",
+        "fetched_child_comment_count integer not null default 0",
+        "phase_ranked_count integer not null default 0",
+        "phase_headload_count integer not null default 0",
+        "phase_fb_crosspost_count integer not null default 0",
+        "phase_child_count integer not null default 0",
+        "phase_counts jsonb not null default '{}'::jsonb",
+        "covered_comment_count integer not null default 0",
+        "spam_report_count integer not null default 0",
+        "inactive_status_count integer not null default 0",
+        "status_counts jsonb not null default '{}'::jsonb",
+        "cursor_stop_reason text",
+        "cursor_payload jsonb not null default '{}'::jsonb",
+        "comment_filter_param text",
+        "reported_parent_gap_count integer not null default 0",
+        "reported_child_gap_count integer not null default 0",
+        "reported_total_gap_count integer not null default 0",
+        "created_at timestamptz not null default now()",
+    ):
+        assert column in sql
+
+    assert "create index if not exists instagram_post_comments_audit_post_created_idx" in sql
+    assert "on social.instagram_post_comments_audit (post_id, created_at desc)" in sql
+    assert "create index if not exists instagram_post_comments_audit_run_job_created_idx" in sql
+    assert "grant all privileges on table social.instagram_post_comments_audit to service_role" in sql
+    assert "alter table social.instagram_post_comments_audit enable row level security" in sql
+    assert "comment on table social.instagram_post_comments_audit is" in sql
+
+
+def test_instagram_comment_phase_migration_is_additive_and_idempotent() -> None:
+    sql = _normalized_comment_phase_sql()
+
+    assert "drop table" not in sql
+    assert "drop constraint" not in sql
+    assert "add column if not exists" in sql
+    assert "create index if not exists" in sql
+    assert "create table if not exists social.instagram_post_comments_audit" in sql
+    assert "create or replace view social.comment_capture_health as" in sql
+    assert "from pg_constraint" in sql

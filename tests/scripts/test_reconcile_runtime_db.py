@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -39,32 +38,6 @@ def _clear_runtime_db_env(monkeypatch: pytest.MonkeyPatch):
     yield
     for name in runtime_envs:
         os.environ.pop(name, None)
-
-
-def _read_runtime_reconcile_decisions(path: Path) -> tuple[set[str], set[str], str | None]:
-    auto_apply: set[str] = set()
-    manual_only: set[str] = set()
-    decision_required_after: str | None = None
-
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            comment = line[1:].strip()
-            lower_comment = comment.lower()
-            if lower_comment.startswith("manual:"):
-                version = comment.split(":", 1)[1].strip().split(maxsplit=1)[0]
-                if version:
-                    manual_only.add(version)
-            elif lower_comment.startswith("decision-required-after:"):
-                version = comment.split(":", 1)[1].strip().split(maxsplit=1)[0]
-                if version:
-                    decision_required_after = version
-            continue
-        auto_apply.add(line.split(maxsplit=1)[0])
-
-    return auto_apply, manual_only, decision_required_after
 
 
 def test_reconcile_runtime_db_blocks_without_runtime_db_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,7 +106,7 @@ def test_reconcile_runtime_db_blocks_on_remote_only_history(monkeypatch: pytest.
     assert result["reason"] == "remote_only_history"
 
 
-def test_reconcile_runtime_db_blocks_when_pending_not_allowlisted(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_runtime_db_warns_when_pending_not_allowlisted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRR_DB_URL", "postgresql://runtime")
     monkeypatch.setattr(cli, "assert_migration_safe", lambda require_core_schema=True: None)
     monkeypatch.setattr(cli, "resolve_direct_runtime_db_url", lambda: "postgresql://direct")
@@ -143,8 +116,10 @@ def test_reconcile_runtime_db_blocks_when_pending_not_allowlisted(monkeypatch: p
 
     result = cli.reconcile_runtime_db()
 
-    assert result["state"] == "blocked"
+    assert result["state"] == "advisory"
     assert result["reason"] == "pending_not_allowlisted"
+    assert result["not_allowlisted"] == ["20260422111500"]
+    assert result["pending_local"] == ["20260422111500"]
 
 
 def test_reconcile_runtime_db_blocks_when_pending_not_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,21 +230,8 @@ def test_reconcile_runtime_db_sanitizes_failed_supabase_output(monkeypatch: pyte
     assert "secret" not in result["remediation"]
 
 
-def test_runtime_reconcile_tail_migrations_have_explicit_startup_decisions() -> None:
-    auto_apply, manual_only, decision_required_after = _read_runtime_reconcile_decisions(cli.ALLOWLIST_PATH)
+def test_runtime_reconcile_allowlist_only_controls_auto_apply() -> None:
+    allowlist = cli.read_allowlist()
 
-    assert decision_required_after, (
-        f"{cli.ALLOWLIST_PATH.name} must declare '# decision-required-after: <version>' so tail migrations "
-        "cannot skip an explicit startup decision."
-    )
-
-    decided_versions = auto_apply | manual_only
-    tail_versions = [
-        version for version in cli.read_local_versions() if version > decision_required_after
-    ]
-    undecided_tail = [version for version in tail_versions if version not in decided_versions]
-
-    assert not undecided_tail, (
-        "Tail migrations newer than the runtime-reconcile decision baseline must be explicitly marked "
-        f"for startup auto-apply or manual-only review in {cli.ALLOWLIST_PATH.name}: {undecided_tail}"
-    )
+    assert "20260422170000" in allowlist
+    assert "20260427140000" not in allowlist

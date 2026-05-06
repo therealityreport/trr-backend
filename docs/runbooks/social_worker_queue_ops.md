@@ -191,6 +191,58 @@ Preferred shared Instagram canary order:
 
 Use `Sync Newer` as the same-pipeline bounded head-gap repair when diagnostics show the newest stored post lags the live profile. It is not a separate worker path.
 
+## Social Media Mirror Covers And Display Variants
+
+Post media mirror jobs now preserve full-quality originals and derive smaller
+cover variants for catalog/gallery display. The canonical full-resolution cover
+is stored in `hosted_thumbnail_url`, playable videos and original carousel media
+are stored in `hosted_media_urls`, and `asset_manifest` carries:
+
+- `originals.cover` for the full-quality cover/still image
+- `originals.media` for full-quality original media, including playable video
+- `display_variants` for `thumb`, `card`, `detail`, and optional poster-crop
+  WebP/JPEG variants
+- `display_variants_status` and `display_variants_reason`
+- `storage_summary` with original bytes, variant bytes, object count, variant
+  count, and CDN URL count
+
+Expected platform caveats:
+
+- Instagram reels usually expose a still/cover and a video URL. If the cover URL
+  is expired, the mirror stage tries to re-resolve it before marking variants
+  failed.
+- TikTok and YouTube may expose page/watch URLs for video. The mirror stage uses
+  yt-dlp for playable media when supported; if no cover image is resolvable, the
+  video can still mirror while display variants are marked `unsupported`.
+- Twitter/X media can include video URLs plus `pbs.twimg.com` stills. Repair
+  reason `twitter_video_thumbnail` means a prior run used a video URL where a
+  still image candidate exists.
+- Facebook and Threads can have rows with media but no independent cover source.
+  These rows should keep original media and report `display_variants_status:
+  unsupported` rather than inventing a still.
+
+Run a dry-run freshness audit before broad repairs:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/socials/audit_social_media_display_variants.py --limit-per-platform 5000
+```
+
+Add a bounded CDN smoke check when public serving is the concern:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/socials/audit_social_media_display_variants.py --cdn-smoke --limit-per-platform 100
+```
+
+Queue variant repair without touching complete original-only rows by filtering
+on the display variant reason:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python3.11 scripts/socials/backfill_social_media_mirror_jobs.py --repair-reasons missing_display_variants --dry-run
+```
+
 Rollback gates before allowing a full shared-profile backfill:
 
 - `scripts/modal/verify_modal_readiness.py` must return `ok: true`
@@ -217,6 +269,204 @@ For remote Instagram auth failures, use these reason buckets:
 - `cookie_schema_invalid`: the Modal social secret contains a partial or malformed Instagram cookie bundle; regenerate and re-apply named secrets before retrying.
 - `request_error`: the worker image had structurally valid cookies but the GraphQL validation canary failed at transport/runtime level; inspect Modal runtime health, network, and deployment drift.
 - `unexpected_exception:*`: the validation path itself raised inside the worker image; treat this as a runtime or image issue first, not as proof that the Instagram account is invalid.
+
+## TikTok And YouTube Posts Smoke Checks
+
+Use these checks when validating the TikTok posts Scrapling lane or the YouTube
+shared-account posts path. They are operator smoke checks, not schema or route
+changes.
+
+First confirm Modal can see the TikTok auth bundle in the worker plane:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python scripts/modal/verify_modal_readiness.py --probe-remote-auth tiktok --json
+```
+
+The TikTok probe is ready only when `remote_auth_probe.ready=true`. The safe
+structure keys are `has_sessionid`, `has_sid_tt`, and `has_ms_token`; they show
+cookie presence only and must not contain raw cookie values.
+
+Use the local wrapper to list the approved post-path smoke commands without
+requiring credentials:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python scripts/socials/smoke_tiktok_youtube_posts.py --dry-run
+```
+
+Run the commands only from an environment with DB access and the required social
+runtime secrets:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python scripts/socials/smoke_tiktok_youtube_posts.py --run
+```
+
+The wrapper currently covers:
+
+- `remote-auth-tiktok`: `scripts/modal/verify_modal_readiness.py --probe-remote-auth tiktok --json`
+- `tiktok-posts`: `python -m scripts.socials.tiktok.smoke_posts_scrapling --account bravotv --max-pages 1`
+- `youtube-posts`: `python -m scripts.socials.youtube.scrape --channel bravo --keywords Bravo --start <window-start> --end <window-end> --max-results 5`
+
+## Threads, Twitter/X, And Facebook Remote Auth Smoke Checks
+
+Use these checks when validating remote auth readiness for the remaining
+auth-required shared-account platforms. They do not add worker lanes for
+Twitter/X or Facebook; those platforms still use the shared-account catalog
+path unless a separate plan adds a claimed-job lane.
+
+List the commands without requiring Modal credentials:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python scripts/socials/smoke_threads_twitter_facebook_auth.py --dry-run
+```
+
+Run the probes from an environment with Modal access and named social secrets:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python scripts/socials/smoke_threads_twitter_facebook_auth.py --run
+```
+
+Equivalent single-platform checks:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+python scripts/modal/verify_modal_readiness.py --probe-remote-auth twitter --json
+python scripts/modal/verify_modal_readiness.py --probe-remote-auth facebook --json
+python scripts/modal/verify_modal_readiness.py --probe-remote-auth threads --json
+```
+
+Safe structure keys only indicate credential shape. They must never contain raw
+cookie or token values:
+
+- Twitter/X: `has_auth_token`, `has_ct0`, `has_bearer_token`, `has_twikit_credentials`
+- Facebook: `has_c_user`, `has_xs`
+- Threads: `has_sessionid`, `has_csrftoken`
+
+Copyable recent-failure query:
+
+```sql
+select
+  platform,
+  stage,
+  status,
+  last_error_code,
+  last_error_class,
+  updated_at,
+  left(coalesce(error_message, ''), 240) as error_message
+from social.scrape_jobs
+where platform in ('twitter', 'facebook', 'threads')
+  and last_error_code in (
+    'twitter_remote_auth_not_ready',
+    'facebook_remote_auth_not_ready',
+    'threads_remote_auth_not_ready',
+    'threads_posts_scrapling_cancelled',
+    'threads_posts_scrapling_final_read_degraded'
+  )
+order by updated_at desc
+limit 50;
+```
+
+Key TikTok job metadata fields:
+
+- `stage`, `platform`, and `account`: confirm the job is the expected
+  `tiktok_posts_scrapling` lane and account.
+- `stage_counters.posts` and `stage_counters.pages`: fetched post/page counts.
+- `persist_counters.posts_upserted`: rows persisted through the current per-row
+  post helper.
+- `activity.phase` and `activity.last_progress_at`: terminal phase and last
+  progress timestamp.
+- `fetcher_runtime`: safe fetcher diagnostics such as proxy fingerprint,
+  request count, warmup cookie names/count, and `sec_uid_resolved`.
+- `runtime_metadata`: failure-specific fetch reason when the job fails or
+  retries.
+
+Key YouTube metadata fields:
+
+- `retrieval_meta.error_code`, `retryable`, and `error_class`: terminal
+  diagnostic for the posts scrape.
+- `retrieval_meta.first_page_counts`: first-page videos/shorts counts used to
+  identify empty-channel pages.
+- `retrieval_meta.continuation_pages`,
+  `retrieval_meta.continuation_failure_reason`, and
+  `retrieval_meta.continuation_failure_count`: pagination coverage and failure
+  signal.
+- `retrieval_meta.scan_capped_reason`: bounded crawl stop reason such as
+  `pre_window_cap`.
+- `retrieval_meta.profile_snapshot` and `retrieval_meta.total_posts`: profile
+  and total-post evidence carried into shared catalog progress.
+- `persist_counters.posts_upserted`: persisted post count when present on the
+  job/run metadata.
+
+Error-code triage:
+
+- `tiktok_posts_account_missing`: job config is invalid; do not retry until the
+  launch payload includes an account.
+- `tiktok_posts_auth_failed`: TikTok auth failed; run the remote auth probe and
+  refresh/redeploy the TikTok cookie secret before retrying.
+- `challenge_or_blocked`: TikTok challenged or blocked the fetch path; inspect
+  cookie freshness, proxy posture, and fallback-chain metadata.
+- `http_429`: TikTok rate limit; retry with lower concurrency or a longer delay.
+- `tiktok_posts_fetch_failed` or `tiktok_posts_scrapling_failed`: inspect
+  `runtime_metadata.fetch_reason` and `fetcher_runtime` before retrying.
+- `tiktok_posts_scrapling_cancelled`: operator or control-plane cancellation;
+  check `cancel_scope`, `job_status`, and `run_status` when those keys are
+  present.
+- `youtube_empty_channel_page`: YouTube returned no first-page videos or shorts
+  with no lower-level error; retry is allowed, but inspect channel identity and
+  parser/continuation behavior first.
+- `youtube_continuation_fetch_failed`: continuation pagination failed; inspect
+  `continuation_failure_reason` and avoid treating partial coverage as complete.
+
+Batch upsert is not a live TikTok/YouTube contract in this docs/scripts pass.
+Keep interpreting TikTok and YouTube post persistence through the existing
+per-row helper semantics until the platform payloads have equivalence tests for
+conflict columns, optional columns, assignment payloads, and returned row shape.
+
+30-day failure audit:
+
+```sql
+select
+  j.id::text as job_id,
+  j.run_id::text as run_id,
+  coalesce(nullif(j.platform, ''), nullif(j.metadata->>'platform', ''), r.config->>'platform') as platform,
+  coalesce(nullif(to_jsonb(j)->>'stage', ''), nullif(j.metadata->>'stage', ''), j.job_type, 'unknown') as stage,
+  j.status,
+  coalesce(
+    nullif(j.last_error_code, ''),
+    nullif(j.metadata->>'error_code', ''),
+    nullif(j.metadata->'retrieval_meta'->>'error_code', '')
+  ) as error_code,
+  coalesce(
+    nullif(j.last_error_class, ''),
+    nullif(j.metadata->>'error_class', ''),
+    nullif(j.metadata->'retrieval_meta'->>'error_class', '')
+  ) as error_class,
+  j.metadata->'runtime_metadata' as runtime_metadata,
+  j.metadata->'fetcher_runtime' as fetcher_runtime,
+  j.metadata->'retrieval_meta' as retrieval_meta,
+  j.metadata->'persist_counters' as persist_counters,
+  j.error_message,
+  j.created_at,
+  j.updated_at
+from social.scrape_jobs j
+left join social.scrape_runs r on r.id = j.run_id
+where coalesce(nullif(j.platform, ''), nullif(j.metadata->>'platform', ''), r.config->>'platform') in ('tiktok', 'youtube')
+  and j.created_at >= now() - interval '30 days'
+  and (
+    j.status in ('failed', 'retrying', 'cancelled')
+    or coalesce(
+      nullif(j.last_error_code, ''),
+      nullif(j.metadata->>'error_code', ''),
+      nullif(j.metadata->'retrieval_meta'->>'error_code', '')
+    ) is not null
+  )
+order by j.created_at desc
+limit 200;
+```
 
 ## Alert Contract
 

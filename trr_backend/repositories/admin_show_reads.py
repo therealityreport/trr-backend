@@ -4,8 +4,11 @@ import json
 import logging
 import math
 import re
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -33,6 +36,7 @@ SHOW_FALLBACK_WARNING = (
 SEASON_FALLBACK_WARNING = (
     "Season episode evidence is missing or stale. Showing approximate show-level cast until cast/credits sync succeeds."
 )
+_CURRENT_READ_CURSOR: ContextVar[Any | None] = ContextVar("admin_show_reads_current_read_cursor", default=None)
 IMDB_CREW_CREDIT_CATEGORIES = (
     "Producers",
     "Editors",
@@ -362,8 +366,54 @@ def _normalize_int(value: Any, *, default: int = 0) -> int:
 def _normalize_asset_request(limit: int | None, offset: int | None, *, full: bool) -> tuple[int, int, int]:
     normalized_limit = max(limit or (ASSET_FULL_FETCH_LIMIT if full else ASSET_QUERY_LIMIT), 1)
     normalized_offset = max(offset or 0, 0)
-    max_limit = ASSET_FULL_FETCH_LIMIT if full else ASSET_QUERY_LIMIT
-    return min(normalized_limit, max_limit), normalized_offset, max_limit
+    max_limit = ASSET_FULL_FETCH_LIMIT if full else ASSET_QUERY_LIMIT + 1
+    normalized_limit = min(normalized_limit, max_limit)
+    fetch_limit = ASSET_FULL_FETCH_LIMIT if full else min(normalized_offset + normalized_limit, max_limit)
+    return normalized_limit, normalized_offset, fetch_limit
+
+
+@contextmanager
+def _shared_asset_read_cursor(label: str):
+    with pg.db_read_connection(label=label) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            token = _CURRENT_READ_CURSOR.set(cur)
+            try:
+                yield
+            finally:
+                _CURRENT_READ_CURSOR.reset(token)
+
+
+def _fetch_asset_source_rows(
+    source_timings: dict[str, dict[str, Any]],
+    label: str,
+    query: str,
+    params: list[Any] | None = None,
+) -> list[dict[str, Any]]:
+    started_at = time.perf_counter()
+    rows = _fetch_all_rows(query, params)
+    source_timings[label] = {
+        "rows": len(rows),
+        "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+    }
+    return rows
+
+
+def _log_asset_source_timings(
+    route: str,
+    *,
+    show_id: str,
+    season_number: int | None = None,
+    timings: dict[str, dict[str, Any]],
+) -> None:
+    if not logger.isEnabledFor(logging.DEBUG) or not timings:
+        return
+    logger.debug(
+        "admin_gallery_asset_source_timings route=%s show_id=%s season_number=%s source_timings=%s",
+        route,
+        show_id,
+        season_number,
+        timings,
+    )
 
 
 def _metadata_dict(value: Any) -> dict[str, Any]:
@@ -723,15 +773,41 @@ def get_show_assets(
     sources: list[str] | None = None,
     full: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
+    with _shared_asset_read_cursor("admin_show_reads.get_show_assets"):
+        return _get_show_assets_impl(
+            show_id,
+            limit=limit,
+            offset=offset,
+            sources=sources,
+            full=full,
+        )
+
+
+def _get_show_assets_impl(
+    show_id: str,
+    *,
+    limit: int | None = None,
+    offset: int | None = None,
+    sources: list[str] | None = None,
+    full: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
     normalized_limit, normalized_offset, fetch_limit = _normalize_asset_request(limit, offset, full=full)
     normalized_sources = {
         str(source).strip().lower() for source in (sources or []) if isinstance(source, str) and source.strip()
     }
+    source_fetch_limit = (
+        ASSET_FULL_FETCH_LIMIT
+        if full
+        else (ASSET_QUERY_LIMIT + 1 if normalized_sources else fetch_limit)
+    )
     assets: list[dict[str, Any]] = []
     hosted_url_seen: set[str] = set()
+    source_timings: dict[str, dict[str, Any]] = {}
     query_count = 0
 
-    media_link_rows = _fetch_all_rows(
+    media_link_rows = _fetch_asset_source_rows(
+        source_timings,
+        "show_media_links",
         """
         select
           ml.id::text as link_id,
@@ -756,9 +832,10 @@ def get_show_assets(
           on ma.id = ml.media_asset_id
         where ml.entity_type = 'show'
           and ml.entity_id = %s::uuid
+        order by ma.created_at desc nulls last, ml.id asc
         limit %s::int
         """,
-        [show_id, fetch_limit],
+        [show_id, source_fetch_limit],
     )
     query_count += 1
     for row in media_link_rows:
@@ -817,7 +894,9 @@ def get_show_assets(
             },
         )
 
-    show_image_rows = _fetch_all_rows(
+    show_image_rows = _fetch_asset_source_rows(
+        source_timings,
+        "show_images",
         """
         select
           id::text as id,
@@ -834,9 +913,10 @@ def get_show_assets(
         from core.show_images
         where show_id = %s::uuid
           and hosted_url is not null
+        order by created_at desc nulls last, id asc
         limit %s::int
         """,
-        [show_id, fetch_limit],
+        [show_id, source_fetch_limit],
     )
     query_count += 1
     for row in show_image_rows:
@@ -889,6 +969,7 @@ def get_show_assets(
         if normalized_sources
         else assets
     )
+    _log_asset_source_timings("show-assets", show_id=show_id, timings=source_timings)
     return filtered_assets[normalized_offset : normalized_offset + normalized_limit], query_count
 
 
@@ -901,12 +982,38 @@ def get_show_season_assets(
     sources: list[str] | None = None,
     full: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
+    with _shared_asset_read_cursor("admin_show_reads.get_show_season_assets"):
+        return _get_show_season_assets_impl(
+            show_id,
+            season_number,
+            limit=limit,
+            offset=offset,
+            sources=sources,
+            full=full,
+        )
+
+
+def _get_show_season_assets_impl(
+    show_id: str,
+    season_number: int,
+    *,
+    limit: int | None = None,
+    offset: int | None = None,
+    sources: list[str] | None = None,
+    full: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
     normalized_limit, normalized_offset, fetch_limit = _normalize_asset_request(limit, offset, full=full)
     normalized_sources = {
         str(source).strip().lower() for source in (sources or []) if isinstance(source, str) and source.strip()
     }
+    source_fetch_limit = (
+        ASSET_FULL_FETCH_LIMIT
+        if full
+        else (ASSET_QUERY_LIMIT + 1 if normalized_sources else fetch_limit)
+    )
     assets: list[dict[str, Any]] = []
     hosted_url_seen: set[str] = set()
+    source_timings: dict[str, dict[str, Any]] = {}
     query_count = 0
     season_id: str | None = None
     season_start_date: datetime | None = None
@@ -917,12 +1024,22 @@ def get_show_season_assets(
     season_row = _fetch_one_row(
         """
         select
-          id::text as id,
-          premiere_date::text as premiere_date,
-          air_date::text as air_date
-        from core.seasons
-        where show_id = %s::uuid
-          and season_number = %s::int
+          s.id::text as id,
+          s.premiere_date::text as premiere_date,
+          s.air_date::text as air_date,
+          min(e.air_date)::text as episode_start_date,
+          max(e.air_date)::text as episode_end_date,
+          sh.name,
+          sh.external_ids
+        from core.seasons as s
+        join core.shows as sh
+          on sh.id = s.show_id
+        left join core.episodes as e
+          on e.season_id = s.id
+          and e.air_date is not null
+        where s.show_id = %s::uuid
+          and s.season_number = %s::int
+        group by s.id, s.premiere_date, s.air_date, sh.name, sh.external_ids
         limit 1
         """,
         [show_id, season_number],
@@ -931,53 +1048,22 @@ def get_show_season_assets(
     if season_row:
         season_id = str(season_row.get("id") or "").strip() or None
         initial_start = season_row.get("premiere_date") or season_row.get("air_date")
-        if season_id:
-            episode_date_rows = _fetch_all_rows(
-                """
-                select air_date::text as air_date
-                from core.episodes
-                where season_id = %s::uuid
-                  and air_date is not null
-                limit %s::int
-                """,
-                [season_id, fetch_limit],
-            )
-            query_count += 1
-            parsed_dates = [
-                parsed
-                for parsed in (_to_date_only(row.get("air_date")) for row in episode_date_rows)
-                if parsed is not None
-            ]
-            if parsed_dates:
-                parsed_dates.sort()
-                season_start_date = parsed_dates[0]
-                season_end_date = parsed_dates[-1]
+        season_start_date = _to_date_only(season_row.get("episode_start_date"))
+        season_end_date = _to_date_only(season_row.get("episode_end_date"))
         if season_start_date is None:
             season_start_date = _to_date_only(initial_start)
             if season_start_date is not None:
                 season_end_date = _to_date_only(datetime.now(UTC).isoformat())
         elif season_end_date is None:
             season_end_date = _to_date_only(datetime.now(UTC).isoformat())
-
-    show_row = _fetch_one_row(
-        """
-        select
-          name,
-          external_ids
-        from core.shows
-        where id = %s::uuid
-        limit 1
-        """,
-        [show_id],
-    )
-    query_count += 1
-    if show_row:
-        show_name = show_row.get("name") if isinstance(show_row.get("name"), str) else None
-        external_ids = show_row.get("external_ids") if isinstance(show_row.get("external_ids"), dict) else {}
+        show_name = season_row.get("name") if isinstance(season_row.get("name"), str) else None
+        external_ids = season_row.get("external_ids") if isinstance(season_row.get("external_ids"), dict) else {}
         show_imdb_id = _pick_url_candidate(external_ids.get("imdb_id"), external_ids.get("imdb"))
 
     if season_id:
-        media_link_rows = _fetch_all_rows(
+        media_link_rows = _fetch_asset_source_rows(
+            source_timings,
+            "season_media_links",
             """
             select
               ml.id::text as link_id,
@@ -1001,9 +1087,10 @@ def get_show_season_assets(
               on ma.id = ml.media_asset_id
             where ml.entity_type = 'season'
               and ml.entity_id = %s::uuid
+            order by ma.created_at desc nulls last, ml.id asc
             limit %s::int
             """,
-            [season_id, fetch_limit],
+            [season_id, source_fetch_limit],
         )
         query_count += 1
         for row in media_link_rows:
@@ -1065,7 +1152,9 @@ def get_show_season_assets(
                 },
             )
 
-    season_image_rows = _fetch_all_rows(
+    season_image_rows = _fetch_asset_source_rows(
+        source_timings,
+        "season_images",
         """
         select
           id::text as id,
@@ -1083,9 +1172,10 @@ def get_show_season_assets(
         where show_id = %s::uuid
           and season_number = %s::int
           and hosted_url is not null
+        order by created_at desc nulls last, id asc
         limit %s::int
         """,
-        [show_id, season_number, fetch_limit],
+        [show_id, season_number, source_fetch_limit],
     )
     query_count += 1
     for row in season_image_rows:
@@ -1129,7 +1219,9 @@ def get_show_season_assets(
             },
         )
 
-    episode_image_rows = _fetch_all_rows(
+    episode_image_rows = _fetch_asset_source_rows(
+        source_timings,
+        "episode_images",
         """
         select
           id::text as id,
@@ -1151,7 +1243,7 @@ def get_show_season_assets(
         order by episode_number asc
         limit %s::int
         """,
-        [show_id, season_number, fetch_limit],
+        [show_id, season_number, source_fetch_limit],
     )
     query_count += 1
     for row in episode_image_rows:
@@ -1214,7 +1306,7 @@ def get_show_season_assets(
           and s.season_number = %s::int
         limit %s::int
         """,
-        [show_id, season_number, fetch_limit],
+        [show_id, season_number, source_fetch_limit],
     )
     query_count += 1
     if season_cast_rows:
@@ -1225,7 +1317,9 @@ def get_show_season_assets(
                 for row in season_cast_rows
                 if isinstance(row.get("person_id"), str)
             }
-            cast_photo_rows = _fetch_all_rows(
+            cast_photo_rows = _fetch_asset_source_rows(
+                source_timings,
+                "cast_photos",
                 """
                 select
                   cp.id::text as id,
@@ -1254,6 +1348,15 @@ def get_show_season_assets(
                 where cp.person_id = any(%s::uuid[])
                   and cp.hosted_url is not null
                   and (
+                    cp.hosted_content_type is null
+                    or cp.hosted_content_type ilike 'image/%%'
+                  )
+                  and (
+                    coalesce(cardinality(cp.title_imdb_ids), 0) = 0
+                    or %s::text is null
+                    or %s::text = any(cp.title_imdb_ids)
+                  )
+                  and (
                     cp.season = %s::int
                     or (
                       %s::date is not null
@@ -1267,12 +1370,14 @@ def get_show_season_assets(
                 """,
                 [
                     person_ids,
+                    show_imdb_id,
+                    show_imdb_id,
                     season_number,
                     _to_sql_date(season_start_date),
                     _to_sql_date(season_end_date),
                     _to_sql_date(season_start_date),
                     _to_sql_date(season_end_date),
-                    fetch_limit,
+                    source_fetch_limit,
                 ],
             )
             query_count += 1
@@ -1348,6 +1453,12 @@ def get_show_season_assets(
         [asset for asset in assets if str(asset.get("source") or "").strip().lower() in normalized_sources]
         if normalized_sources
         else assets
+    )
+    _log_asset_source_timings(
+        "season-assets",
+        show_id=show_id,
+        season_number=season_number,
+        timings=source_timings,
     )
     return filtered_assets[normalized_offset : normalized_offset + normalized_limit], query_count
 
@@ -1614,6 +1725,9 @@ def _fetch_all_rows(
     cur: Any | None = None,
 ) -> list[dict[str, Any]]:
     if cur is None:
+        active_cur = _CURRENT_READ_CURSOR.get()
+        if active_cur is not None:
+            return pg.fetch_all_with_cursor(active_cur, query, params)
         return pg.fetch_all(query, params)
     return pg.fetch_all_with_cursor(cur, query, params)
 
@@ -1625,6 +1739,9 @@ def _fetch_one_row(
     cur: Any | None = None,
 ) -> dict[str, Any] | None:
     if cur is None:
+        active_cur = _CURRENT_READ_CURSOR.get()
+        if active_cur is not None:
+            return pg.fetch_one_with_cursor(active_cur, query, params)
         return pg.fetch_one(query, params)
     return pg.fetch_one_with_cursor(cur, query, params)
 

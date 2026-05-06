@@ -1,0 +1,29 @@
+{
+  "platform": "threads",
+  "job_type": "posts",
+  "status": "cancelled",
+  "last_error_code": "threads_posts_scrapling_cancelled",
+  "last_error_class": "ThreadsPostsScraplingCancelledError",
+  "error_message": "Cancelled by operator request",
+  "metadata": {
+    "cancel_scope": "job",
+    "job_status": "cancelled",
+    "run_status": "running",
+    "runtime_metadata": {
+      "proxy_configured": true,
+      "cookie_source": "modal_secret",
+      "session_cookie_present": true
+    },
+    "listing_progress": {
+      "pages_fetched": 1,
+      "posts_seen": 18
+    },
+    "persist_counters": {
+      "posts_upserted": 9,
+      "posts_skipped": 1,
+      "posts_skipped_by_reason": {
+        "missing_external_id": 1
+      }
+    }
+  }
+}

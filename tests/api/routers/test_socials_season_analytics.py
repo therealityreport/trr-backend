@@ -254,13 +254,13 @@ def test_get_shared_account_sources(client: TestClient, monkeypatch: pytest.Monk
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
-        "source_scope": "bravo",
+        "source_scope": "network",
         "using_defaults": False,
         "sources": [
             {
                 "id": "shared-source-1",
                 "platform": "instagram",
-                "source_scope": "bravo",
+                "source_scope": "network",
                 "account_handle": "bravotv",
                 "is_active": True,
                 "scrape_priority": 100,
@@ -268,7 +268,7 @@ def test_get_shared_account_sources(client: TestClient, monkeypatch: pytest.Monk
         ],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_shared_account_sources", return_value=expected):
+    with patch("trr_backend.repositories.social_season_analytics.get_shared_account_sources", return_value=expected) as mocked:
         response = client.get(
             "/api/v1/admin/socials/shared/sources?source_scope=bravo&include_inactive=true",
             headers={"Authorization": f"Bearer {token}"},
@@ -276,8 +276,9 @@ def test_get_shared_account_sources(client: TestClient, monkeypatch: pytest.Monk
 
     assert response.status_code == 200
     body = response.json()
-    assert body["source_scope"] == "bravo"
+    assert body["source_scope"] == "network"
     assert body["sources"][0]["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["source_scope"] == "network"
 
 
 def test_get_social_account_profile_summary(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -654,6 +655,32 @@ def test_get_social_account_profile_posts_forwards_comment_filter(
     assert mocked.call_args.kwargs["comment_filter"] == "incomplete"
 
 
+def test_get_social_account_profile_posts_forwards_sort_params(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    expected = {
+        "items": [],
+        "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 1},
+    }
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_posts",
+        return_value=expected,
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/posts"
+            "?page=1&page_size=25&comments_only=true&sort_by=missing_comments&sort_dir=asc",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["sort_by"] == "missing_comments"
+    assert mocked.call_args.kwargs["sort_dir"] == "asc"
+
+
 def test_get_social_account_profile_posts_returns_503_on_statement_timeout(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -939,8 +966,8 @@ def test_post_social_account_catalog_backfill(client: TestClient, monkeypatch: p
     )
     assert mocked_begin.call_args.kwargs["platform"] == "instagram"
     assert mocked_begin.call_args.kwargs["account_handle"] == "bravotv"
-    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
-    assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-1"
+    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details"]
+    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details"]
 
 
 def test_post_social_account_catalog_backfill_forwards_selected_tasks(
@@ -962,32 +989,15 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
                     "status": "queued",
                     "launch_group_id": "launch-group-1",
                     "selected_tasks": ["post_details", "comments", "media"],
-                    "effective_selected_tasks": ["comments", "media"],
-                    "post_details_skipped_reason": "already_materialized",
                     "catalog_run_id": "catalog-run-1",
-                    "comments_run_id": "comments-run-1",
-                    "attached_followups": {
-                        "comments": {
-                            "run_id": "comments-run-1",
-                            "state": "running",
-                            "status": "running",
-                            "source": "reused_run",
-                        },
-                        "media": {
-                            "attachment_id": "media-launch-group-1",
-                            "state": "pending",
-                            "status": "queued",
-                            "source": "catalog_media_mirror",
-                            "enqueued_job_ids": ["media-job-1"],
-                            "enqueued_job_count": 1,
-                        },
-                    },
+                    "launch_state": "pending",
+                    "launch_task_resolution_pending": True,
                 },
             ) as mocked_begin:
                 with patch(
                     "api.routers.socials._queue_catalog_backfill_finalize_task",
                     return_value=None,
-                ):
+                ) as mocked_finalize:
                     response = client.post(
                         "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
                         headers={"Authorization": f"Bearer {token}"},
@@ -1001,12 +1011,53 @@ def test_post_social_account_catalog_backfill_forwards_selected_tasks(
     body = response.json()
     assert body["launch_group_id"] == "launch-group-1"
     assert body["catalog_run_id"] == "catalog-run-1"
-    assert body["comments_run_id"] == "comments-run-1"
-    assert body["effective_selected_tasks"] == ["comments", "media"]
-    assert body["post_details_skipped_reason"] == "already_materialized"
-    assert body["attached_followups"]["comments"]["source"] == "reused_run"
-    assert body["attached_followups"]["media"]["attachment_id"] == "media-launch-group-1"
+    assert body["launch_state"] == "pending"
+    assert body["launch_task_resolution_pending"] is True
     assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+
+
+def test_post_social_account_catalog_backfill_without_comments_uses_async_kickoff(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
+        with patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
+                return_value={
+                    "run_id": "catalog-run-post-details",
+                    "status": "queued",
+                    "launch_group_id": "launch-group-post-details",
+                    "selected_tasks": ["post_details"],
+                    "effective_selected_tasks": ["post_details"],
+                    "ingest_mode": "shared_account_catalog_backfill",
+                },
+            ) as mocked_begin:
+                with patch(
+                    "trr_backend.repositories.social_season_analytics.launch_social_account_catalog_backfill",
+                    side_effect=AssertionError("non-comments launch should use async kickoff"),
+                ):
+                    with patch(
+                        "api.routers.socials._queue_catalog_backfill_finalize_task",
+                        return_value=None,
+                    ) as mocked_finalize:
+                        response = client.post(
+                            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json={"backfill_scope": "full_history", "selected_tasks": ["post_details"]},
+                        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "catalog-run-post-details"
+    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details"]
+    assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-post-details"
 
 
 def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
@@ -1016,11 +1067,17 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
 
     finalized: list[dict[str, Any]] = []
     cleared: list[str] = []
+    done = Event()
     background_tasks = BackgroundTasks()
+
+    def _finalize(**kwargs: Any) -> dict[str, Any]:
+        finalized.append(kwargs)
+        done.set()
+        return {"run_id": kwargs["run_id"], "status": "queued"}
 
     monkeypatch.setattr(
         "trr_backend.repositories.social_season_analytics.finalize_social_account_catalog_backfill_launch",
-        lambda **kwargs: finalized.append(kwargs) or {"run_id": kwargs["run_id"], "status": "queued"},
+        _finalize,
     )
     monkeypatch.setattr("trr_backend.repositories.social_season_analytics.is_queue_enabled", lambda: True)
     monkeypatch.setattr(socials_router, "_clear_account_profile_caches", lambda: cleared.append("cleared"))
@@ -1041,8 +1098,9 @@ def test_queue_catalog_backfill_finalize_task_runs_finalize_and_clears_caches(
     )
 
     assert len(background_tasks.tasks) == 1
-
-    asyncio.run(background_tasks())
+    for task in background_tasks.tasks:
+        task.func(*task.args, **task.kwargs)
+    assert done.wait(1)
 
     assert finalized == [
         {
@@ -1068,21 +1126,28 @@ def test_queue_catalog_backfill_finalize_task_starts_inline_fallback_runs(
     from api.routers import socials as socials_router
 
     executed: list[dict[str, Any]] = []
+    done = Event()
     background_tasks = BackgroundTasks()
 
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_LOCAL_WORKERS", "3")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "6")
     monkeypatch.setattr(
         "trr_backend.repositories.social_season_analytics.finalize_social_account_catalog_backfill_launch",
         lambda **_kwargs: {
             "run_id": "catalog-run-1",
             "catalog_run_id": "catalog-run-1",
             "comments_run_id": "comments-run-1",
+            "selected_tasks": ["post_details", "comments", "media"],
+            "effective_selected_tasks": ["post_details", "comments", "media"],
             "status": "running",
         },
     )
     monkeypatch.setattr("trr_backend.repositories.social_season_analytics.is_queue_enabled", lambda: False)
     monkeypatch.setattr(
         "trr_backend.repositories.social_season_analytics.execute_run_with_inline_worker_registration",
-        lambda run_id, **kwargs: executed.append({"run_id": run_id, **kwargs}) or {"run_id": run_id},
+        lambda run_id, **kwargs: executed.append({"run_id": run_id, **kwargs})
+        or (done.set() if len(executed) >= 4 else None)
+        or {"run_id": run_id},
     )
     monkeypatch.setattr(socials_router, "_clear_account_profile_caches", lambda: None)
 
@@ -1101,13 +1166,23 @@ def test_queue_catalog_backfill_finalize_task_starts_inline_fallback_runs(
         launch_group_id="launch-group-1",
     )
 
-    asyncio.run(background_tasks())
+    assert len(background_tasks.tasks) == 1
+    for task in background_tasks.tasks:
+        task.func(*task.args, **task.kwargs)
+    assert done.wait(1)
 
-    assert executed[0]["run_id"] == "catalog-run-1"
-    assert executed[0]["worker_id"] == "api-background:catalog:instagram"
-    assert executed[1]["run_id"] == "comments-run-1"
-    assert executed[1]["worker_id"] == "api-background:comments:instagram"
-    assert executed[1]["platform"] == "instagram"
+    catalog_calls = [call for call in executed if call["run_id"] == "catalog-run-1"]
+    comments_calls = [call for call in executed if call["run_id"] == "comments-run-1"]
+    assert sorted(call["worker_id"] for call in catalog_calls) == [
+        "api-background:catalog:instagram:1",
+        "api-background:catalog:instagram:2",
+        "api-background:catalog:instagram:3",
+    ]
+    assert all(call["supported_platforms"] == ["instagram"] for call in catalog_calls)
+    assert sorted(call["metadata_updates"]["worker_lane"] for call in catalog_calls) == ["a", "b", "c"]
+    assert len(comments_calls) == 1
+    assert comments_calls[0]["worker_id"] == "api-background:comments:instagram"
+    assert comments_calls[0]["platform"] == "instagram"
 
 
 def test_post_social_account_catalog_backfill_rejects_empty_selected_tasks(
@@ -1150,7 +1225,7 @@ def test_post_social_account_catalog_backfill_ignores_date_bounds_for_full_histo
                 with patch(
                     "api.routers.socials._queue_catalog_backfill_finalize_task",
                     return_value=None,
-                ):
+                ) as mocked_finalize:
                     response = client.post(
                         "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
                         headers={"Authorization": f"Bearer {token}"},
@@ -1164,6 +1239,8 @@ def test_post_social_account_catalog_backfill_ignores_date_bounds_for_full_histo
     assert response.status_code == 200
     assert mocked_begin.call_args.kwargs["date_start"] is None
     assert mocked_begin.call_args.kwargs["date_end"] is None
+    assert mocked_finalize.call_args.kwargs["date_start"] is None
+    assert mocked_finalize.call_args.kwargs["date_end"] is None
 
 
 def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
@@ -1189,7 +1266,7 @@ def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
                 with patch(
                     "api.routers.socials._queue_catalog_backfill_finalize_task",
                     return_value=None,
-                ):
+                ) as mocked_finalize:
                     response = client.post(
                         "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/backfill",
                         headers={"Authorization": f"Bearer {token}"},
@@ -1203,6 +1280,8 @@ def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
     assert response.status_code == 200
     assert mocked_begin.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
     assert mocked_begin.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 23, 59, 59, tzinfo=UTC)
+    assert mocked_finalize.call_args.kwargs["date_start"] == datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    assert mocked_finalize.call_args.kwargs["date_end"] == datetime(2026, 1, 8, 23, 59, 59, tzinfo=UTC)
 
 
 def test_get_social_account_catalog_post_detail_route(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1619,6 +1698,10 @@ def test_post_social_account_catalog_backfill_allows_local_inline_fallback_when_
                 "launch_task_resolution_pending": True,
                 "ingest_mode": "shared_account_catalog_backfill",
             },
+        ) as mocked_begin,
+        patch(
+            "trr_backend.repositories.social_season_analytics.launch_social_account_catalog_backfill",
+            side_effect=AssertionError("inline Instagram launch should use async kickoff"),
         ) as mocked_start,
         patch(
             "api.routers.socials._queue_catalog_backfill_finalize_task",
@@ -1643,8 +1726,10 @@ def test_post_social_account_catalog_backfill_allows_local_inline_fallback_when_
     assert body["requires_modal_executor"] is True
     worker_guard.assert_called_once()
     mocked_background.assert_not_called()
-    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    assert mocked_begin.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    mocked_start.assert_not_called()
     mocked_finalize.assert_called_once()
+    assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-inline-1"
 
 
 def test_post_social_account_catalog_backfill_uses_local_admin_override_for_instagram_in_dev(
@@ -1680,6 +1765,10 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
                 "launch_task_resolution_pending": True,
                 "ingest_mode": "shared_account_catalog_backfill",
             },
+        ) as mocked_begin,
+        patch(
+            "trr_backend.repositories.social_season_analytics.launch_social_account_catalog_backfill",
+            side_effect=AssertionError("inline Instagram launch should use async kickoff"),
         ) as mocked_start,
         patch(
             "api.routers.socials._queue_catalog_backfill_finalize_task",
@@ -1701,8 +1790,10 @@ def test_post_social_account_catalog_backfill_uses_local_admin_override_for_inst
     assert body["execution_mode_legacy"] == "inline_fallback"
     worker_guard.assert_called_once()
     mocked_background.assert_not_called()
-    assert mocked_start.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    assert mocked_begin.call_args.kwargs["allow_local_dev_inline_bypass"] is True
+    mocked_start.assert_not_called()
     mocked_finalize.assert_called_once()
+    assert mocked_finalize.call_args.kwargs["run_id"] == "catalog-run-inline-override-1"
 
 
 def test_post_social_account_catalog_backfill_returns_modal_dispatch_unavailable_when_target_unresolvable(
@@ -2425,7 +2516,7 @@ def test_post_social_account_comments_run_cancel(client: TestClient, monkeypatch
     }
 
     with patch(
-        "trr_backend.repositories.social_season_analytics.cancel_social_account_comments_run",
+        "trr_backend.socials.pipelines.comments.instagram.cancel_social_account_comments_run",
         return_value=expected,
     ) as mocked:
         response = client.post(
@@ -2562,6 +2653,9 @@ def test_get_social_account_profile_hashtags_forwards_window(
 
 
 def test_post_social_account_catalog_freshness(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
@@ -2588,6 +2682,77 @@ def test_post_social_account_catalog_freshness(client: TestClient, monkeypatch: 
     assert response.json()["delta_posts"] == 3
     assert mocked.call_args.kwargs["platform"] == "instagram"
     assert mocked.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked.call_args.kwargs["use_cached_live_total_only"] is True
+    assert mocked.call_args.kwargs["statement_timeout_ms"] == 3000
+
+
+def test_post_social_account_catalog_freshness_force_uses_deep_probe(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        return_value={"platform": "instagram", "account_handle": "bravotv", "delta_posts": 4},
+    ) as mocked:
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/freshness?force=true&statement_timeout_ms=4000",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["delta_posts"] == 4
+    assert "use_cached_live_total_only" not in mocked.call_args.kwargs
+    assert mocked.call_args.kwargs["statement_timeout_ms"] == 4000
+
+
+def test_post_social_account_catalog_freshness_returns_stale_on_default_refresh_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    cache_key = socials_router._account_profile_cache_key(
+        surface="catalog-freshness",
+        platform="instagram",
+        account_handle="bravotv",
+        extra=(3000,),
+    )
+    stale_payload = {
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "eligible": True,
+        "checked_at": "2026-03-24T17:00:00Z",
+        "stored_total_posts": 100,
+        "live_total_posts_current": 103,
+        "delta_posts": 3,
+        "needs_recent_sync": True,
+    }
+    socials_router._ACCOUNT_PROFILE_CATALOG_FRESHNESS_CACHE[cache_key] = (
+        socials_router.monotonic() - 1,
+        stale_payload,
+    )
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_catalog_freshness",
+        side_effect=DatabaseServiceUnavailableError("pool exhausted", reason="pool_capacity"),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/freshness",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["delta_posts"] == 3
+    assert payload["stale"] is True
+    assert payload["degraded"] is True
+    assert payload["freshness_error"]["code"] == "CATALOG_FRESHNESS_REFRESH_FAILED"
 
 
 def test_post_social_account_catalog_freshness_returns_503_on_session_pool_saturation(
@@ -2686,7 +2851,7 @@ def test_post_shared_ingest_returns_run_metadata(client: TestClient, monkeypatch
     expected = {
         "run_id": "shared-run-123",
         "status": "queued",
-        "source_scope": "bravo",
+        "source_scope": "network",
         "ingest_mode": "shared_account_async",
         "shared_scrape_status": {"status": "queued", "job_count": 4},
         "classification_status": None,
@@ -2712,6 +2877,7 @@ def test_post_shared_ingest_returns_run_metadata(client: TestClient, monkeypatch
     body = response.json()
     assert body["run_id"] == "shared-run-123"
     assert body["ingest_mode"] == "shared_account_async"
+    assert ingest_mock.call_args.kwargs["source_scope"] == "network"
     assert ingest_mock.call_args.kwargs["platforms"] == ["instagram", "twitter"]
 
 
@@ -2719,7 +2885,7 @@ def test_get_shared_review_queue(client: TestClient, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
     token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
     expected = {
-        "source_scope": "bravo",
+        "source_scope": "network",
         "review_status": "open",
         "count": 1,
         "items": [
@@ -2733,7 +2899,7 @@ def test_get_shared_review_queue(client: TestClient, monkeypatch: pytest.MonkeyP
         ],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.list_shared_review_queue", return_value=expected):
+    with patch("trr_backend.repositories.social_season_analytics.list_shared_review_queue", return_value=expected) as mocked:
         response = client.get(
             "/api/v1/admin/socials/shared/review-queue?source_scope=bravo&review_status=open&limit=10",
             headers={"Authorization": f"Bearer {token}"},
@@ -2743,6 +2909,7 @@ def test_get_shared_review_queue(client: TestClient, monkeypatch: pytest.MonkeyP
     body = response.json()
     assert body["count"] == 1
     assert body["items"][0]["review_reason"] == "ambiguous_match"
+    assert mocked.call_args.kwargs["source_scope"] == "network"
 
 
 def test_shared_social_reads_accept_internal_admin_token_without_supabase_jwt(
@@ -4032,6 +4199,47 @@ def test_get_week_detail_endpoint_defaults_to_25_comments_and_paginated_page(
     assert mocked.call_args.kwargs["max_comments_per_post"] == 0
     assert mocked.call_args.kwargs["post_limit"] == 20
     assert mocked.call_args.kwargs["post_offset"] == 0
+    assert mocked.call_args.kwargs["include_status"] is True
+
+
+def test_get_week_detail_endpoint_forwards_include_status_false(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+
+    payload: dict[str, Any] = {
+        "season_id": season_id,
+        "week": {
+            "week_index": 3,
+            "label": "Week 3",
+            "start": "2025-09-30T00:00:00Z",
+            "end": "2025-10-07T00:00:00Z",
+        },
+        "platforms": {
+            "instagram": {
+                "posts": [],
+                "total_posts": 0,
+                "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
+            }
+        },
+        "totals": {"posts": 0, "total_comments": 0, "total_engagement": 0},
+    }
+
+    from api.routers import socials as socials_router
+
+    socials_router.invalidate_week_detail_cache()
+    with patch("trr_backend.repositories.social_season_analytics.get_week_detail", return_value=payload) as mocked:
+        response = client.get(
+            f"/api/v1/admin/socials/seasons/{season_id}/analytics/week/3?source_scope=bravo&include_status=false",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_count == 1
+    assert mocked.call_args.kwargs["include_status"] is False
 
 
 def test_get_week_summary_endpoint_forwards_defaults_and_shape(
@@ -4898,6 +5106,30 @@ def test_get_social_account_profile_comments_forwards_post_source_id(
     assert mocked.call_args.kwargs["post_source_id"] == "DVfQnTcjsCA"
 
 
+def test_get_social_account_profile_comments_forwards_search_and_sort(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_social_account_profile_comments",
+        return_value={"items": [], "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 1}},
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments"
+            "?page=1&page_size=25&post_source_id=DWAGS9iFCFy&search=carol&sort_by=likes&sort_dir=asc",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["post_source_id"] == "DWAGS9iFCFy"
+    assert mocked.call_args.kwargs["search"] == "carol"
+    assert mocked.call_args.kwargs["sort_by"] == "likes"
+    assert mocked.call_args.kwargs["sort_dir"] == "asc"
+
+
 def test_post_social_account_comments_scrape_returns_modal_error_when_modal_dispatch_unavailable(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -4915,7 +5147,7 @@ def test_post_social_account_comments_scrape_returns_modal_error_when_modal_disp
             },
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             side_effect=HTTPException(
                 status_code=503,
                 detail={
@@ -4957,7 +5189,7 @@ def test_post_social_account_comments_scrape_accepts_all_saved_posts_profile_syn
         ),
         patch("api.routers.socials._start_runs_in_background", return_value=None),
         patch(
-            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             return_value={"run_id": "comments-run-1", "status": "pending"},
         ) as scrape_mock,
     ):
@@ -4974,6 +5206,86 @@ def test_post_social_account_comments_scrape_accepts_all_saved_posts_profile_syn
     assert scrape_mock.call_args.kwargs["max_comments_per_post"] is None
     assert scrape_mock.call_args.kwargs["refresh_policy"] == "all_saved_posts"
     assert scrape_mock.call_args.kwargs["dispatch_immediately"] is True
+
+
+def test_post_social_account_comments_scrape_returns_auth_repair_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            return_value={
+                "queue_enabled": False,
+                "used_inline_fallback": False,
+                "requires_modal_executor": False,
+            },
+        ),
+        patch("api.routers.socials._start_runs_in_background", return_value=None),
+        patch(
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
+            return_value={
+                "run_id": "comments-run-1",
+                "status": "pending",
+                "auth_repair_attempted": True,
+                "auth_repair_status": "succeeded",
+                "auth_repair_reason": None,
+                "comments_auth_probe": {"status": "valid", "shortcode": "SHORT1"},
+            },
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"mode": "profile", "source_scope": "bravo", "refresh_policy": "stale_or_missing"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["auth_repair_attempted"] is True
+    assert body["auth_repair_status"] == "succeeded"
+    assert body["comments_auth_probe"]["status"] == "valid"
+
+
+def test_post_social_account_comments_scrape_returns_503_when_auth_repair_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import SocialIngestValidationError
+
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            return_value={
+                "queue_enabled": False,
+                "used_inline_fallback": False,
+                "requires_modal_executor": False,
+            },
+        ),
+        patch(
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
+            side_effect=SocialIngestValidationError(
+                "SOCIAL_INSTAGRAM_COMMENTS_AUTH_REPAIR_FAILED",
+                "Instagram comments auth repair failed before launch: operator cancelled.",
+            ),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"mode": "profile", "source_scope": "bravo", "refresh_policy": "stale_or_missing"},
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["detail"]["code"] == "SOCIAL_INSTAGRAM_COMMENTS_AUTH_REPAIR_FAILED"
+    assert "operator cancelled" in body["detail"]["message"]
 
 
 def test_post_social_account_comments_scrape_forwards_incomplete_target_filter(
@@ -4994,7 +5306,7 @@ def test_post_social_account_comments_scrape_forwards_incomplete_target_filter(
         ),
         patch("api.routers.socials._start_runs_in_background", return_value=None),
         patch(
-            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             return_value={
                 "run_id": "comments-run-1",
                 "status": "pending",
@@ -5032,7 +5344,7 @@ def test_post_social_account_comments_scrape_dry_run_returns_preview_without_lau
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.preview_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.preview_social_account_comments_scrape",
             return_value={
                 "dry_run": True,
                 "platform": "instagram",
@@ -5070,7 +5382,7 @@ def test_post_social_account_comments_scrape_dry_run_returns_preview_without_lau
             },
         ) as preview_mock,
         patch(
-            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             side_effect=AssertionError("dry run should not launch a scrape"),
         ),
         patch(
@@ -5107,7 +5419,7 @@ def test_post_social_account_comments_scrape_dry_run_forwards_incomplete_target_
 
     with (
         patch(
-            "trr_backend.repositories.social_season_analytics.preview_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.preview_social_account_comments_scrape",
             return_value={
                 "dry_run": True,
                 "platform": "instagram",
@@ -5134,7 +5446,7 @@ def test_post_social_account_comments_scrape_dry_run_forwards_incomplete_target_
             },
         ) as preview_mock,
         patch(
-            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             side_effect=AssertionError("dry run should not launch a scrape"),
         ),
         patch(
@@ -5179,7 +5491,7 @@ def test_post_social_account_comments_scrape_queue_dispatches_in_background(
             },
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             return_value={"run_id": "comments-run-queued-1", "status": "queued"},
         ) as scrape_mock,
         patch(
@@ -5225,7 +5537,7 @@ def test_post_social_account_comments_scrape_background_dispatch_exception_keeps
             },
         ),
         patch(
-            "trr_backend.repositories.social_season_analytics.start_social_account_comments_scrape",
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
             return_value={"run_id": "comments-run-queued-2", "status": "queued"},
         ) as scrape_mock,
         patch(
@@ -6012,7 +6324,7 @@ def test_get_queue_status_endpoint_returns_payload(
         },
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_queue_status", return_value=expected):
+    with patch("trr_backend.repositories.social_season_analytics.get_queue_status", return_value=expected) as mocked:
         response = client.get(
             "/api/v1/admin/socials/ingest/queue-status",
             headers={"Authorization": f"Bearer {token}"},
@@ -6020,6 +6332,10 @@ def test_get_queue_status_endpoint_returns_payload(
 
     assert response.status_code == 200
     assert response.json() == expected
+    assert mocked.call_args.kwargs["summary_only"] is True
+    assert mocked.call_args.kwargs["include_recent_failures"] is False
+    assert mocked.call_args.kwargs["include_stuck_jobs"] is False
+    assert mocked.call_args.kwargs["include_runs_summary"] is False
 
 
 def test_get_queue_status_endpoint_forwards_fresh_flag(
@@ -6040,6 +6356,31 @@ def test_get_queue_status_endpoint_forwards_fresh_flag(
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert mocked.call_args.kwargs.get("fresh") is True
+    assert mocked.call_args.kwargs["summary_only"] is False
+    assert mocked.call_args.kwargs["include_recent_failures"] is True
+    assert mocked.call_args.kwargs["include_stuck_jobs"] is True
+    assert mocked.call_args.kwargs["include_runs_summary"] is True
+
+
+def test_get_queue_status_endpoint_allows_explicit_summary_refresh(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_queue_status", return_value={"ok": True}
+    ) as mocked:
+        response = client.get(
+            "/api/v1/admin/socials/ingest/queue-status?fresh=true&detail=summary",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert mocked.call_args.kwargs["fresh"] is True
+    assert mocked.call_args.kwargs["summary_only"] is True
+    assert mocked.call_args.kwargs["include_recent_failures"] is False
 
 
 def test_get_queue_status_endpoint_returns_500_on_unhandled_error(
@@ -6541,10 +6882,11 @@ def test_get_health_dot_endpoint_returns_lightweight_payload(
     assert body["alerts"] == expected["alerts"]
     assert isinstance(body.get("updated_at"), str)
     mocked.assert_called_once_with(
-        include_recent_failures=True,
+        include_recent_failures=False,
         include_stuck_jobs=False,
         include_runs_summary=False,
         summary_only=True,
+        statement_timeout_ms=2000,
     )
 
 
@@ -6627,9 +6969,11 @@ def test_get_live_status_aggregates_health_queue_and_operations(
     assert isinstance(body["generated_at"], str)
     assert isinstance(body["sequence"], int)
     mocked_queue.assert_called_once_with(
-        include_recent_failures=True,
+        include_recent_failures=False,
         include_stuck_jobs=False,
         include_runs_summary=False,
+        summary_only=True,
+        statement_timeout_ms=1000,
     )
     mocked_ops.assert_called_once()
 
@@ -6638,6 +6982,7 @@ def test_live_status_stream_uses_threadpool_for_payload_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import api.routers.socials as router_module
+    from trr_backend.socials.api.handlers import live_status as live_status_handler
 
     payload = {
         "health_dot": {"queue_enabled": True},
@@ -6662,7 +7007,7 @@ def test_live_status_stream_uses_threadpool_for_payload_generation(
 
     with (
         patch.object(router_module, "run_in_threadpool", side_effect=_fake_run_in_threadpool) as mocked_threadpool,
-        patch.object(router_module, "_build_live_status_payload") as mocked_builder,
+        patch.object(live_status_handler, "build_live_status_payload") as mocked_builder,
     ):
         response = asyncio.run(router_module.stream_social_live_status(_DummyRequest(), None))
 

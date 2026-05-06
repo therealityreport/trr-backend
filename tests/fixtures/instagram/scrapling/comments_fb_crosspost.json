@@ -1,0 +1,15 @@
+{
+  "status": "ok",
+  "has_more_headload_fb_comments": false,
+  "fb_comments": [
+    {
+      "id": "fb-comment-raw-id-redacted",
+      "text": "Facebook crosspost fixture comment",
+      "created_at": 1770000500,
+      "from": {
+        "name": "Facebook Fixture Author",
+        "id": "fb-author-id-redacted"
+      }
+    }
+  ]
+}

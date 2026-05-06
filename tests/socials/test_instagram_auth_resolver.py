@@ -6,6 +6,7 @@ import multiprocessing as mp
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,8 @@ from trr_backend.socials.instagram.auth_resolver import (
     build_authenticated_instagram_scraper,
     clear_instagram_auth_runtime_state,
     resolve_instagram_auth_session,
+    resolve_instagram_comments_auth_session,
+    resolve_instagram_comments_auth_validation_mode,
 )
 
 
@@ -40,6 +43,7 @@ def _clear_auth_resolver_state(monkeypatch: pytest.MonkeyPatch) -> None:
         "INSTAGRAM_USERNAME",
         "INSTAGRAM_PASSWORD",
         "SOCIAL_BROWSER_SESSION_DIR",
+        "SOCIAL_INSTAGRAM_COMMENTS_AUTH_VALIDATION",
     ):
         monkeypatch.delenv(key, raising=False)
     clear_instagram_auth_runtime_state()
@@ -73,6 +77,106 @@ def test_resolve_instagram_auth_session_skips_validation_when_disabled(
     assert auth_session.validation_category == "validation_skipped"
     assert auth_session.session_account_id == "bravotv"
     assert auth_session.caller_context == "unit_test"
+
+
+def test_resolve_instagram_comments_auth_session_defaults_without_profile_graphql(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "SOCIAL_INSTAGRAM_COOKIES_JSON",
+        '{"sessionid":"env-session","csrftoken":"env-csrf","ds_user_id":"123"}',
+    )
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID", "bravotv")
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path))
+
+    class _UnexpectedInstagramScraper:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def fetch_posts_graphql(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("comments default auth resolution must not call profile GraphQL")
+
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.InstagramScraper", _UnexpectedInstagramScraper)
+
+    auth_session = resolve_instagram_comments_auth_session(
+        browser_account_id="bravotv",
+        caller_context="comments_scrapling:profile:bravotv",
+    )
+
+    assert auth_session.cookies["sessionid"] == "env-session"
+    assert auth_session.validated is True
+    assert auth_session.validation_category == "validation_skipped"
+    assert auth_session.metadata["comments_auth_validation_mode"] == "comments_endpoint"
+    assert auth_session.metadata["comments_profile_graphql_validation"] is False
+
+
+def test_resolve_instagram_comments_auth_session_schema_only_skips_profile_graphql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_resolve(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            cookies={"sessionid": "env-session", "csrftoken": "env-csrf"},
+            browser_account_id="bravotv",
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.auth_resolver.resolve_instagram_auth_session",
+        _fake_resolve,
+    )
+
+    auth_session = resolve_instagram_comments_auth_session(
+        browser_account_id="bravotv",
+        caller_context="comments_scrapling:schema:bravotv",
+        validation_mode="schema_only",
+    )
+
+    assert captured["require_validation"] is False
+    assert auth_session.metadata["comments_auth_validation_mode"] == "schema_only"
+    assert auth_session.metadata["comments_profile_graphql_validation"] is False
+
+
+def test_resolve_instagram_comments_auth_session_graphql_profile_can_validate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_resolve(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            cookies={"sessionid": "env-session", "csrftoken": "env-csrf"},
+            browser_account_id="bravotv",
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        "trr_backend.socials.instagram.auth_resolver.resolve_instagram_auth_session",
+        _fake_resolve,
+    )
+
+    auth_session = resolve_instagram_comments_auth_session(
+        browser_account_id="bravotv",
+        caller_context="comments_scrapling:profile:bravotv",
+        validation_mode="graphql_profile",
+    )
+
+    assert captured["require_validation"] is True
+    assert auth_session.metadata["comments_auth_validation_mode"] == "graphql_profile"
+    assert auth_session.metadata["comments_profile_graphql_validation"] is True
+
+
+def test_resolve_instagram_comments_auth_validation_mode_invalid_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_AUTH_VALIDATION", "bad-mode")
+
+    assert resolve_instagram_comments_auth_validation_mode() == "comments_endpoint"
+    assert "Invalid SOCIAL_INSTAGRAM_COMMENTS_AUTH_VALIDATION" in caplog.text
 
 
 def test_resolve_instagram_auth_session_normalizes_invalid_session_key(

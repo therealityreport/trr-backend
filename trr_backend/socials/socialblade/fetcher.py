@@ -145,7 +145,10 @@ class SocialBladeScraplingFetcher:
                 stats, rankings = _build_profile_stats_from_user_payload(captured_user)
                 metrics = _history_rows_to_metrics(captured_history_rows, limit=len(captured_history_rows))
                 if isinstance(captured_daily_deltas, list):
-                    chart_data = _build_total_followers_chart_from_daily_deltas(stats["followers"], captured_daily_deltas)
+                    chart_data = _build_total_followers_chart_from_daily_deltas(
+                        stats["followers"],
+                        captured_daily_deltas,
+                    )
                 history_source = "page_trpc_capture"
                 self._last_transport = "scrapling_page_trpc_capture"
                 self._fallback_chain.append("instagram_page_trpc_capture")

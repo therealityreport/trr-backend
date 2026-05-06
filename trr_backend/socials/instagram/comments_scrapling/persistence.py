@@ -16,6 +16,15 @@ class PersistedInstagramComments:
     comments_marked_missing: int
     comment_media_mirror_jobs_enqueued: int
     comment_media_mirror_job_enqueue_errors: int
+    comments_inserted: int = 0
+    comments_refreshed: int = 0
+    comments_changed: int = 0
+    stored_parent_comments: int = 0
+    stored_child_replies: int = 0
+    expected_child_replies: int = 0
+    stored_reply_gap_total: int = 0
+    stored_reply_gap_parent_count: int = 0
+    stored_reply_gap_samples: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -53,6 +62,182 @@ def _comment_effective_reply_depth(comment: InstagramComment, parent_external_id
     if parsed_depth > 0 or not parent_external_id:
         return max(0, parsed_depth)
     return max(0, int(fallback or 0))
+
+
+def _upsert_write_counts(rows: list[dict[str, Any]]) -> tuple[int, int]:
+    total = len(rows)
+    inserted = 0
+    for row in rows:
+        if bool(row.pop("__trr_inserted", False)):
+            inserted += 1
+    return total, inserted
+
+
+def _record_comment_write_counts(
+    persist_stats: dict[str, int],
+    *,
+    total: int,
+    inserted: int,
+    changed: int | None = None,
+) -> None:
+    if total <= 0:
+        return
+    refreshed = max(total - inserted, 0)
+    changed_count = max(0, int(inserted if changed is None else changed))
+    changed_count = min(total, changed_count)
+    persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + total
+    persist_stats["comments_inserted"] = int(persist_stats.get("comments_inserted") or 0) + inserted
+    persist_stats["comments_refreshed"] = int(persist_stats.get("comments_refreshed") or 0) + refreshed
+    persist_stats["comments_changed"] = int(persist_stats.get("comments_changed") or 0) + changed_count
+
+
+def _repo_column_exists(repo: Any, table: str, column: str, *, conn: Any) -> bool:
+    column_exists = getattr(repo, "_column_exists", None)
+    if not callable(column_exists):
+        return False
+    try:
+        return bool(column_exists("social", table, column, conn=conn))
+    except TypeError:
+        return bool(column_exists("social", table, column))
+
+
+def _empty_persisted_reply_topology() -> dict[str, Any]:
+    return {
+        "stored_parent_comments": 0,
+        "stored_child_replies": 0,
+        "expected_child_replies": 0,
+        "stored_reply_gap_total": 0,
+        "stored_reply_gap_parent_count": 0,
+        "stored_reply_gap_samples": [],
+    }
+
+
+def _load_persisted_instagram_reply_topology(
+    *,
+    repo: Any,
+    post_id: str,
+    conn: Any,
+) -> dict[str, Any]:
+    normalized_post_id = str(post_id or "").strip()
+    if not normalized_post_id:
+        return _empty_persisted_reply_topology()
+    if not callable(getattr(repo, "_column_exists", None)):
+        return _empty_persisted_reply_topology()
+
+    has_parent_external_id = _repo_column_exists(
+        repo,
+        "instagram_comments",
+        "parent_comment_external_id",
+        conn=conn,
+    )
+    has_child_comment_count = _repo_column_exists(
+        repo,
+        "instagram_comments",
+        "child_comment_count",
+        conn=conn,
+    )
+    parent_external_parent_filter = (
+        "and nullif(parent.parent_comment_external_id, '') is null" if has_parent_external_id else ""
+    )
+    reply_parent_match = "reply.parent_comment_id = parent.id"
+    if has_parent_external_id:
+        reply_parent_match = (
+            "(reply.parent_comment_id = parent.id "
+            "or nullif(reply.parent_comment_external_id, '') = parent.comment_id)"
+        )
+    expected_child_count_expr = (
+        "greatest(coalesce(parent.reply_count, 0), coalesce(parent.child_comment_count, 0))"
+        if has_child_comment_count
+        else "coalesce(parent.reply_count, 0)"
+    )
+    base_ctes = f"""
+        with parents as materialized (
+          select
+            parent.id,
+            parent.comment_id,
+            {expected_child_count_expr}::int as expected_reply_count
+          from social.instagram_comments parent
+          where parent.post_id = %s::uuid
+            and coalesce(parent.is_reply, false) = false
+            and parent.parent_comment_id is null
+            {parent_external_parent_filter}
+            and coalesce(parent.is_missing, false) = false
+            and parent.deleted_at is null
+            and nullif(parent.comment_id, '') is not null
+        ),
+        reply_counts as materialized (
+          select
+            parent.id,
+            count(reply.id)::int as saved_reply_count
+          from parents parent
+          left join social.instagram_comments reply
+            on reply.post_id = %s::uuid
+           and ({reply_parent_match})
+           and coalesce(reply.is_missing, false) = false
+           and reply.deleted_at is null
+           and nullif(reply.comment_id, '') is not null
+          group by parent.id
+        ),
+        parent_gaps as materialized (
+          select
+            parent.comment_id,
+            greatest(parent.expected_reply_count, 0)::int as expected_reply_count,
+            coalesce(reply_counts.saved_reply_count, 0)::int as saved_reply_count,
+            greatest(
+              parent.expected_reply_count - coalesce(reply_counts.saved_reply_count, 0),
+              0
+            )::int as missing_reply_count
+          from parents parent
+          left join reply_counts on reply_counts.id = parent.id
+        )
+        """
+    totals = pg.fetch_one(
+        f"""
+        {base_ctes}
+        select
+          count(*)::int as stored_parent_comments,
+          coalesce(sum(saved_reply_count), 0)::int as stored_child_replies,
+          coalesce(sum(expected_reply_count), 0)::int as expected_child_replies,
+          coalesce(sum(missing_reply_count), 0)::int as stored_reply_gap_total,
+          count(*) filter (where missing_reply_count > 0)::int as stored_reply_gap_parent_count
+        from parent_gaps
+        """,
+        [normalized_post_id, normalized_post_id],
+        conn=conn,
+    ) or {}
+    samples = pg.fetch_all(
+        f"""
+        {base_ctes}
+        select
+          comment_id,
+          expected_reply_count,
+          saved_reply_count,
+          missing_reply_count
+        from parent_gaps
+        where missing_reply_count > 0
+        order by missing_reply_count desc, comment_id asc
+        limit 10
+        """,
+        [normalized_post_id, normalized_post_id],
+        conn=conn,
+    )
+    return {
+        "stored_parent_comments": int(totals.get("stored_parent_comments") or 0),
+        "stored_child_replies": int(totals.get("stored_child_replies") or 0),
+        "expected_child_replies": int(totals.get("expected_child_replies") or 0),
+        "stored_reply_gap_total": int(totals.get("stored_reply_gap_total") or 0),
+        "stored_reply_gap_parent_count": int(totals.get("stored_reply_gap_parent_count") or 0),
+        "stored_reply_gap_samples": [
+            {
+                "comment_id": str(row.get("comment_id") or "").strip(),
+                "expected_reply_count": int(row.get("expected_reply_count") or 0),
+                "saved_reply_count": int(row.get("saved_reply_count") or 0),
+                "missing_reply_count": int(row.get("missing_reply_count") or 0),
+            }
+            for row in (samples or [])
+            if str(row.get("comment_id") or "").strip()
+        ],
+    }
 
 
 def find_instagram_post_for_comments(
@@ -171,7 +356,7 @@ def persist_instagram_comments_for_post(
     run_id: str | None,
     job_id: str | None,
     is_complete: bool,
-    source_scope: str = "bravo",
+    source_scope: str = "network",
     enable_media_followups: bool = True,
     conn: Any | None = None,
 ) -> PersistedInstagramComments:
@@ -245,6 +430,7 @@ def persist_instagram_comments_for_post(
         )
 
     stored_total = repo._count_stored_comments([post_id], "instagram", conn=conn).get(post_id, 0)
+    reply_topology = _load_persisted_instagram_reply_topology(repo=repo, post_id=post_id, conn=conn)
     return PersistedInstagramComments(
         post_id=post_id,
         stored_total_comments=int(stored_total or 0),
@@ -252,6 +438,15 @@ def persist_instagram_comments_for_post(
         comments_marked_missing=comments_marked_missing,
         comment_media_mirror_jobs_enqueued=int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0),
         comment_media_mirror_job_enqueue_errors=int(persist_stats.get("comment_media_mirror_job_enqueue_errors") or 0),
+        comments_inserted=int(persist_stats.get("comments_inserted") or 0),
+        comments_refreshed=int(persist_stats.get("comments_refreshed") or 0),
+        comments_changed=int(persist_stats.get("comments_changed") or 0),
+        stored_parent_comments=int(reply_topology.get("stored_parent_comments") or 0),
+        stored_child_replies=int(reply_topology.get("stored_child_replies") or 0),
+        expected_child_replies=int(reply_topology.get("expected_child_replies") or 0),
+        stored_reply_gap_total=int(reply_topology.get("stored_reply_gap_total") or 0),
+        stored_reply_gap_parent_count=int(reply_topology.get("stored_reply_gap_parent_count") or 0),
+        stored_reply_gap_samples=list(reply_topology.get("stored_reply_gap_samples") or []),
     )
 
 
@@ -300,6 +495,7 @@ def _persist_without_season_context(
                 int(persist_stats.get("comments_skipped_missing_id") or 0) + 1
             )
             continue
+        raw_data_for_write = getattr(repo, "_instagram_comment_raw_data_for_write", None)
         payload: dict[str, Any] = {
             "comment_id": external_id,
             "post_id": post_id,
@@ -312,7 +508,11 @@ def _persist_without_season_context(
             "reply_count": int(getattr(comment_obj, "reply_count", 0) or 0),
             "created_at": repo._parse_instagram_time(getattr(comment_obj, "created_at", None)),
             "scraped_at": now,
-            "raw_data": comment_obj.to_dict() if hasattr(comment_obj, "to_dict") else {},
+            "raw_data": (
+                raw_data_for_write(comment_obj)
+                if callable(raw_data_for_write)
+                else comment_obj.to_dict() if hasattr(comment_obj, "to_dict") else {}
+            ),
             "season_id": None,
             "source_account": account_handle,
         }
@@ -383,6 +583,11 @@ def _persist_without_season_context(
             payload["_parent_external_id"] = parent_external_id
             replies.append(payload)
 
+    dedupe_payloads = getattr(repo, "_dedupe_instagram_comment_payloads_for_upsert", None)
+    if callable(dedupe_payloads):
+        top_level = dedupe_payloads(top_level)
+        replies = dedupe_payloads(replies)
+
     ext_to_db: dict[str, str] = {}
     upserted = 0
     for batch in (top_level, replies):
@@ -390,16 +595,34 @@ def _persist_without_season_context(
             for payload in batch:
                 parent_external_id = str(payload.pop("_parent_external_id", "") or "").strip()
                 payload["parent_comment_id"] = ext_to_db.get(parent_external_id)
+        load_baseline = getattr(repo, "_load_instagram_comment_write_baseline", None)
+        count_new_or_changed = getattr(repo, "_count_new_or_changed_instagram_comment_payloads", None)
+        write_baseline = load_baseline(batch, conn=conn) if callable(load_baseline) and batch else {}
+        preserve_ranked = getattr(repo, "_preserve_existing_ranked_instagram_comment_values", None)
+        if callable(preserve_ranked) and write_baseline:
+            preserve_ranked(batch, write_baseline)
+        batch_changed = (
+            count_new_or_changed(batch, write_baseline)
+            if callable(count_new_or_changed)
+            else None
+        )
         rows = (
-            repo._pg_upsert_many("instagram_comments", batch, conflict_col=["post_id", "comment_id"], conn=conn)
+            repo._pg_upsert_many(
+                "instagram_comments",
+                batch,
+                conflict_col=["post_id", "comment_id"],
+                conn=conn,
+                include_inserted_flag=True,
+            )
             if batch
             else []
         )
+        batch_total, batch_inserted = _upsert_write_counts(rows)
         for row in rows:
             ext_id = str(row.get("comment_id") or "").strip()
             db_id = str(row.get("id") or "").strip()
             if ext_id and db_id:
                 ext_to_db[ext_id] = db_id
-        upserted += len(rows)
-    persist_stats["comments_upserted"] = int(persist_stats.get("comments_upserted") or 0) + upserted
+        upserted += batch_total
+        _record_comment_write_counts(persist_stats, total=batch_total, inserted=batch_inserted, changed=batch_changed)
     return upserted

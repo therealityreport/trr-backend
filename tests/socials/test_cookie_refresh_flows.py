@@ -158,6 +158,111 @@ def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatc
     assert imported_sessions == []
 
 
+def test_instagram_cookie_refresh_schema_only_skips_graphql_validator(monkeypatch, tmp_path: Path) -> None:
+    writes: list[tuple[Path, dict[str, str]]] = []
+    imported_sessions: list[object] = []
+
+    class _FakePlaywrightTimeoutError(Exception):
+        pass
+
+    class _Locator:
+        @property
+        def first(self) -> _Locator:
+            return self
+
+        def wait_for(self, **_kwargs: object) -> None:
+            return None
+
+        def fill(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def click(self, **_kwargs: object) -> None:
+            return None
+
+        def is_visible(self, **_kwargs: object) -> bool:
+            return False
+
+        def inner_text(self, **_kwargs: object) -> str:
+            return ""
+
+    class _Page:
+        url = instagram_cookie_refresh.INSTAGRAM_LOGIN_URL
+
+        def goto(self, url: str, **_kwargs: object) -> None:
+            self.url = url
+
+        def locator(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def get_by_label(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def get_by_role(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def wait_for_timeout(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class _Context:
+        def new_page(self) -> _Page:
+            return _Page()
+
+        def cookies(self) -> list[dict[str, object]]:
+            return [
+                {"name": "sessionid", "value": "fresh-session", "domain": ".instagram.com"},
+                {"name": "csrftoken", "value": "fresh-csrf", "domain": ".instagram.com"},
+            ]
+
+        def storage_state(self) -> dict[str, object]:
+            return {"cookies": self.cookies(), "origins": []}
+
+    class _Browser:
+        def new_context(self, **_kwargs: object) -> _Context:
+            return _Context()
+
+        def close(self) -> None:
+            return None
+
+    class _PlaywrightContext:
+        def __enter__(self) -> SimpleNamespace:
+            chromium = SimpleNamespace(launch=lambda **_kwargs: _Browser())
+            return SimpleNamespace(chromium=chromium)
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
+    sync_api_module.sync_playwright = lambda: _PlaywrightContext()
+    playwright_module = ModuleType("playwright")
+    playwright_module.sync_api = sync_api_module
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_write_cookie_file",
+        lambda path, cookies: writes.append((Path(path), dict(cookies))),
+    )
+    monkeypatch.setattr(
+        instagram_cookie_refresh._INSTAGRAM_BROWSER_SESSIONS,
+        "import_bootstrapped_session",
+        lambda *args, **kwargs: imported_sessions.append((args, kwargs)),
+    )
+
+    cookies = instagram_cookie_refresh.refresh_instagram_cookies(
+        username="operator@example.com",
+        password="secret",
+        cookie_file=tmp_path / "instagram-cookies.json",
+        validation_username="bravotv",
+        validator=lambda _cookies: (_ for _ in ()).throw(AssertionError("validator should not run")),
+        validation_mode="schema_only",
+    )
+
+    assert cookies["sessionid"] == "fresh-session"
+    assert writes == [(tmp_path / "instagram-cookies.json", cookies)]
+    assert imported_sessions
+
+
 def test_instagram_cookie_refresh_writes_refresh_metadata(tmp_path: Path) -> None:
     cookie_file = tmp_path / "instagram-cookies.json"
 
@@ -208,6 +313,11 @@ def test_interactive_instagram_login_reuses_saved_browser_session(monkeypatch, t
     )
     monkeypatch.setattr(
         instagram_cookie_refresh,
+        "_validate_saved_cookies_via_graphql",
+        lambda *args, **kwargs: (True, None),
+    )
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
         "_write_cookie_file",
         lambda path, cookies: writes.append((Path(path), dict(cookies))),
     )
@@ -229,6 +339,81 @@ def test_interactive_instagram_login_reuses_saved_browser_session(monkeypatch, t
     assert validate_calls[0]["validation_url"] == "https://www.instagram.com/bravotv/"
     assert writes == [(tmp_path / "instagram-cookies.json", {"sessionid": "saved-session", "csrftoken": "saved-csrf"})]
     assert paths.cookie_file_path.exists()
+
+
+def test_interactive_instagram_login_comments_mode_reuses_saved_session_without_graphql(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path))
+    instagram_cookie_refresh._INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(  # noqa: SLF001
+        "bravotv",
+        {"sessionid": "saved-session", "csrftoken": "saved-csrf"},
+    )
+
+    monkeypatch.setattr(instagram_cookie_refresh, "validate_browser_cookie_session", lambda **_kwargs: (True, None))
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_validate_saved_cookies_via_graphql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("GraphQL validation should not run")),
+    )
+    monkeypatch.setattr(instagram_cookie_refresh, "_write_cookie_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_find_chrome_profile_dir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("persistent Chrome should not launch")),
+    )
+
+    cookies = instagram_cookie_refresh.interactive_chrome_login(
+        chrome_profile_name="unused-profile",
+        cookie_file=tmp_path / "instagram-cookies.json",
+        validation_username="bravotv",
+        timeout_seconds=120,
+        headless=False,
+        validation_mode="comments_endpoint",
+    )
+
+    assert cookies == {"sessionid": "saved-session", "csrftoken": "saved-csrf"}
+
+
+def test_interactive_instagram_login_rejects_saved_session_when_graphql_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path))
+    instagram_cookie_refresh._INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(  # noqa: SLF001
+        "bravotv",
+        {"sessionid": "saved-session", "csrftoken": "saved-csrf"},
+    )
+
+    writes: list[tuple[Path, dict[str, str]]] = []
+    monkeypatch.setattr(instagram_cookie_refresh, "validate_browser_cookie_session", lambda **_kwargs: (True, None))
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_validate_saved_cookies_via_graphql",
+        lambda *args, **kwargs: (False, "checkpoint_required"),
+    )
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_write_cookie_file",
+        lambda path, cookies: writes.append((Path(path), dict(cookies))),
+    )
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_find_chrome_profile_dir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("persistent Chrome launched")),
+    )
+
+    with pytest.raises(RuntimeError, match="persistent Chrome launched"):
+        instagram_cookie_refresh.interactive_chrome_login(
+            chrome_profile_name="unused-profile",
+            cookie_file=tmp_path / "instagram-cookies.json",
+            validation_username="bravotv",
+            timeout_seconds=120,
+            headless=False,
+        )
+
+    assert writes == []
 
 
 def test_refresh_twitter_cookies_retries_headed_after_headless_error_shell(

@@ -1,0 +1,17 @@
+{
+  "status": "ok",
+  "has_more_tail_child_comments": false,
+  "child_comments": [
+    {
+      "pk": "child-reply-1",
+      "text": "Child reply fixture",
+      "created_at": 1770000300,
+      "comment_like_count": 2,
+      "user": {
+        "username": "child_reply_author",
+        "pk": "child-reply-author-id"
+      },
+      "status": "Active"
+    }
+  ]
+}

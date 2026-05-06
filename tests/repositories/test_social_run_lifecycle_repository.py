@@ -146,6 +146,33 @@ def test_create_run_writes_sync_session_metadata_when_available(monkeypatch: pyt
     ]
 
 
+def test_create_run_normalizes_pending_run_status_for_scrape_runs_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    insert_params: list[object] = []
+
+    def _fake_fetch_one(sql: str, params: list[object]):
+        if "insert into social.scrape_runs" in sql.lower():
+            insert_params.extend(params)
+            return {"id": "run-1"}
+        return {}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo, "_column_exists", lambda *_args, **_kwargs: False)
+
+    payload = social_repo._create_run(
+        None,
+        source_scope="bravo",
+        initiated_by="admin@test",
+        config={"stage": "instagram_comments_scrapling"},
+        status="pending",
+    )
+
+    assert payload == "run-1"
+    assert insert_params[3] == "queued"
+    assert insert_params[-1] == "queued"
+
+
 def test_build_run_summary_payload_normalizes_stage_counts() -> None:
     payload = social_repo._build_run_summary_payload(
         total_jobs="4",

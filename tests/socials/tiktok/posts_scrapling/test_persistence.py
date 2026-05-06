@@ -54,3 +54,43 @@ def test_adapt_tiktok_item_extracts_hashtags_from_challenges():
     assert "fyp" in dto.hashtags
     assert "foryou" in dto.hashtags
     assert "" not in dto.hashtags
+
+
+def test_persist_tiktok_posts_tracks_skipped_reasons(monkeypatch):
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_posts
+
+    class _ConnectionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    def _fake_upsert(_context, *, post, **_kwargs):
+        if post.video_id == "bad":
+            raise RuntimeError("upsert failed")
+
+    monkeypatch.setattr(pg, "db_connection", lambda: _ConnectionContext())
+    monkeypatch.setattr(repo, "_upsert_tiktok_post", _fake_upsert)
+
+    result = persist_tiktok_posts(
+        account_handle="testuser",
+        post_items=[
+            "not-a-dict",
+            {},
+            {"id": "bad"},
+            {"id": "good"},
+        ],
+        run_id="run-1",
+        job_id="job-1",
+    )
+
+    assert result.posts_upserted == 1
+    assert result.posts_skipped == 3
+    assert result.posts_skipped_by_reason == {
+        "invalid_item": 1,
+        "missing_video_id": 1,
+        "upsert_failed": 1,
+    }

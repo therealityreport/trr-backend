@@ -1164,7 +1164,7 @@ def test_get_show_assets_preserves_logo_fields_and_dedupes_show_images(monkeypat
 
     monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
 
-    assets, query_count = repo.get_show_assets("show-1", limit=10, offset=0)
+    assets, query_count = repo._get_show_assets_impl("show-1", limit=10, offset=0)
 
     assert query_count == 2
     assert [asset["id"] for asset in assets] == ["media-1", "show-image-2"]
@@ -1236,10 +1236,10 @@ def test_get_show_assets_paginates_after_fetch_limit(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
 
-    assets, query_count = repo.get_show_assets("show-1", limit=1, offset=1)
+    assets, query_count = repo._get_show_assets_impl("show-1", limit=1, offset=1)
 
     assert query_count == 2
-    assert captured_limits == [500, 500]
+    assert captured_limits == [2, 2]
     assert [asset["id"] for asset in assets] == ["asset-2"]
     assert assets[0]["source"] == "tmdb.com"
 
@@ -1284,7 +1284,7 @@ def test_get_show_assets_full_path_uses_full_fetch_limit(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
 
-    assets, query_count = repo.get_show_assets("show-1", limit=5001, offset=0, full=True)
+    assets, query_count = repo._get_show_assets_impl("show-1", limit=5001, offset=0, full=True)
 
     assert query_count == 2
     assert captured_limits == [5001, 5001]
@@ -1303,16 +1303,19 @@ def test_get_show_season_assets_default_path_paginates_after_fetch_limit(monkeyp
     def fake_fetch_one(query: str, params=None, cur=None):
         sql = str(query)
         if "from core.seasons" in sql:
-            return {"id": "season-1", "premiere_date": "2024-01-01", "air_date": None}
-        if "from core.shows" in sql:
-            return {"name": "Bravo Show", "external_ids": {}}
+            return {
+                "id": "season-1",
+                "premiere_date": "2024-01-01",
+                "air_date": None,
+                "episode_start_date": None,
+                "episode_end_date": None,
+                "name": "Bravo Show",
+                "external_ids": {},
+            }
         raise AssertionError(f"unexpected query: {sql}")
 
     def fake_fetch_all(query: str, params=None, cur=None):
         sql = str(query)
-        if "from core.episodes" in sql and "air_date is not null" in sql:
-            captured_limits.append(int(params[1]))
-            return []
         if "from core.media_links as ml" in sql and "ml.entity_type = 'season'" in sql:
             captured_limits.append(int(params[1]))
             return [
@@ -1367,12 +1370,106 @@ def test_get_show_season_assets_default_path_paginates_after_fetch_limit(monkeyp
     monkeypatch.setattr(repo, "_fetch_one_row", fake_fetch_one)
     monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
 
-    assets, query_count = repo.get_show_season_assets("show-1", 6, limit=1, offset=1)
+    assets, query_count = repo._get_show_season_assets_impl("show-1", 6, limit=1, offset=1)
 
-    assert query_count == 7
-    assert captured_limits == [500, 500, 500, 500, 500]
+    assert query_count == 5
+    assert captured_limits == [2, 2, 2, 2]
     assert [asset["id"] for asset in assets] == ["asset-2"]
     assert assets[0]["source"] == "tmdb.com"
+
+
+def test_get_show_season_assets_bounds_large_cast_photo_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_limits: dict[str, int] = {}
+    captured_cast_params: list[object] | None = None
+    captured_cast_query = ""
+    person_ids = [f"00000000-0000-0000-0000-{index:012d}" for index in range(27)]
+
+    def fake_fetch_one(query: str, params=None, cur=None):
+        sql = str(query)
+        if "from core.seasons" in sql:
+            return {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "premiere_date": "2024-01-01",
+                "air_date": None,
+                "episode_start_date": "2024-01-01",
+                "episode_end_date": "2024-03-01",
+                "name": "Bravo Show",
+                "external_ids": {"imdb_id": "tt123"},
+            }
+        raise AssertionError(f"unexpected query: {sql}")
+
+    def fake_fetch_all(query: str, params=None, cur=None):
+        nonlocal captured_cast_params, captured_cast_query
+        sql = str(query)
+        if "from core.media_links as ml" in sql and "ml.entity_type = 'season'" in sql:
+            captured_limits["season_media_links"] = int(params[1])
+            return []
+        if "from core.season_images" in sql:
+            captured_limits["season_images"] = int(params[2])
+            return []
+        if "from core.episode_images" in sql:
+            captured_limits["episode_images"] = int(params[2])
+            return []
+        if "from core.credits as c" in sql:
+            captured_limits["season_cast"] = int(params[2])
+            return [
+                {
+                    "person_id": person_id,
+                    "person_name": f"Cast Member {index}",
+                }
+                for index, person_id in enumerate(person_ids)
+            ]
+        if "from core.cast_photos as cp" in sql:
+            captured_cast_params = list(params)
+            captured_cast_query = sql
+            captured_limits["cast_photos"] = int(params[8])
+            return [
+                {
+                    "id": f"cast-photo-{index}",
+                    "person_id": person_ids[index % len(person_ids)],
+                    "source": "bravotv",
+                    "url": f"https://bravo.example.com/cast-{index}.jpg",
+                    "hosted_url": f"https://cdn.example.com/cast-{index}.jpg",
+                    "hosted_content_type": "image/jpeg",
+                    "width": None,
+                    "height": None,
+                    "caption": None,
+                    "context_section": "cast",
+                    "context_type": "profile",
+                    "season": 6,
+                    "fetched_at": f"2024-02-{(index % 28) + 1:02d}T00:00:00Z",
+                    "hosted_at": None,
+                    "updated_at": None,
+                    "title_imdb_ids": ["tt123"],
+                    "title_names": ["Bravo Show"],
+                    "metadata": None,
+                    "people_count": None,
+                    "people_count_source": None,
+                }
+                for index in range(int(params[8]))
+            ]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(repo, "_fetch_one_row", fake_fetch_one)
+    monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
+
+    assets, query_count = repo._get_show_season_assets_impl("show-1", 6, limit=49, offset=0)
+
+    assert query_count == 6
+    assert captured_limits == {
+        "season_media_links": 49,
+        "season_images": 49,
+        "episode_images": 49,
+        "season_cast": 49,
+        "cast_photos": 49,
+    }
+    assert captured_cast_params is not None
+    assert len(captured_cast_params[0]) == 27
+    assert captured_cast_params[1:4] == ["tt123", "tt123", 6]
+    assert "cp.hosted_content_type ilike 'image/%%'" in captured_cast_query
+    assert "cardinality(cp.title_imdb_ids)" in captured_cast_query
+    assert len(assets) == 49
+    assert {asset["type"] for asset in assets} == {"cast"}
 
 
 def test_assign_season_backdrops_skips_when_everything_already_assigned(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1445,8 +1542,11 @@ def test_assign_season_backdrops_reports_mirror_failures_without_insert(monkeypa
 def test_get_show_assets_merges_default_rows_with_dedupe_and_logo_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    captured_limits: list[int] = []
+
     def fake_fetch_all(query: str, params=None, cur=None):
         if "from core.media_links as ml" in query:
+            captured_limits.append(int(params[1]))
             return [
                 {
                     "link_id": "link-1",
@@ -1476,6 +1576,7 @@ def test_get_show_assets_merges_default_rows_with_dedupe_and_logo_fields(
                 }
             ]
         if "from core.show_images" in query:
+            captured_limits.append(int(params[1]))
             return [
                 {
                     "id": "legacy-duplicate",
@@ -1511,9 +1612,10 @@ def test_get_show_assets_merges_default_rows_with_dedupe_and_logo_fields(
 
     monkeypatch.setattr(repo, "_fetch_all_rows", fake_fetch_all)
 
-    assets, query_count = repo.get_show_assets("show-1", limit=10, offset=0, sources=["tmdb", "fanart"])
+    assets, query_count = repo._get_show_assets_impl("show-1", limit=10, offset=0, sources=["tmdb", "fanart"])
 
     assert query_count == 2
+    assert captured_limits == [501, 501]
     assert len(assets) == 2
     assert assets[0]["id"] == "asset-1"
     assert assets[0]["logo_link_is_primary"] is True

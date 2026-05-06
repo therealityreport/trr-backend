@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from typing import Any
 
 import pytest
 
@@ -145,6 +146,155 @@ def test_adapt_xdt_media_dict_carousel():
     assert dto.media_urls == ["https://cdn.example.com/c1.jpg", "https://cdn.example.com/c2.mp4"]
 
 
+def test_adapt_xdt_media_dict_preserves_rich_listing_fields():
+    from trr_backend.socials.instagram.posts_scrapling.persistence import _graph_node_to_post_dto
+
+    node = {
+        "__typename": "XDTMediaDict",
+        "code": "RICH123",
+        "pk": "rich-pk",
+        "id": "rich-pk_owner",
+        "inputUrl": "https://www.instagram.com/p/RICH123/",
+        "media_type": 8,
+        "product_type": "clips",
+        "like_count": 12,
+        "comment_count": 3,
+        "taken_at": 1776272482,
+        "caption": {"id": "caption-rich", "text": "Rich listing", "is_edited": True, "has_translation": False},
+        "user": {
+            "pk": "owner-1",
+            "username": "bravotv",
+            "full_name": "Bravo",
+            "profile_pic_url": "https://cdn.example.com/bravo-small.jpg",
+            "hd_profile_pic_url_info": {"url": "https://cdn.example.com/bravo-hd.jpg"},
+            "is_verified": True,
+        },
+        "image_versions2": {
+            "candidates": [
+                {
+                    "url": "https://cdn.example.com/cover.jpg",
+                    "width": 1080,
+                    "height": 1350,
+                }
+            ]
+        },
+        "accessibility_caption": "Cast portrait alt text",
+        "comments_disabled": True,
+        "like_and_view_counts_disabled": True,
+        "commenting_disabled_for_viewer": True,
+        "is_paid_partnership": True,
+        "isAdvertisement": True,
+        "can_viewer_reshare": False,
+        "has_audio": True,
+        "media_repost_count": 5,
+        "music_info": {"artist_name": "Composer", "song_name": "Theme"},
+        "audio_url": "https://cdn.example.com/audio.m4a",
+        "video_duration": 9.5,
+        "play_count": 77,
+        "usertags": {
+            "in": [
+                {
+                    "position": [0.5, 0.25],
+                    "user": {
+                        "pk": "tag-1",
+                        "username": "host",
+                        "full_name": "Host Person",
+                        "profile_pic_url": "https://cdn.example.com/host.jpg",
+                    },
+                }
+            ]
+        },
+        "coauthor_producers": [{"pk": "co-1", "username": "peacock", "full_name": "Peacock"}],
+        "carousel_media": [
+            {
+                "pk": "child-1",
+                "media_type": 1,
+                "original_width": 1080,
+                "original_height": 1350,
+                "accessibility_caption": "Child image alt",
+                "image_versions2": {"candidates": [{"url": "https://cdn.example.com/child-1.jpg"}]},
+            }
+        ],
+    }
+
+    dto = _graph_node_to_post_dto(node, account_handle="bravotv")
+
+    assert dto.input_url == "https://www.instagram.com/p/RICH123/"
+    assert dto.source_post_id == "rich-pk"
+    assert dto.alt_text == "Cast portrait alt text"
+    assert dto.width == 1080
+    assert dto.height == 1350
+    assert dto.product_type == "clips"
+    assert dto.sponsored is True
+    assert dto.is_paid_partnership is True
+    assert dto.is_advertisement is True
+    assert dto.comments_disabled is True
+    assert dto.is_comments_disabled is True
+    assert dto.like_and_view_counts_disabled is True
+    assert dto.commenting_disabled_for_viewer is True
+    assert dto.can_viewer_reshare is False
+    assert dto.has_audio is True
+    assert dto.media_repost_count == 5
+    assert dto.owner_detail.username == "bravotv"
+    assert dto.owner_detail.user_id == "owner-1"
+    assert dto.owner_detail.full_name == "Bravo"
+    assert dto.owner_detail.profile_pic_url_hd == "https://cdn.example.com/bravo-hd.jpg"
+    assert dto.owner_detail.is_verified is True
+    assert dto.owner_user_id == "owner-1"
+    assert dto.owner_profile_pic_url_hd == "https://cdn.example.com/bravo-hd.jpg"
+    assert dto.tagged_users_detail[0].username == "host"
+    assert dto.collaborators_detail[0].username == "peacock"
+    assert dto.music_info == {"artist_name": "Composer", "song_name": "Theme"}
+    assert dto.audio_url == "https://cdn.example.com/audio.m4a"
+    assert dto.video_duration == 9.5
+    assert dto.video_play_count == 77
+    assert dto.child_posts_data[0]["alt_text"] == "Child image alt"
+
+
+def test_adapt_xdt_media_dict_media_repost_count_alternate_alias_persists():
+    from trr_backend.socials.instagram.posts_scrapling.persistence import _graph_node_to_post_dto
+
+    node = {
+        "__typename": "XDTMediaDict",
+        "code": "ALTREPOST",
+        "pk": "alt-repost-pk",
+        "media_type": 1,
+        "like_count": 10,
+        "comment_count": 2,
+        "taken_at": 1776272482,
+        "caption": {"text": "Alternate alias"},
+        "user": {"username": "traitors"},
+        "image_versions2": {"candidates": [{"url": "https://cdn.example.com/alt-repost.jpg"}]},
+        "repostCount": "42",
+    }
+
+    dto = _graph_node_to_post_dto(node, account_handle="traitors")
+
+    assert dto.media_repost_count == 42
+
+
+def test_adapt_xdt_media_dict_media_repost_count_snake_case_persists():
+    from trr_backend.socials.instagram.posts_scrapling.persistence import _graph_node_to_post_dto
+
+    node = {
+        "__typename": "XDTMediaDict",
+        "code": "SNAKEREPOST",
+        "pk": "snake-repost-pk",
+        "media_type": 1,
+        "like_count": 10,
+        "comment_count": 2,
+        "taken_at": 1776272482,
+        "caption": {"text": "Snake alias"},
+        "user": {"username": "traitors"},
+        "image_versions2": {"candidates": [{"url": "https://cdn.example.com/snake-repost.jpg"}]},
+        "media_repost_count": 15,
+    }
+
+    dto = _graph_node_to_post_dto(node, account_handle="traitors")
+
+    assert dto.media_repost_count == 15
+
+
 def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -237,6 +387,8 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
     assert captured_updates[-1]["posts_scrapling_persist_diagnostics"] == {
         "posts_upserted": 3,
         "posts_skipped": 5,
+        "inline_comments_upserted": 0,
+        "inline_comments_skipped": 0,
         "posts_skipped_by_reason": {
             "canonical_upsert_exception": 1,
             "canonical_upsert_returned_none": 1,
@@ -244,3 +396,82 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
             "missing_shortcode": 2,
         },
     }
+
+
+def test_persist_instagram_posts_persists_inline_comment_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling.persistence import persist_instagram_posts
+
+    @contextmanager
+    def _fake_conn(*, label: str | None = None):
+        del label
+        yield object()
+
+    captured_comments: list[Any] = []
+    captured_updates: list[dict[str, object]] = []
+    fake_context = object()
+
+    monkeypatch.setattr(pg, "db_connection", _fake_conn)
+    monkeypatch.setattr(repo, "get_season_context", lambda _season_id: fake_context)
+    monkeypatch.setattr(repo, "_upsert_instagram_post", lambda *_args, **_kwargs: {"id": "post-1"})
+
+    def _fake_batch_comments(_context, **kwargs):  # noqa: ANN001
+        assert _context is fake_context
+        assert kwargs["post_id"] == "post-1"
+        assert kwargs["run_id"] == "run-1"
+        assert kwargs["job_id"] == "job-1"
+        assert kwargs["enable_media_followups"] is False
+        captured_comments.extend(kwargs["comments"])
+        return len(kwargs["comments"])
+
+    def _fake_fetch_one(sql, params):  # noqa: ANN001
+        normalized = " ".join(str(sql).split()).lower()
+        if normalized.startswith("select metadata from social.scrape_jobs"):
+            return {"metadata": {}}
+        if normalized.startswith("update social.scrape_jobs"):
+            captured_updates.append(json.loads(str(params[0])))
+            return {"id": "job-1"}
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    monkeypatch.setattr(repo, "_batch_upsert_instagram_comments", _fake_batch_comments)
+    monkeypatch.setattr(pg, "fetch_one", _fake_fetch_one)
+
+    result = persist_instagram_posts(
+        account_handle="traitors",
+        post_nodes=[
+            {
+                "__typename": "XDTMediaDict",
+                "code": "INLINE123",
+                "pk": "inline-pk",
+                "media_type": 1,
+                "taken_at": 1776272482,
+                "image_versions2": {"candidates": [{"url": "https://cdn.example.com/inline.jpg"}]},
+                "user": {"username": "traitors"},
+                "latestComments": [
+                    {
+                        "id": "latest-1",
+                        "text": "sample only",
+                        "ownerUsername": "viewer",
+                        "ownerFullName": "Viewer Name",
+                    }
+                ],
+                "firstComment": {"id": "first-1", "text": "first sample", "ownerUsername": "firstviewer"},
+            }
+        ],
+        run_id="run-1",
+        job_id="job-1",
+        season_id="season-1",
+    )
+
+    assert result.posts_upserted == 1
+    assert [comment.comment_id for comment in captured_comments] == ["latest-1", "first-1"]
+    assert [comment.source_snapshot_type for comment in captured_comments] == [
+        "listing_inline_sample",
+        "listing_inline_sample",
+    ]
+    assert captured_comments[0].owner_full_name == "Viewer Name"
+    assert captured_updates[-1]["posts_scrapling_persist_diagnostics"]["inline_comments_upserted"] == 2
+    assert captured_updates[-1]["posts_scrapling_persist_diagnostics"]["inline_comments_skipped"] == 0

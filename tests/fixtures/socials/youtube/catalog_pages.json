@@ -1,0 +1,78 @@
+{
+  "normal": {
+    "account_handle": "bravo",
+    "api_identity": {
+      "channel_id": "UCbravo123",
+      "title": "Bravo",
+      "canonical_handle": "bravo",
+      "payload": {
+        "snippet": {
+          "title": "Bravo",
+          "description": "Official Bravo channel",
+          "thumbnails": {
+            "high": {
+              "url": "https://yt3.googleusercontent.com/bravo=s800-c-k"
+            }
+          }
+        },
+        "statistics": {
+          "subscriberCount": "3430000",
+          "videoCount": "12562"
+        }
+      }
+    },
+    "retrieval_meta": {
+      "canonical_handle": "bravo",
+      "canonical_channel_id": "UCbravo123",
+      "resolved_channel_title": "Bravo",
+      "resolved_channel_avatar_url": "https://yt3.googleusercontent.com/bravo=s160-c-k",
+      "first_page_counts": {
+        "videos": 1,
+        "shorts": 0
+      },
+      "pages_scanned": 1,
+      "posts_checked": 1,
+      "total_posts": 12562
+    },
+    "videos": [
+      {
+        "video_id": "abc123",
+        "title": "Bravo clip",
+        "description": "Episode preview",
+        "date_time": "2025-08-14 12:00:00",
+        "published_at": 1755172800,
+        "channel_id": "UCbravo123",
+        "channel_title": "Bravo",
+        "duration": "PT1M30S",
+        "duration_seconds": 90,
+        "views": 1200,
+        "likes": 34,
+        "comments": 5,
+        "url": "https://www.youtube.com/watch?v=abc123",
+        "thumbnail_url": "https://i.ytimg.com/vi/abc123/hqdefault.jpg",
+        "tags": ["Bravo"],
+        "keywords_matched": [],
+        "user_avatar_url": "https://yt3.googleusercontent.com/bravo=s160-c-k",
+        "is_short": false,
+        "source_surface": "videos",
+        "published_text": "1 day ago"
+      }
+    ]
+  },
+  "empty": {
+    "account_handle": "bravo",
+    "api_identity": null,
+    "retrieval_meta": {
+      "videos_found": 0,
+      "shorts_found": 0,
+      "first_page_counts": {
+        "videos": 0,
+        "shorts": 0
+      },
+      "pages_scanned": 1,
+      "posts_checked": 0,
+      "total_posts": 0
+    },
+    "videos": []
+  }
+}

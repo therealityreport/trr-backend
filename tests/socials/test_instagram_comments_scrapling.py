@@ -34,6 +34,24 @@ def test_select_comments_proxy_prefers_explicit_proxy_urls(monkeypatch) -> None:
     assert config.proxy_rotator is not None
 
 
+def test_comments_gap_defaults_allow_only_single_missing_comment(monkeypatch) -> None:
+    from trr_backend.socials.instagram.comments_scrapling.fetcher import _hidden_unavailable_gap_is_tolerable
+    from trr_backend.socials.instagram.comments_scrapling.job_runner import _reported_count_gap_is_tolerable
+
+    for name in (
+        "SOCIAL_INSTAGRAM_COMMENTS_RECONCILABLE_GAP_MAX",
+        "SOCIAL_INSTAGRAM_COMMENTS_RECONCILABLE_GAP_RATIO",
+        "SOCIAL_INSTAGRAM_COMMENTS_HIDDEN_UNAVAILABLE_GAP_MAX",
+        "SOCIAL_INSTAGRAM_COMMENTS_HIDDEN_UNAVAILABLE_GAP_RATIO",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert _hidden_unavailable_gap_is_tolerable(unresolved_gap=1, target_count=100)
+    assert not _hidden_unavailable_gap_is_tolerable(unresolved_gap=2, target_count=100)
+    assert _reported_count_gap_is_tolerable(unresolved_gap=1, target_count=100)
+    assert not _reported_count_gap_is_tolerable(unresolved_gap=2, target_count=100)
+
+
 def test_select_comments_proxy_decodo_browser_proxy_is_dict_with_raw_password(monkeypatch) -> None:
     """Decodo browser proxy must be a dict with un-encoded password so
     Scrapling's ProxyRotator passes it directly to Patchright without
@@ -206,7 +224,7 @@ def test_resolve_comments_scrapling_session_reuses_instagram_auth_session(monkey
     )
 
     monkeypatch.setattr(
-        "trr_backend.socials.instagram.comments_scrapling.session.resolve_instagram_auth_session",
+        "trr_backend.socials.instagram.comments_scrapling.session.resolve_instagram_comments_auth_session",
         lambda **_kwargs: fake_session,
     )
 

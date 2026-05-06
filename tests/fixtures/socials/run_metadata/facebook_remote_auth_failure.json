@@ -1,0 +1,21 @@
+{
+  "platform": "facebook",
+  "job_type": "posts",
+  "status": "failed",
+  "last_error_code": "facebook_remote_auth_not_ready",
+  "last_error_class": "RemoteAuthNotReady",
+  "error_message": "Facebook remote auth probe failed before catalog backfill",
+  "metadata": {
+    "remote_auth_probe": {
+      "platform": "facebook",
+      "ready": false,
+      "reason": "checkpoint_required",
+      "has_c_user": true,
+      "has_xs": true
+    },
+    "runtime_metadata": {
+      "execution_backend": "modal",
+      "probe_source": "modal_remote_auth_probe"
+    }
+  }
+}

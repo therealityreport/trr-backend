@@ -48,23 +48,80 @@ def test_tiktok_challenge_detection():
     assert _is_challenge_response('{"statusCode": 0}') is False
 
 
+def test_tiktok_posts_scrapling_page_size_defaults_to_30(monkeypatch):
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import tiktok_posts_scrapling_page_size
+
+    monkeypatch.delenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_PAGE_SIZE", raising=False)
+
+    assert tiktok_posts_scrapling_page_size() == 30
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("not-an-int", 30),
+        ("4", 10),
+        ("99", 50),
+        ("42", 42),
+    ],
+)
+def test_tiktok_posts_scrapling_page_size_env_bounds(monkeypatch, env_value, expected):
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import tiktok_posts_scrapling_page_size
+
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_PAGE_SIZE", env_value)
+
+    assert tiktok_posts_scrapling_page_size() == expected
+
+
+def test_tiktok_fetch_posts_page_preserves_explicit_count_override(_mock_scrapling, monkeypatch):
+    import asyncio
+
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    captured_params = {}
+    fetcher = TikTokPostsScraplingFetcher(cookies=[], raw_cookies={})
+
+    async def _fake_fetch_api_json(_url, *, params, referer):
+        del referer
+        captured_params.update(params)
+        return {"failed": False, "payload": {"itemList": [], "hasMore": False}}
+
+    monkeypatch.setenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_PAGE_SIZE", "50")
+    monkeypatch.setattr(fetcher, "_fetch_api_json", _fake_fetch_api_json)
+
+    asyncio.run(fetcher.fetch_posts_page(sec_uid="SEC_UID", count=7))
+
+    assert captured_params["count"] == "7"
+
+
 def test_tiktok_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
     from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
 
     fetcher = TikTokPostsScraplingFetcher(
         cookies=[],
-        raw_cookies={"sessionid": "existing"},
+        raw_cookies={"sessionid": "existing-session-secret"},
     )
     fetcher._warmup_cookie_delta = {"sessionid": "new-tiktok-value", "msToken": "signed-token"}
 
     meta = fetcher.runtime_metadata
     serialized = repr(meta)
+    assert "existing-session-secret" not in serialized
     assert "new-tiktok-value" not in serialized
     assert "signed-token" not in serialized
     # sorted alphabetically: msToken comes before sessionid (capital M sorts before lowercase s)
     assert meta.get("warmup_cookie_names") == ["msToken", "sessionid"]
     assert meta.get("warmup_cookie_count") == 2
+    assert {
+        "warmup_cookie_names",
+        "warmup_cookie_count",
+        "selected_proxy_fingerprint",
+        "sec_uid_resolved",
+        "request_count",
+        "transport",
+    }.issubset(meta)
     assert "warmup_cookie_delta" not in meta
+    assert "raw_cookies" not in meta
+    assert "cookies" not in meta
 
 
 def test_tiktok_warmup_emits_structured_log_success(_mock_scrapling, caplog):

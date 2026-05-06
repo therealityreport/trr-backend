@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from trr_backend.socials.instagram.post_normalizer import (
     normalize_instagram_comment,
     normalize_instagram_post,
@@ -8,6 +13,28 @@ from trr_backend.socials.instagram.profile_normalizer import normalize_instagram
 from trr_backend.socials.instagram.profile_relationship_normalizer import (
     normalize_instagram_profile_relationships,
 )
+
+_INSTAGRAM_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "instagram"
+
+
+def _load_instagram_fixture(name: str) -> dict:
+    return json.loads((_INSTAGRAM_FIXTURES / name).read_text())
+
+
+def _repost_payload_with_alias(alias: str, value: object) -> dict:
+    payload = _load_instagram_fixture("xdt_media_dict_repost_alias.json")
+    for key in (
+        "media_repost_count",
+        "reshare_count",
+        "reshareCount",
+        "repost_count",
+        "repostCount",
+        "share_count",
+        "shareCount",
+    ):
+        payload.pop(key, None)
+    payload[alias] = value
+    return payload
 
 
 def test_normalize_xdt_post_extracts_rich_post_fields() -> None:
@@ -108,6 +135,53 @@ def test_normalize_xdt_post_extracts_rich_post_fields() -> None:
     assert post.context_items[0]["type"] == "media_note"
 
 
+@pytest.mark.parametrize(
+    ("alias", "raw_value", "expected"),
+    [
+        ("media_repost_count", 21, 21),
+        ("repostCount", "22", 22),
+        ("reshareCount", 23, 23),
+        ("shareCount", "24", 24),
+    ],
+)
+def test_normalize_instagram_post_media_repost_count_aliases(alias: str, raw_value: object, expected: int) -> None:
+    post = normalize_instagram_post(_repost_payload_with_alias(alias, raw_value), account_handle="traitors")
+
+    assert post.media_repost_count == expected
+
+
+@pytest.mark.parametrize("raw_value", [0, "0"])
+def test_normalize_instagram_post_media_repost_count_allows_zero(raw_value: object) -> None:
+    post = normalize_instagram_post(_repost_payload_with_alias("shareCount", raw_value), account_handle="traitors")
+
+    assert post.media_repost_count == 0
+
+
+@pytest.mark.parametrize("raw_value", [-1, "-1", 1.5, "1.5", True])
+def test_normalize_instagram_post_media_repost_count_rejects_non_non_negative_integers(raw_value: object) -> None:
+    post = normalize_instagram_post(_repost_payload_with_alias("shareCount", raw_value), account_handle="traitors")
+
+    assert post.media_repost_count is None
+
+
+def test_normalize_instagram_post_media_repost_count_comments_header_without_alias_returns_none() -> None:
+    post = normalize_instagram_post(
+        {
+            "__typename": "XDTMediaDict",
+            "code": "COMMENTHEAD",
+            "pk": "comment-header-pk",
+            "media_type": 1,
+            "caption": {"text": "Header-only comments sample"},
+            "user": {"username": "traitors"},
+            "latestComments": [{"id": "latest-1", "text": "sample", "ownerUsername": "viewer"}],
+            "firstComment": {"id": "first-1", "text": "first sample", "ownerUsername": "firstviewer"},
+        },
+        account_handle="traitors",
+    )
+
+    assert post.media_repost_count is None
+
+
 def test_normalize_media_info_shortcode_style_fixture_extracts_children() -> None:
     post = normalize_instagram_post(
         {
@@ -178,7 +252,7 @@ def test_normalize_media_info_shortcode_style_fixture_extracts_children() -> Non
     assert post.tagged_users[0].tag_position_source == "rest_usertags.position_object"
 
 
-def test_normalize_apify_aliases_excludes_latest_comment_samples() -> None:
+def test_normalize_apify_aliases_extracts_latest_comment_samples() -> None:
     post = normalize_instagram_post(
         {
             "id": "apify-id-1",
@@ -198,8 +272,16 @@ def test_normalize_apify_aliases_excludes_latest_comment_samples() -> None:
             "locationName": "Castle",
             "locationId": "castle-1",
             "musicInfo": {"song_name": "Theme"},
-            "latestComments": [{"id": "latest-1", "text": "sample only", "ownerUsername": "viewer"}],
-            "firstComment": {"id": "first-1", "text": "also sample only"},
+            "latestComments": [
+                {
+                    "id": "latest-1",
+                    "text": "sample only",
+                    "ownerUsername": "viewer",
+                    "ownerFullName": "Viewer One",
+                    "likesCount": 4,
+                }
+            ],
+            "firstComment": {"id": "first-1", "text": "also sample only", "ownerUsername": "firstviewer"},
         }
     )
 
@@ -214,10 +296,54 @@ def test_normalize_apify_aliases_excludes_latest_comment_samples() -> None:
     assert post.collaborators[0].username == "peacock"
     assert post.width == 1920
     assert post.height == 1080
+    assert post.alt_text is None
     assert post.location is not None
     assert post.location.name == "Castle"
-    assert post.comment_samples_excluded == ["latestComments", "firstComment"]
+    assert post.comment_samples_excluded == []
+    assert [comment.comment_id for comment in post.inline_comment_samples] == ["latest-1", "first-1"]
+    assert post.inline_comment_samples[0].text == "sample only"
+    assert post.inline_comment_samples[0].username == "viewer"
+    assert post.inline_comment_samples[0].likes == 4
+    assert post.inline_comment_samples[0].owner_full_name == "Viewer One"
+    assert post.inline_comment_samples[0].source_snapshot_type == "listing_inline_sample"
     assert post.comments == []
+
+
+def test_normalize_graphql_preview_comments_as_inline_samples() -> None:
+    post = normalize_instagram_post(
+        {
+            "__typename": "GraphImage",
+            "shortcode": "PREVIEW123",
+            "id": "preview-post-1",
+            "display_url": "https://cdn.example.com/preview.jpg",
+            "edge_media_to_comment": {
+                "count": 12,
+                "edges": [
+                    {
+                        "node": {
+                            "id": "preview-comment-1",
+                            "text": "preview sample",
+                            "created_at": 1776272482,
+                            "edge_liked_by": {"count": 3},
+                            "owner": {
+                                "id": "owner-1",
+                                "username": "previewer",
+                                "full_name": "Preview User",
+                                "profile_pic_url": "https://cdn.example.com/previewer.jpg",
+                            },
+                        }
+                    }
+                ],
+            },
+        }
+    )
+
+    assert post.comment_samples_excluded == []
+    assert len(post.inline_comment_samples) == 1
+    assert post.inline_comment_samples[0].comment_id == "preview-comment-1"
+    assert post.inline_comment_samples[0].username == "previewer"
+    assert post.inline_comment_samples[0].created_at == 1776272482
+    assert post.inline_comment_samples[0].source_snapshot_type == "listing_inline_sample"
 
 
 def test_normalize_nasa_style_profile_payload() -> None:

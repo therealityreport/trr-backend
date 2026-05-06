@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from trr_backend.repositories.social_season_analytics import (
+from trr_backend.socials.control_plane.run_lifecycle import reconcile_run_summaries
+from trr_backend.socials.social_season_analytics_impl import (
     cancel_active_jobs,
     cancel_claimed_job_before_processing,
     cancel_dispatch_blocked_jobs,
@@ -12,7 +13,6 @@ from trr_backend.repositories.social_season_analytics import (
     recover_stale_running_jobs,
     reset_social_ingest_health,
 )
-from trr_backend.socials.control_plane.run_lifecycle import reconcile_run_summaries
 
 __all__ = [
     "cancel_active_jobs",

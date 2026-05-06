@@ -1,0 +1,28 @@
+{
+  "platform": "threads",
+  "job_type": "posts",
+  "status": "completed",
+  "last_error_code": "threads_posts_scrapling_final_read_degraded",
+  "last_error_class": "DatabaseServiceUnavailableError",
+  "error_message": "Final run summary read was unavailable after persistence completed",
+  "metadata": {
+    "degraded": true,
+    "degraded_reason": "final_run_summary_read_unavailable",
+    "runtime_metadata": {
+      "proxy_configured": true,
+      "cookie_source": "modal_secret",
+      "session_cookie_present": true
+    },
+    "listing_progress": {
+      "pages_fetched": 2,
+      "posts_seen": 31
+    },
+    "persist_counters": {
+      "posts_upserted": 24,
+      "posts_skipped": 2,
+      "posts_skipped_by_reason": {
+        "duplicate_external_id": 2
+      }
+    }
+  }
+}

@@ -36,7 +36,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.socials.instagram.post_normalizer import normalize_instagram_post
+from trr_backend.socials.instagram.post_normalizer import _extract_repost_count, normalize_instagram_post
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.persistence")
 
@@ -116,6 +116,7 @@ class _ScraplingPostDTO:
     caption_is_edited: bool | None = None
     caption_has_translation: bool | None = None
     source_post_id: str | None = None
+    input_url: str | None = None
     owner_user_id: str | None = None
     owner_username: str | None = None
     owner_profile_pic_url_hd: str | None = None
@@ -128,6 +129,7 @@ class _ScraplingPostDTO:
     audio_url: str | None = None
     video_duration: float | None = None
     child_posts_data: list[dict[str, Any]] = field(default_factory=list)
+    inline_comment_samples: list[Any] = field(default_factory=list)
     # Mirror fields (left empty — mirroring handled separately)
     hosted_media_urls: list[str] = field(default_factory=list)
     hosted_thumbnail_url: str | None = None
@@ -389,6 +391,7 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
     owner_detail = normalized.owner
     location_raw = _normalizer_object_to_dict(normalized.location)
     flags = normalized.flags
+    input_url = str(node.get("input_url") or node.get("inputUrl") or "").strip() or None
 
     return _ScraplingPostDTO(
         shortcode=shortcode,
@@ -396,7 +399,7 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
         date_time=date_time,
         taken_at=taken_at,
         caption=caption,
-        sponsored=False,
+        sponsored=bool(flags.get("paid_partnership") or flags.get("advertisement")),
         likes=likes,
         comments=comments,
         video_views=views,
@@ -417,6 +420,7 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
         owner_detail=owner_detail,
         product_type=str(node.get("product_type") or node.get("productType") or "") or None,
         video_play_count=normalized.video_play_count,
+        alt_text=normalized.alt_text,
         width=normalized.width,
         height=normalized.height,
         is_comments_disabled=flags.get("comments_disabled"),
@@ -425,9 +429,9 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
         commenting_disabled_for_viewer=bool(node.get("commenting_disabled_for_viewer"))
         if node.get("commenting_disabled_for_viewer") is not None
         else None,
-        media_repost_count=int(node.get("media_repost_count") or 0)
-        if node.get("media_repost_count") is not None
-        else None,
+        media_repost_count=normalized.media_repost_count
+        if normalized.media_repost_count is not None
+        else _extract_repost_count(node),
         is_paid_partnership=flags.get("paid_partnership"),
         is_advertisement=flags.get("advertisement"),
         can_viewer_reshare=bool(node.get("can_viewer_reshare")) if node.get("can_viewer_reshare") is not None else None,
@@ -436,6 +440,7 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
         caption_is_edited=normalized.caption.is_edited,
         caption_has_translation=normalized.caption.has_translation,
         source_post_id=normalized.source_id,
+        input_url=input_url,
         owner_user_id=owner_detail.user_id if owner_detail else None,
         owner_username=owner_detail.username if owner_detail else username,
         owner_profile_pic_url_hd=owner_detail.profile_pic_url_hd if owner_detail else None,
@@ -448,6 +453,7 @@ def _graph_node_to_post_dto(node: dict[str, Any], *, account_handle: str) -> _Sc
         audio_url=normalized.audio_url,
         video_duration=normalized.video_duration,
         child_posts_data=[_normalizer_object_to_dict(child) for child in normalized.child_posts],
+        inline_comment_samples=normalized.inline_comment_samples,
         metadata_scraped_at=datetime.now(tz=UTC),
         metadata_source="posts_scrapling",
         _raw_node=node,
@@ -461,7 +467,7 @@ def persist_instagram_posts(
     run_id: str | None,
     job_id: str | None,
     season_id: str | None = None,
-    source_scope: str = "bravo",
+    source_scope: str = "network",
 ) -> PersistedInstagramPosts:
     """Adapt raw GraphQL nodes and persist through the canonical repo helper."""
     from trr_backend.db import pg
@@ -470,6 +476,8 @@ def persist_instagram_posts(
     context = repo.get_season_context(season_id) if season_id else None
     posts_upserted = 0
     posts_skipped = 0
+    inline_comments_upserted = 0
+    inline_comments_skipped = 0
     posts_skipped_by_reason: dict[str, int] = {}
 
     def _record_skip(reason: str) -> None:
@@ -512,6 +520,32 @@ def persist_instagram_posts(
                 continue
 
             posts_upserted += 1
+            inline_samples = list(getattr(dto, "inline_comment_samples", []) or [])
+            if inline_samples:
+                post_id = str((upserted or {}).get("id") or "").strip()
+                if context is not None and post_id:
+                    inline_stats: dict[str, int] = {}
+                    try:
+                        inline_comments_upserted += int(
+                            repo._batch_upsert_instagram_comments(
+                                context,
+                                job_id=job_id,
+                                run_id=run_id,
+                                account=account_handle,
+                                post_id=post_id,
+                                comments=inline_samples,
+                                persist_stats=inline_stats,
+                                source_scope=source_scope,
+                                enable_media_followups=False,
+                                conn=conn,
+                            )
+                            or 0
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Failed to persist inline comment samples for shortcode=%s", shortcode)
+                        inline_comments_skipped += len(inline_samples)
+                else:
+                    inline_comments_skipped += len(inline_samples)
 
     if job_id:
         existing_row = (
@@ -534,6 +568,10 @@ def persist_instagram_posts(
             "posts_upserted": int((existing_summary or {}).get("posts_upserted") or 0) + posts_upserted,
             "posts_skipped": int((existing_summary or {}).get("posts_skipped") or 0) + posts_skipped,
             "posts_skipped_by_reason": merged_reasons,
+            "inline_comments_upserted": int((existing_summary or {}).get("inline_comments_upserted") or 0)
+            + inline_comments_upserted,
+            "inline_comments_skipped": int((existing_summary or {}).get("inline_comments_skipped") or 0)
+            + inline_comments_skipped,
         }
         pg.fetch_one(
             """

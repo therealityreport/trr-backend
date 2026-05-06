@@ -17,6 +17,7 @@ DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_API_FUNCTION = "serve_backend_api"
 DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION = "probe_social_remote_auth"
+DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION = "probe_instagram_posts_auth"
 DEFAULT_GETTY_REMOTE_PROBE_FUNCTION = "probe_getty_remote_access"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
@@ -84,9 +85,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--probe-remote-auth",
-        choices=("instagram",),
+        choices=("instagram", "tiktok", "twitter", "facebook", "threads"),
         default="",
         help="Optionally run the deployed remote auth probe for a supported platform.",
+    )
+    parser.add_argument(
+        "--probe-instagram-posts-auth",
+        default="",
+        metavar="HANDLE",
+        help="Optionally run the deployed Instagram profile-posts auth probe for an account handle.",
     )
     parser.add_argument(
         "--probe-getty-remote-access",
@@ -185,6 +192,9 @@ def expected_function_names() -> tuple[str, ...]:
         or "probe_reddit_refresh_runtime",
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
+        str(os.getenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION") or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION)
+        .strip()
+        or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION).strip()
         or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
@@ -205,6 +215,14 @@ def social_auth_probe_function_name() -> str:
     return (
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION
+    )
+
+
+def instagram_posts_auth_probe_function_name() -> str:
+    return (
+        str(os.getenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION") or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION)
+        .strip()
+        or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION
     )
 
 
@@ -300,6 +318,7 @@ def verify_modal_readiness(
     function_names: tuple[str, ...] | list[str],
     modal_environment: str = "",
     probe_remote_auth_platform: str | None = None,
+    probe_instagram_posts_auth_handle: str | None = None,
     probe_getty_remote_access: bool = False,
 ) -> dict[str, Any]:
     social_jobs_are_enabled = social_jobs_enabled()
@@ -385,6 +404,47 @@ def verify_modal_readiness(
                 platform=probe_remote_auth_platform,
             )
 
+    instagram_posts_auth_probe: dict[str, Any] | None = None
+    if probe_instagram_posts_auth_handle:
+        probe_function_name = instagram_posts_auth_probe_function_name()
+        probe_handle = app_function_handles.get(probe_function_name)
+        if probe_handle is None or probe_function_name in missing_functions:
+            instagram_posts_auth_probe = {
+                "platform": "instagram",
+                "account_handle": probe_instagram_posts_auth_handle,
+                "ready": False,
+                "reason": "probe_function_unavailable",
+                "execution_backend": "modal",
+            }
+        else:
+            try:
+                payload = probe_handle.remote(probe_instagram_posts_auth_handle)
+            except Exception as exc:  # noqa: BLE001
+                instagram_posts_auth_probe = {
+                    "platform": "instagram",
+                    "account_handle": probe_instagram_posts_auth_handle,
+                    "ready": False,
+                    "reason": "probe_invocation_failed",
+                    "execution_backend": "modal",
+                    "detail": {
+                        "phase": "posts_auth_probe",
+                        "exception_class": type(exc).__name__,
+                        "message": str(exc)[:240],
+                    },
+                }
+            else:
+                instagram_posts_auth_probe = (
+                    dict(payload)
+                    if isinstance(payload, dict)
+                    else {
+                        "platform": "instagram",
+                        "account_handle": probe_instagram_posts_auth_handle,
+                        "ready": False,
+                        "reason": "probe_payload_invalid",
+                        "execution_backend": "modal",
+                    }
+                )
+
     getty_remote_probe: dict[str, Any] | None = None
     if probe_getty_remote_access:
         probe_function_name = getty_remote_probe_function_name()
@@ -422,6 +482,11 @@ def verify_modal_readiness(
         blocking_probe_failures.append(
             str(remote_auth_probe.get("reason") or "remote_auth_probe_failed").strip() or "remote_auth_probe_failed"
         )
+    if instagram_posts_auth_probe is not None and not bool(instagram_posts_auth_probe.get("ready")):
+        blocking_probe_failures.append(
+            str(instagram_posts_auth_probe.get("reason") or "instagram_posts_auth_probe_failed").strip()
+            or "instagram_posts_auth_probe_failed"
+        )
     if getty_remote_probe is not None and not bool(getty_remote_probe.get("ready")):
         advisory_probe_failures.append(
             str(getty_remote_probe.get("reason") or "getty_remote_probe_failed").strip() or "getty_remote_probe_failed"
@@ -456,6 +521,7 @@ def verify_modal_readiness(
         "api_web_url": api_web_url,
         "missing_web_endpoints": missing_web_endpoints,
         "remote_auth_probe": remote_auth_probe,
+        "instagram_posts_auth_probe": instagram_posts_auth_probe,
         "getty_remote_probe": getty_remote_probe,
         "blocking_probe_failures": blocking_probe_failures,
         "advisory_probe_failures": advisory_probe_failures,
@@ -494,6 +560,13 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
             "  Remote auth probe: "
             f"{probe.get('platform')}: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}"
         )
+    if summary.get("instagram_posts_auth_probe"):
+        probe = summary["instagram_posts_auth_probe"]
+        probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
+        print(
+            "  Instagram posts auth probe: "
+            f"{probe.get('account_handle')}: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}"
+        )
     if summary.get("getty_remote_probe"):
         probe = summary["getty_remote_probe"]
         probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
@@ -514,6 +587,7 @@ def main() -> int:
         function_names=expected_function_names(),
         modal_environment=args.env,
         probe_remote_auth_platform=str(args.probe_remote_auth or "").strip() or None,
+        probe_instagram_posts_auth_handle=str(args.probe_instagram_posts_auth or "").strip() or None,
         probe_getty_remote_access=bool(args.probe_getty_remote_access),
     )
     if args.json:

@@ -11,7 +11,7 @@ be ingested by the same downstream pipeline.
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)

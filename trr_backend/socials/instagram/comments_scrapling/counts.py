@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -13,6 +14,12 @@ def _comment_id(comment: Any) -> str:
 def _comment_replies(comment: Any) -> list[Any]:
     replies = getattr(comment, "replies", None)
     return replies if isinstance(replies, list) else []
+
+
+def _comment_is_reply(comment: Any) -> bool:
+    if bool(getattr(comment, "is_reply", False)):
+        return True
+    return bool(str(getattr(comment, "parent_comment_id", "") or "").strip())
 
 
 def _unique_count(comments: Iterable[Any]) -> int:
@@ -44,8 +51,64 @@ def iter_reply_comments(comments: Iterable[Any]) -> Iterator[Any]:
             yield from iter_flattened_comments(_comment_replies(reply))
 
 
+def iter_parent_comments(comments: Iterable[Any]) -> Iterator[Any]:
+    """Yield top-level comments that are safe to persist as parents."""
+    for comment in comments:
+        if not _comment_is_reply(comment):
+            yield comment
+
+
+def iter_parentless_reply_comments(comments: Iterable[Any]) -> Iterator[Any]:
+    """Yield root-level replies that have no fetched parent container."""
+    for comment in comments:
+        if _comment_is_reply(comment):
+            yield comment
+
+
 def top_level_count(comments: Iterable[Any]) -> int:
     return _unique_count(comments)
+
+
+def parent_comment_count(comments: Iterable[Any]) -> int:
+    return _unique_count(iter_parent_comments(comments))
+
+
+def child_reply_count(comments: Iterable[Any]) -> int:
+    return _unique_count(iter_reply_comments(comments))
+
+
+def parentless_reply_count(comments: Iterable[Any]) -> int:
+    return _unique_count(iter_parentless_reply_comments(comments))
+
+
+def parentless_reply_ids(comments: Iterable[Any]) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for comment in iter_parentless_reply_comments(comments):
+        comment_id = _comment_id(comment)
+        if not comment_id or comment_id in seen:
+            continue
+        seen.add(comment_id)
+        ids.append(comment_id)
+    return ids
+
+
+@dataclass(frozen=True, slots=True)
+class CommentTreeCounts:
+    parent_comments: int
+    child_replies: int
+    flattened_comments: int
+    parentless_replies: int
+
+
+def comment_tree_counts(comments: Iterable[Any]) -> CommentTreeCounts:
+    comments_list = list(comments or [])
+    return CommentTreeCounts(
+        parent_comments=parent_comment_count(comments_list),
+        child_replies=child_reply_count(comments_list),
+        flattened_comments=flattened_comment_count(comments_list),
+        parentless_replies=parentless_reply_count(comments_list),
+    )
 
 
 def reply_count_observed(comment: Any) -> int:

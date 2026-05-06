@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import trr_backend.repositories.social_season_analytics as legacy
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
+import trr_backend.socials.social_season_analytics_impl as legacy
 
 
 def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:
@@ -29,12 +29,12 @@ def _fetch_one_control(sql: str, params: list[Any]) -> dict[str, Any] | None:
 def get_season_shared_status(
     season_id: str,
     *,
-    source_scope: str = "bravo",
+    source_scope: str = "network",
 ) -> dict[str, Any]:
     cache_key = (
         "season_shared_status",
         str(season_id or "").strip(),
-        str(source_scope or "").strip().lower() or "bravo",
+        str(source_scope or "").strip().lower() or "network",
     )
     cached_payload = legacy._get_social_hot_path_cache(cache_key)
     if isinstance(cached_payload, dict):

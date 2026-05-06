@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.modal import prepare_named_secrets, verify_modal_readiness
+from scripts.modal import prepare_named_secrets, verify_modal_readiness  # noqa: E402
 
 
 def workspace_logs_dir(repo_root: Path = REPO_ROOT) -> Path:
@@ -44,6 +45,24 @@ def command_timeout_seconds() -> int:
     return max(30, parsed)
 
 
+def post_deploy_verify_attempts() -> int:
+    raw = str(os.getenv("WORKSPACE_RUNTIME_MODAL_POST_DEPLOY_VERIFY_ATTEMPTS") or "3").strip()
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return 3
+    return max(1, parsed)
+
+
+def post_deploy_verify_delay_seconds() -> float:
+    raw = str(os.getenv("WORKSPACE_RUNTIME_MODAL_POST_DEPLOY_VERIFY_DELAY_SECONDS") or "5").strip()
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return 5.0
+    return max(0.0, parsed)
+
+
 def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
     source_env = prepare_named_secrets._load_source_env(repo_root / ".env")
     runtime_values, social_values = prepare_named_secrets._split_env(source_env)
@@ -51,6 +70,16 @@ def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
         runtime_values,
         disabled=False,
     )
+    fingerprint_files = [
+        repo_root / "trr_backend" / "modal_jobs.py",
+        repo_root / "trr_backend" / "modal_dispatch.py",
+        repo_root / "trr_backend" / "socials" / "social_season_analytics_impl.py",
+        repo_root / "trr_backend" / "socials" / "instagram" / "comments_scrapling" / "fetcher.py",
+        repo_root / "trr_backend" / "socials" / "instagram" / "comments_scrapling" / "job_runner.py",
+        repo_root / "trr_backend" / "socials" / "instagram" / "comments_scrapling" / "persistence.py",
+        repo_root / "requirements.txt",
+        repo_root / "requirements.lock.txt",
+    ]
     payload = {
         "runtime_values": runtime_values,
         "social_values": social_values,
@@ -59,11 +88,8 @@ def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
         "social_secret_name": os.getenv("TRR_MODAL_SOCIAL_SECRET_NAME") or "trr-social-auth",
         "files": {
             str(path.relative_to(repo_root)): path.read_text(encoding="utf-8")
-            for path in (
-                repo_root / "trr_backend" / "modal_jobs.py",
-                repo_root / "trr_backend" / "modal_dispatch.py",
-                repo_root / "requirements.txt",
-            )
+            for path in fingerprint_files
+            if path.is_file()
         },
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
@@ -88,10 +114,12 @@ def save_fingerprint(fingerprint: str, repo_root: Path = REPO_ROOT) -> None:
 
 
 def verify_readiness(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
+    runtime_secret_name = str(os.getenv("TRR_MODAL_RUNTIME_SECRET_NAME") or "trr-backend-runtime").strip()
+    social_secret_name = str(os.getenv("TRR_MODAL_SOCIAL_SECRET_NAME") or "trr-social-auth").strip()
     return verify_modal_readiness.verify_modal_readiness(
         app_name=str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs",
-        runtime_secret_name=(str(os.getenv("TRR_MODAL_RUNTIME_SECRET_NAME") or "trr-backend-runtime").strip() or "trr-backend-runtime"),
-        social_secret_name=(str(os.getenv("TRR_MODAL_SOCIAL_SECRET_NAME") or "trr-social-auth").strip() or "trr-social-auth"),
+        runtime_secret_name=runtime_secret_name or "trr-backend-runtime",
+        social_secret_name=social_secret_name or "trr-social-auth",
         function_names=verify_modal_readiness.expected_function_names(),
         modal_environment=str(os.getenv("MODAL_ENVIRONMENT") or "").strip(),
         probe_remote_auth_platform="instagram",
@@ -101,6 +129,19 @@ def verify_readiness(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         # startup outage.
         probe_getty_remote_access=True,
     )
+
+
+def verify_readiness_after_deploy(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
+    attempts = post_deploy_verify_attempts()
+    delay_seconds = post_deploy_verify_delay_seconds()
+    refreshed: dict[str, Any] = {}
+    for attempt in range(attempts):
+        refreshed = verify_readiness(repo_root)
+        if refreshed.get("ok"):
+            return refreshed
+        if attempt < attempts - 1 and delay_seconds > 0:
+            time.sleep(delay_seconds)
+    return refreshed
 
 
 def apply_named_secrets(repo_root: Path = REPO_ROOT) -> subprocess.CompletedProcess[str]:
@@ -132,7 +173,11 @@ def deploy_modal_app(repo_root: Path = REPO_ROOT) -> subprocess.CompletedProcess
 
 
 def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
-    if os.getenv("WORKSPACE_TRR_MODAL_ENABLED", "1") != "1" or os.getenv("WORKSPACE_TRR_REMOTE_EXECUTOR", "modal") != "modal":
+    modal_disabled = (
+        os.getenv("WORKSPACE_TRR_MODAL_ENABLED", "1") != "1"
+        or os.getenv("WORKSPACE_TRR_REMOTE_EXECUTOR", "modal") != "modal"
+    )
+    if modal_disabled:
         payload = default_result()
         payload["state"] = "skipped"
         payload["reason"] = "modal_disabled"
@@ -173,7 +218,9 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         payload["reason"] = "modal_secret_apply_failed"
         payload["fingerprint_changed"] = fingerprint_changed
         payload["readiness"] = readiness
-        payload["remediation"] = (secrets_completed.stderr or secrets_completed.stdout or "Failed to apply Modal secrets").strip()
+        payload["remediation"] = (
+            secrets_completed.stderr or secrets_completed.stdout or "Failed to apply Modal secrets"
+        ).strip()
         return payload
 
     try:
@@ -195,7 +242,7 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         payload["remediation"] = (deploy_completed.stderr or deploy_completed.stdout or "Modal deploy failed").strip()
         return payload
 
-    refreshed = verify_readiness(repo_root)
+    refreshed = verify_readiness_after_deploy(repo_root)
     if not refreshed.get("ok"):
         payload = default_result()
         payload["state"] = "blocked"

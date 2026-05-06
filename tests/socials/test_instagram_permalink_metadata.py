@@ -10,6 +10,7 @@ from trr_backend.socials.instagram.permalink_metadata import (
     _graphql_extract_collaborators_detail,
     _metadata_from_graphql_node,
     _shortcode_to_media_id,
+    fetch_instagram_facebook_crosspost_metadata,
     fetch_permalink_media_item,
     parse_permalink_metadata,
     resolve_instagram_media,
@@ -134,6 +135,142 @@ def test_fetch_permalink_media_item_rejects_malformed_shortcode_or_url() -> None
         session=_FakeSession(),  # type: ignore[arg-type]
     )
     assert found is None
+
+
+def test_fetch_instagram_facebook_crosspost_metadata_reads_post_root_graphql() -> None:
+    requested_posts: list[dict[str, object]] = []
+
+    class _FakeResponse:
+        status_code = 200
+        text = "<html></html>"
+
+        def __init__(self, payload: dict[str, object] | None = None):
+            self._payload = payload or {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+        def post(self, *_args, **kwargs):
+            requested_posts.append(dict(kwargs.get("data") or {}))
+            return _FakeResponse(
+                {
+                    "data": {
+                        "xdt_api__v1__media__shortcode__web_info": {
+                            "items": [
+                                {
+                                    "fb_comment_count": 742,
+                                    "fb_like_count": "1,234",
+                                    "is_shared_to_fb": True,
+                                    "crosspost_metadata": {"post_id": "fb-post-1"},
+                                    "social_context": {"url": "https://www.facebook.com/Bravo/posts/fb-post-1"},
+                                }
+                            ]
+                        }
+                    }
+                }
+            )
+
+    metadata = fetch_instagram_facebook_crosspost_metadata(
+        "DVfQnTcjsCA",
+        session=_FakeSession(),  # type: ignore[arg-type]
+        cookies={"sessionid": "session", "csrftoken": "csrf"},
+    )
+
+    assert metadata is not None
+    assert metadata.comments_count == 742
+    assert metadata.likes_count == 1234
+    assert metadata.is_shared_to_fb is True
+    assert metadata.facebook_post_id == "fb-post-1"
+    assert metadata.facebook_post_url == "https://www.facebook.com/Bravo/posts/fb-post-1"
+    assert metadata.auth_state == "authenticated"
+    assert requested_posts[0]["fb_api_req_friendly_name"] == "PolarisPostRootQuery"
+    assert json.loads(str(requested_posts[0]["variables"])) == {"shortcode": "DVfQnTcjsCA"}
+
+
+def test_fetch_instagram_facebook_crosspost_metadata_ignores_anonymous_null_fields() -> None:
+    class _FakeResponse:
+        status_code = 200
+        text = "<html></html>"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "data": {
+                    "xdt_api__v1__media__shortcode__web_info": {
+                        "items": [
+                            {
+                                "fb_comment_count": None,
+                                "fb_like_count": None,
+                                "is_shared_to_fb": None,
+                                "crosspost_metadata": None,
+                                "social_context": None,
+                            }
+                        ]
+                    }
+                }
+            }
+
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+        def post(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+    assert fetch_instagram_facebook_crosspost_metadata("DVfQnTcjsCA", session=_FakeSession()) is None  # type: ignore[arg-type]
+
+
+def test_fetch_instagram_facebook_crosspost_metadata_reads_inline_payload_doc_id() -> None:
+    media_item = {"fb_comment_count": 15, "is_shared_to_fb": True}
+    payload = {
+        "__bbox": {
+            "result": {
+                "data": {
+                    "xdt_api__v1__media__shortcode__web_info": {
+                        "items": [media_item],
+                    }
+                }
+            }
+        },
+        "expectedPreloaders": [
+            {
+                "friendlyName": "PolarisPostRootQuery",
+                "queryID": "doc-inline",
+                "variables": {"shortcode": "DVfQnTcjsCA"},
+            }
+        ],
+    }
+    html = f'<html><body><script type="application/json" data-sjs>{json.dumps(payload)}</script></body></html>'
+
+    class _FakeResponse:
+        status_code = 200
+        text = html
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeSession:
+        def get(self, *_args, **_kwargs):
+            return _FakeResponse()
+
+        def post(self, *_args, **_kwargs):
+            raise AssertionError("inline integer should avoid a second GraphQL POST")
+
+    metadata = fetch_instagram_facebook_crosspost_metadata("DVfQnTcjsCA", session=_FakeSession())  # type: ignore[arg-type]
+
+    assert metadata is not None
+    assert metadata.comments_count == 15
+    assert metadata.doc_id_used == "doc-inline"
+    assert metadata.auth_state == "inline"
 
 
 def test_shortcode_to_media_id_converts_known_good_shortcode() -> None:

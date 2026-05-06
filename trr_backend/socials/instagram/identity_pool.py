@@ -3,14 +3,12 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 from urllib.parse import urlparse
 
-import requests
 
-
-class InstagramIdentityPoolExhausted(RuntimeError):
+class InstagramIdentityPoolExhausted(RuntimeError):  # noqa: N818
     """Raised when the pool cannot supply another usable identity."""
 
 

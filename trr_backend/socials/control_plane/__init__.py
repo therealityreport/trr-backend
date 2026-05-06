@@ -1,8 +1,8 @@
 """Canonical import surface for the backend social control plane.
 
 This package is the new first-party import path for social control-plane code
-while `trr_backend.repositories.social_season_analytics` remains the temporary
-legacy compatibility surface.
+while `trr_backend.repositories.social_season_analytics` remains a compatibility
+alias for `trr_backend.socials.social_season_analytics_impl`.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ from trr_backend.socials.control_plane.analytics import (
     pdf_filename,
     sentiment_for_text,
 )
+from trr_backend.socials.control_plane.background_tasks import background_task_snapshot, submit_named_background_task
 from trr_backend.socials.control_plane.dispatch import (
     SOCIAL_CATALOG_GAP_ANALYSIS_OPERATION_TYPE,
     build_social_account_catalog_gap_analysis_operation_producer,
@@ -129,6 +130,7 @@ from trr_backend.socials.control_plane.shared_accounts import (
     get_social_account_catalog_run_progress,
     get_social_account_catalog_verification,
     get_social_account_profile_collaborators_tags,
+    get_social_account_profile_comments,
     get_social_account_profile_hashtag_timeline,
     get_social_account_profile_hashtags,
     get_social_account_profile_posts,
@@ -146,9 +148,11 @@ from trr_backend.socials.control_plane.windowing import resolve_week_window
 from trr_backend.socials.control_plane.worker_health import (
     assert_worker_available_when_queue_enabled,
     get_queue_status,
+    get_trusted_local_worker_health,
     get_worker_auth_capabilities,
     get_worker_detail,
     get_worker_health,
+    get_worker_health_for_lane,
     is_queue_enabled,
     mark_worker_stopped,
     probe_remote_auth_health,
@@ -198,6 +202,7 @@ __all__ = [
     "_youtube_title_is_cross_show_excluded",
     "_youtube_video_matches_show_terms",
     "assert_worker_available_when_queue_enabled",
+    "background_task_snapshot",
     "build_csv",
     "build_pdf",
     "build_social_account_catalog_gap_analysis_operation_producer",
@@ -234,6 +239,7 @@ __all__ = [
     "get_social_account_catalog_run_progress",
     "get_social_account_catalog_verification",
     "get_social_account_profile_collaborators_tags",
+    "get_social_account_profile_comments",
     "get_social_account_profile_hashtag_timeline",
     "get_social_account_profile_hashtags",
     "get_social_account_profile_posts",
@@ -255,6 +261,8 @@ __all__ = [
     "get_worker_auth_capabilities",
     "get_worker_detail",
     "get_worker_health",
+    "get_worker_health_for_lane",
+    "get_trusted_local_worker_health",
     "ingest_season",
     "ingest_shared_accounts",
     "is_queue_enabled",
@@ -290,5 +298,6 @@ __all__ = [
     "start_social_account_catalog_backfill",
     "sync_newer_social_account_catalog",
     "sync_recent_social_account_catalog",
+    "submit_named_background_task",
     "update_worker_heartbeat",
 ]

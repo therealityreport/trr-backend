@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,6 +46,8 @@ logger = logging.getLogger("socials.tiktok.posts_scrapling.fetcher")
 TIKTOK_USER_DETAIL_URL = "https://www.tiktok.com/api/user/detail/"
 TIKTOK_POST_LIST_URL = "https://www.tiktok.com/api/post/item_list/"
 TIKTOK_POST_PAGE_SIZE = 30
+TIKTOK_POST_PAGE_SIZE_MIN = 10
+TIKTOK_POST_PAGE_SIZE_MAX = 50
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +72,17 @@ def _build_tiktok_headers(referer: str) -> dict[str, str]:
 def _is_challenge_response(text: str) -> bool:
     body = str(text or "").strip().lower()[:512]
     return any(token in body for token in ("<html", "captcha", "verify", "challenge"))
+
+
+def tiktok_posts_scrapling_page_size() -> int:
+    raw_value = str(os.getenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_PAGE_SIZE") or "").strip()
+    if not raw_value:
+        return TIKTOK_POST_PAGE_SIZE
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return TIKTOK_POST_PAGE_SIZE
+    return min(TIKTOK_POST_PAGE_SIZE_MAX, max(TIKTOK_POST_PAGE_SIZE_MIN, parsed))
 
 
 # ---------------------------------------------------------------------------
@@ -180,12 +194,13 @@ class TikTokPostsScraplingFetcher:
         *,
         sec_uid: str,
         cursor: str | None = None,
-        count: int = TIKTOK_POST_PAGE_SIZE,
+        count: int | None = None,
     ) -> TikTokPostsFetchResult:
         """Fetch one page of posts via the post list API."""
+        effective_count = count if count is not None else tiktok_posts_scrapling_page_size()
         params: dict[str, str] = {
             "secUid": sec_uid,
-            "count": str(count),
+            "count": str(effective_count),
             "aid": "1988",
         }
         if cursor:

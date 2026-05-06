@@ -1,0 +1,22 @@
+{
+  "status": "ok",
+  "comment_filter_param": "offensive",
+  "comments": [
+    {
+      "pk": "covered-parent-1",
+      "created_at": 1770000400,
+      "user": {
+        "username": "covered_author",
+        "pk": "covered-author-id"
+      },
+      "is_covered": true,
+      "did_report_as_spam": true,
+      "status": "Covered",
+      "is_edited": false,
+      "is_pinned": false,
+      "meta_ai_comment_type": "NONE",
+      "child_comment_count": 0,
+      "liked_by_media_coauthors": false
+    }
+  ]
+}

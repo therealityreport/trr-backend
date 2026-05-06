@@ -33,6 +33,9 @@ INSTAGRAM_AUTH_RESOLVER_VERSION = 2
 INSTAGRAM_AUTH_RESOLVER_POSITIVE_TTL_SECONDS = 300
 INSTAGRAM_AUTH_RESOLVER_NEGATIVE_TTL_SECONDS = 90
 INSTAGRAM_AUTH_RESOLVER_SOFT_PASS_TTL_SECONDS = 90
+INSTAGRAM_COMMENTS_AUTH_VALIDATION_ENV = "SOCIAL_INSTAGRAM_COMMENTS_AUTH_VALIDATION"
+INSTAGRAM_COMMENTS_AUTH_VALIDATION_DEFAULT = "comments_endpoint"
+INSTAGRAM_COMMENTS_AUTH_VALIDATION_MODES = {"comments_endpoint", "schema_only", "graphql_profile"}
 
 _HANDLE_RE = re.compile(r"^[a-z0-9._]{1,30}$")
 _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9]{8,15}$")
@@ -164,6 +167,23 @@ def _interactive_login_enabled() -> bool:
 
 def _resolver_v2_enabled() -> bool:
     return _env_truthy(INSTAGRAM_AUTH_RESOLVER_V2)
+
+
+def resolve_instagram_comments_auth_validation_mode(value: str | None = None) -> str:
+    raw_value = (
+        str(value or "").strip().lower()
+        or str(os.getenv(INSTAGRAM_COMMENTS_AUTH_VALIDATION_ENV) or "").strip().lower()
+        or INSTAGRAM_COMMENTS_AUTH_VALIDATION_DEFAULT
+    )
+    if raw_value in INSTAGRAM_COMMENTS_AUTH_VALIDATION_MODES:
+        return raw_value
+    logger.warning(
+        "Invalid %s=%r; falling back to %s",
+        INSTAGRAM_COMMENTS_AUTH_VALIDATION_ENV,
+        raw_value,
+        INSTAGRAM_COMMENTS_AUTH_VALIDATION_DEFAULT,
+    )
+    return INSTAGRAM_COMMENTS_AUTH_VALIDATION_DEFAULT
 
 
 def _looks_like_shortcode(value: str) -> bool:
@@ -838,6 +858,29 @@ def build_authenticated_instagram_scraper(
     if hasattr(scraper, "attach_auth_session"):
         scraper.attach_auth_session(auth_session)
     return scraper
+
+
+def resolve_instagram_comments_auth_session(
+    *,
+    browser_account_id: str | None,
+    caller_context: str | None = None,
+    validation_mode: str | None = None,
+    browser_session_manager: AccountBrowserSessionManager | None = None,
+) -> InstagramAuthSession:
+    mode = resolve_instagram_comments_auth_validation_mode(validation_mode)
+    auth_session = resolve_instagram_auth_session(
+        browser_account_id=browser_account_id,
+        caller_context=caller_context,
+        require_validation=mode == "graphql_profile",
+        browser_session_manager=browser_session_manager,
+    )
+    auth_session.metadata.update(
+        {
+            "comments_auth_validation_mode": mode,
+            "comments_profile_graphql_validation": mode == "graphql_profile",
+        }
+    )
+    return auth_session
 
 
 def auth_session_log_payload(auth_session: InstagramAuthSession) -> dict[str, Any]:

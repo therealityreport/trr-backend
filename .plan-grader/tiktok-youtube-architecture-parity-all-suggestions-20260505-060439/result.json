@@ -1,0 +1,37 @@
+{
+  "sourcePath": ".plan-grader/tiktok-youtube-architecture-parity-20260505-055823/REVISED_PLAN.md",
+  "rubricPath": "/Users/thomashulihan/Documents/Codex/2026-04-21-create-a-rubric-for-scoring-an/implementation-plan-rubric.md",
+  "verdict": "READY_FOR_EXECUTION",
+  "gates": {
+    "triage": "pass",
+    "hardFail": "pass",
+    "shortReview": "pass",
+    "automaticDowngradeCap": null
+  },
+  "scores": {
+    "priorRevisedEstimate": 90.92,
+    "revisedEstimate": 93.04
+  },
+  "artifactPaths": {
+    "revisedPlan": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/REVISED_PLAN.md",
+    "patches": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/PATCHES.md",
+    "comparison": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/COMPARISON.md",
+    "scorecard": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/SCORECARD.md",
+    "validation": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/VALIDATION.md",
+    "suggestions": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/SUGGESTIONS.md",
+    "result": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/result.json"
+  },
+  "suggestionsPath": ".plan-grader/tiktok-youtube-architecture-parity-all-suggestions-20260505-060439/SUGGESTIONS.md",
+  "archivePlanAfterImplementation": true,
+  "cleanupAfterImplementation": true,
+  "recommendedNextExecutionSkill": "orchestrate-subagents",
+  "suppliedContextSummary": "User asked to revise the TikTok and YouTube architecture plan with all prior suggestions and then implement with orchestrated subagents.",
+  "threadFileConflictSummary": "Dirty backend worktree overlaps social control plane, TikTok posts runner, Modal readiness scripts, Instagram scraper files, and social tests. Execution must preserve unrelated changes and use disjoint subagent ownership scopes.",
+  "topFixes": [
+    "Accepted all ten prior suggestions as implementation tasks.",
+    "Added required ADDITIONAL SUGGESTIONS phase with task-level traceability.",
+    "Kept YouTube extraction bounded to posts catalog module without new worker lane.",
+    "Kept batch upsert gated behind contract equivalence.",
+    "Retained orchestrate-subagents as the execution handoff."
+  ]
+}

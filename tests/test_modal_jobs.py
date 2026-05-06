@@ -121,13 +121,46 @@ def test_resolve_modal_secrets_requires_named_secrets_outside_local_dev(
     assert named == ["trr-backend-runtime", "trr-social-auth"]
 
 
-def test_resolve_modal_secrets_keeps_dotenv_fallback_for_local_dev(
+def test_resolve_modal_secrets_uses_named_secrets_for_enabled_modal_job_plane_in_local_dev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    named: list[str] = []
+    dotenv_paths: list[object] = []
+
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.delenv("TRR_MODAL_RUNTIME_SECRET_NAME", raising=False)
+    monkeypatch.delenv("TRR_MODAL_SOCIAL_SECRET_NAME", raising=False)
+    monkeypatch.delenv("TRR_MODAL_ALLOW_DOTENV_FALLBACK", raising=False)
+    monkeypatch.setattr(
+        modal_jobs.modal.Secret,
+        "from_name",
+        lambda name: named.append(name) or {"named": name},
+    )
+    monkeypatch.setattr(
+        modal_jobs.modal.Secret,
+        "from_dotenv",
+        lambda path: dotenv_paths.append(path) or {"dotenv": str(path)},
+    )
+
+    secrets = modal_jobs._resolve_modal_secrets()
+
+    assert secrets == [
+        {"named": "trr-backend-runtime"},
+        {"named": "trr-social-auth"},
+    ]
+    assert named == ["trr-backend-runtime", "trr-social-auth"]
+    assert dotenv_paths == []
+
+
+def test_resolve_modal_secrets_keeps_explicit_dotenv_fallback_for_local_dev(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dotenv_paths: list[object] = []
 
     monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
     monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("TRR_MODAL_ALLOW_DOTENV_FALLBACK", "1")
     monkeypatch.delenv("TRR_MODAL_RUNTIME_SECRET_NAME", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_SECRET_NAME", raising=False)
     monkeypatch.setattr(

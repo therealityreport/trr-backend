@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from api.routers import socials
+from trr_backend.socials.api.handlers import live_status
 
 
 def test_social_landing_summary_returns_covered_shows_and_reddit_counts(monkeypatch) -> None:
@@ -95,9 +96,9 @@ def test_social_landing_socialblade_rows_uses_social_profile_pool(monkeypatch) -
 
 def test_social_live_status_reuses_cached_snapshot(monkeypatch) -> None:
     calls = {"queue": 0, "operations": 0}
-    monkeypatch.setattr(socials, "_LIVE_STATUS_SNAPSHOT_CACHE", None)
-    monkeypatch.setattr(socials, "_LIVE_STATUS_SNAPSHOT_TTL_SECONDS", 5.0)
-    monkeypatch.setattr(socials, "_LIVE_STATUS_SNAPSHOT_STALE_SECONDS", 30.0)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_CACHE", None)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_STALE_SECONDS", 30.0)
 
     def fake_get_queue_status(**_kwargs):
         calls["queue"] += 1
@@ -117,8 +118,8 @@ def test_social_live_status_reuses_cached_snapshot(monkeypatch) -> None:
         fake_get_admin_operations_health,
     )
 
-    first = socials._build_live_status_payload()
-    second = socials._build_live_status_payload()
+    first = live_status.build_live_status_payload()
+    second = live_status.build_live_status_payload()
 
     assert calls == {"queue": 1, "operations": 1}
     assert first["snapshot"]["cache_status"] == "miss"
@@ -129,10 +130,10 @@ def test_social_live_status_reuses_cached_snapshot(monkeypatch) -> None:
 
 def test_social_live_status_serves_stale_snapshot_when_refresh_fails(monkeypatch) -> None:
     now = {"value": 100.0}
-    monkeypatch.setattr(socials, "_LIVE_STATUS_SNAPSHOT_CACHE", None)
-    monkeypatch.setattr(socials, "_LIVE_STATUS_SNAPSHOT_TTL_SECONDS", 5.0)
-    monkeypatch.setattr(socials, "_LIVE_STATUS_SNAPSHOT_STALE_SECONDS", 30.0)
-    monkeypatch.setattr(socials, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_CACHE", None)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_STALE_SECONDS", 30.0)
+    monkeypatch.setattr(live_status, "monotonic", lambda: now["value"])
 
     def fake_get_queue_status(**_kwargs):
         return {
@@ -146,17 +147,42 @@ def test_social_live_status_serves_stale_snapshot_when_refresh_fails(monkeypatch
         "trr_backend.repositories.admin_operations.get_admin_operations_health",
         lambda: {"summary": {"active_total": 0}},
     )
-    fresh = socials._build_live_status_payload()
+    fresh = live_status.build_live_status_payload()
 
-    def fail_get_queue_status(**_kwargs):
+    def fail_live_status_refresh():
         raise RuntimeError("queue unavailable")
 
     now["value"] = 106.0
-    monkeypatch.setattr("trr_backend.repositories.social_season_analytics.get_queue_status", fail_get_queue_status)
-    stale = socials._build_live_status_payload()
+    monkeypatch.setattr(live_status, "_build_live_status_payload_uncached", fail_live_status_refresh)
+    stale = live_status.build_live_status_payload()
 
     assert stale["sequence"] == fresh["sequence"]
     assert stale["snapshot"]["cache_status"] == "stale"
     assert stale["snapshot"]["stale"] is True
     assert stale["snapshot"]["refresh_error"] == "RuntimeError"
     assert stale["snapshot"]["cache_age_ms"] == 6000
+
+
+def test_social_live_status_serves_stale_snapshot_when_refresh_in_progress(monkeypatch) -> None:
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_TTL_SECONDS", 5.0)
+    monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_STALE_SECONDS", 30.0)
+    monkeypatch.setattr(live_status, "monotonic", lambda: 106.0)
+    monkeypatch.setattr(
+        live_status,
+        "_LIVE_STATUS_SNAPSHOT_CACHE",
+        {
+            "payload": {"sequence": 123, "generated_at": "2026-05-03T10:00:00+00:00"},
+            "fetched_at": 100.0,
+        },
+    )
+
+    live_status._LIVE_STATUS_SNAPSHOT_LOCK.acquire()
+    try:
+        payload = live_status.build_live_status_payload()
+    finally:
+        live_status._LIVE_STATUS_SNAPSHOT_LOCK.release()
+
+    assert payload["sequence"] == 123
+    assert payload["snapshot"]["cache_status"] == "stale-refreshing"
+    assert payload["snapshot"]["stale"] is True
+    assert payload["snapshot"]["cache_age_ms"] == 6000

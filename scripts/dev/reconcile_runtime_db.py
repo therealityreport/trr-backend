@@ -46,6 +46,13 @@ def blocked_result(reason: str, remediation: str, **extra: Any) -> dict[str, Any
     return payload
 
 
+def advisory_result(reason: str, remediation: str, **extra: Any) -> dict[str, Any]:
+    payload = default_result()
+    payload.update({"state": "advisory", "reason": reason, "remediation": remediation})
+    payload.update(extra)
+    return payload
+
+
 def fixed_result(*, applied_versions: list[str], **extra: Any) -> dict[str, Any]:
     payload = default_result()
     payload.update({"state": "fixed", "applied_versions": applied_versions})
@@ -268,9 +275,12 @@ def reconcile_runtime_db() -> dict[str, Any]:
         )
     not_allowlisted = [version for version in pending_local if version not in allowlist]
     if not_allowlisted:
-        return blocked_result(
+        return advisory_result(
             "pending_not_allowlisted",
-            "Pending backend-owned shared-schema migrations are not allowlisted for startup auto-apply.",
+            "Pending backend-owned shared-schema migrations are not allowlisted for startup auto-apply, "
+            "so startup will not apply them automatically. The workspace can still start; review or apply "
+            "the migrations separately when the task requires those schema changes.",
+            not_allowlisted=not_allowlisted,
             **base,
         )
     max_auto_apply = int(os.getenv("WORKSPACE_RUNTIME_DB_MAX_AUTO_APPLY") or "3")

@@ -1,0 +1,45 @@
+[0;32mINFO:[0m Database URL resolved from: TRR_DB_URL (.env)
+[0;32mINFO:[0m Connection: postgresql://postgres.vwxfvzutyufrkhfgoeaa:****@aws-1-us-east-1.pooler.supabase.com:5432/postgres
+
+          column_name          |        data_type         | is_nullable 
+-------------------------------+--------------------------+-------------
+ author_full_name              | text                     | YES
+ author_is_verified            | boolean                  | YES
+ author_profile_pic_url        | text                     | YES
+ author_profile_pic_url_hd     | text                     | YES
+ comment_id                    | text                     | NO
+ created_at                    | timestamp with time zone | YES
+ deleted_at                    | timestamp with time zone | YES
+ first_seen_at                 | timestamp with time zone | NO
+ hosted_author_profile_pic_url | text                     | YES
+ hosted_media_urls             | jsonb                    | NO
+ id                            | uuid                     | NO
+ is_missing                    | boolean                  | NO
+ is_reply                      | boolean                  | NO
+ job_id                        | uuid                     | YES
+ last_seen_at                  | timestamp with time zone | NO
+ last_seen_run_id              | uuid                     | YES
+ likes                         | integer                  | NO
+ media_mirror_attempt_count    | integer                  | YES
+ media_mirror_error            | text                     | YES
+ media_mirror_last_attempt_at  | timestamp with time zone | YES
+ media_mirror_last_job_id      | text                     | YES
+ media_mirror_status           | text                     | YES
+ media_urls                    | jsonb                    | NO
+ missing_at                    | timestamp with time zone | YES
+ parent_comment_external_id    | text                     | YES
+ parent_comment_id             | uuid                     | YES
+ post_id                       | uuid                     | NO
+ raw_data                      | jsonb                    | YES
+ reply_count                   | integer                  | NO
+ reply_depth                   | integer                  | YES
+ root_comment_id               | uuid                     | YES
+ scraped_at                    | timestamp with time zone | NO
+ season_id                     | uuid                     | YES
+ source_account                | text                     | YES
+ source_snapshot_type          | text                     | YES
+ text                          | text                     | YES
+ user_id                       | text                     | YES
+ username                      | text                     | NO
+(38 rows)
+

@@ -13,14 +13,18 @@ from .auth_resolver import (
     clear_instagram_auth_runtime_state,
     get_current_instagram_auth_session,
     resolve_instagram_auth_session,
+    resolve_instagram_comments_auth_session,
+    resolve_instagram_comments_auth_validation_mode,
     set_current_instagram_auth_session,
     set_instagram_runtime_override,
 )
 from .cookie_refresh import refresh_instagram_cookies
 from .crawlee_adapter import run_stage_with_crawlee
 from .permalink_metadata import (
+    InstagramFacebookCrosspostMetadata,
     InstagramMediaResolution,
     InstagramPermalinkMetadata,
+    fetch_instagram_facebook_crosspost_metadata,
     fetch_permalink_media_item,
     fetch_permalink_metadata,
     parse_permalink_metadata,
@@ -44,6 +48,8 @@ __all__ = [
     "ScrapeConfig",
     "load_cookies_from_file",
     "resolve_instagram_auth_session",
+    "resolve_instagram_comments_auth_session",
+    "resolve_instagram_comments_auth_validation_mode",
     "build_authenticated_instagram_scraper",
     "get_current_instagram_auth_session",
     "set_current_instagram_auth_session",
@@ -53,6 +59,8 @@ __all__ = [
     "refresh_instagram_cookies",
     "InstagramPermalinkMetadata",
     "InstagramMediaResolution",
+    "InstagramFacebookCrosspostMetadata",
+    "fetch_instagram_facebook_crosspost_metadata",
     "fetch_permalink_media_item",
     "fetch_permalink_metadata",
     "parse_permalink_metadata",

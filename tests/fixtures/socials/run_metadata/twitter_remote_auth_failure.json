@@ -1,0 +1,23 @@
+{
+  "platform": "twitter",
+  "job_type": "posts",
+  "status": "failed",
+  "last_error_code": "twitter_remote_auth_not_ready",
+  "last_error_class": "RemoteAuthNotReady",
+  "error_message": "Twitter/X remote auth probe failed before catalog backfill",
+  "metadata": {
+    "remote_auth_probe": {
+      "platform": "twitter",
+      "ready": false,
+      "reason": "checkpoint_required",
+      "has_auth_token": true,
+      "has_ct0": true,
+      "has_bearer_token": false,
+      "has_twikit_credentials": false
+    },
+    "runtime_metadata": {
+      "execution_backend": "modal",
+      "probe_source": "modal_remote_auth_probe"
+    }
+  }
+}

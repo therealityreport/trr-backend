@@ -18,6 +18,28 @@ def test_job_runner_rejects_missing_account():
         run_instagram_posts_scrapling_job(job)
 
 
+def test_select_posts_proxy_distributes_explicit_urls_by_session_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.socials.instagram.posts_scrapling import proxy
+
+    monkeypatch.setenv(
+        "SOCIAL_INSTAGRAM_POSTS_PROXY_URLS",
+        "http://user:pass@proxy-a.example:7000,http://user:pass@proxy-b.example:7001",
+    )
+    monkeypatch.setattr(proxy, "_build_proxy_rotator", lambda _value: object())
+
+    first = proxy.select_posts_proxy(session_key="thetraitorsus:details:0")
+    second = proxy.select_posts_proxy(session_key="thetraitorsus:details:1")
+
+    assert first is not None
+    assert second is not None
+    assert first.session_mode == "explicit_sharded"
+    assert second.session_mode == "explicit_sharded"
+    assert first.fingerprint in {"proxy-a.example:7000:explicit", "proxy-b.example:7001:explicit"}
+    assert second.fingerprint in {"proxy-a.example:7000:explicit", "proxy-b.example:7001:explicit"}
+    assert "user" not in first.fingerprint
+    assert "pass" not in first.fingerprint
+
+
 def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.posts_scrapling.job_runner import run_instagram_posts_scrapling_job
@@ -59,7 +81,7 @@ def test_job_runner_emits_post_skip_truthfulness_metadata(monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(
         "trr_backend.socials.instagram.posts_scrapling.job_runner.select_posts_proxy",
-        lambda: None,
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(
         "trr_backend.socials.instagram.posts_scrapling.job_runner.InstagramPostsScraplingFetcher",
@@ -157,7 +179,7 @@ def test_job_runner_preserves_warmup_error_runtime_metadata(monkeypatch: pytest.
             auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
         ),
     )
-    monkeypatch.setattr(jr, "select_posts_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
     monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
     monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
@@ -223,7 +245,7 @@ def test_job_runner_cancels_before_fetching_next_posts_page(monkeypatch: pytest.
             auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
         ),
     )
-    monkeypatch.setattr(jr, "select_posts_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
@@ -292,7 +314,7 @@ def test_job_runner_returns_degraded_completed_summary_when_final_read_saturates
             auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
         ),
     )
-    monkeypatch.setattr(jr, "select_posts_proxy", lambda: None)
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
     monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
     monkeypatch.setattr(jr.pg, "fetch_one", fake_fetch_one)
     monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
@@ -314,3 +336,456 @@ def test_job_runner_returns_degraded_completed_summary_when_final_read_saturates
         "degraded_summary": True,
         "database_service_unavailable": True,
     }
+
+
+def test_job_runner_persists_page_checkpoint_and_resumes_latest_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.posts_scrapling.persistence import PersistedInstagramPosts
+
+    fetch_cursors: list[str | None] = []
+    checkpoint_calls: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        runtime_metadata = {
+            "transport": "test",
+            "request_count": 1,
+            "doc_id_used": "doc-good",
+            "doc_ids_attempted": ["doc-good"],
+            "proxy_fingerprint": "proxy-a",
+        }
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts_page(self, _account_handle: str, *, cursor: str | None = None) -> SimpleNamespace:
+            fetch_cursors.append(cursor)
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"shortcode": "abc123"}],
+                has_next_page=False,
+                end_cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        jr,
+        "resolve_posts_scrapling_session",
+        lambda **_kwargs: SimpleNamespace(
+            cookies={},
+            browser_account_id="thetraitorsus",
+            auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
+        ),
+    )
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: SimpleNamespace(fingerprint="proxy-a"))
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_posts",
+        lambda **_kwargs: PersistedInstagramPosts(posts_upserted=1, posts_skipped=0, posts_skipped_by_reason={}),
+    )
+    monkeypatch.setattr(
+        repo,
+        "latest_instagram_profile_pagination_state",
+        lambda **_kwargs: {"end_cursor": "resume-cursor"},
+    )
+
+    def _capture_checkpoint(**kwargs: Any) -> dict[str, Any]:
+        checkpoint_calls.append(kwargs)
+        return {
+            "end_cursor": kwargs.get("end_cursor"),
+            "stop_reason": kwargs.get("stop_reason"),
+            "posts_seen": kwargs.get("posts_seen"),
+            "posts_upserted": kwargs.get("posts_upserted"),
+        }
+
+    monkeypatch.setattr(repo, "persist_instagram_profile_pagination_state", _capture_checkpoint)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_iso", lambda _value: "2026-05-03T00:00:00+00:00")
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
+    monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {"flags": {}})
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "completed"})
+
+    jr.run_instagram_posts_scrapling_job(
+        {"id": "job-1", "run_id": "11111111-1111-4111-8111-111111111111", "config": {"account": "thetraitorsus"}},
+        worker_id="worker-1",
+    )
+
+    assert fetch_cursors == ["resume-cursor"]
+    assert checkpoint_calls[-1]["cursor_in"] == "resume-cursor"
+    assert checkpoint_calls[-1]["posts_seen"] == 1
+    assert checkpoint_calls[-1]["posts_upserted"] == 1
+    assert checkpoint_calls[-1]["doc_id_used"] == "doc-good"
+    assert checkpoint_calls[-1]["stop_reason"] == "completed"
+    assert checkpoint_calls[-1]["completed"] is True
+
+
+def test_job_runner_rotates_page_proxy_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.posts_scrapling.persistence import PersistedInstagramPosts
+
+    proxy_selections: list[dict[str, Any]] = []
+    proxy_switches: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        def __init__(self, **_kwargs) -> None:
+            self.runtime_metadata = {
+                "transport": "test",
+                "request_count": 0,
+                "profile_posts_doc_ids": {"used": "doc-good", "attempted": ["doc-good"]},
+                "selected_proxy_fingerprint": "initial-proxy",
+            }
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def set_api_proxy_config(self, proxy_config: Any, *, reason: str) -> None:
+            proxy_switches.append({"fingerprint": proxy_config.fingerprint, "reason": reason})
+            self.runtime_metadata["selected_proxy_fingerprint"] = proxy_config.fingerprint
+
+        async def fetch_posts_page(self, _account_handle: str, *, cursor: str | None = None) -> SimpleNamespace:
+            if cursor is None:
+                return SimpleNamespace(
+                    auth_failed=False,
+                    fetch_failed=False,
+                    retryable=False,
+                    fetch_reason=None,
+                    posts=[{"shortcode": "abc123"}],
+                    has_next_page=True,
+                    end_cursor="cursor-1",
+                )
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"shortcode": "def456"}],
+                has_next_page=False,
+                end_cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    def _select_posts_proxy(**kwargs: Any) -> SimpleNamespace:
+        proxy_selections.append(kwargs)
+        page_index = kwargs.get("page_index")
+        fingerprint = "proxy-b:8080:explicit" if page_index == 1 else "proxy-a:8080:explicit"
+        return SimpleNamespace(
+            api_proxy_url=f"http://{fingerprint}",
+            fingerprint=fingerprint,
+            session_mode="explicit_page_rotation" if page_index is not None else "explicit_sharded",
+            rotation_index=page_index,
+        )
+
+    monkeypatch.setattr(
+        jr,
+        "resolve_posts_scrapling_session",
+        lambda **_kwargs: SimpleNamespace(
+            cookies={},
+            browser_account_id="thetraitorsus",
+            auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
+        ),
+    )
+    monkeypatch.setattr(jr, "select_posts_proxy", _select_posts_proxy)
+    monkeypatch.setattr(jr, "posts_proxy_feature_flags", lambda: {"page_proxy_rotation_enabled": True})
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_posts",
+        lambda **_kwargs: PersistedInstagramPosts(posts_upserted=1, posts_skipped=0, posts_skipped_by_reason={}),
+    )
+    monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        repo,
+        "persist_instagram_profile_pagination_state",
+        lambda **kwargs: {"end_cursor": kwargs.get("end_cursor"), "stop_reason": kwargs.get("stop_reason")},
+    )
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+    monkeypatch.setattr(repo, "_finish_job", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_iso", lambda _value: "2026-05-03T00:00:00+00:00")
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
+    monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {"flags": {}})
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "completed"})
+
+    jr.run_instagram_posts_scrapling_job(
+        {"id": "job-1", "run_id": "11111111-1111-4111-8111-111111111111", "config": {"account": "thetraitorsus"}},
+        worker_id="worker-1",
+    )
+
+    assert [selection.get("page_index") for selection in proxy_selections] == [None, 0, 1]
+    assert [switch["fingerprint"] for switch in proxy_switches] == [
+        "proxy-a:8080:explicit",
+        "proxy-b:8080:explicit",
+    ]
+
+
+def test_job_runner_starts_reverse_walker_after_bidirectional_probe_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.posts_scrapling.persistence import PersistedInstagramPosts
+
+    finish_calls: list[dict[str, Any]] = []
+    checkpoint_calls: list[dict[str, Any]] = []
+    fetcher_instances: list[Any] = []
+
+    class _FakeFetcher:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.kind = "forward" if not fetcher_instances else "reverse"
+            self.runtime_metadata = {"transport": "test", "request_count": 0, "selected_proxy_fingerprint": self.kind}
+            fetcher_instances.append(self)
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        def warmup_snapshot(self) -> dict[str, Any]:
+            return {"raw_cookies": {"sessionid": "x"}, "page_tokens": {"lsd": "token"}}
+
+        async def apply_warmup_snapshot(self, _snapshot: dict[str, Any]) -> None:
+            self.runtime_metadata["warmup_snapshot_reused"] = True
+
+        async def probe_bidirectional_walk(
+            self,
+            _account_handle: str,
+            *,
+            forward_posts: list[dict[str, Any]],
+        ) -> dict[str, Any]:
+            assert forward_posts == [{"id": "new-1", "code": "NEW"}]
+            self.runtime_metadata["bidirectional_probe"] = {"passed": True, "reason": "reverse_probe_passed"}
+            return {"passed": True, "reason": "reverse_probe_passed"}
+
+        async def fetch_posts_page(
+            self,
+            _account_handle: str,
+            *,
+            cursor: str | None = None,
+            direction: str = "forward",
+        ) -> SimpleNamespace:
+            self.runtime_metadata["request_count"] += 1
+            if self.kind == "reverse":
+                assert direction == "reverse"
+                assert cursor is None
+                return SimpleNamespace(
+                    auth_failed=False,
+                    fetch_failed=False,
+                    retryable=False,
+                    fetch_reason=None,
+                    posts=[{"id": "old-1", "code": "OLD"}],
+                    has_next_page=False,
+                    end_cursor=None,
+                )
+            assert direction == "forward"
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"id": "new-1", "code": "NEW"}],
+                has_next_page=False,
+                end_cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_BIDIRECTIONAL_WALK_ENABLED", "1")
+    monkeypatch.setattr(
+        jr,
+        "resolve_posts_scrapling_session",
+        lambda **_kwargs: SimpleNamespace(
+            cookies={},
+            browser_account_id="thetraitorsus",
+            auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
+        ),
+    )
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
+    monkeypatch.setattr(jr, "posts_proxy_feature_flags", lambda: {"page_proxy_rotation_enabled": False})
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", _FakeFetcher)
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_posts",
+        lambda **kwargs: PersistedInstagramPosts(
+            posts_upserted=len(kwargs.get("post_nodes") or []),
+            posts_skipped=0,
+            posts_skipped_by_reason={},
+        ),
+    )
+    monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        repo,
+        "persist_instagram_profile_pagination_state",
+        lambda **kwargs: checkpoint_calls.append(kwargs) or {"end_cursor": kwargs.get("end_cursor")},
+    )
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_iso", lambda _value: "2026-05-03T00:00:00+00:00")
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
+    monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {"flags": {}})
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "completed"})
+
+    jr.run_instagram_posts_scrapling_job(
+        {"id": "job-1", "run_id": "11111111-1111-4111-8111-111111111111", "config": {"account": "thetraitorsus"}},
+        worker_id="worker-1",
+    )
+
+    assert [call["direction"] for call in checkpoint_calls] == ["forward", "reverse"]
+    assert finish_calls[-1]["items_found"] == 2
+    assert finish_calls[-1]["metadata"]["bidirectional_listing"]["reverse_started"] is True
+    assert finish_calls[-1]["metadata"]["bidirectional_listing"]["reverse_posts_seen"] == 1
+
+
+def test_job_runner_timeout_guard_records_partial_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+
+    checkpoint_calls: list[dict[str, Any]] = []
+    finish_calls: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 0, "doc_id_used": "doc-good"}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts_page(self, _account_handle: str, *, cursor: str | None = None) -> SimpleNamespace:
+            raise AssertionError("timeout guard should fire before fetching")
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(jr, "_posts_pagination_timeout_guard_seconds", lambda _config: 0.0)
+    monkeypatch.setattr(
+        jr,
+        "resolve_posts_scrapling_session",
+        lambda **_kwargs: SimpleNamespace(
+            cookies={},
+            browser_account_id="thetraitorsus",
+            auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
+        ),
+    )
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
+    monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_kwargs: {})
+
+    def _capture_checkpoint(**kwargs: Any) -> dict[str, Any]:
+        checkpoint_calls.append(kwargs)
+        return {"end_cursor": kwargs.get("end_cursor"), "stop_reason": kwargs.get("stop_reason")}
+
+    monkeypatch.setattr(repo, "persist_instagram_profile_pagination_state", _capture_checkpoint)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda _attempt: 30)
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
+    monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {"flags": {}})
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "retrying"})
+
+    jr.run_instagram_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "thetraitorsus", "pagination_timeout_guard_seconds": 1},
+        },
+        worker_id="worker-1",
+    )
+
+    assert checkpoint_calls[-1]["stop_reason"] == "timeout_guard"
+    assert checkpoint_calls[-1]["partial"] is True
+    assert finish_calls[-1]["status"] == "retrying"
+    assert finish_calls[-1]["last_error_code"] == "timeout_guard"
+    assert finish_calls[-1]["metadata"]["listing_progress"]["stop_reason"] == "timeout_guard"
+
+
+def test_job_runner_cursor_expired_records_restart_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+
+    checkpoint_calls: list[dict[str, Any]] = []
+    finish_calls: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1, "doc_id_used": "doc-good"}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts_page(self, _account_handle: str, *, cursor: str | None = None) -> SimpleNamespace:
+            assert cursor == "expired-cursor"
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=True,
+                retryable=False,
+                fetch_reason="cursor_expired",
+                posts=[],
+                has_next_page=False,
+                end_cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        jr,
+        "resolve_posts_scrapling_session",
+        lambda **_kwargs: SimpleNamespace(
+            cookies={},
+            browser_account_id="thetraitorsus",
+            auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
+        ),
+    )
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
+    monkeypatch.setattr(
+        repo,
+        "latest_instagram_profile_pagination_state",
+        lambda **_kwargs: {"end_cursor": "expired-cursor"},
+    )
+    monkeypatch.setattr(
+        repo,
+        "persist_instagram_profile_pagination_state",
+        lambda **kwargs: checkpoint_calls.append(kwargs) or {"end_cursor": kwargs.get("end_cursor")},
+    )
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
+    monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {"flags": {}})
+    monkeypatch.setattr(jr.pg, "fetch_one", lambda *_args, **_kwargs: {"id": "job-1", "status": "failed"})
+
+    jr.run_instagram_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "attempt_count": 1,
+            "max_attempts": 1,
+            "config": {"account": "thetraitorsus"},
+        },
+        worker_id="worker-1",
+    )
+
+    assert checkpoint_calls[-1]["stop_reason"] == "cursor_expired_restart_required"
+    assert checkpoint_calls[-1]["partial"] is True
+    assert finish_calls[-1]["status"] == "failed"
+    assert finish_calls[-1]["last_error_code"] == "cursor_expired_restart_required"

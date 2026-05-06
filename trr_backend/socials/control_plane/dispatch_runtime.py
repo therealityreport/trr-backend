@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-import trr_backend.repositories.social_season_analytics as legacy
+import trr_backend.socials.social_season_analytics_impl as legacy
 
 
 def _call_extracted_override(name: str, local_impl: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -519,6 +519,12 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
     }
 
 
+def _mark_claimed_runs_running(jobs: list[dict[str, Any]]) -> None:
+    run_ids = sorted({str(job.get("run_id") or "").strip() for job in jobs if str(job.get("run_id") or "").strip()})
+    for run_id in run_ids:
+        legacy._set_run_status(run_id, "running")
+
+
 def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, Any]:
     claimed = legacy._claim_job_by_id(job_id=job_id, worker_id=worker_id)
     if not claimed:
@@ -527,6 +533,7 @@ def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, An
             "claimed": False,
             "job": legacy._load_current_job_row(job_id),
         }
+    _mark_claimed_runs_running([claimed])
     result = _call_extracted_override("process_claimed_job", process_claimed_job, claimed, worker_id=worker_id)
     run_id = str(claimed.get("run_id") or "").strip() or None
     _call_extracted_override("dispatch_due_social_jobs", dispatch_due_social_jobs, run_id=run_id, limit=1)
@@ -565,13 +572,15 @@ def claim_next_queued_jobs(
 ) -> list[dict[str, Any]]:
     normalized_platform = legacy._normalize_platform_name(platform) or None
     safe_limit = legacy._resolve_job_claim_batch_size(limit, stage=stage)
-    return legacy._claim_next_jobs(
+    claimed_jobs = legacy._claim_next_jobs(
         worker_id=worker_id,
         run_id=run_id,
         stage=stage,
         platform=normalized_platform,
         limit=safe_limit,
     )
+    _mark_claimed_runs_running(claimed_jobs)
+    return claimed_jobs
 
 
 def process_claimed_job(job: dict[str, Any], *, worker_id: str | None = None) -> dict[str, Any]:

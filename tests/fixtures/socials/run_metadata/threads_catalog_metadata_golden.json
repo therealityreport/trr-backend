@@ -1,0 +1,25 @@
+{
+  "platform": "threads",
+  "job_type": "posts",
+  "status": "completed",
+  "last_error_code": null,
+  "last_error_class": null,
+  "error_message": null,
+  "metadata": {
+    "retrieval_meta": {
+      "posts_checked": 4,
+      "pages_scanned": 1,
+      "persist_counters": {
+        "posts_upserted": 4,
+        "comments_upserted": 0
+      },
+      "profile_snapshot": {
+        "username": "bravotv",
+        "display_name": "Bravo",
+        "avatar_url": "https://example.invalid/threads-avatar.jpg",
+        "is_verified": true,
+        "profile_url": "https://www.threads.net/@bravotv"
+      }
+    }
+  }
+}

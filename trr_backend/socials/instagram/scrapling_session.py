@@ -6,7 +6,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from trr_backend.socials.instagram.auth_resolver import InstagramAuthSession, resolve_instagram_auth_session
+from trr_backend.socials.instagram.auth_resolver import (
+    InstagramAuthSession,
+    resolve_instagram_auth_session,
+)
 
 
 @dataclass(slots=True)

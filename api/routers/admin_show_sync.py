@@ -2618,7 +2618,7 @@ def _seed_show_social_targets(show_id: str, *, show_row: dict[str, Any] | None) 
 
     for season_id in season_ids:
         context = get_season_context(season_id)
-        current_payload = get_targets(season_id, source_scope="bravo")
+        current_payload = get_targets(season_id, source_scope="network")
         current_targets = (
             [dict(item) for item in current_payload.get("targets", []) if isinstance(item, dict)]
             if isinstance(current_payload, dict)
@@ -2630,7 +2630,7 @@ def _seed_show_social_targets(show_id: str, *, show_row: dict[str, Any] | None) 
             if str(item.get("platform") or "").strip()
         }
         merged_targets = list(current_targets)
-        for default_target in _default_targets(context, source_scope="bravo"):
+        for default_target in _default_targets(context, source_scope="network"):
             platform = str(default_target.get("platform") or "").strip().lower()
             if not platform or platform in existing_platforms:
                 continue
@@ -2638,7 +2638,7 @@ def _seed_show_social_targets(show_id: str, *, show_row: dict[str, Any] | None) 
             existing_platforms.add(platform)
         put_targets(
             season_id,
-            source_scope="bravo",
+            source_scope="network",
             targets=merged_targets,
             updated_by="admin_show_refresh",
         )

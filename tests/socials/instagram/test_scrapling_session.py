@@ -29,7 +29,7 @@ def test_posts_and_comments_sessions_share_adapter(monkeypatch) -> None:
         lambda **_kwargs: auth_session,
     )
     monkeypatch.setattr(
-        "trr_backend.socials.instagram.comments_scrapling.session.resolve_instagram_auth_session",
+        "trr_backend.socials.instagram.comments_scrapling.session.resolve_instagram_comments_auth_session",
         lambda **_kwargs: auth_session,
     )
 

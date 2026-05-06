@@ -42,7 +42,7 @@ def _load_tiktok_cookies() -> dict[str, str]:
     Lazy import to avoid loading the 10k+ line social_season_analytics
     module until needed, and to make the function patchable in tests.
     """
-    from trr_backend.repositories.social_season_analytics import (
+    from trr_backend.socials.social_season_analytics_impl import (
         _load_tiktok_cookies as _canonical_load,
     )
 

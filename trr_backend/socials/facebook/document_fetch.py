@@ -6,7 +6,7 @@ import requests
 
 
 def _load_facebook_cookies() -> dict[str, str]:
-    from trr_backend.repositories.social_season_analytics import _load_facebook_cookies as _canonical_load
+    from trr_backend.socials.social_season_analytics_impl import _load_facebook_cookies as _canonical_load
 
     return _canonical_load()
 

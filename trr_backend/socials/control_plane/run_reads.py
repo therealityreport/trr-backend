@@ -6,8 +6,8 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-import trr_backend.repositories.social_season_analytics as legacy
 import trr_backend.socials.control_plane.run_lifecycle as run_lifecycle
+import trr_backend.socials.social_season_analytics_impl as legacy
 
 
 def _fetch_all_control(sql: str, params: list[Any]) -> list[dict[str, Any]]:

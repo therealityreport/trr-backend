@@ -50,6 +50,23 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
         result["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
         == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
     )
+    assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "12"
+    assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "8"
+    assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "8"
+
+
+def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
+    result = cli._apply_runtime_overrides(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "SOCIAL_WORKER_POOL_COMMENTS": "4",
+            "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "4",
+        },
+        disabled=False,
+    )
+
+    assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
+    assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
 
 
 def test_apply_runtime_overrides_can_be_disabled() -> None:

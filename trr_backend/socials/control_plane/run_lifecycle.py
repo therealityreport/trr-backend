@@ -2,14 +2,38 @@
 
 from __future__ import annotations
 
+import importlib
+from datetime import datetime
+from types import ModuleType
 from typing import Any
 
 from psycopg2 import InterfaceError, OperationalError
 from psycopg2.pool import PoolError
 
-import trr_backend.repositories.social_season_analytics as legacy
-
 SOCIAL_CONTROL_POOL_NAME = "social_control"
+_SCRAPE_RUN_ALLOWED_STATUSES = {"queued", "running", "completed", "failed", "cancelled"}
+JobProgressState = dict[str, Any]
+
+
+def _legacy_module() -> ModuleType:
+    return importlib.import_module("trr_backend.socials.social_season_analytics_impl")
+
+
+class _LegacyModuleProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_legacy_module(), name)
+
+
+legacy = _LegacyModuleProxy()
+
+
+def _normalize_scrape_run_status(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in _SCRAPE_RUN_ALLOWED_STATUSES:
+        return normalized
+    if normalized in {"pending", "retrying"}:
+        return "queued"
+    return normalized
 
 
 def _call_with_optional_conn(
@@ -29,6 +53,95 @@ def _call_with_optional_conn(
         return loader(*args, **kwargs)
 
 
+def new_job_progress_state() -> JobProgressState:
+    """Create the mutable progress watermark carried by platform job runners."""
+    return legacy._new_job_progress_state()
+
+
+def now_utc() -> datetime:
+    return legacy._now_utc()
+
+
+def format_time(dt: datetime | None) -> str | None:
+    return legacy._iso(dt)
+
+
+def metadata_dict(value: Any) -> dict[str, Any]:
+    return legacy._metadata_dict(value)
+
+
+def touch_job_heartbeat(job_id: str, *, worker_id: str | None = None) -> bool:
+    return bool(legacy._touch_job_heartbeat(job_id, worker_id=worker_id))
+
+
+def emit_job_progress(
+    *,
+    job_id: str,
+    stage: str,
+    platform: str,
+    account: str,
+    scraped_posts: int,
+    scraped_comments: int,
+    posts_upserted: int,
+    comments_upserted: int,
+    activity: dict[str, Any] | None,
+    progress_state: JobProgressState,
+    worker_id: str | None = None,
+    force: bool = False,
+    extra_metadata: dict[str, Any] | None = None,
+) -> bool:
+    kwargs: dict[str, Any] = {
+        "job_id": job_id,
+        "stage": stage,
+        "platform": platform,
+        "account": account,
+        "scraped_posts": scraped_posts,
+        "scraped_comments": scraped_comments,
+        "posts_upserted": posts_upserted,
+        "comments_upserted": comments_upserted,
+        "activity": activity,
+        "progress_state": progress_state,
+        "force": force,
+    }
+    if worker_id is not None:
+        kwargs["worker_id"] = worker_id
+    if extra_metadata is not None:
+        kwargs["extra_metadata"] = extra_metadata
+    return bool(legacy._emit_job_progress(**kwargs))
+
+
+def finish_job(
+    job_id: str,
+    *,
+    status: str,
+    items_found: int,
+    error_message: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    last_error_code: str | None = None,
+    last_error_class: str | None = None,
+    next_available_at: datetime | None = None,
+    expected_worker_id: str | None = None,
+) -> None:
+    kwargs: dict[str, Any] = {"status": status, "items_found": items_found}
+    if error_message is not None:
+        kwargs["error_message"] = error_message
+    if metadata is not None:
+        kwargs["metadata"] = metadata
+    if last_error_code is not None:
+        kwargs["last_error_code"] = last_error_code
+    if last_error_class is not None:
+        kwargs["last_error_class"] = last_error_class
+    if next_available_at is not None:
+        kwargs["next_available_at"] = next_available_at
+    if expected_worker_id is not None:
+        kwargs["expected_worker_id"] = expected_worker_id
+    legacy._finish_job(job_id, **kwargs)
+
+
+def retry_backoff_seconds(attempt_count: int) -> int:
+    return int(legacy._retry_backoff_seconds(attempt_count))
+
+
 def _create_run(
     context: legacy.SeasonContext | None,
     *,
@@ -38,6 +151,7 @@ def _create_run(
     status: str,
     conn: Any | None = None,
 ) -> str:
+    status = _normalize_scrape_run_status(status)
     initial_summary = _build_run_summary_payload(
         total_jobs=0,
         completed_jobs=0,
@@ -111,6 +225,7 @@ def _create_run(
 
 
 def _set_run_status(run_id: str, status: str, *, conn: Any | None = None) -> None:
+    status = _normalize_scrape_run_status(status)
     _call_with_optional_conn(
         legacy.pg.fetch_one,
         """
@@ -166,6 +281,17 @@ def _merge_run_config(
     return legacy._metadata_dict(row.get("config"))
 
 
+def _deferred_comments_followup_retryable_reason(exc: BaseException) -> str | None:
+    message = str(exc or "").strip().lower()
+    if "must appear in the group by clause" in message and ("p.*" in message or "fb_comment_count" in message):
+        return "sql_grouping_contract"
+    if isinstance(exc, (InterfaceError, OperationalError, PoolError)):
+        return "database_retryable"
+    if "connection pool" in message or "server closed the connection" in message:
+        return "database_retryable"
+    return None
+
+
 def _maybe_start_deferred_comments_followup(
     *,
     run_id: str,
@@ -193,7 +319,7 @@ def _maybe_start_deferred_comments_followup(
                 str(followup.get("platform") or "").strip(),
                 str(followup.get("account_handle") or "").strip(),
                 mode="profile",
-                source_scope=str(followup.get("source_scope") or "bravo"),
+                source_scope=str(followup.get("source_scope") or "network"),
                 max_posts=None,
                 max_comments_per_post=None,
                 refresh_policy=str(followup.get("refresh_policy") or "all_saved_posts"),
@@ -239,6 +365,22 @@ def _maybe_start_deferred_comments_followup(
             conn=conn,
         )
     except Exception as exc:  # noqa: BLE001
+        error_message = str(exc)
+        retryable_reason = _deferred_comments_followup_retryable_reason(exc)
+        retryable = retryable_reason is not None
+        prior_failures = [
+            dict(item)
+            for item in list(followup.get("failure_history") or [])
+            if isinstance(item, dict)
+        ]
+        prior_failures.append(
+            {
+                "failed_at": now_iso,
+                "error_message": error_message,
+                "retryable": retryable,
+                "retryable_reason": retryable_reason,
+            }
+        )
         _merge_run_config(
             run_id,
             config_updates={
@@ -249,13 +391,19 @@ def _maybe_start_deferred_comments_followup(
                         status="failed",
                         source="deferred_after_catalog",
                         state="failed",
+                        error_message=error_message,
+                        failed_at=now_iso,
+                        retryable=retryable,
                     ),
                 },
                 "deferred_comments_followup": {
                     **followup,
                     "state": "failed",
                     "failed_at": now_iso,
-                    "error_message": str(exc),
+                    "error_message": error_message,
+                    "retryable": retryable,
+                    "retryable_reason": retryable_reason,
+                    "failure_history": prior_failures[-5:],
                 },
             },
             conn=conn,
@@ -803,6 +951,10 @@ def _finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[
         return {"status": "finalize_deferred", "finalize_deferred": True, "error": str(exc)}
 
 
+def finalize_run_status(run_id: str, *, force_recompute: bool = False) -> dict[str, Any]:
+    return _finalize_run_status(run_id, force_recompute=force_recompute)
+
+
 def _finalize_run_status_locked(
     run_id: str,
     lock_conn: Any,
@@ -830,7 +982,7 @@ def _finalize_run_status_locked(
         classify_jobs_created = _call_with_optional_conn(
             legacy._maybe_enqueue_shared_catalog_classify_jobs_after_fetch,
             run_id=run_id,
-            source_scope=str(current_config.get("source_scope") or "").strip() or "bravo",
+            source_scope=str(current_config.get("source_scope") or "").strip() or "network",
             run_config=current_config,
             conn=lock_conn,
         )

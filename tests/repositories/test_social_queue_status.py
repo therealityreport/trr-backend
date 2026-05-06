@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 import trr_backend.repositories.social_season_analytics as social_repo
 import trr_backend.socials.control_plane.worker_health as worker_health
+
+FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "socials" / "run_metadata"
+RAW_SECRET_VALUE_KEYS = {
+    "auth_token",
+    "bearer_token",
+    "c_user",
+    "cookie",
+    "cookies",
+    "csrftoken",
+    "ct0",
+    "ms_token",
+    "msToken",
+    "password",
+    "sessionid",
+    "sid_tt",
+    "xs",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +46,11 @@ def test_legacy_get_queue_status_delegates_to_control_plane_worker_health(monkey
 
     monkeypatch.setattr(worker_health, "get_queue_status", lambda **_kwargs: expected)
 
-    payload = social_repo.get_queue_status(include_recent_failures=False, include_runs_summary=False)
+    payload = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+    )
 
     assert payload is expected
 
@@ -50,16 +73,21 @@ def test_get_queue_status_uses_cache_ttl_and_skips_recent_failures_when_disabled
         ]
 
     monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "20")
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_list_stuck_jobs", lambda limit=100: ([], 0))
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
 
-    payload = social_repo.get_queue_status(include_recent_failures=False, include_runs_summary=False)
+    payload = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+        summary_only=True,
+    )
 
     assert payload["queue"]["by_status"]["running"] == 2
     assert payload["queue"]["recent_failures"] == []
@@ -118,25 +146,36 @@ def test_get_queue_status_fresh_true_bypasses_cache(monkeypatch: pytest.MonkeyPa
             20,
             5000,
             False,
-            True,
+            False,
             social_repo.SOCIAL_QUEUE_STATUS_STUCK_JOBS_LIMIT_DEFAULT,
             False,
-            False,
+            True,
             cached_payload,
         ),
     )
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_list_stuck_jobs", lambda limit=100: ([], 0))
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
 
-    cached = social_repo.get_queue_status(include_recent_failures=False, include_runs_summary=False)
+    cached = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+        summary_only=True,
+    )
     count_after_cached = query_counter["count"]
-    fresh = social_repo.get_queue_status(include_recent_failures=False, include_runs_summary=False, fresh=True)
+    fresh = social_repo.get_queue_status(
+        include_recent_failures=False,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+        summary_only=True,
+        fresh=True,
+    )
 
     assert cached["queue"]["by_status"]["running"] == 9
     assert count_after_cached == 0
@@ -178,7 +217,7 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
         raise AssertionError("summary_only should skip expensive queue detail work")
 
     monkeypatch.setenv("SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS", "0")
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", _unexpected)
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", _unexpected)
     monkeypatch.setattr(social_repo, "_list_dispatch_blocked_jobs", _unexpected)
@@ -189,8 +228,8 @@ def test_get_queue_status_summary_only_skips_expensive_side_effects(
         lambda: {"has_run_id": True, "has_queue_fields": True},
     )
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", _unexpected)
 
@@ -216,10 +255,10 @@ def test_get_queue_status_returns_stale_last_good_on_query_failure(monkeypatch: 
     def _raise_query_failure(*_args, **_kwargs):
         raise RuntimeError("aggregate query failed")
 
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
 
     baseline_payload = {
         "queue_enabled": True,
@@ -303,13 +342,13 @@ def test_get_queue_status_includes_stuck_jobs_payload(monkeypatch: pytest.Monkey
             return {"total": 2}
         return {}
 
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda limit=100: [])
     monkeypatch.setattr(social_repo, "_list_dispatch_blocked_jobs", lambda limit=100: ([], 0))
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
@@ -380,7 +419,7 @@ def test_get_queue_status_includes_dispatch_blocked_payload(monkeypatch: pytest.
             return {"total": 1}
         return {}
 
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
     monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", lambda limit=200: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda limit=100: [])
@@ -397,8 +436,8 @@ def test_get_queue_status_includes_dispatch_blocked_payload(monkeypatch: pytest.
             "dispatcher_readiness": {"resolved": False, "reason": "modal_sdk_unavailable"},
         },
     )
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
@@ -424,10 +463,10 @@ def test_get_queue_status_includes_runs_summary(monkeypatch: pytest.MonkeyPatch)
             return [{"status": "running", "total": 1}, {"status": "failed", "total": 2}]
         return []
 
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(social_repo, "_list_stuck_jobs", lambda limit=100: ([], 0))
@@ -466,11 +505,11 @@ def test_get_queue_status_recent_failures_include_run_id(monkeypatch: pytest.Mon
             ]
         return []
 
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
 
@@ -484,6 +523,151 @@ def test_get_queue_status_recent_failures_include_run_id(monkeypatch: pytest.Mon
     assert "completed_at" in normalized_sql
     assert "created_at" in normalized_sql
     assert "make_interval(secs => 600)" in normalized_sql
+
+
+def test_get_queue_status_recent_failures_preserve_tiktok_youtube_error_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Cursor:
+        def execute(self, _sql: str, _params: list[object] | None = None) -> None:
+            return None
+
+    def _fake_fetch_all_with_cursor(_cur: object, sql: str, _params: list[object] | None = None):
+        normalized = " ".join(sql.split()).lower()
+        if "group by 1, 2, 3, 4" in normalized or "group by 1, 2, 3" in normalized:
+            return [
+                {"platform": "tiktok", "job_type": "posts", "status": "cancelled", "stage": "posts", "total": 1},
+                {"platform": "youtube", "job_type": "posts", "status": "failed", "stage": "posts", "total": 1},
+            ]
+        if "where status = any(%s::text[])" in normalized and "failure_dismissed_at" in normalized:
+            return [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "run_id": "22222222-2222-2222-2222-222222222222",
+                    "platform": "tiktok",
+                    "job_type": "posts",
+                    "status": "cancelled",
+                    "error_message": "cancelled by operator",
+                    "last_error_code": "tiktok_posts_scrapling_cancelled",
+                    "last_error_class": "TikTokPostsScraplingCancelledError",
+                    "created_at": datetime(2026, 5, 5, 10, 0, tzinfo=UTC),
+                    "completed_at": datetime(2026, 5, 5, 10, 1, tzinfo=UTC),
+                },
+                {
+                    "id": "33333333-3333-3333-3333-333333333333",
+                    "run_id": "44444444-4444-4444-4444-444444444444",
+                    "platform": "youtube",
+                    "job_type": "posts",
+                    "status": "failed",
+                    "error_message": "empty channel page",
+                    "last_error_code": "youtube_empty_channel_page",
+                    "last_error_class": "YouTubeEmptyChannelPage",
+                    "created_at": datetime(2026, 5, 5, 10, 2, tzinfo=UTC),
+                    "completed_at": datetime(2026, 5, 5, 10, 3, tzinfo=UTC),
+                },
+            ]
+        return []
+
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
+    monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_list_stuck_jobs", lambda limit=100: ([], 0))
+    monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
+
+    payload = social_repo.get_queue_status(
+        include_recent_failures=True,
+        include_stuck_jobs=False,
+        include_runs_summary=False,
+    )
+
+    recent_codes = [row["last_error_code"] for row in payload["queue"]["recent_failures"]]
+    recent_classes = [row["last_error_class"] for row in payload["queue"]["recent_failures"]]
+    assert recent_codes == ["tiktok_posts_scrapling_cancelled", "youtube_empty_channel_page"]
+    assert recent_classes == ["TikTokPostsScraplingCancelledError", "YouTubeEmptyChannelPage"]
+
+
+def test_social_run_metadata_fixtures_cover_queue_admin_error_contract() -> None:
+    fixture_paths = [
+        FIXTURES_DIR / "tiktok_posts_scrapling_cancelled.json",
+        FIXTURES_DIR / "threads_posts_scrapling_cancelled.json",
+        FIXTURES_DIR / "threads_posts_scrapling_degraded_final_read.json",
+        FIXTURES_DIR / "twitter_remote_auth_failure.json",
+        FIXTURES_DIR / "facebook_remote_auth_failure.json",
+        FIXTURES_DIR / "threads_remote_auth_failure.json",
+        FIXTURES_DIR / "youtube_empty_channel_page.json",
+    ]
+
+    payloads = [json.loads(path.read_text()) for path in fixture_paths]
+
+    assert [payload["platform"] for payload in payloads] == [
+        "tiktok",
+        "threads",
+        "threads",
+        "twitter",
+        "facebook",
+        "threads",
+        "youtube",
+    ]
+    assert [payload["last_error_code"] for payload in payloads] == [
+        "tiktok_posts_scrapling_cancelled",
+        "threads_posts_scrapling_cancelled",
+        "threads_posts_scrapling_final_read_degraded",
+        "twitter_remote_auth_not_ready",
+        "facebook_remote_auth_not_ready",
+        "threads_remote_auth_not_ready",
+        "youtube_empty_channel_page",
+    ]
+    for payload in payloads:
+        assert payload["job_type"] == "posts"
+        assert payload["last_error_class"]
+        assert isinstance(payload["metadata"], dict)
+        assert payload["metadata"].get("runtime_metadata") is not None
+
+
+def _raw_secret_paths(payload: object, path: tuple[str, ...] = ()) -> list[str]:
+    findings: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_str = str(key)
+            if key_str in RAW_SECRET_VALUE_KEYS and value not in (None, "", False, True):
+                findings.append(".".join((*path, key_str)))
+            findings.extend(_raw_secret_paths(value, (*path, key_str)))
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            findings.extend(_raw_secret_paths(value, (*path, str(index))))
+    return findings
+
+
+def test_social_run_metadata_fixture_secret_validator_rejects_raw_secret_values() -> None:
+    assert _raw_secret_paths({"metadata": {"auth_token": "raw-secret"}}) == ["metadata.auth_token"]
+    assert _raw_secret_paths({"metadata": {"has_auth_token": True, "cookie_source": "modal_secret"}}) == []
+
+
+def test_social_run_metadata_fixtures_do_not_contain_raw_secret_values() -> None:
+    for path in sorted(FIXTURES_DIR.glob("*.json")):
+        payload = json.loads(path.read_text())
+        assert _raw_secret_paths(payload) == [], path.name
+
+
+def test_social_catalog_metadata_golden_fixtures_cover_expected_platform_fields() -> None:
+    fixture_paths = [
+        FIXTURES_DIR / "twitter_catalog_metadata_golden.json",
+        FIXTURES_DIR / "facebook_catalog_metadata_golden.json",
+        FIXTURES_DIR / "threads_catalog_metadata_golden.json",
+    ]
+    payloads = [json.loads(path.read_text()) for path in fixture_paths]
+
+    assert [payload["platform"] for payload in payloads] == ["twitter", "facebook", "threads"]
+    for payload in payloads:
+        metadata = payload["metadata"]["retrieval_meta"]
+        assert metadata["persist_counters"] == {"posts_upserted": metadata["posts_checked"], "comments_upserted": 0}
+        assert metadata["pages_scanned"] >= 1
+        assert metadata["profile_snapshot"]["username"]
 
 
 def test_get_queue_status_includes_tiktok_single_path_alerts_from_recent_failures(
@@ -514,14 +698,14 @@ def test_get_queue_status_includes_tiktok_single_path_alerts_from_recent_failure
             ]
         return []
 
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_scrape_jobs_features", lambda: {"has_run_id": True, "has_queue_fields": True})
     monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_list_stuck_jobs", lambda limit=100: ([], 0))
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
 
@@ -546,6 +730,22 @@ def test_get_queue_status_includes_running_jobs_payload(monkeypatch: pytest.Monk
 
     def _fake_fetch_all_with_cursor(_cur: object, sql: str, _params: list[object] | None = None):
         normalized = " ".join(sql.split()).lower()
+        if "where j.status = 'running'" in normalized:
+            return [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "run_id": "22222222-2222-2222-2222-222222222222",
+                    "platform": "instagram",
+                    "job_type": "shared_account_posts",
+                    "stage": "shared_account_posts",
+                    "account_handle": "bravotv",
+                    "worker_id": "modal:social:job-1",
+                    "started_at": datetime(2026, 3, 19, 20, 0, tzinfo=UTC),
+                    "heartbeat_at": datetime(2026, 3, 19, 20, 5, tzinfo=UTC),
+                    "dispatch_backend": "modal",
+                    "required_execution_backend": "modal",
+                }
+            ]
         if "from social.scrape_jobs j" in normalized:
             return [
                 {
@@ -560,33 +760,14 @@ def test_get_queue_status_includes_running_jobs_payload(monkeypatch: pytest.Monk
             return [{"status": "running", "total": 1}]
         return []
 
-    def _fake_fetch_all(sql: str, _params: list[object] | None = None) -> list[dict[str, object]]:
-        normalized = " ".join(sql.split()).lower()
-        assert "where j.status = 'running'" in normalized
-        return [
-            {
-                "id": "11111111-1111-1111-1111-111111111111",
-                "run_id": "22222222-2222-2222-2222-222222222222",
-                "platform": "instagram",
-                "job_type": "shared_account_posts",
-                "stage": "shared_account_posts",
-                "account_handle": "bravotv",
-                "worker_id": "modal:social:job-1",
-                "started_at": datetime(2026, 3, 19, 20, 0, tzinfo=UTC),
-                "heartbeat_at": datetime(2026, 3, 19, 20, 5, tzinfo=UTC),
-                "dispatch_backend": "modal",
-                "required_execution_backend": "modal",
-            }
-        ]
-
-    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name: True)
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda _name, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_reconcile_active_queue_runs", lambda **_kwargs: [])
     monkeypatch.setattr(social_repo, "_list_stuck_jobs", lambda limit=100: ([], 0))
     monkeypatch.setattr(social_repo, "get_worker_health", lambda: {"healthy": True, "healthy_workers": 1})
-    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(object()))
-    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None: nullcontext(_Cursor()))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(_Cursor()))
     monkeypatch.setattr(social_repo.pg, "fetch_all_with_cursor", _fake_fetch_all_with_cursor)
-    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo.pg, "fetch_all", lambda *_args, **_kwargs: [])
 
     payload = social_repo.get_queue_status(include_recent_failures=False)
 

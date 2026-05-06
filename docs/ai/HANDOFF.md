@@ -8,10 +8,11 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - None.
 
 ## Blocked / Waiting
-- None.
+- `Instagram Social Scraper Readiness - 2026-05-03` | last updated `2026-05-03` | current phase `Instagram scraper readiness passed code and route-contract gates, but launch-path comments auth remained blocked.` | next action `Investigate the comments endpoint auth/session mismatch before queuing live Instagram comments jobs.` | details `local-status/instagram-social-scraper-readiness-20260503.md`
 
 ## Recent Completions
-- None.
+- `Social Scraper Separation Phase 1 Inventory` | last updated `2026-05-02` | current phase `phase 0–1.5 inventory captured; baseline 65114 lines and dirty worktree overlap recorded` | next action `Resolve overlapping Instagram comments/cookie dirty files before resuming runtime moves out of social_season_analytics.py.` | details `local-status/social-scraper-separation-phase1-inventory-20260502.md`
+- `Social Scraper Separation Final Notes` | last updated `2026-05-02` | current phase `all planned social scraper separation phases completed through Instagram-first persistence, handler registry, router package split, and ops thinning` | next action `Plan a separate compatibility-wrapper deletion pass after route/test patch paths no longer need the legacy facade.` | details `local-status/social-scraper-separation-final-20260502.md`
 
 ## Older Plans
 - `FK Index Hardening Rollout — Closeout` | last updated `2026-04-20` | current phase `closeout complete` | next action `Monitor planner usage for the new indexes over the next 24-48h and merge the rollout branch via PR.` | details `local-status/fk-index-hardening-rollout-2026-04-20.md`

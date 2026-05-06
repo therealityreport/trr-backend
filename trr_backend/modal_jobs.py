@@ -265,6 +265,10 @@ def _require_named_secrets() -> bool:
     return _env_flag("TRR_MODAL_ENABLED", default=False) and not _is_local_or_dev_runtime()
 
 
+def _allow_dotenv_secret_fallback() -> bool:
+    return _env_flag("TRR_MODAL_ALLOW_DOTENV_FALLBACK", default=False) and _is_local_or_dev_runtime()
+
+
 def _api_custom_domains() -> list[str] | None:
     raw = str(os.getenv("TRR_MODAL_API_CUSTOM_DOMAINS") or "").strip()
     if not raw:
@@ -292,6 +296,15 @@ def _resolve_modal_secrets() -> list[modal.Secret]:
         raise RuntimeError(
             f"Modal secret configuration is partial. Set both named secrets or neither. Missing: {', '.join(missing)}"
         )
+
+    if _allow_dotenv_secret_fallback():
+        return [modal.Secret.from_dotenv(_BACKEND_ROOT)]
+
+    if _env_flag("TRR_MODAL_ENABLED", default=False):
+        return [
+            modal.Secret.from_name(_DEFAULT_RUNTIME_SECRET_NAME),
+            modal.Secret.from_name(_DEFAULT_SOCIAL_SECRET_NAME),
+        ]
 
     if _is_local_or_dev_runtime():
         return [modal.Secret.from_dotenv(_BACKEND_ROOT)]
@@ -471,6 +484,29 @@ def probe_social_remote_auth(platform: str) -> dict[str, object]:
     from trr_backend.socials.control_plane import probe_remote_auth_health
 
     return probe_remote_auth_health(platform)
+
+
+@app.function(
+    name=str(os.getenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION") or "probe_instagram_posts_auth").strip()
+    or "probe_instagram_posts_auth",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_posts_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+)
+def probe_instagram_posts_auth(account_handle: str) -> dict[str, object]:
+    from trr_backend.socials.pipelines.account_catalog.launch import _probe_instagram_posts_endpoint_for_launch
+
+    payload = dict(_probe_instagram_posts_endpoint_for_launch(account_handle=account_handle))
+    status = str(payload.get("status") or payload.get("result") or "").strip().lower()
+    payload.update(
+        {
+            "platform": "instagram",
+            "ready": status == "valid",
+            "execution_backend": "modal",
+        }
+    )
+    return payload
 
 
 @app.function(

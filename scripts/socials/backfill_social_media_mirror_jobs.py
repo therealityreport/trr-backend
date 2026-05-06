@@ -36,6 +36,7 @@ REPAIR_REASON_CHOICES = (
     "source_quality",
     "stale_media_metadata",
     "twitter_video_thumbnail",
+    "missing_display_variants",
 )
 
 REPAIR_REASON_ALIASES = {
@@ -282,6 +283,7 @@ def _load_rows(
           coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', '') as hosted_thumbnail_url,
           coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
           coalesce(to_jsonb(p) ->> 'media_mirror_status', '') as media_mirror_status,
+          coalesce(to_jsonb(p) -> 'asset_manifest', '{{}}'::jsonb) as asset_manifest,
           coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data,
           coalesce(to_jsonb(p) ->> 'user_avatar_url', '') as user_avatar_url,
           coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', '') as hosted_user_avatar_url,

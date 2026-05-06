@@ -108,13 +108,14 @@ def test_main_hosted_html_only_filters_non_html_rows(monkeypatch, capsys) -> Non
         "queued": 1,
         "skipped": 1,
         "failed": 0,
-        "repair_reasons": {
-            "hosted_content": 1,
-            "legacy_hosted_url": 1,
-            "non_video_hosted_media": 1,
-            "missing_source_avatar": 1,
-        },
-    }
+            "repair_reasons": {
+                "hosted_content": 1,
+                "legacy_hosted_url": 1,
+                "non_video_hosted_media": 1,
+                "missing_display_variants": 1,
+                "missing_source_avatar": 1,
+            },
+        }
     assert enqueued_ids == ["tt-1"]
 
 
@@ -139,6 +140,7 @@ def test_row_repair_reasons_detects_historical_cleanup_cases(monkeypatch) -> Non
             "legacy_hosted_url",
             "twitter_video_thumbnail",
             "missing_hosted_media",
+            "missing_display_variants",
             "missing_source_avatar",
         ]
     finally:
