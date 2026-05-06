@@ -331,6 +331,44 @@ def test_coauthor_status_only_graphql_preview_stays_retryable_when_partial() -> 
     fetcher._fetch_rendered_coauthor_comments_for_status_only.assert_awaited_once()
 
 
+def test_is_collaborator_post_boolean_alone_triggers_coauthor_classification() -> None:
+    fetcher = _build_fetcher()
+    fetcher._fetch_json_response = AsyncMock(
+        return_value={
+            "payload": {"status": "ok"},
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+        }
+    )
+    fetcher._fetch_rendered_comments_after_revealing_hidden = AsyncMock(return_value=[])
+    fetcher._fetch_graphql_coauthor_comments_for_status_only = AsyncMock(
+        return_value=([], {"reason": "graphql_preview_empty"})
+    )
+    fetcher._fetch_rendered_coauthor_comments_for_status_only = AsyncMock(return_value=[])
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "ABC123",
+            max_comments=0,
+            fetch_replies=False,
+            expected_comment_count=5,
+            target_metadata={
+                "source_account": "peacock",
+                "owner_username": "peacock",
+                "is_collaborator_post": True,
+            },
+        )
+    )
+
+    assert result.fetch_reason == "coauthor_comments_endpoint_empty"
+    assert result.diagnostic_metadata["is_coauthor_context"] is True
+    fetcher._fetch_graphql_coauthor_comments_for_status_only.assert_awaited_once()
+    fetcher._fetch_rendered_coauthor_comments_for_status_only.assert_awaited_once()
+    fetcher._fetch_rendered_comments_after_revealing_hidden.assert_not_awaited()
+
+
 def test_extract_graphql_preview_comments_from_post_action_payload() -> None:
     payload = {
         "data": {

@@ -929,8 +929,14 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
     collaborator_rows_sql = ""
     deduped_rows_sql = """
         deduped_rows as materialized (
-          select *
+          select
+            shortcode,
+            max(posted_at) as posted_at,
+            max(comments_count)::bigint as comments_count,
+            max(facebook_comments)::bigint as facebook_comments,
+            max(_profile_dataset_priority)::int as _profile_dataset_priority
           from owner_rows
+          group by shortcode
         ),
     """
     params: list[Any] = [normalized_account]
@@ -938,7 +944,6 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
         collaborator_rows_sql = f"""
         collaborator_rows as materialized (
           select
-            materialized_post.id::text as profile_row_id,
             p.source_id as shortcode,
             p.posted_at,
             {catalog_reported_comments_expr}::bigint as comments_count,
@@ -947,8 +952,6 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           from social.instagram_account_catalog_post_collaborators m
           join social.instagram_account_catalog_posts p
             on p.id = m.catalog_post_id
-          left join social.instagram_posts materialized_post
-            on materialized_post.shortcode = p.source_id
           where m.collaborator_handle = %s
             and lower(p.source_account) <> %s
             and nullif(p.source_id, '') is not null
@@ -957,24 +960,24 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
         """
         deduped_rows_sql = """
         deduped_rows as materialized (
-          select distinct on (shortcode)
-            *
+          select
+            shortcode,
+            max(posted_at) as posted_at,
+            max(comments_count)::bigint as comments_count,
+            max(facebook_comments)::bigint as facebook_comments,
+            max(_profile_dataset_priority)::int as _profile_dataset_priority
           from (
             select * from owner_rows
             union all
             select * from collaborator_rows
           ) candidate_rows
-          order by
-            shortcode,
-            _profile_dataset_priority desc,
-            posted_at desc nulls last
+          group by shortcode
         ),
         """
         params.extend([normalized_account, normalized_account])
     sql = f"""
         with owner_rows as materialized (
           select
-            p.id::text as profile_row_id,
             p.shortcode as shortcode,
             p.posted_at,
             {reported_comments_expr}::bigint as comments_count,
@@ -989,31 +992,36 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
         {deduped_rows_sql}
         saved_comment_counts as materialized (
           select
-            c.post_id::text as profile_row_id,
-            count(*) filter (
+            p.shortcode,
+            count(distinct c.id) filter (
               where {active_condition} and not ({fb_crosspost_condition}) and not {reply_condition}
             )::int as saved_parent_comments,
-            count(*) filter (
+            count(distinct c.id) filter (
               where {active_condition} and not ({fb_crosspost_condition}) and {reply_condition}
             )::int as saved_child_replies,
-            count(*) filter (
+            count(distinct c.id) filter (
               where {active_condition} and not ({fb_crosspost_condition})
             )::int as saved_comments,
-            count(*) filter (
+            count(distinct c.id) filter (
               where {missing_condition} and not ({fb_crosspost_condition})
             )::int as classified_missing_comments
           from social.instagram_comments c
+          join social.instagram_posts p
+            on p.id = c.post_id
           join deduped_rows d
-            on d.profile_row_id is not null
-           and c.post_id = d.profile_row_id::uuid
-          group by c.post_id
+            on p.shortcode = d.shortcode
+          group by p.shortcode
         )
         select d.shortcode
         from deduped_rows d
         left join saved_comment_counts
-          on saved_comment_counts.profile_row_id = d.profile_row_id
+          on saved_comment_counts.shortcode = d.shortcode
         where {filter_where_sql}
-        order by {missing_comments_sql} asc, d.posted_at desc nulls last, d.shortcode desc
+        order by
+          {missing_comments_sql} desc,
+          d.comments_count desc nulls last,
+          d.posted_at desc nulls last,
+          d.shortcode desc
     """
     if safe_limit is not None:
         sql += " limit %s"
@@ -1202,6 +1210,11 @@ def _instagram_comments_job_max_attempts(config: Mapping[str, Any] | None = None
         raw_value = os.getenv("SOCIAL_INSTAGRAM_COMMENTS_MAX_ATTEMPTS")
     raw_text = str(raw_value or "").strip()
     if not raw_text:
+        if config is not None and (
+            str(config.get("target_filter") or "").strip().lower() == "incomplete"
+            or _config_truthy(config.get("incomplete_fill"))
+        ):
+            return 1
         return SOCIAL_INSTAGRAM_COMMENTS_MAX_ATTEMPTS_DEFAULT
     try:
         requested = int(raw_text)
@@ -1557,12 +1570,19 @@ def start_social_account_comments_scrape(
                     )
             target_enumeration_ms = round((time_module.perf_counter() - target_enumeration_started_at) * 1000, 1)
 
+            deferred_launch_auth_reason = (
+                "incomplete_fill_worker_validation"
+                if normalized_target_filter == "incomplete"
+                else "catalog_parallel_launch"
+                if skip_launch_auth_probe
+                else None
+            )
             launch_auth_metadata = (
                 _comments_launch_auth_metadata(
                     status="deferred",
-                    reason="catalog_parallel_launch",
+                    reason=deferred_launch_auth_reason,
                 )
-                if skip_launch_auth_probe
+                if deferred_launch_auth_reason
                 else _ensure_instagram_comments_auth_ready_for_launch(
                     account_handle=normalized_account,
                     representative_shortcode=target_source_ids[0] if target_source_ids else None,
@@ -1591,7 +1611,15 @@ def start_social_account_comments_scrape(
             recommended_comments_shard_count = _instagram_comments_recommended_shard_count(
                 target_count=target_source_ids_count
             )
-            comments_max_attempts = _instagram_comments_job_max_attempts()
+            comments_max_attempts = _instagram_comments_job_max_attempts(
+                {
+                    "target_filter": normalized_target_filter,
+                    "incomplete_fill": normalized_target_filter == "incomplete",
+                }
+            )
+            comments_auth_validation_mode = (
+                "schema_only" if normalized_target_filter == "incomplete" else "comments_endpoint"
+            )
             run_status = "queued" if queue_enabled else "running"
             job_status = "queued" if queue_enabled else "pending"
             run_config = {
@@ -1622,6 +1650,7 @@ def start_social_account_comments_scrape(
                     str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SHARD_SESSIONS", "0")).strip().lower()
                     in {"1", "true", "yes", "on"}
                 ),
+                "comments_auth_validation_mode": comments_auth_validation_mode,
                 "recommended_comments_shard_count": recommended_comments_shard_count,
                 "comments_max_attempts": comments_max_attempts,
                 "timing": {

@@ -633,6 +633,18 @@ def _build_cumulative_counters(
     }
 
 
+def _cumulative_items_found(counters: dict[str, Any]) -> int:
+    try:
+        posts = max(0, int(counters.get("posts") or 0))
+    except (TypeError, ValueError):
+        posts = 0
+    try:
+        comments = max(0, int(counters.get("comments") or 0))
+    except (TypeError, ValueError):
+        comments = 0
+    return posts + comments
+
+
 def _is_comments_transport_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     if not message:
@@ -742,13 +754,20 @@ def _load_expected_comment_counts(
     requested = list(dict.fromkeys(str(item or "").strip() for item in target_source_ids if str(item or "").strip()))
     if not normalized_account or not requested:
         return {}
-    owner_match_clause = repo._social_account_profile_owner_match_sql("instagram", alias="p")
     fetchable_comments_sql = getattr(repo, "_instagram_fetchable_comments_sql", None)
     reported_comments_expr = (
         fetchable_comments_sql("p")
         if callable(fetchable_comments_sql)
         else repo._instagram_reported_comments_sql("p")
     )
+    # For coauthor posts (e.g. @peacock owner / @thetraitorsus collaborator),
+    # the row materialized under the collaborator's profile commonly has
+    # comments_count = 0 because the metric lives on the owner's row. Filtering
+    # to lower(p.source_account) = profile_account would silently zero out
+    # expected_comments, which in turn keeps the status-only / coauthor
+    # fallback chain in fetcher.py from ever firing. Take the max across all
+    # rows for the shortcode so we honor whichever row was crawled with full
+    # metadata.
     rows = pg.fetch_all(
         f"""
         with requested as (
@@ -758,26 +777,22 @@ def _load_expected_comment_counts(
           from unnest(%s::text[]) with ordinality as request(shortcode, ordinality)
           where nullif(shortcode, '') is not null
         ),
-        owner_posts as (
+        shortcode_max as (
           select
-            p.shortcode::text as shortcode,
-            {reported_comments_expr}::bigint as reported_comments,
-            row_number() over (
-              partition by p.shortcode
-              order by p.posted_at desc nulls last, p.id desc
-            ) as row_number
-          from social.instagram_posts p
-          join requested r on r.shortcode = p.shortcode
-          where {owner_match_clause}
+            r.shortcode,
+            max(({reported_comments_expr})::bigint) as reported_comments
+          from requested r
+          join social.instagram_posts p on p.shortcode = r.shortcode
+          group by r.shortcode
         )
         select
           r.shortcode,
-          coalesce(op.reported_comments, 0)::bigint as reported_comments
+          coalesce(sm.reported_comments, 0)::bigint as reported_comments
         from requested r
-        left join owner_posts op on op.shortcode = r.shortcode and op.row_number = 1
+        left join shortcode_max sm on sm.shortcode = r.shortcode
         order by r.sort_order
         """,
-        [requested, normalized_account],
+        [requested],
     )
     counts: dict[str, int] = {}
     for row in rows:
@@ -828,22 +843,71 @@ def _load_comment_target_metadata(
                 then 'owner_username'
               else 'shortcode'
             end as profile_match_mode,
-            row_number() over (
-              partition by r.shortcode
-              order by
-                case
-                  when ltrim(lower(coalesce(nullif(p.source_account, ''), '')), '@') = %s then 3
-                  when ltrim(
-                    lower(coalesce(nullif(p.username, ''), nullif(to_jsonb(p) ->> 'owner_username', ''), '')),
-                    '@'
-                  ) = %s then 2
-                  else 1
-                end desc,
-                p.posted_at desc nulls last,
-                p.id desc
-            ) as row_number
+            null::text as catalog_collaborator_handle,
+            p.posted_at,
+            case
+              when ltrim(lower(coalesce(nullif(p.source_account, ''), '')), '@') = %s then 4
+              when ltrim(
+                lower(coalesce(nullif(p.username, ''), nullif(to_jsonb(p) ->> 'owner_username', ''), '')),
+                '@'
+              ) = %s then 3
+              else 1
+            end as profile_match_rank
           from social.instagram_posts p
           join requested r on r.shortcode = p.shortcode
+        ),
+        catalog_collaborator_rows as (
+          select
+            r.shortcode,
+            r.sort_order,
+            coalesce(materialized_post.materialized_post_id, cp.id::text) as materialized_post_id,
+            nullif(cp.source_account, '') as source_account,
+            nullif(cp.source_account, '') as username,
+            nullif(coalesce(nullif(cp.owner_username, ''), nullif(cp.raw_data ->> 'ownerUsername', ''), nullif(cp.raw_data ->> 'owner_username', ''), nullif(cp.source_account, '')), '') as owner_username,
+            coalesce(nullif(cp.collaborators, '[]'::jsonb), jsonb_build_array(m.collaborator_handle)) as collaborators,
+            coalesce(
+              nullif(to_jsonb(cp) -> 'collaborators_detail', '[]'::jsonb),
+              nullif(cp.raw_data -> 'collaborators_detail', '[]'::jsonb),
+              jsonb_build_array(jsonb_build_object('username', m.collaborator_handle, 'source', m.collaborator_source))
+            ) as collaborators_detail,
+            nullif(cp.media_type, '') as media_type,
+            nullif(coalesce(to_jsonb(cp) ->> 'product_type', cp.raw_data ->> 'product_type', ''), '') as product_type,
+            'catalog'::text as profile_source_surface,
+            'catalog_collaborator'::text as profile_match_mode,
+            nullif(m.collaborator_handle, '') as catalog_collaborator_handle,
+            cp.posted_at,
+            5 as profile_match_rank
+          from social.instagram_account_catalog_post_collaborators m
+          join social.instagram_account_catalog_posts cp
+            on cp.id = m.catalog_post_id
+          join requested r
+            on r.shortcode = cp.source_id
+          left join lateral (
+            select mp.id::text as materialized_post_id
+            from social.instagram_posts mp
+            where mp.shortcode = cp.source_id
+            order by mp.posted_at desc nulls last, mp.id desc
+            limit 1
+          ) materialized_post on true
+          where ltrim(lower(coalesce(nullif(m.collaborator_handle, ''), '')), '@') = %s
+            and ltrim(lower(coalesce(nullif(cp.source_account, ''), '')), '@') <> %s
+        ),
+        candidate_rows as (
+          select * from materialized_rows
+          union all
+          select * from catalog_collaborator_rows
+        ),
+        ranked_rows as (
+          select
+            *,
+            row_number() over (
+              partition by shortcode
+              order by
+                profile_match_rank desc,
+                posted_at desc nulls last,
+                materialized_post_id desc
+            ) as row_number
+          from candidate_rows
         )
         select
           shortcode,
@@ -856,12 +920,21 @@ def _load_comment_target_metadata(
           media_type,
           product_type,
           profile_source_surface,
-          profile_match_mode
-        from materialized_rows
+          profile_match_mode,
+          catalog_collaborator_handle
+        from ranked_rows
         where row_number = 1
         order by sort_order
         """,
-        [requested, normalized_account, normalized_account, normalized_account, normalized_account],
+        [
+            requested,
+            normalized_account,
+            normalized_account,
+            normalized_account,
+            normalized_account,
+            normalized_account,
+            normalized_account,
+        ],
     )
     target_metadata: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -869,26 +942,46 @@ def _load_comment_target_metadata(
         if not shortcode:
             continue
         collaborators = _metadata_string_list(row.get("collaborators"))
-        collaborator_handles = {_normalize_instagram_handle(item) for item in collaborators}
+        collaborator_handles = list(
+            dict.fromkeys(
+                handle
+                for handle in (
+                    *(_normalize_instagram_handle(item) for item in collaborators),
+                    *_metadata_handle_list(row.get("collaborators")),
+                    *_metadata_handle_list(row.get("collaborators_detail")),
+                    _normalize_instagram_handle(row.get("catalog_collaborator_handle")),
+                )
+                if handle
+            )
+        )
         source_account = str(row.get("source_account") or "").strip() or None
         username = str(row.get("username") or "").strip() or None
         owner_username = str(row.get("owner_username") or "").strip() or username or source_account
         normalized_owner = _normalize_instagram_handle(owner_username)
+        normalized_source_account = _normalize_instagram_handle(source_account)
         is_collaborator_post = bool(
             normalized_owner
             and normalized_owner != normalized_account
             and (
                 normalized_account in collaborator_handles
-                or _normalize_instagram_handle(source_account) == normalized_account
+                or normalized_source_account == normalized_account
+                or _normalize_instagram_handle(row.get("catalog_collaborator_handle")) == normalized_account
+                or row.get("profile_match_mode") == "catalog_collaborator"
             )
         )
         target_metadata[shortcode] = {
             "source_id": shortcode,
+            "account_handle": normalized_account,
             "profile_account": normalized_account,
+            "selected_profile_account": normalized_account,
             "source_account": source_account,
             "username": username,
             "owner_username": owner_username,
+            "caption_author": owner_username,
+            "caption_writer": owner_username,
+            "original_author": owner_username,
             "collaborators": collaborators,
+            "collaborator_handles": collaborator_handles,
             "collaborators_detail": row.get("collaborators_detail") or [],
             "media_type": row.get("media_type"),
             "product_type": row.get("product_type"),
@@ -896,6 +989,7 @@ def _load_comment_target_metadata(
             "profile_source_surface": row.get("profile_source_surface") or "materialized",
             "profile_match_mode": row.get("profile_match_mode") or "shortcode",
             "is_collaborator_post": is_collaborator_post,
+            "is_collaborator": is_collaborator_post,
         }
     return target_metadata
 
@@ -1384,11 +1478,77 @@ def _reply_resume_cursor_params_from_job(job: dict[str, Any]) -> dict[str, str]:
 def _metadata_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return list(dict.fromkeys(str(item or "").strip() for item in value if str(item or "").strip()))
+    values: list[str] = []
+    for item in value:
+        text: str | None = None
+        if isinstance(item, dict):
+            for key in ("username", "handle", "user_name", "collaborator_handle", "source_account"):
+                candidate = str(item.get(key) or "").strip()
+                if candidate:
+                    text = candidate
+                    break
+            if text is None:
+                for key in ("user", "owner", "profile"):
+                    nested = item.get(key)
+                    if not isinstance(nested, dict):
+                        continue
+                    for nested_key in ("username", "handle", "user_name"):
+                        candidate = str(nested.get(nested_key) or "").strip()
+                        if candidate:
+                            text = candidate
+                            break
+                    if text is not None:
+                        break
+        else:
+            candidate = str(item or "").strip()
+            if candidate:
+                text = candidate
+        if text:
+            values.append(text)
+    return list(dict.fromkeys(values))
 
 
 def _normalize_instagram_handle(value: Any) -> str:
-    return str(value or "").strip().lower().lstrip("@")
+    return str(value or "").strip().strip("/").lower().lstrip("@")
+
+
+def _metadata_handle_list(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = list(value)
+    elif isinstance(value, str):
+        candidates = value.replace(",", " ").replace(";", " ").split()
+    else:
+        candidates = []
+
+    handles: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        raw_value: Any = item
+        if isinstance(item, dict):
+            raw_value = None
+            for key in ("username", "handle", "user_name", "collaborator_handle", "source_account"):
+                if str(item.get(key) or "").strip():
+                    raw_value = item.get(key)
+                    break
+            if raw_value is None:
+                for key in ("user", "owner", "profile"):
+                    nested = item.get(key)
+                    if not isinstance(nested, dict):
+                        continue
+                    for nested_key in ("username", "handle", "user_name"):
+                        if str(nested.get(nested_key) or "").strip():
+                            raw_value = nested.get(nested_key)
+                            break
+                    if raw_value is not None:
+                        break
+        handle = _normalize_instagram_handle(raw_value)
+        if not handle or handle in seen:
+            continue
+        seen.add(handle)
+        handles.append(handle)
+    return handles
 
 
 def _fetch_result_diagnostic_metadata(result: Any) -> dict[str, Any] | None:
@@ -2212,10 +2372,10 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 raise
             auth_metadata = dict(session.auth_session.metadata or {})
             comments_auth_validation_mode = str(
-                auth_context.get("comments_auth_validation_mode")
-                or auth_metadata.get("comments_auth_validation_mode")
-                or config.get("comments_auth_validation_mode")
+                config.get("comments_auth_validation_mode")
                 or config.get("auth_validation_mode")
+                or auth_context.get("comments_auth_validation_mode")
+                or auth_metadata.get("comments_auth_validation_mode")
                 or "comments_endpoint"
             ).strip().lower() or "comments_endpoint"
             auth_context["comments_auth_validation_mode"] = comments_auth_validation_mode
@@ -2919,6 +3079,23 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         attempt_count,
                         retryable_incomplete_targets,
                     )
+                elif incomplete_fill_enabled and attempt_count >= max_attempts:
+                    incomplete_retry_stall_metadata = {
+                        "stalled": False,
+                        "retry_exhausted": True,
+                        "attempt_count": attempt_count,
+                        "max_attempts": max_attempts,
+                        "target_source_ids": retryable_incomplete_targets,
+                        "fetch_reasons": retry_fetch_reasons,
+                        "current_comments_fetched": comments_fetched,
+                        "completion_status": "attempted_incomplete_fill",
+                    }
+                    logger.info(
+                        "Instagram comments incomplete fill exhausted its one-pass retry budget; "
+                        "completing shard with unresolved targets: job_id=%s targets=%s",
+                        job_id,
+                        retryable_incomplete_targets,
+                    )
                 else:
                     raise CommentsScraplingRuntimeError(
                         "Instagram comments Scrapling job had retryable incomplete posts.",
@@ -2955,6 +3132,15 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             worker_id=worker_id,
             runtime_metadata=dict(fetcher_metadata),
         )
+        cumulative_counters = _build_cumulative_counters(
+            job_id,
+            posts=processed_posts,
+            comments=comments_fetched,
+            comments_upserted=comments_upserted,
+            comments_inserted=comments_inserted,
+            comments_refreshed=comments_refreshed,
+            comments_changed=comments_changed,
+        )
         metadata = {
             "stage": stage,
             "platform": "instagram",
@@ -2966,15 +3152,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
             **terminal_metadata_common(),
             "stage_counters": {"posts": processed_posts, "comments": comments_fetched},
-            "cumulative_counters": _build_cumulative_counters(
-                job_id,
-                posts=processed_posts,
-                comments=comments_fetched,
-                comments_upserted=comments_upserted,
-                comments_inserted=comments_inserted,
-                comments_refreshed=comments_refreshed,
-                comments_changed=comments_changed,
-            ),
+            "cumulative_counters": cumulative_counters,
             "skipped_complete_target_source_ids": skipped_complete_target_source_ids,
             "persist_counters": {
                 "posts_upserted": processed_posts,
@@ -3017,7 +3195,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         lifecycle.finish_job(
             job_id,
             status="completed",
-            items_found=processed_posts + comments_fetched,
+            items_found=_cumulative_items_found(cumulative_counters),
             metadata=metadata,
             expected_worker_id=worker_id,
         )
@@ -3033,10 +3211,19 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         terminal_status = exc.job_status or "unknown"
         terminal_error_message = str(exc)
     except ScraplingJobCancelledError as exc:
+        cumulative_counters = _build_cumulative_counters(
+            job_id,
+            posts=processed_posts,
+            comments=comments_fetched,
+            comments_upserted=comments_upserted,
+            comments_inserted=comments_inserted,
+            comments_refreshed=comments_refreshed,
+            comments_changed=comments_changed,
+        )
         lifecycle.finish_job(
             job_id,
             status="cancelled",
-            items_found=processed_posts + comments_fetched,
+            items_found=_cumulative_items_found(cumulative_counters),
             error_message=str(exc),
             metadata={
                 "stage": stage,
@@ -3060,15 +3247,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "run_status_at_cancel": exc.run_status,
                 "activity": {"phase": "cancelled", "last_progress_at": lifecycle.format_time(lifecycle.now_utc())},
                 "stage_counters": {"posts": processed_posts, "comments": comments_fetched},
-                "cumulative_counters": _build_cumulative_counters(
-                    job_id,
-                    posts=processed_posts,
-                    comments=comments_fetched,
-                    comments_upserted=comments_upserted,
-                    comments_inserted=comments_inserted,
-                    comments_refreshed=comments_refreshed,
-                    comments_changed=comments_changed,
-                ),
+                "cumulative_counters": cumulative_counters,
                 "persist_counters": {
                     "posts_upserted": processed_posts,
                     "comments_upserted": comments_upserted,
@@ -3156,10 +3335,19 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             if can_retry
             else None
         )
+        cumulative_counters = _build_cumulative_counters(
+            job_id,
+            posts=processed_posts,
+            comments=comments_fetched,
+            comments_upserted=comments_upserted,
+            comments_inserted=comments_inserted,
+            comments_refreshed=comments_refreshed,
+            comments_changed=comments_changed,
+        )
         lifecycle.finish_job(
             job_id,
             status="retrying" if can_retry else "failed",
-            items_found=processed_posts + comments_fetched,
+            items_found=_cumulative_items_found(cumulative_counters),
             error_message=str(exc),
             metadata={
                 "stage": stage,
@@ -3183,15 +3371,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "max_attempts": max_attempts,
                 "activity": {"phase": "failed", "last_progress_at": lifecycle.format_time(lifecycle.now_utc())},
                 "stage_counters": {"posts": processed_posts, "comments": comments_fetched},
-                "cumulative_counters": _build_cumulative_counters(
-                    job_id,
-                    posts=processed_posts,
-                    comments=comments_fetched,
-                    comments_upserted=comments_upserted,
-                    comments_inserted=comments_inserted,
-                    comments_refreshed=comments_refreshed,
-                    comments_changed=comments_changed,
-                ),
+                "cumulative_counters": cumulative_counters,
                 "persist_counters": {
                     "posts_upserted": processed_posts,
                     "comments_upserted": comments_upserted,

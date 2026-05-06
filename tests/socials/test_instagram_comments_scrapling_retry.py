@@ -3551,6 +3551,185 @@ def test_comments_job_runner_stops_before_targets_when_endpoint_probe_auth_block
     assert metadata["fetcher_runtime"]["comments_auth_validation"]["reason"] == "redirect_to_login"
 
 
+def test_comments_job_runner_config_schema_only_skips_endpoint_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
+
+    finish_calls: list[dict[str, Any]] = []
+    fetch_calls: list[str] = []
+
+    def fake_persist(*, shortcode: str, **_kwargs: Any) -> PersistedInstagramComments:
+        return PersistedInstagramComments(
+            post_id=f"post-{shortcode}",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+            comments_inserted=1,
+            comments_refreshed=0,
+            comments_changed=1,
+        )
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {"transport": "test", "request_count": len(fetch_calls)}
+
+        async def warmup(self) -> None:
+            return None
+
+        async def validate_comments_endpoint(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("schema_only jobs should not run the comments endpoint preflight")
+
+        async def fetch_comments_for_shortcode(self, shortcode: str, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            fetch_calls.append(shortcode)
+            return InstagramCommentsFetchResult(comments=[object()], fetch_failed=False, auth_failed=False)
+
+        async def aclose(self) -> None:
+            return None
+
+    fake_session = _fake_comments_session()
+    fake_session.auth_session.metadata = {
+        **dict(fake_session.auth_session.metadata or {}),
+        "comments_auth_validation_mode": "comments_endpoint",
+    }
+
+    monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1"],
+            "comments_auth_validation_mode": "schema_only",
+            "max_comments_per_post": 10,
+            "fetch_replies": False,
+        },
+        "attempt_count": 1,
+        "max_attempts": 1,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        side_effect=_active_comments_job_fetch_one("completed"),
+    ):
+        payload = jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert payload["status"] == "completed"
+    assert fetch_calls == ["SHORT1"]
+    metadata = finish_calls[-1]["metadata"]
+    assert metadata["auth_context"]["comments_auth_validation_mode"] == "schema_only"
+    assert "comments_auth_validation" not in metadata["fetcher_runtime"]
+
+
+def test_comments_job_runner_preserves_prior_retry_progress_when_endpoint_probe_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    finish_calls: list[dict[str, Any]] = []
+    probe = {
+        "mode": "comments_endpoint",
+        "shortcode": "SHORT1",
+        "status": "auth_blocked",
+        "result": "auth_blocked",
+        "reason": "redirect_to_login",
+        "proxy_fingerprint": "none",
+        "transport": "httpx_after_browser_warmup",
+    }
+    prior_counters = {
+        "posts": 5,
+        "comments": 120,
+        "comments_upserted": 110,
+        "comments_inserted": 3,
+        "comments_refreshed": 107,
+        "comments_changed": 25,
+    }
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {
+                "transport": "httpx_after_browser_warmup",
+                "request_count": 1,
+                "comments_auth_validation": dict(probe),
+            }
+
+        async def warmup(self) -> None:
+            return None
+
+        async def validate_comments_endpoint(self, shortcode: str, *, mode: str) -> dict[str, Any]:
+            probe["shortcode"] = shortcode
+            probe["mode"] = mode
+            return dict(probe)
+
+        async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            raise AssertionError("targets should not be fetched after auth endpoint probe failure")
+
+        async def aclose(self) -> None:
+            return None
+
+    def fake_fetch_one(sql: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        normalized = " ".join(str(sql or "").split()).lower()
+        if "select metadata from social.scrape_jobs" in normalized:
+            return {"metadata": {"cumulative_counters": dict(prior_counters)}}
+        return _active_comments_job_fetch_one("failed")(sql)
+
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: _fake_comments_session())
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(jr, "_load_expected_comment_counts", lambda **_kwargs: {})
+    monkeypatch.setattr(jr, "_load_comment_target_metadata", lambda **_kwargs: {})
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+    monkeypatch.setattr(jr.pg, "fetch_all", lambda *_args, **_kwargs: [])
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1", "SHORT2"],
+            "max_comments_per_post": 10,
+            "fetch_replies": False,
+        },
+        "attempt_count": 2,
+        "max_attempts": 2,
+    }
+
+    with patch("trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one", side_effect=fake_fetch_one):
+        payload = jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert payload["status"] == "failed"
+    finish_kwargs = finish_calls[-1]
+    assert finish_kwargs["last_error_code"] == "instagram_comments_endpoint_auth_blocked"
+    assert finish_kwargs["items_found"] == 125
+    assert finish_kwargs["metadata"]["stage_counters"] == {"posts": 0, "comments": 0}
+    assert finish_kwargs["metadata"]["cumulative_counters"] == prior_counters
+
+
 def test_comments_job_runner_retries_endpoint_probe_transport_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5789,6 +5968,105 @@ def test_job_runner_retries_only_remaining_posts_after_hard_retryable_failure(
     assert finish_calls[-1]["metadata"]["retry_rebalance"] == {
         "remaining_target_source_ids": ["SHORT2"],
         "eligible": True,
+    }
+
+
+def test_job_runner_completes_one_pass_incomplete_fill_with_unresolved_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.comments_scrapling.persistence import PersistedInstagramComments
+
+    finish_calls: list[dict[str, Any]] = []
+    config_update_calls: list[dict[str, Any]] = []
+
+    def fake_persist(*, shortcode: str, is_complete: bool, **_kwargs: Any) -> PersistedInstagramComments:
+        assert shortcode == "SHORT1"
+        assert is_complete is False
+        return PersistedInstagramComments(
+            post_id="post-short1",
+            stored_total_comments=1,
+            comments_upserted=1,
+            comments_marked_missing=0,
+            comment_media_mirror_jobs_enqueued=0,
+            comment_media_mirror_job_enqueue_errors=0,
+        )
+
+    class _FakeFetcher:
+        @property
+        def runtime_metadata(self) -> dict[str, Any]:
+            return {"transport": "test", "request_count": 1}
+
+        async def warmup(self) -> None:
+            return None
+
+        async def fetch_comments_for_shortcode(self, *_args: Any, **_kwargs: Any) -> InstagramCommentsFetchResult:
+            return InstagramCommentsFetchResult(
+                comments=[object()],
+                fetch_failed=True,
+                auth_failed=False,
+                fetch_reason="reply_tail_incomplete",
+                retryable=True,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    fake_session = _fake_comments_session()
+    monkeypatch.setattr(jr, "persist_instagram_comments_for_post", fake_persist)
+    monkeypatch.setattr(jr, "select_comments_proxy", lambda *, session_key=None: None)
+    monkeypatch.setattr(jr, "resolve_comments_scrapling_session", lambda **_: fake_session)
+    monkeypatch.setattr(jr, "InstagramCommentsScraplingFetcher", lambda **_: _FakeFetcher())
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(
+        repo,
+        "_update_job_config",
+        lambda _job_id, config_updates: config_update_calls.append(config_updates),
+    )
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(jr.pg, "db_connection", lambda **_kwargs: nullcontext(MagicMock()))
+
+    job = {
+        "id": "job-1",
+        "run_id": "run-1",
+        "config": {
+            "mode": "profile",
+            "account": "bravotv",
+            "target_source_ids": ["SHORT1"],
+            "target_filter": "incomplete",
+            "incomplete_fill": True,
+            "fetch_replies": True,
+        },
+        "attempt_count": 1,
+        "max_attempts": 1,
+    }
+
+    with patch(
+        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+        side_effect=_active_comments_job_fetch_one("completed"),
+    ):
+        payload = jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
+
+    assert payload["status"] == "completed"
+    assert config_update_calls == []
+    finish_kwargs = finish_calls[-1]
+    assert finish_kwargs["status"] == "completed"
+    metadata = finish_kwargs["metadata"]
+    assert metadata["incomplete_target_source_ids"] == ["SHORT1"]
+    assert metadata["incomplete_fetch_reasons"] == {"SHORT1": "reply_tail_incomplete"}
+    assert metadata["incomplete_retry_stalled"] == {
+        "stalled": False,
+        "retry_exhausted": True,
+        "attempt_count": 1,
+        "max_attempts": 1,
+        "target_source_ids": ["SHORT1"],
+        "fetch_reasons": {"SHORT1": "reply_tail_incomplete"},
+        "current_comments_fetched": 1,
+        "completion_status": "attempted_incomplete_fill",
     }
 
 
