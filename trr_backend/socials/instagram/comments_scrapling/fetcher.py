@@ -82,18 +82,35 @@ _COMMENT_RATE_LIMIT_COOLDOWN_MIN_SECONDS_DEFAULT = 15.0
 _COMMENT_RATE_LIMIT_COOLDOWN_MULTIPLIER_DEFAULT = 2.0
 _REPLY_CHECKPOINT_MAX_ITEMS_DEFAULT = 25
 _REPLY_CHECKPOINT_STRING_MAX_LENGTH = 256
+_CHALLENGE_RESPONSE_SAMPLE_MAX = 12
 _BROWSER_API_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_BROWSER_API_FALLBACK"
 _BROWSER_API_FALLBACK_ON_429_ENV = "SOCIAL_INSTAGRAM_COMMENTS_BROWSER_API_FALLBACK_ON_429"
 _BROWSER_API_FALLBACK_ON_429_ATTEMPT_ENV = "SOCIAL_INSTAGRAM_COMMENTS_BROWSER_API_FALLBACK_ON_429_ATTEMPT"
 _COMMENTS_ENDPOINT_PROBE_TIMEOUT_SECONDS_DEFAULT = 20.0
 _REVEAL_HIDDEN_COMMENTS_ENV = "SOCIAL_INSTAGRAM_COMMENTS_REVEAL_HIDDEN"
 _REVEAL_HIDDEN_COMMENTS_WITHOUT_EXPECTED_ENV = "SOCIAL_INSTAGRAM_COMMENTS_REVEAL_HIDDEN_WITHOUT_EXPECTED"
+_COAUTHOR_AUTH_RENDERED_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_AUTH_RENDERED_FALLBACK"
+_WARMUP_COOKIE_ONLY_ON_AUTH_ENV = "SOCIAL_INSTAGRAM_COMMENTS_WARMUP_COOKIE_ONLY_ON_AUTH"
 _HIDDEN_COMMENTS_CLICK_LIMIT_DEFAULT = 4
 _HIDDEN_UNAVAILABLE_GAP_MAX_DEFAULT = 1
 _HIDDEN_UNAVAILABLE_GAP_RATIO_DEFAULT = 0.0
 _COAUTHOR_STATUS_ONLY_CLICK_LIMIT_DEFAULT = 8
 _COAUTHOR_STATUS_ONLY_SCROLL_LIMIT_DEFAULT = 8
 _COAUTHOR_RENDERED_FALLBACK_VERSION = "2026-05-05.coauthor-rendered-dom-v2"
+_COMMENTS_LOAD_STRATEGY_CURSOR_API = "cursor_api"
+_COMMENTS_LOAD_STRATEGY_SINGLE_SESSION_LOAD_ALL = "single_session_load_all"
+_COMMENTS_LOAD_STRATEGIES = frozenset(
+    {
+        _COMMENTS_LOAD_STRATEGY_CURSOR_API,
+        _COMMENTS_LOAD_STRATEGY_SINGLE_SESSION_LOAD_ALL,
+    }
+)
+_SINGLE_SESSION_RENDERED_FALLBACK_VERSION = "2026-05-06.single-session-rendered-dom-v1"
+_SINGLE_SESSION_RENDERED_CLICK_LIMIT_DEFAULT = 10
+_SINGLE_SESSION_RENDERED_SCROLL_LIMIT_DEFAULT = 12
+_SINGLE_SESSION_RENDERED_STALL_LIMIT_DEFAULT = 3
+_SINGLE_SESSION_RENDERED_DEADLINE_SECONDS_DEFAULT = 45.0
+_SINGLE_SESSION_MAX_IN_MEMORY_ROWS_DEFAULT = 5000
 _STATUS_ONLY_METADATA_MAX_ITEMS = 20
 _POST_ACTION_GRAPHQL_URL = "https://www.instagram.com/graphql/query/"
 _POST_ACTION_GRAPHQL_FRIENDLY_NAME = "PolarisPostActionLoadPostQueryQuery"
@@ -126,6 +143,11 @@ _POST_COMMENTS_CONTAINER_QUERY_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def normalize_comments_load_strategy(value: Any) -> str:
+    normalized = str(value or _COMMENTS_LOAD_STRATEGY_CURSOR_API).strip().lower()
+    return normalized if normalized in _COMMENTS_LOAD_STRATEGIES else _COMMENTS_LOAD_STRATEGY_CURSOR_API
+
 
 _API_HEADER_KEYS_TO_STRIP = frozenset(
     {
@@ -1082,17 +1104,35 @@ def _merge_unique_comments(
     max_comments: int,
 ) -> int:
     seen = {str(comment.comment_id or "").strip() for comment in comments if str(comment.comment_id or "").strip()}
+    seen_signatures = {
+        signature
+        for signature in (_comment_content_signature(comment) for comment in comments)
+        if signature is not None
+    }
     appended = 0
     for comment in extra_comments:
         comment_id = str(comment.comment_id or "").strip()
-        if not comment_id or comment_id in seen:
+        signature = _comment_content_signature(comment)
+        if (comment_id and comment_id in seen) or (signature is not None and signature in seen_signatures):
             continue
         comments.append(comment)
-        seen.add(comment_id)
+        if comment_id:
+            seen.add(comment_id)
+        if signature is not None:
+            seen_signatures.add(signature)
         appended += 1
         if max_comments > 0 and len(comments) >= max_comments:
             break
     return appended
+
+
+def _comment_content_signature(comment: InstagramComment) -> tuple[str, str, str, bool] | None:
+    username = str(getattr(comment, "username", "") or "").strip().lower().lstrip("@")
+    text = " ".join(str(getattr(comment, "text", "") or "").split()).lower()
+    if not username or not text:
+        return None
+    parent_comment_id = str(getattr(comment, "parent_comment_id", "") or "").strip()
+    return (username, text, parent_comment_id, bool(getattr(comment, "is_reply", False)))
 
 
 def _instagram_comment_phase_counts(comments: Iterable[InstagramComment]) -> dict[str, int]:
@@ -1852,6 +1892,111 @@ def _auth_failure_text(text: str) -> bool:
     return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
 
 
+def _safe_url_path(url: Any) -> str | None:
+    url = str(url or "").strip()
+    if not url:
+        return None
+    try:
+        parsed = httpx.URL(url)
+    except Exception:  # noqa: BLE001
+        return url[:160]
+    path = str(parsed.path or "/")
+    if parsed.query:
+        query = parsed.query.decode("utf-8", errors="ignore") if isinstance(parsed.query, bytes) else str(parsed.query)
+        safe_query_keys = []
+        for part in query.split("&"):
+            key = part.split("=", 1)[0].strip()
+            if key:
+                safe_query_keys.append(key[:48])
+        if safe_query_keys:
+            path = f"{path}?keys={','.join(safe_query_keys[:12])}"
+    return path[:240]
+
+
+def _safe_response_url_path(response: Any) -> str | None:
+    try:
+        url = getattr(response, "url", "") or ""
+    except Exception:  # noqa: BLE001
+        url = ""
+    return _safe_url_path(url)
+
+
+def _safe_response_header(headers: Any, name: str) -> str | None:
+    try:
+        value = headers.get(name) if hasattr(headers, "get") else None
+    except Exception:  # noqa: BLE001
+        value = None
+    text = str(value or "").strip()
+    return text[:180] if text else None
+
+
+def _response_cookie_names(response: Any) -> list[str]:
+    names: set[str] = set()
+    try:
+        cookies = getattr(response, "cookies", None)
+    except Exception:  # noqa: BLE001
+        cookies = None
+    if isinstance(cookies, Mapping):
+        names.update(str(name or "").strip() for name in cookies.keys())
+    elif cookies is not None:
+        try:
+            names.update(str(cookie.name or "").strip() for cookie in cookies.jar)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+    headers = getattr(response, "headers", None) or {}
+    set_cookie = _safe_response_header(headers, "set-cookie")
+    if set_cookie:
+        for segment in set_cookie.split(","):
+            if "=" in segment:
+                candidate = segment.split("=", 1)[0].strip()
+                if candidate and ";" not in candidate and len(candidate) <= 64:
+                    names.add(candidate)
+    return sorted(name for name in names if name)
+
+
+def _html_title(text: str) -> str | None:
+    match = re.search(r"<title[^>]*>(.*?)</title>", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    title = html_lib.unescape(re.sub(r"\s+", " ", match.group(1) or "").strip())
+    return title[:160] if title else None
+
+
+def _html_form_actions(text: str) -> list[str]:
+    actions: list[str] = []
+    for match in re.finditer(r"<form\b[^>]*\baction=[\"']([^\"']+)[\"']", str(text or ""), flags=re.IGNORECASE):
+        action = html_lib.unescape(match.group(1) or "").strip()
+        if not action:
+            continue
+        if action.startswith("http"):
+            try:
+                parsed = httpx.URL(action)
+                action = str(parsed.path or "/")
+            except Exception:  # noqa: BLE001
+                action = action[:160]
+        actions.append(action[:160])
+        if len(actions) >= 5:
+            break
+    return actions
+
+
+def _challenge_text_markers(text: str) -> dict[str, bool]:
+    normalized = str(text or "").lower()
+    return {
+        "accounts_login": "accounts/login" in normalized,
+        "login_required": "login_required" in normalized,
+        "checkpoint": "checkpoint" in normalized,
+        "challenge": "challenge" in normalized,
+        "two_factor": "two_factor" in normalized or "two-factor" in normalized,
+        "suspicious_login": "suspicious login" in normalized,
+        "password_field": 'type="password"' in normalized or "password" in normalized and "<form" in normalized,
+        "captcha": "captcha" in normalized or "arkose" in normalized or "turnstile" in normalized,
+        "lsd_token": '"lsd"' in normalized or '"lsd",[]' in normalized,
+        "jazoest": "jazoest" in normalized,
+        "fb_dtsg": "fb_dtsg" in normalized,
+    }
+
+
 def _global_rate_limit_key(browser_account_id: str | None, proxy_fingerprint: str | None) -> str:
     account = str(browser_account_id or "").strip().lower().lstrip("@") or "instagram"
     proxy = str(proxy_fingerprint or "").strip().lower() or "no-proxy"
@@ -2295,6 +2440,8 @@ class InstagramCommentsScraplingFetcher:
         self._last_api_request_started_at = 0.0
         self._retry_reason_counts: dict[str, int] = {}
         self._lane_diagnostics: dict[str, dict[str, Any]] = {}
+        self._challenge_response_samples: list[dict[str, Any]] = []
+        self._challenge_response_total_count = 0
         self._top_level_checkpoints: list[dict[str, Any]] = []
         self._top_level_checkpoint_total_count = 0
         self._top_level_checkpoint_dropped_count = 0
@@ -2317,6 +2464,12 @@ class InstagramCommentsScraplingFetcher:
         self._coauthor_status_only_rendered_comments = 0
         self._coauthor_status_only_merged = 0
         self._last_coauthor_status_only_render_metadata: dict[str, Any] = {}
+        self._single_session_render_attempts = 0
+        self._single_session_rendered_rows_seen = 0
+        self._single_session_rendered_merged = 0
+        self._single_session_memory_guardrail_reached = 0
+        self._last_single_session_strategy_metadata: dict[str, Any] = {}
+        self._last_single_session_rendered_metadata: dict[str, Any] = {}
         self._reply_checkpoint_max_items = _resolve_positive_int_env(
             "SOCIAL_INSTAGRAM_REPLY_CHECKPOINT_MAX_ITEMS",
             _REPLY_CHECKPOINT_MAX_ITEMS_DEFAULT,
@@ -2376,6 +2529,12 @@ class InstagramCommentsScraplingFetcher:
             "request_count": self._request_count,
             "retry_reason_counts": dict(sorted(self._retry_reason_counts.items())),
             "lane_diagnostics": {lane: dict(metadata) for lane, metadata in sorted(self._lane_diagnostics.items())},
+            "challenge_responses": {
+                "samples": list(self._challenge_response_samples),
+                "total_count": self._challenge_response_total_count,
+                "max_items": _CHALLENGE_RESPONSE_SAMPLE_MAX,
+                "truncated": self._challenge_response_total_count > len(self._challenge_response_samples),
+            },
             "hidden_comments": {
                 "render_attempts": self._hidden_comments_render_attempts,
                 "rendered_comments": self._hidden_comments_rendered_comments,
@@ -2388,6 +2547,14 @@ class InstagramCommentsScraplingFetcher:
                 "coauthor_fallback_rendered_comments": self._coauthor_status_only_rendered_comments,
                 "coauthor_fallback_merged_comments": self._coauthor_status_only_merged,
                 "last_coauthor_rendered_metadata": dict(self._last_coauthor_status_only_render_metadata),
+            },
+            "comments_load_strategy": {
+                "last": dict(self._last_single_session_strategy_metadata),
+                "single_session_render_attempts": self._single_session_render_attempts,
+                "single_session_rendered_rows_seen": self._single_session_rendered_rows_seen,
+                "single_session_rendered_merged_comments": self._single_session_rendered_merged,
+                "single_session_memory_guardrail_reached_count": self._single_session_memory_guardrail_reached,
+                "last_single_session_rendered_metadata": dict(self._last_single_session_rendered_metadata),
             },
             "top_level_checkpoint_metadata": {
                 "items": list(self._top_level_checkpoints),
@@ -2474,35 +2641,26 @@ class InstagramCommentsScraplingFetcher:
             maximum=120.0,
         )
         post_url = f"https://www.instagram.com/p/{normalized_shortcode}/"
-        try:
-            response = await self._fetch_api(
-                COMMENTS_URL.format(media_id=media_id),
-                referer=post_url,
-                params={
-                    "can_support_threading": "true",
-                    "permalink_enabled": "false",
-                    **({"sort_order": self._comment_sort_order} if self._comment_sort_order else {}),
-                },
-                deadline=deadline,
-            )
-        except _PaginationDeadlineExceededError:
-            return finish(
-                "transport_blocked",
-                media_id=media_id,
-                reason="comments_endpoint_probe_timeout",
-                retryable=True,
-            )
-        except (TimeoutError, httpx.TimeoutException, httpx.TransportError, OSError) as exc:
-            return finish(
-                "transport_blocked",
-                media_id=media_id,
-                reason=_transport_failure_reason(exc),
-                retryable=True,
-            )
-
-        decoded = self._decode_json_response_result(response, attempt=1)
+        endpoint_params = {
+            "can_support_threading": "true",
+            "permalink_enabled": "false",
+            **({"sort_order": self._comment_sort_order} if self._comment_sort_order else {}),
+        }
+        decoded = await self._fetch_json_response(
+            COMMENTS_URL.format(media_id=media_id),
+            referer=post_url,
+            params=endpoint_params,
+            max_retries=0,
+            deadline=deadline,
+        )
         payload = decoded.get("payload")
         reason = str(decoded.get("reason") or "").strip() or None
+        diagnostic_metadata = decoded.get("diagnostic_metadata")
+        diagnostic_status_code = (
+            diagnostic_metadata.get("status_code")
+            if isinstance(diagnostic_metadata, Mapping)
+            else None
+        )
         auth_blocked = bool(decoded.get("auth_failed")) or reason in {
             "redirect_to_login",
             "redirect_to_checkpoint",
@@ -2531,7 +2689,7 @@ class InstagramCommentsScraplingFetcher:
             return finish(
                 "valid",
                 media_id=media_id,
-                status_code=_status_code(response),
+                status_code=diagnostic_status_code,
                 payload=payload,
                 attempt_count=int(decoded.get("attempt_count") or 1),
             )
@@ -2541,7 +2699,7 @@ class InstagramCommentsScraplingFetcher:
                 media_id=media_id,
                 reason=reason or "comments_endpoint_auth_required",
                 retryable=False,
-                status_code=_status_code(response),
+                status_code=diagnostic_status_code,
                 payload=payload,
                 attempt_count=int(decoded.get("attempt_count") or 1),
             )
@@ -2550,7 +2708,7 @@ class InstagramCommentsScraplingFetcher:
             media_id=media_id,
             reason=reason or "comments_endpoint_probe_failed",
             retryable=True,
-            status_code=_status_code(response),
+            status_code=diagnostic_status_code,
             payload=payload,
             attempt_count=int(decoded.get("attempt_count") or 1),
         )
@@ -2607,6 +2765,21 @@ class InstagramCommentsScraplingFetcher:
                 ) from exc
         text = _response_text(response)
         if _status_code(response) in {401, 403} or _document_auth_failure_text(text):
+            self._record_challenge_response(
+                response,
+                reason="warmup_auth_challenge",
+                transport="browser_warmup",
+                attempt=1,
+                request_url=warmup_url,
+            )
+            if (
+                _env_truthy(_WARMUP_COOKIE_ONLY_ON_AUTH_ENV, True)
+                and str(self._raw_cookies.get("sessionid") or "").strip()
+            ):
+                self._record_retry_reason("warmup_cookie_only_after_auth_challenge")
+                self._merge_warmup_cookies(response)
+                await self._rebuild_http_client()
+                return
             raise InstagramCommentsWarmupError(
                 "Instagram comments warmup failed because the session appears logged out or challenged.",
                 error_code="instagram_comments_warmup_auth_failed",
@@ -2636,7 +2809,41 @@ class InstagramCommentsScraplingFetcher:
         persisted_top_level_comments: list[InstagramComment] | None = None,
         reply_only: bool = False,
         target_metadata: Mapping[str, Any] | None = None,
+        load_strategy: str = _COMMENTS_LOAD_STRATEGY_CURSOR_API,
     ) -> InstagramCommentsFetchResult:
+        requested_load_strategy = str(load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API).strip().lower()
+        selected_load_strategy = normalize_comments_load_strategy(load_strategy)
+        single_session_load_all = selected_load_strategy == _COMMENTS_LOAD_STRATEGY_SINGLE_SESSION_LOAD_ALL
+        strategy_lane_order: list[str] = [_COMMENTS_LOAD_STRATEGY_CURSOR_API]
+        strategy_fallback_trigger: str | None = None
+        strategy_stop_reason: str | None = None
+        single_session_rendered_metadata: dict[str, Any] = {}
+        single_session_rendered_attempted = False
+        single_session_rendered_rows_seen = 0
+        single_session_rendered_merged = 0
+        single_session_memory_guardrail_reached = False
+        single_session_memory_guardrail_stop_reason: str | None = None
+        max_in_memory_rows = (
+            _resolve_positive_int_env(
+                "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS",
+                _SINGLE_SESSION_MAX_IN_MEMORY_ROWS_DEFAULT,
+                minimum=1,
+                maximum=100_000,
+            )
+            if single_session_load_all
+            else None
+        )
+        strategy_decision: dict[str, Any] = {
+            "requested_strategy": requested_load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API,
+            "selected_strategy": selected_load_strategy,
+            "defaulted": selected_load_strategy != (requested_load_strategy or _COMMENTS_LOAD_STRATEGY_CURSOR_API),
+            "api_first": True,
+            "rendered_dom_canonical": False,
+            "reply_only": bool(reply_only),
+        }
+        if max_in_memory_rows is not None:
+            strategy_decision["max_in_memory_rows"] = max_in_memory_rows
+
         try:
             media_id = _shortcode_to_media_id(shortcode)
         except Exception as exc:  # noqa: BLE001
@@ -2647,6 +2854,23 @@ class InstagramCommentsScraplingFetcher:
                 fetch_reason=f"invalid_shortcode:{exc.__class__.__name__}",
                 reported_comment_count=_safe_non_negative_int(expected_comment_count),
                 request_count=self._request_count,
+                diagnostic_metadata={
+                    "strategy_decision": strategy_decision,
+                    "fallback_trigger": None,
+                    "lane_order": list(strategy_lane_order),
+                    "stop_reason": f"invalid_shortcode:{exc.__class__.__name__}",
+                    "api_pages_loaded": 0,
+                    "api_rows_seen": 0,
+                    "rendered_load_attempts": 0,
+                    "rendered_rows_seen": 0,
+                    "merged_comments": 0,
+                    "top_level_comments": 0,
+                    "child_replies": 0,
+                    "memory_guardrail": {
+                        "max_in_memory_rows": max_in_memory_rows,
+                        "reached": False,
+                    },
+                },
             )
 
         expected_comments = _safe_non_negative_int(expected_comment_count)
@@ -2677,6 +2901,7 @@ class InstagramCommentsScraplingFetcher:
         }
         top_level_checkpoint: dict[str, Any] | None = None
         pages_seen = 0
+        api_rows_seen = 0
         seen_cursors: set[str] = set()
         seen_top_level_comment_ids: set[str] = set()
         reply_lane_attempted_parent_ids: set[str] = set()
@@ -2712,8 +2937,75 @@ class InstagramCommentsScraplingFetcher:
             maximum=250,
         )
 
+        def current_memory_guardrail_metadata() -> dict[str, Any]:
+            return {
+                "max_in_memory_rows": max_in_memory_rows,
+                "current_rows": flattened_comment_count(comments),
+                "reached": bool(single_session_memory_guardrail_reached),
+                "stop_reason": single_session_memory_guardrail_stop_reason,
+            }
+
+        def mark_memory_guardrail_if_needed() -> bool:
+            nonlocal fetch_failed, fetch_reason, retryable
+            nonlocal single_session_memory_guardrail_reached, single_session_memory_guardrail_stop_reason
+            nonlocal top_level_checkpoint
+            if not single_session_load_all or max_in_memory_rows is None:
+                return False
+            if single_session_memory_guardrail_reached:
+                return True
+            current_rows = flattened_comment_count(comments)
+            if current_rows <= max_in_memory_rows:
+                return False
+            single_session_memory_guardrail_reached = True
+            single_session_memory_guardrail_stop_reason = "memory_guardrail_reached"
+            fetch_failed = True
+            retryable = True
+            fetch_reason = "memory_guardrail_reached"
+            if top_level_checkpoint is None:
+                top_level_checkpoint = self._record_top_level_checkpoint(
+                    shortcode=shortcode,
+                    media_id=media_id,
+                    stop_reason=fetch_reason,
+                    last_error_code=fetch_reason,
+                    last_top_level_cursor=cursor,
+                    next_top_level_cursor=cursor,
+                    last_top_level_cursor_param=cursor_param_name,
+                    next_top_level_cursor_param=cursor_param_name,
+                    observed_comment_count=current_rows,
+                    expected_comment_count=expected_comments,
+                    pages_seen=pages_seen,
+                    diagnostic_metadata={
+                        "reason": fetch_reason,
+                        "strategy_decision": strategy_decision,
+                        "memory_guardrail": {
+                            "max_in_memory_rows": max_in_memory_rows,
+                            "current_rows": current_rows,
+                            "reached": True,
+                            "stop_reason": fetch_reason,
+                        },
+                    },
+                )
+            self._single_session_memory_guardrail_reached += 1
+            self._record_lane_diagnostic(
+                "memory_guardrail",
+                shortcode=shortcode,
+                reason="memory_guardrail_reached",
+                count=current_rows,
+                metadata={
+                    "load_strategy": selected_load_strategy,
+                    "max_in_memory_rows": max_in_memory_rows,
+                },
+            )
+            logger.warning(
+                "Instagram comments single-session memory guardrail reached for shortcode=%s rows=%d max_rows=%d",
+                shortcode,
+                current_rows,
+                max_in_memory_rows,
+            )
+            return True
+
         if reply_only and persisted_top_level_comments:
-            return await self._fetch_persisted_reply_tails(
+            result = await self._fetch_persisted_reply_tails(
                 shortcode=shortcode,
                 media_id=media_id,
                 post_url=post_url,
@@ -2727,6 +3019,27 @@ class InstagramCommentsScraplingFetcher:
                 deadline=deadline,
                 reply_tail_deadline=reply_tail_deadline,
             )
+            result.diagnostic_metadata = {
+                **dict(result.diagnostic_metadata or {}),
+                "strategy_decision": strategy_decision,
+                "fallback_trigger": None,
+                "lane_order": list(strategy_lane_order),
+                "stop_reason": result.fetch_reason,
+                "api_pages_loaded": 0,
+                "api_rows_seen": flattened_comment_count(result.comments),
+                "rendered_load_attempts": 0,
+                "rendered_rows_seen": 0,
+                "merged_comments": flattened_comment_count(result.comments),
+                "top_level_comments": parent_comment_count(result.comments),
+                "child_replies": child_reply_count(result.comments),
+                "memory_guardrail": {
+                    "max_in_memory_rows": max_in_memory_rows,
+                    "current_rows": flattened_comment_count(result.comments),
+                    "reached": False,
+                    "stop_reason": None,
+                },
+            }
+            return result
 
         while True:
             if time.monotonic() >= deadline:
@@ -3032,6 +3345,10 @@ class InstagramCommentsScraplingFetcher:
                                 fetch_reason = "reply_tail_budget_exhausted"
                             comments.append(comment)
                             comments_fetched += 1
+                            api_rows_seen = flattened_comment_count(comments)
+                            if mark_memory_guardrail_if_needed():
+                                post_deadline_reached = True
+                                break
                             if max_comments > 0 and comments_fetched >= max_comments:
                                 break
                             continue
@@ -3105,6 +3422,10 @@ class InstagramCommentsScraplingFetcher:
                         )
                 comments.append(comment)
                 comments_fetched += 1
+                api_rows_seen = flattened_comment_count(comments)
+                if mark_memory_guardrail_if_needed():
+                    post_deadline_reached = True
+                    break
                 if max_comments > 0 and comments_fetched >= max_comments:
                     break
 
@@ -3127,6 +3448,10 @@ class InstagramCommentsScraplingFetcher:
                         seen_top_level_comment_ids.add(fb_comment_id)
                     comments.append(fb_comment)
                     comments_fetched += 1
+                    api_rows_seen = flattened_comment_count(comments)
+                    if mark_memory_guardrail_if_needed():
+                        post_deadline_reached = True
+                        break
                     if max_comments > 0 and comments_fetched >= max_comments:
                         break
                 if fb_crosspost_rows:
@@ -3309,6 +3634,7 @@ class InstagramCommentsScraplingFetcher:
             fetch_replies
             and not status_only_endpoint_detected
             and not auth_failed
+            and not single_session_memory_guardrail_reached
             and api_top_level_complete
             and _has_expected_gap(
                 expected_comment_count=expected_comments,
@@ -3340,24 +3666,74 @@ class InstagramCommentsScraplingFetcher:
             if residual_child_metadata.get("fetch_reason") and not fetch_reason:
                 fetch_reason = str(residual_child_metadata.get("fetch_reason"))
 
-        if not status_only_endpoint_detected and self._should_reveal_hidden_comments(
+        if (
+            auth_failed
+            and not comments
+            and not reply_only
+            and not single_session_load_all
+            and _target_metadata_indicates_coauthor(target_metadata)
+            and _env_truthy(_COAUTHOR_AUTH_RENDERED_FALLBACK_ENV, True)
+        ):
+            rendered_comments = await self._fetch_rendered_coauthor_comments_for_status_only(
+                shortcode,
+                post_url,
+                target_metadata=target_metadata,
+            )
+            rendered_merged_count = _merge_unique_comments(
+                comments,
+                rendered_comments,
+                max_comments=max_comments,
+            )
+            self._coauthor_status_only_merged += rendered_merged_count
+            self._record_lane_diagnostic(
+                "rendered",
+                shortcode=shortcode,
+                reason=(
+                    "coauthor_auth_rendered_fallback_recovered"
+                    if rendered_merged_count
+                    else "coauthor_auth_rendered_fallback_empty"
+                ),
+                count=len(rendered_comments),
+                metadata={
+                    "merged_comments": rendered_merged_count,
+                    "api_fetch_reason": fetch_reason,
+                    "rendered_fallback": dict(self._last_coauthor_status_only_render_metadata),
+                },
+            )
+            target_count = _expected_target_count(expected_comments, max_comments)
+            if rendered_merged_count and (
+                target_count is None or flattened_comment_count(comments) >= target_count
+            ):
+                auth_failed = False
+                fetch_failed = False
+                retryable = False
+                fetch_reason = "coauthor_auth_rendered_fallback_recovered"
+
+        should_reveal_hidden_comments = self._should_reveal_hidden_comments(
             expected_comment_count=expected_comments,
             current_comment_count=flattened_comment_count(comments),
             missing_reply_count=missing_reply_count(comments),
             max_comments=max_comments,
             auth_failed=auth_failed,
             api_top_level_complete=api_top_level_complete or api_top_level_reveal_candidate,
+        )
+        if (
+            not status_only_endpoint_detected
+            and should_reveal_hidden_comments
+            and not single_session_memory_guardrail_reached
         ):
             hidden_reveal_attempted = True
             hidden_comments = await self._fetch_rendered_comments_after_revealing_hidden(shortcode, post_url)
             merged_count = _merge_unique_comments(comments, hidden_comments, max_comments=max_comments)
             self._hidden_comments_merged += merged_count
+            if mark_memory_guardrail_if_needed():
+                hidden_reveal_attempted = True
             if merged_count:
                 logger.info(
                     "Merged %d rendered hidden Instagram comment(s) for shortcode=%s",
                     merged_count,
-                        shortcode,
-                    )
+                    shortcode,
+                )
             if api_top_level_reveal_candidate and fetch_reason in {
                 "pagination_repeated_cursor",
                 "pagination_page_cap_reached",
@@ -3372,10 +3748,76 @@ class InstagramCommentsScraplingFetcher:
                     fetch_reason = "hidden_comments_recovered"
 
         target_count = _expected_target_count(expected_comments, max_comments)
+        single_session_api_rows_seen = api_rows_seen
+        single_session_render_trigger: str | None = None
+        if (
+            single_session_load_all
+            and not reply_only
+            and not auth_failed
+            and not single_session_memory_guardrail_reached
+        ):
+            has_gap_after_api = (
+                target_count is not None and flattened_comment_count(comments) < target_count
+            )
+            if status_only_endpoint_detected:
+                single_session_render_trigger = fetch_reason or "comments_endpoint_status_only"
+            elif fetch_reason in {
+                "hidden_comments_unresolved",
+                "pagination_deadline_exceeded",
+                "pagination_page_cap_reached",
+                "pagination_repeated_cursor",
+                "reply_tail_budget_exhausted",
+                "reply_tail_incomplete",
+            }:
+                single_session_render_trigger = fetch_reason
+            elif api_top_level_reveal_candidate and has_gap_after_api:
+                single_session_render_trigger = "api_pagination_gap"
+            elif api_top_level_complete and has_gap_after_api:
+                single_session_render_trigger = "api_complete_expected_gap"
+        if single_session_render_trigger:
+            strategy_fallback_trigger = single_session_render_trigger
+            strategy_lane_order.append("rendered_hydration")
+            single_session_rendered_attempted = True
+            rendered_comments, rendered_metadata = await self._fetch_rendered_single_session_load_all(
+                shortcode,
+                post_url,
+                target_metadata=target_metadata,
+                target_count=target_count,
+                max_comments=max_comments,
+            )
+            single_session_rendered_metadata = dict(rendered_metadata)
+            single_session_rendered_rows_seen = len(rendered_comments)
+            single_session_rendered_merged = _merge_unique_comments(
+                comments,
+                rendered_comments,
+                max_comments=max_comments,
+            )
+            self._single_session_rendered_merged += single_session_rendered_merged
+            if mark_memory_guardrail_if_needed():
+                pass
+            elif (
+                target_count is not None
+                and flattened_comment_count(comments) >= target_count
+                and not missing_reply_count(comments)
+            ):
+                fetch_failed = False
+                retryable = False
+                fetch_reason = "single_session_rendered_hydration_recovered"
+            elif single_session_rendered_merged and not fetch_reason:
+                fetch_reason = "single_session_rendered_hydration_partial"
+            elif not single_session_rendered_merged and not fetch_reason:
+                fetch_reason = "single_session_rendered_hydration_empty"
+
+        target_count = _expected_target_count(expected_comments, max_comments)
         if target_count is not None and (max_comments <= 0 or expected_comments <= max_comments):
             current_flattened_count = flattened_comment_count(comments)
             current_missing_reply_count = missing_reply_count(comments)
-            if not auth_failed and current_flattened_count >= target_count and current_missing_reply_count == 0:
+            if (
+                not auth_failed
+                and not single_session_memory_guardrail_reached
+                and current_flattened_count >= target_count
+                and current_missing_reply_count == 0
+            ):
                 fetch_failed = False
                 retryable = False
                 if fetch_reason in {
@@ -3388,6 +3830,7 @@ class InstagramCommentsScraplingFetcher:
                     fetch_reason = "coverage_target_met"
             elif (
                 not auth_failed
+                and not single_session_memory_guardrail_reached
                 and current_flattened_count < target_count
                 and fetch_reason != _TERMINAL_MISSING_CLASSIFIED_REASON
             ):
@@ -3491,6 +3934,34 @@ class InstagramCommentsScraplingFetcher:
             result_diagnostic_metadata["cursor_shape_counts"] = dict(sorted(cursor_shape_counts.items()))
         if last_comment_filter_param:
             result_diagnostic_metadata["comment_filter_param"] = last_comment_filter_param
+        strategy_stop_reason = (
+            single_session_memory_guardrail_stop_reason
+            or fetch_reason
+            or ("api_pagination_complete" if api_top_level_complete else None)
+        )
+        strategy_metadata = {
+            "strategy_decision": strategy_decision,
+            "fallback_trigger": strategy_fallback_trigger,
+            "lane_order": list(dict.fromkeys(strategy_lane_order)),
+            "stop_reason": strategy_stop_reason,
+            "api_pages_loaded": pages_seen,
+            "api_rows_seen": single_session_api_rows_seen,
+            "rendered_load_attempts": 1 if single_session_rendered_attempted else 0,
+            "rendered_rows_seen": single_session_rendered_rows_seen,
+            "rendered_merged_comments": single_session_rendered_merged,
+            "merged_comments": flattened_comment_count(comments),
+            "top_level_comments": parent_comment_count(comments),
+            "child_replies": child_reply_count(comments),
+            "challenge_stop": bool(auth_failed),
+            "memory_guardrail": current_memory_guardrail_metadata(),
+        }
+        if single_session_rendered_metadata:
+            strategy_metadata["rendered_hydration"] = dict(single_session_rendered_metadata)
+        result_diagnostic_metadata.update(strategy_metadata)
+        self._last_single_session_strategy_metadata = {
+            "shortcode": str(shortcode or "").strip() or None,
+            **strategy_metadata,
+        }
         return InstagramCommentsFetchResult(
             comments=comments,
             fetch_failed=fetch_failed,
@@ -3953,6 +4424,385 @@ class InstagramCommentsScraplingFetcher:
                 shortcode,
             )
         return comments
+
+    async def _fetch_rendered_single_session_load_all(
+        self,
+        shortcode: str,
+        post_url: str,
+        *,
+        target_metadata: Mapping[str, Any] | None = None,
+        target_count: int | None,
+        max_comments: int,
+    ) -> tuple[list[InstagramComment], dict[str, Any]]:
+        click_limit = _resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_CLICK_LIMIT",
+            _SINGLE_SESSION_RENDERED_CLICK_LIMIT_DEFAULT,
+            minimum=0,
+            maximum=50,
+        )
+        scroll_limit = _resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_SCROLL_LIMIT",
+            _SINGLE_SESSION_RENDERED_SCROLL_LIMIT_DEFAULT,
+            minimum=0,
+            maximum=75,
+        )
+        stall_limit = _resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_STALL_LIMIT",
+            _SINGLE_SESSION_RENDERED_STALL_LIMIT_DEFAULT,
+            minimum=1,
+            maximum=20,
+        )
+        deadline_seconds = _resolve_positive_float_env(
+            "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_DEADLINE_SECONDS",
+            _SINGLE_SESSION_RENDERED_DEADLINE_SECONDS_DEFAULT,
+            minimum=1.0,
+            maximum=300.0,
+        )
+        max_rows = _resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS",
+            _SINGLE_SESSION_MAX_IN_MEMORY_ROWS_DEFAULT,
+            minimum=1,
+            maximum=100_000,
+        )
+        if click_limit <= 0 and scroll_limit <= 0:
+            metadata = {
+                "version": _SINGLE_SESSION_RENDERED_FALLBACK_VERSION,
+                "shortcode": str(shortcode or "").strip() or None,
+                "reason": "rendered_hydration_disabled",
+                "click_limit": click_limit,
+                "scroll_limit": scroll_limit,
+                "stall_limit": stall_limit,
+                "deadline_seconds": deadline_seconds,
+                "max_rows": max_rows,
+                "rendered_rows_seen": 0,
+            }
+            self._last_single_session_rendered_metadata = metadata
+            return [], metadata
+
+        context = _target_metadata_context(target_metadata)
+        ignored_usernames = [
+            self._browser_account_id or "",
+            context.get("profile_account") or "",
+            context.get("selected_profile_account") or "",
+            context.get("source_account") or "",
+            context.get("account_handle") or "",
+            context.get("caption_author") or "",
+            context.get("caption_writer") or "",
+            context.get("original_author") or "",
+            context.get("owner_username") or "",
+            context.get("owner") or "",
+            context.get("username") or "",
+            *(context.get("collaborator_handles") or []),
+        ]
+        metadata_base = {
+            "version": _SINGLE_SESSION_RENDERED_FALLBACK_VERSION,
+            "shortcode": str(shortcode or "").strip() or None,
+            "target_count": _safe_non_negative_int(target_count),
+            "max_comments": max(0, int(max_comments or 0)),
+            "click_limit": click_limit,
+            "scroll_limit": scroll_limit,
+            "stall_limit": stall_limit,
+            "deadline_seconds": deadline_seconds,
+            "max_rows": max_rows,
+        }
+        self._record_lane_diagnostic(
+            "rendered_hydration",
+            shortcode=shortcode,
+            reason="single_session_load_all_rendered_hydration",
+            metadata=metadata_base,
+        )
+
+        async def load_all_visible_comments(page: Any) -> None:
+            await page.evaluate(
+                """
+                async ({ maxClicks, maxScrolls, stallLimit, targetCount, maxRows, deadlineMs,
+                          ignoredUsernames, snapshotElementId, version }) => {
+                  const startedAt = Date.now();
+                  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+                  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                  const textFor = (element) => {
+                    if (!element) return "";
+                    return [
+                      element.innerText || "",
+                      element.textContent || "",
+                      element.getAttribute?.("aria-label") || "",
+                      element.querySelector?.("title")?.textContent || "",
+                    ].join(" ").replace(/\\s+/g, " ").trim();
+                  };
+                  const diagnostics = {
+                    version,
+                    url: String(window.location.href || ""),
+                    title: String(document.title || ""),
+                    readyState: String(document.readyState || ""),
+                    clickedControls: 0,
+                    scrollSteps: 0,
+                    stallCount: 0,
+                    rowsCollected: 0,
+                    stopReason: null,
+                    rowTextSamples: [],
+                  };
+                  const reserved = new Set([
+                    "accounts",
+                    "explore",
+                    "p",
+                    "reel",
+                    "reels",
+                    "stories",
+                    ...ignoredUsernames.map((value) => String(value || "").trim().replace(/^@/, "").toLowerCase()),
+                  ].filter(Boolean));
+                  const profileHrefMatch = (href) =>
+                    String(href || "").match(/^(?:https?:\\/\\/(?:www\\.)?instagram\\.com)?\\/([^/?#]+)\\/?$/);
+                  const collectRows = () => {
+                    const rows = [];
+                    const seen = new Set();
+                    for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+                      const href = anchor.getAttribute("href") || "";
+                      const match = profileHrefMatch(href);
+                      if (!match) continue;
+                      const username = match[1].toLowerCase();
+                      if (reserved.has(username)) continue;
+                      let row = anchor;
+                      for (let depth = 0; depth < 10 && row.parentElement; depth += 1) {
+                        row = row.parentElement;
+                        const candidateText = clean(row.innerText || row.textContent || "");
+                        if (candidateText.includes("Reply") && candidateText.length < 1400) break;
+                      }
+                      const rowText = clean(row.innerText || row.textContent || "");
+                      if (!rowText || rowText.length >= 1400) continue;
+                      const anchorText = clean(
+                        anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || ""
+                      ).toLowerCase();
+                      const rowTextLower = rowText.toLowerCase();
+                      const profileImage = Array.from(row.querySelectorAll("img"))
+                        .find((image) => clean(image.getAttribute("alt") || "").toLowerCase().includes(username));
+                      if (
+                        anchorText !== username &&
+                        !anchorText.includes(`@${username}`) &&
+                        !rowTextLower.startsWith(`${username} `) &&
+                        !rowTextLower.startsWith(`${username}\\n`) &&
+                        !profileImage
+                      ) {
+                        continue;
+                      }
+                      const key = `${username}:${rowText}`;
+                      if (seen.has(key)) continue;
+                      seen.add(key);
+                      const rowRect = row.getBoundingClientRect();
+                      const commentLink = row.querySelector?.('a[href*="/c/"]');
+                      const commentHref = commentLink?.getAttribute?.("href") || "";
+                      const commentMatch = commentHref.match(/\\/c\\/(\\d+)/);
+                      if (diagnostics.rowTextSamples.length < 3) {
+                        diagnostics.rowTextSamples.push(rowText.slice(0, 180));
+                      }
+                      rows.push({
+                        username,
+                        rowText: rowText.slice(0, 1400),
+                        href,
+                        commentId: commentMatch?.[1] || null,
+                        commentHref: commentHref || null,
+                        left: Math.round(rowRect.left || 0),
+                        top: Math.round(rowRect.top || 0),
+                        profilePicUrl: profileImage?.getAttribute?.("src") || null,
+                      });
+                      if (rows.length >= maxRows) break;
+                    }
+                    return rows;
+                  };
+                  const commentControl = (element) => {
+                    const text = textFor(element).toLowerCase();
+                    if (!text || text.length > 160) return false;
+                    return (
+                      (text.includes("view all") && text.includes("repl")) ||
+                      text.includes("view all comments") ||
+                      text.includes("view more comments") ||
+                      text.includes("load more comments") ||
+                      text.includes("view hidden comments") ||
+                      text.includes("view replies") ||
+                      text.includes("more comments")
+                    );
+                  };
+                  const getScrollTarget = () => {
+                    const candidates = Array.from(document.querySelectorAll("*"))
+                      .filter((element) => {
+                        if (element.scrollHeight <= element.clientHeight + 40 || element.clientHeight <= 80) {
+                          return false;
+                        }
+                        const elementText = clean(element.innerText || element.textContent || "");
+                        return /Add a comment|Reply|likes/i.test(elementText);
+                      })
+                      .sort((left, right) => {
+                        const leftGap = left.scrollHeight - left.clientHeight;
+                        const rightGap = right.scrollHeight - right.clientHeight;
+                        return rightGap - leftGap;
+                      });
+                    return candidates[0] || document.scrollingElement || document.documentElement;
+                  };
+                  let rows = collectRows();
+                  let lastRowCount = rows.length;
+                  const maxSteps = Math.max(maxClicks, maxScrolls);
+                  await sleep(800);
+                  for (let index = 0; index < maxSteps; index += 1) {
+                    if (Date.now() - startedAt >= deadlineMs) {
+                      diagnostics.stopReason = "rendered_deadline_reached";
+                      break;
+                    }
+                    if (targetCount && rows.length >= targetCount) {
+                      diagnostics.stopReason = "target_count_reached";
+                      break;
+                    }
+                    if (rows.length >= maxRows) {
+                      diagnostics.stopReason = "max_rows_reached";
+                      break;
+                    }
+                    if (diagnostics.stallCount >= stallLimit) {
+                      diagnostics.stopReason = "no_new_rows_stall";
+                      break;
+                    }
+                    if (diagnostics.clickedControls < maxClicks) {
+                      let clickedThisStep = 0;
+                      const candidates = Array.from(
+                        document.querySelectorAll('[role="button"], button, a, [tabindex="0"], span, div')
+                      ).filter(commentControl);
+                      for (const control of candidates.slice(0, 10)) {
+                        if (diagnostics.clickedControls >= maxClicks || clickedThisStep >= 3) break;
+                        const rect = control.getBoundingClientRect();
+                        if (rect.bottom < -80 || rect.top > (window.innerHeight || 900) + 80) continue;
+                        const clickable = control.closest?.('[role="button"], button, a, [tabindex="0"]') || control;
+                        clickable.click?.();
+                        clickable.dispatchEvent(
+                          new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
+                        );
+                        diagnostics.clickedControls += 1;
+                        clickedThisStep += 1;
+                        await sleep(350);
+                      }
+                    }
+                    if (diagnostics.scrollSteps < maxScrolls) {
+                      const scrollTarget = getScrollTarget();
+                      const scrollBy = Math.max(
+                        450,
+                        Math.round((scrollTarget.clientHeight || window.innerHeight || 700) * 0.8)
+                      );
+                      scrollTarget.scrollTop = (scrollTarget.scrollTop || 0) + scrollBy;
+                      window.scrollBy(0, Math.min(600, scrollBy));
+                      diagnostics.scrollSteps += 1;
+                      await sleep(650);
+                    }
+                    rows = collectRows();
+                    if (rows.length <= lastRowCount) {
+                      diagnostics.stallCount += 1;
+                    } else {
+                      diagnostics.stallCount = 0;
+                      lastRowCount = rows.length;
+                    }
+                  }
+                  if (!diagnostics.stopReason) {
+                    diagnostics.stopReason =
+                      rows.length >= maxRows ? "max_rows_reached" : "rendered_budget_exhausted";
+                  }
+                  diagnostics.rowsCollected = rows.length;
+                  const existingSnapshot = document.getElementById(snapshotElementId);
+                  if (existingSnapshot) existingSnapshot.remove();
+                  const snapshot = document.createElement("script");
+                  snapshot.id = snapshotElementId;
+                  snapshot.type = "application/json";
+                  snapshot.textContent = JSON.stringify({ rows, diagnostics });
+                  document.documentElement.appendChild(snapshot);
+                }
+                """,
+                {
+                    "maxClicks": click_limit,
+                    "maxScrolls": scroll_limit,
+                    "stallLimit": stall_limit,
+                    "targetCount": target_count or 0,
+                    "maxRows": max_rows,
+                    "deadlineMs": int(deadline_seconds * 1000),
+                    "ignoredUsernames": ignored_usernames,
+                    "snapshotElementId": _RENDERED_COMMENTS_JSON_ID,
+                    "version": _SINGLE_SESSION_RENDERED_FALLBACK_VERSION,
+                },
+            )
+
+        self._single_session_render_attempts += 1
+        self._request_count += 1
+        self._last_single_session_rendered_metadata = dict(metadata_base)
+        all_headers = self._parser.get_headers(post_url)
+        nav_headers = {key: value for key, value in all_headers.items() if key.lower() not in _API_HEADER_KEYS_TO_STRIP}
+        try:
+            response = await self._fetcher.async_fetch(
+                post_url,
+                headless=self._headless,
+                network_idle=True,
+                load_dom=True,
+                cookies=_cookies_to_scrapling(self._raw_cookies),
+                proxy_rotator=self._proxy_rotator,
+                extra_headers=nav_headers,
+                timeout=min(self._timeout_ms, max(1_000, int(deadline_seconds * 1000) + 2_000)),
+                retries=1,
+                retry_delay=1.0,
+                wait=1_000,
+                page_action=load_all_visible_comments,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._record_retry_reason("single_session_render_fetch_failed")
+            metadata = {
+                **metadata_base,
+                "reason": "render_fetch_failed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "rendered_rows_seen": 0,
+            }
+            self._last_single_session_rendered_metadata = metadata
+            logger.warning(
+                "Single-session rendered comments hydration failed for shortcode=%s: %s",
+                shortcode,
+                exc,
+                exc_info=True,
+            )
+            return [], metadata
+
+        self._sync_response_cookies(response)
+        html_text = _response_text(response)
+        dom_comments = _extract_rendered_dom_snapshot_comments(
+            html_text,
+            shortcode=shortcode,
+            post_url=post_url,
+            ignored_usernames=ignored_usernames,
+            source_snapshot_type="rendered_single_session_load_all",
+            is_hidden_by_instagram=False,
+        )
+        permalink_comments = _extract_rendered_permalink_comments(
+            html_text,
+            shortcode=shortcode,
+            post_url=post_url,
+            ignored_usernames=ignored_usernames,
+            source_snapshot_type="rendered_single_session_load_all",
+            is_hidden_by_instagram=False,
+        )
+        comments = dom_comments or permalink_comments
+        render_metadata = _rendered_dom_snapshot_metadata(
+            html_text,
+            shortcode=shortcode,
+            dom_comments_count=len(dom_comments),
+            permalink_comments_count=len(permalink_comments),
+            status_code=_status_code(response),
+            location=_safe_location(response),
+        )
+        metadata = {
+            **metadata_base,
+            **render_metadata,
+            "reason": "rendered_comments_found" if comments else "rendered_comments_empty",
+            "rendered_rows_seen": len(comments),
+        }
+        self._last_single_session_rendered_metadata = metadata
+        self._single_session_rendered_rows_seen += len(comments)
+        self._record_lane_diagnostic(
+            "rendered_hydration",
+            shortcode=shortcode,
+            reason="single_session_load_all_rendered",
+            count=len(comments),
+            metadata=metadata,
+        )
+        return comments, metadata
 
     def _status_only_diagnostic_metadata(
         self,
@@ -4737,15 +5587,109 @@ class InstagramCommentsScraplingFetcher:
             *(context.get("collaborator_handles") or []),
         ]
 
+        async def continue_profile_gate(page: Any) -> dict[str, Any]:
+            metadata: dict[str, Any] = {
+                "detected": False,
+                "clicked": False,
+                "navigated_to_post": False,
+            }
+            try:
+                metadata["before_url"] = str(getattr(page, "url", "") or "")
+            except Exception:  # noqa: BLE001
+                metadata["before_url"] = ""
+            try:
+                click_result = await page.evaluate(
+                    """
+                    async () => {
+                      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+                      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                      const bodyText = clean(document.body?.innerText || document.body?.textContent || "");
+                      const looksLikeProfileGate =
+                        bodyText.includes("Use another profile") &&
+                        /\\bContinue\\b/.test(bodyText);
+                      const result = {
+                        detected: Boolean(looksLikeProfileGate),
+                        clicked: false,
+                        url: String(window.location.href || ""),
+                      };
+                      if (!looksLikeProfileGate) return result;
+                      const textFor = (element) => {
+                        if (!element) return "";
+                        return [
+                          element.innerText || "",
+                          element.textContent || "",
+                          element.getAttribute?.("aria-label") || "",
+                          element.querySelector?.("title")?.textContent || "",
+                        ].join(" ").replace(/\\s+/g, " ").trim();
+                      };
+                      const candidates = Array.from(
+                        document.querySelectorAll('[role="button"], button, a, [tabindex="0"], span, div')
+                      );
+                      const control = candidates.find((element) => {
+                        const text = textFor(element);
+                        if (!text || text.length > 80) return false;
+                        return text === "Continue" || /^Continue\\b/.test(text);
+                      });
+                      if (!control) return result;
+                      const clickable = control.closest?.('[role="button"], button, a, [tabindex="0"]') || control;
+                      clickable.click?.();
+                      clickable.dispatchEvent(
+                        new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
+                      );
+                      await sleep(1400);
+                      result.clicked = true;
+                      result.url = String(window.location.href || "");
+                      return result;
+                    }
+                    """
+                )
+                if isinstance(click_result, Mapping):
+                    metadata.update(
+                        {
+                            "detected": bool(click_result.get("detected")),
+                            "clicked": bool(click_result.get("clicked")),
+                            "after_click_url": str(click_result.get("url") or ""),
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                metadata["error"] = f"{exc.__class__.__name__}: {exc}"
+
+            try:
+                current_url = str(getattr(page, "url", "") or metadata.get("after_click_url") or "")
+            except Exception:  # noqa: BLE001
+                current_url = str(metadata.get("after_click_url") or "")
+            if metadata.get("detected") and f"/p/{shortcode}" not in current_url:
+                try:
+                    try:
+                        await page.goto(post_url, wait_until="networkidle", timeout=self._timeout_ms)
+                    except TypeError:
+                        await page.goto(post_url, timeout=self._timeout_ms)
+                    metadata["navigated_to_post"] = True
+                    try:
+                        await page.wait_for_timeout(1_200)
+                    except Exception:  # noqa: BLE001
+                        await page.evaluate(
+                            "async () => await new Promise((resolve) => setTimeout(resolve, 1200))"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    metadata["navigation_error"] = f"{exc.__class__.__name__}: {exc}"
+            try:
+                metadata["after_url"] = str(getattr(page, "url", "") or "")
+            except Exception:  # noqa: BLE001
+                metadata["after_url"] = ""
+            return metadata
+
         async def load_visible_comments(page: Any) -> None:
+            profile_gate_metadata = await continue_profile_gate(page)
             await page.evaluate(
                 """
-                async ({ maxClicks, maxScrolls, ignoredUsernames, snapshotElementId, version }) => {
+                async ({ maxClicks, maxScrolls, ignoredUsernames, snapshotElementId, version, profileGate }) => {
                   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
                   const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
                   const bodyText = clean(document.body?.innerText || document.body?.textContent || "");
                   const diagnostics = {
                     version,
+                    profileGate,
                     url: String(window.location.href || ""),
                     title: String(document.title || ""),
                     readyState: String(document.readyState || ""),
@@ -4937,6 +5881,7 @@ class InstagramCommentsScraplingFetcher:
                     "ignoredUsernames": ignored_usernames,
                     "snapshotElementId": _RENDERED_COMMENTS_JSON_ID,
                     "version": _COAUTHOR_RENDERED_FALLBACK_VERSION,
+                    "profileGate": profile_gate_metadata,
                 },
             )
 
@@ -5552,7 +6497,59 @@ class InstagramCommentsScraplingFetcher:
         self._retry_reason_counts[normalized] = self._retry_reason_counts.get(normalized, 0) + 1
         self._record_lane_diagnostic("retry", reason=normalized)
 
-    def _decode_json_response_result(self, response: Any, *, attempt: int) -> dict[str, Any]:
+    def _record_challenge_response(
+        self,
+        response: Any,
+        *,
+        reason: str,
+        transport: str,
+        attempt: int,
+        request_url: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+        location: str | None = None,
+    ) -> dict[str, Any]:
+        text = _response_text(response)
+        headers = getattr(response, "headers", None) or {}
+        text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:16] if text else None
+        payload_keys = sorted(str(key)[:48] for key in payload.keys())[:16] if isinstance(payload, Mapping) else []
+        metadata: dict[str, Any] = {
+            "reason": str(reason or "").strip()[:96],
+            "transport": str(transport or "unknown").strip()[:48],
+            "attempt": self._non_negative_int(attempt),
+            "status_code": _status_code(response),
+            "content_type": _safe_response_header(headers, "content-type"),
+            "response_path": _safe_response_url_path(response),
+            "request_path": _safe_url_path(request_url),
+            "location_path": _safe_url_path(location),
+            "set_cookie_names": _response_cookie_names(response),
+            "html_title": _html_title(text),
+            "html_form_actions": _html_form_actions(text),
+            "text_length": len(text) if text else 0,
+            "text_sha256_16": text_hash,
+            "text_markers": _challenge_text_markers(text),
+            "payload_keys": payload_keys,
+            "payload_status": self._compact_checkpoint_text(payload.get("status")) if isinstance(payload, Mapping) else None,
+            "payload_message": self._compact_checkpoint_text(
+                payload.get("message") or payload.get("error_message")
+            )
+            if isinstance(payload, Mapping)
+            else None,
+        }
+        compact = {str(key): value for key, value in metadata.items() if value not in (None, [], {})}
+        self._challenge_response_total_count += 1
+        if len(self._challenge_response_samples) < _CHALLENGE_RESPONSE_SAMPLE_MAX:
+            self._challenge_response_samples.append(compact)
+        self._record_lane_diagnostic("challenge_response", reason=reason, metadata=compact)
+        return compact
+
+    def _decode_json_response_result(
+        self,
+        response: Any,
+        *,
+        attempt: int,
+        transport: str = "httpx",
+        request_url: str | None = None,
+    ) -> dict[str, Any]:
         status_code = _status_code(response)
         text = _response_text(response)
         auth_failed = status_code in {401, 403} or _auth_failure_text(text)
@@ -5567,6 +6564,16 @@ class InstagramCommentsScraplingFetcher:
                 else "redirect_to_homepage"
             )
             auth_redirect = any(token in location for token in ("login", "challenge", "checkpoint"))
+            diagnostic_metadata = None
+            if auth_redirect or reason == "redirect_to_homepage":
+                diagnostic_metadata = self._record_challenge_response(
+                    response,
+                    reason=reason,
+                    transport=transport,
+                    attempt=attempt,
+                    request_url=request_url,
+                    location=location,
+                )
             return {
                 "failed": True,
                 "auth_failed": auth_redirect or reason == "redirect_to_homepage",
@@ -5574,6 +6581,7 @@ class InstagramCommentsScraplingFetcher:
                 "retryable": False,
                 "payload": None,
                 "attempt_count": attempt,
+                "diagnostic_metadata": diagnostic_metadata,
             }
 
         if self._is_transient_status(status_code):
@@ -5587,6 +6595,15 @@ class InstagramCommentsScraplingFetcher:
             }
 
         if status_code >= 400:
+            diagnostic_metadata = None
+            if auth_failed:
+                diagnostic_metadata = self._record_challenge_response(
+                    response,
+                    reason=f"http_{status_code}",
+                    transport=transport,
+                    attempt=attempt,
+                    request_url=request_url,
+                )
             return {
                 "failed": True,
                 "auth_failed": auth_failed,
@@ -5594,9 +6611,17 @@ class InstagramCommentsScraplingFetcher:
                 "retryable": False,
                 "payload": None,
                 "attempt_count": attempt,
+                "diagnostic_metadata": diagnostic_metadata,
             }
 
         if text and text.lstrip().startswith("<"):
+            diagnostic_metadata = self._record_challenge_response(
+                response,
+                reason="html_challenge_or_auth_required",
+                transport=transport,
+                attempt=attempt,
+                request_url=request_url,
+            )
             return {
                 "failed": True,
                 "auth_failed": auth_failed or _auth_failure_text(text),
@@ -5604,6 +6629,7 @@ class InstagramCommentsScraplingFetcher:
                 "retryable": False,
                 "payload": None,
                 "attempt_count": attempt,
+                "diagnostic_metadata": diagnostic_metadata,
             }
 
         try:
@@ -5625,17 +6651,28 @@ class InstagramCommentsScraplingFetcher:
             status_value = str(payload.get("status") or "").strip().lower()
             message = str(payload.get("message") or payload.get("error_message") or "").strip().lower()
             if status_value and status_value != "ok":
+                auth_status = auth_failed or any(
+                    token in f"{status_value} {message}"
+                    for token in ("login", "checkpoint", "challenge", "unauthorized")
+                )
+                diagnostic_metadata = None
+                if auth_status:
+                    diagnostic_metadata = self._record_challenge_response(
+                        response,
+                        reason=status_value or "api_status_fail",
+                        transport=transport,
+                        attempt=attempt,
+                        request_url=request_url,
+                        payload=payload,
+                    )
                 return {
                     "failed": True,
-                    "auth_failed": auth_failed
-                    or any(
-                        token in f"{status_value} {message}"
-                        for token in ("login", "checkpoint", "challenge", "unauthorized")
-                    ),
+                    "auth_failed": auth_status,
                     "reason": status_value or "api_status_fail",
                     "retryable": False,
                     "payload": payload,
                     "attempt_count": attempt,
+                    "diagnostic_metadata": diagnostic_metadata,
                 }
 
         return {
@@ -5799,6 +6836,11 @@ class InstagramCommentsScraplingFetcher:
         homepage_redirect_recovery_attempted = False
         browser_api_fallback_attempted = False
         last_transient_reason: str | None = None
+        clean_params = {key: value for key, value in (params or {}).items() if value is not None}
+        request_url = url
+        if clean_params:
+            separator = "&" if "?" in request_url else "?"
+            request_url = f"{request_url}{separator}{urlencode(clean_params, doseq=True)}"
         while True:
             if _deadline_remaining_seconds(deadline) == 0.0:
                 return _deadline_response(attempt)
@@ -5889,13 +6931,26 @@ class InstagramCommentsScraplingFetcher:
                                 "payload": None,
                                 "attempt_count": attempt,
                             }
-                        browser_result = self._decode_json_response_result(browser_response, attempt=attempt)
+                        browser_result = self._decode_json_response_result(
+                            browser_response,
+                            attempt=attempt,
+                            transport="browser_api",
+                            request_url=request_url,
+                        )
                         if not (
                             browser_result.get("failed")
                             and browser_result.get("reason") == "redirect_to_homepage"
                         ):
                             return browser_result
                     auth_redirect = True
+                diagnostic_metadata = self._record_challenge_response(
+                    response,
+                    reason=reason,
+                    transport="httpx",
+                    attempt=attempt,
+                    request_url=request_url,
+                    location=location,
+                )
                 return {
                     "failed": True,
                     "auth_failed": auth_redirect,
@@ -5903,6 +6958,7 @@ class InstagramCommentsScraplingFetcher:
                     "retryable": False,
                     "payload": None,
                     "attempt_count": attempt,
+                    "diagnostic_metadata": diagnostic_metadata,
                 }
 
             # Transient 429 / 5xx: retry with backoff.
@@ -5956,7 +7012,12 @@ class InstagramCommentsScraplingFetcher:
                             raise
                         self._record_retry_reason(_transport_failure_reason(exc))
                     else:
-                        browser_result = self._decode_json_response_result(browser_response, attempt=attempt)
+                        browser_result = self._decode_json_response_result(
+                            browser_response,
+                            attempt=attempt,
+                            transport="browser_api",
+                            request_url=request_url,
+                        )
                         if not (
                             browser_result.get("failed")
                             and browser_result.get("reason") == "http_429"
@@ -5983,7 +7044,12 @@ class InstagramCommentsScraplingFetcher:
 
             # Permanent 4xx.
             if status_code >= 400:
-                return self._decode_json_response_result(response, attempt=attempt)
+                return self._decode_json_response_result(
+                    response,
+                    attempt=attempt,
+                    transport="httpx",
+                    request_url=request_url,
+                )
 
             # HTML response (challenge page, not JSON).
             if text and text.lstrip().startswith("<"):
@@ -6017,12 +7083,27 @@ class InstagramCommentsScraplingFetcher:
                             "payload": None,
                             "attempt_count": attempt,
                         }
-                    browser_result = self._decode_json_response_result(browser_response, attempt=attempt)
+                    browser_result = self._decode_json_response_result(
+                        browser_response,
+                        attempt=attempt,
+                        transport="browser_api",
+                        request_url=request_url,
+                    )
                     if not (
                         browser_result.get("failed")
                         and browser_result.get("reason") == "html_challenge_or_auth_required"
                     ):
                         return browser_result
-                return self._decode_json_response_result(response, attempt=attempt)
+                return self._decode_json_response_result(
+                    response,
+                    attempt=attempt,
+                    transport="httpx",
+                    request_url=request_url,
+                )
 
-            return self._decode_json_response_result(response, attempt=attempt)
+            return self._decode_json_response_result(
+                response,
+                attempt=attempt,
+                transport="httpx",
+                request_url=request_url,
+            )

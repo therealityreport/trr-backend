@@ -21,6 +21,7 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     InstagramCommentsFetchResult,
     InstagramCommentsScraplingFetcher,
     InstagramCommentsWarmupError,
+    normalize_comments_load_strategy,
 )
 from trr_backend.socials.instagram.comments_scrapling.persistence import (
     PersistedInstagramComments,
@@ -84,6 +85,7 @@ _COAUTHOR_STATUS_ONLY_FETCH_REASONS = {
     "comments_endpoint_status_only",
     "coauthor_comments_endpoint_empty",
 }
+_COAUTHOR_AUTH_RENDERED_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_AUTH_RENDERED_FALLBACK"
 _REPLY_ONLY_RETRY_REASONS = {
     "http_429",
     "reply_tail_budget_exhausted",
@@ -580,6 +582,26 @@ def _config_truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _config_env_truthy(value: Any, env_name: str, *, default: bool = True) -> bool:
+    raw = value
+    if raw is None:
+        raw = os.getenv(env_name)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _metadata_indicates_collaborator_post(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    if bool(metadata.get("is_collaborator_post") or metadata.get("is_collaborator")):
+        return True
+    collaborators = metadata.get("collaborator_handles") or metadata.get("collaborators")
+    return isinstance(collaborators, list) and any(str(item or "").strip() for item in collaborators)
 
 
 def _is_database_capacity_error(exc: BaseException) -> bool:
@@ -2055,6 +2077,19 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     source_scope = str(config.get("source_scope") or "network").strip().lower() or "network"
     max_comments_per_post = max(0, int(config.get("max_comments_per_post") or 0))
     fetch_replies = bool(config.get("fetch_replies", True))
+    comments_load_strategy = normalize_comments_load_strategy(config.get("comments_load_strategy"))
+    single_session_load_all = comments_load_strategy == "single_session_load_all"
+    default_comments_session_scope = (
+        "post_continuous"
+        if single_session_load_all and mode == "single_post"
+        else "profile_single_worker"
+        if single_session_load_all
+        else "cursor_api_worker"
+    )
+    comments_session_scope = (
+        str(config.get("comments_session_scope") or default_comments_session_scope).strip()
+        or default_comments_session_scope
+    )
     target_source_ids = [
         str(item or "").strip()
         for item in (config.get("target_source_ids") or ([config.get("source_id")] if config.get("source_id") else []))
@@ -2103,6 +2138,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         "comments_shard_index": comments_shard_index,
         "comments_shard_count": comments_shard_count,
         "comments_shard_target_count": comments_shard_target_count,
+        "comments_load_strategy": comments_load_strategy,
+        "comments_session_scope": comments_session_scope,
     }
     if not account_handle:
         raise CommentsScraplingRuntimeError(
@@ -2157,12 +2194,15 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     comments_marked_missing = 0
     mirror_jobs_enqueued = 0
     mirror_job_enqueue_errors = 0
+    saved_once_per_post_target_source_ids: list[str] = []
     activity: dict[str, Any] = {
         "phase": "comments_scrapling_start",
         "posts_checked": 0,
         "matched_posts": 0,
         "saved_posts": 0,
         "total_posts": len(target_source_ids),
+        "comments_load_strategy": comments_load_strategy,
+        "comments_session_scope": comments_session_scope,
         **shard_metadata,
     }
     fetcher_metadata: dict[str, Any] = {}
@@ -2230,6 +2270,21 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "parent_comments_fetched": parent_comments_fetched,
                 "child_replies_fetched": child_replies_fetched,
                 "parentless_replies_fetched": parentless_replies_fetched,
+            },
+            "comments_load_strategy": comments_load_strategy,
+            "comments_session_scope": comments_session_scope,
+            "comments_strategy": {
+                "selected": comments_load_strategy,
+                "session_scope": comments_session_scope,
+                "api_first": True,
+                "rendered_dom_canonical": False,
+                "single_session_load_all": single_session_load_all,
+                "same_job_auth_retry_suppressed": single_session_load_all,
+                "saved_once_per_post": {
+                    "enabled": True,
+                    "count": len(saved_once_per_post_target_source_ids),
+                    "target_source_ids": list(dict.fromkeys(saved_once_per_post_target_source_ids)),
+                },
             },
             "comments_endpoint_probe": dict(comments_endpoint_probe),
             "post_auth_failures": {
@@ -2406,19 +2461,49 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 probe_status = str(
                     comments_endpoint_probe.get("status") or comments_endpoint_probe.get("result") or ""
                 ).strip().lower()
+                probe_reason = str(comments_endpoint_probe.get("reason") or "").strip()
                 if probe_status == "auth_blocked":
-                    raise CommentsScraplingRuntimeError(
-                        "Instagram comments endpoint auth validation failed before target processing.",
-                        error_code="instagram_comments_endpoint_auth_blocked",
-                        retryable=False,
-                        runtime_metadata=dict(fetcher.runtime_metadata),
+                    first_target_metadata = target_metadata_by_shortcode.get(target_source_ids[0]) or {}
+                    allow_coauthor_rendered_fallback = (
+                        probe_reason == "html_challenge_or_auth_required"
+                        and _metadata_indicates_collaborator_post(first_target_metadata)
+                        and _config_env_truthy(
+                            config.get("comments_coauthor_auth_rendered_fallback"),
+                            _COAUTHOR_AUTH_RENDERED_FALLBACK_ENV,
+                            default=True,
+                        )
                     )
+                    if allow_coauthor_rendered_fallback:
+                        comments_endpoint_probe = {
+                            **dict(comments_endpoint_probe),
+                            "advisory_continue": True,
+                            "advisory_reason": "coauthor_rendered_fallback_after_endpoint_html_challenge",
+                        }
+                        logger.warning(
+                            "Instagram comments endpoint auth validation returned HTML challenge for collaborator "
+                            "target; continuing so rendered post fallback can run. job_id=%s run_id=%s shortcode=%s",
+                            job_id,
+                            run_id,
+                            target_source_ids[0],
+                        )
+                    else:
+                        raise CommentsScraplingRuntimeError(
+                            "Instagram comments endpoint auth validation failed before target processing.",
+                            error_code="instagram_comments_endpoint_auth_blocked",
+                            retryable=False,
+                            runtime_metadata=dict(fetcher.runtime_metadata),
+                        )
                 if probe_status == "transport_blocked":
-                    raise CommentsScraplingRuntimeError(
-                        "Instagram comments endpoint transport validation failed before target processing.",
-                        error_code="instagram_comments_endpoint_transport_blocked",
-                        retryable=True,
-                        runtime_metadata=dict(fetcher.runtime_metadata),
+                    comments_endpoint_probe = {
+                        **dict(comments_endpoint_probe),
+                        "advisory_continue": True,
+                    }
+                    logger.warning(
+                        "Instagram comments endpoint transport validation was inconclusive before target "
+                        "processing; continuing with target fetch budget. job_id=%s run_id=%s reason=%s",
+                        job_id,
+                        run_id,
+                        comments_endpoint_probe.get("reason"),
                     )
             lifecycle.emit_job_progress(
                 job_id=job_id,
@@ -2530,6 +2615,9 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             "is_complete": True,
                             "completion_reason": "already_complete",
                             "reported_comment_count": None,
+                            "comments_load_strategy": comments_load_strategy,
+                            "comments_session_scope": comments_session_scope,
+                            "saved_once_per_post": False,
                         }
                     )
                     processed_posts += 1
@@ -2562,6 +2650,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     "max_comments": max_comments_per_post,
                     "fetch_replies": fetch_replies,
                     "expected_comment_count": expected_comment_counts_by_shortcode.get(shortcode),
+                    "load_strategy": comments_load_strategy,
                 }
                 target_metadata = target_metadata_by_shortcode.get(shortcode)
                 if target_metadata:
@@ -2675,6 +2764,10 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             "is_complete": False,
                             "completion_reason": "post_auth_failed_skipped",
                             "reported_comment_count": _extract_reported_comment_count(result),
+                            "comments_load_strategy": comments_load_strategy,
+                            "comments_session_scope": comments_session_scope,
+                            "saved_once_per_post": False,
+                            "same_job_auth_retry_suppressed": single_session_load_all,
                         }
                     )
                     processed_posts += 1
@@ -2756,6 +2849,9 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                                 "is_complete": False,
                                 "completion_reason": "post_fetch_failed_retryable_skipped",
                                 "reported_comment_count": _extract_reported_comment_count(result),
+                                "comments_load_strategy": comments_load_strategy,
+                                "comments_session_scope": comments_session_scope,
+                                "saved_once_per_post": False,
                             }
                         )
                         processed_posts += 1
@@ -2886,6 +2982,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         target_metadata=target_metadata_by_shortcode.get(shortcode) or {},
                     )
                     persist_conn.commit()
+                saved_once_per_post_target_source_ids.append(shortcode)
                 _raise_if_job_lease_lost(
                     job_id=job_id,
                     worker_id=worker_id,
@@ -2997,6 +3094,9 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         "operator_status": operator_status,
                         "completion_reason": completion_reason,
                         "reported_comment_count": _extract_reported_comment_count(result),
+                        "comments_load_strategy": comments_load_strategy,
+                        "comments_session_scope": comments_session_scope,
+                        "saved_once_per_post": shortcode in saved_once_per_post_target_source_ids,
                         # Phase A5 follow-up diagnostics: surface pagination
                         # depth + last cursor direction so operators can
                         # spot repeated_cursor stops without grepping logs.
@@ -3051,7 +3151,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             retryable_incomplete_targets = _retryable_incomplete_target_source_ids(
                 incomplete_target_source_ids=incomplete_target_source_ids,
                 incomplete_fetch_reasons=incomplete_fetch_reasons,
-                auth_failed_target_source_ids=auth_failed_target_source_ids,
+                auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
             )
             # Any target-level gap should be retried automatically. Earlier
             # versions only retried when enough posts in a shard failed, which
@@ -3147,6 +3247,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             "account": account_handle,
             "mode": mode,
             "source_scope": source_scope,
+            "comments_load_strategy": comments_load_strategy,
+            "comments_session_scope": comments_session_scope,
             "target_source_ids": target_source_ids,
             "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
             "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
@@ -3231,6 +3333,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "account": account_handle,
                 "mode": mode,
                 "source_scope": source_scope,
+                "comments_load_strategy": comments_load_strategy,
+                "comments_session_scope": comments_session_scope,
                 "target_source_ids": target_source_ids,
                 "incomplete_target_source_ids": list(dict.fromkeys(incomplete_target_source_ids)),
                 "zero_comment_incomplete_target_source_ids": list(
@@ -3270,7 +3374,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     target_source_ids=target_source_ids,
                     processed_posts=processed_posts,
                     incomplete_target_source_ids=incomplete_target_source_ids,
-                    auth_failed_target_source_ids=auth_failed_target_source_ids,
+                    auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
                 ),
             },
             last_error_code="instagram_comments_scrapling_cancelled",
@@ -3305,7 +3409,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
             target_source_ids=target_source_ids,
             processed_posts=processed_posts,
             incomplete_target_source_ids=retry_incomplete_targets or incomplete_target_source_ids,
-            auth_failed_target_source_ids=auth_failed_target_source_ids,
+            auth_failed_target_source_ids=[] if single_session_load_all else auth_failed_target_source_ids,
         )
         retry_target_source_ids = retry_incomplete_targets or [
             str(item or "").strip()
@@ -3355,6 +3459,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "account": account_handle,
                 "mode": mode,
                 "source_scope": source_scope,
+                "comments_load_strategy": comments_load_strategy,
+                "comments_session_scope": comments_session_scope,
                 "target_source_ids": target_source_ids,
                 "incomplete_target_source_ids": list(dict.fromkeys(incomplete_target_source_ids)),
                 "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),

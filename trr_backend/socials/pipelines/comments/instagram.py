@@ -341,6 +341,79 @@ def _instagram_comments_target_priority(refresh_policy: str) -> str:
         return target_priority if target_priority in {"gap_first", "posted_at_desc"} else "gap_first"
     return "missing_first_recent"
 
+_INSTAGRAM_COMMENTS_LOAD_STRATEGIES = {"cursor_api", "single_session_load_all"}
+_INSTAGRAM_COMMENTS_SINGLE_SESSION_ENV = "SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED"
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _instagram_comments_single_session_load_all_enabled() -> bool:
+    return _env_truthy(_INSTAGRAM_COMMENTS_SINGLE_SESSION_ENV)
+
+
+def _normalize_instagram_comments_load_strategy(value: str | None) -> str:
+    normalized = str(value or "cursor_api").strip().lower() or "cursor_api"
+    if normalized not in _INSTAGRAM_COMMENTS_LOAD_STRATEGIES:
+        allowed = ", ".join(sorted(_INSTAGRAM_COMMENTS_LOAD_STRATEGIES))
+        raise SocialIngestValidationError(
+            "SOCIAL_ACCOUNT_COMMENTS_INVALID_LOAD_STRATEGY",
+            f"Unsupported comments_load_strategy: {normalized}. Allowed values: {allowed}.",
+        )
+    return normalized
+
+
+def _assert_instagram_comments_load_strategy_enabled(load_strategy: str) -> None:
+    if load_strategy != "single_session_load_all":
+        return
+    if _instagram_comments_single_session_load_all_enabled():
+        return
+    raise SocialIngestValidationError(
+        "SOCIAL_INSTAGRAM_COMMENTS_LOAD_STRATEGY_DISABLED",
+        (
+            "Instagram comments load strategy single_session_load_all is disabled. "
+            f"Set {_INSTAGRAM_COMMENTS_SINGLE_SESSION_ENV}=true to enable it."
+        ),
+    )
+
+
+def _instagram_comments_load_strategy_metadata(
+    *,
+    load_strategy: str,
+    mode: str,
+    target_count: int,
+    recommended_shard_count: int,
+    effective_shard_count: int,
+) -> dict[str, Any]:
+    single_session = load_strategy == "single_session_load_all"
+    forced_single_session = single_session and mode == "profile" and target_count > 1
+    if single_session:
+        session_scope = "post_continuous" if mode == "single_post" else "profile_single_worker"
+    else:
+        session_scope = "cursor_api_worker"
+    return {
+        "comments_load_strategy": load_strategy,
+        "comments_session_scope": session_scope,
+        "comments_internal_pagination": "cursor_preserved",
+        "comments_sharding_forced_single_session": forced_single_session,
+        "recommended_comments_shard_count": recommended_shard_count,
+        "effective_comments_shard_count": effective_shard_count,
+        "single_session_enabled": _instagram_comments_single_session_load_all_enabled(),
+    }
+
+
+def _instagram_comments_load_strategy_warnings(metadata: Mapping[str, Any]) -> list[dict[str, str]]:
+    if not bool(metadata.get("comments_sharding_forced_single_session")):
+        return []
+    return [
+        {
+            "code": "INSTAGRAM_COMMENTS_SINGLE_SESSION_FORCES_ONE_SHARD",
+            "message": "single_session_load_all runs profile comment scrapes in one comments shard.",
+        }
+    ]
+
+
 def _normalize_instagram_comments_target_filter(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower()
     if not normalized or normalized == "all":
@@ -1212,7 +1285,7 @@ def _instagram_comments_job_max_attempts(config: Mapping[str, Any] | None = None
     if not raw_text:
         if config is not None and (
             str(config.get("target_filter") or "").strip().lower() == "incomplete"
-            or _config_truthy(config.get("incomplete_fill"))
+            or str(config.get("incomplete_fill") or "").strip().lower() in {"1", "true", "yes", "on"}
         ):
             return 1
         return SOCIAL_INSTAGRAM_COMMENTS_MAX_ATTEMPTS_DEFAULT
@@ -1418,6 +1491,7 @@ def start_social_account_comments_scrape(
     max_comments_per_post: int | None = None,
     refresh_policy: str = "stale_or_missing",
     target_filter: str | None = None,
+    comments_load_strategy: str = "cursor_api",
     initiated_by: str | None = None,
     inline_worker_id: str | None = None,
     allow_local_dev_inline_bypass: bool = False,
@@ -1432,6 +1506,8 @@ def start_social_account_comments_scrape(
     normalized_mode = str(mode or "").strip().lower()
     normalized_refresh_policy = str(refresh_policy or "stale_or_missing").strip().lower()
     normalized_target_filter = _normalize_instagram_comments_target_filter(target_filter)
+    normalized_load_strategy = _normalize_instagram_comments_load_strategy(comments_load_strategy)
+    _assert_instagram_comments_load_strategy_enabled(normalized_load_strategy)
     if normalized_platform != "instagram":
         raise SocialIngestValidationError(
             "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
@@ -1599,18 +1675,39 @@ def start_social_account_comments_scrape(
                 )
 
             target_source_ids_count = len(target_source_ids)
-            comments_shard_count = (
+            recommended_comments_shard_count = _instagram_comments_recommended_shard_count(
+                target_count=target_source_ids_count
+            )
+            default_comments_shard_count = (
                 _instagram_comments_profile_shard_count(target_source_ids_count)
                 if normalized_mode == "profile"
                 else 1
             )
+            comments_shard_count = (
+                1
+                if normalized_load_strategy == "single_session_load_all" and normalized_mode == "profile"
+                else default_comments_shard_count
+            )
+            strategy_metadata = _instagram_comments_load_strategy_metadata(
+                load_strategy=normalized_load_strategy,
+                mode=normalized_mode,
+                target_count=target_source_ids_count,
+                recommended_shard_count=recommended_comments_shard_count,
+                effective_shard_count=comments_shard_count,
+            )
+            strategy_warnings = _instagram_comments_load_strategy_warnings(strategy_metadata)
             target_source_id_shards = _chunk_instagram_comment_targets(target_source_ids, comments_shard_count)
             if not target_source_id_shards:
                 target_source_id_shards = [target_source_ids]
                 comments_shard_count = 1
-            recommended_comments_shard_count = _instagram_comments_recommended_shard_count(
-                target_count=target_source_ids_count
-            )
+                strategy_metadata = _instagram_comments_load_strategy_metadata(
+                    load_strategy=normalized_load_strategy,
+                    mode=normalized_mode,
+                    target_count=target_source_ids_count,
+                    recommended_shard_count=recommended_comments_shard_count,
+                    effective_shard_count=comments_shard_count,
+                )
+                strategy_warnings = _instagram_comments_load_strategy_warnings(strategy_metadata)
             comments_max_attempts = _instagram_comments_job_max_attempts(
                 {
                     "target_filter": normalized_target_filter,
@@ -1644,14 +1741,17 @@ def start_social_account_comments_scrape(
                 "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
                 "ingest_mode": "comments_only",
                 "target_source_ids_count": target_source_ids_count,
+                **strategy_metadata,
                 "comments_shard_count": comments_shard_count,
                 "comments_sharding_enabled": comments_shard_count > 1,
                 "comments_proxy_shard_sessions": (
                     str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SHARD_SESSIONS", "0")).strip().lower()
                     in {"1", "true", "yes", "on"}
+                    and normalized_load_strategy != "single_session_load_all"
                 ),
                 "comments_auth_validation_mode": comments_auth_validation_mode,
                 "recommended_comments_shard_count": recommended_comments_shard_count,
+                "strategy_warnings": strategy_warnings,
                 "comments_max_attempts": comments_max_attempts,
                 "timing": {
                     "target_enumeration_ms": target_enumeration_ms,
@@ -1740,9 +1840,11 @@ def start_social_account_comments_scrape(
                 "target_source_ids_count": target_source_ids_count,
                 "target_filter": normalized_target_filter,
                 "incomplete_fill": normalized_target_filter == "incomplete",
+                **strategy_metadata,
                 "comments_shard_count": comments_shard_count,
                 "comments_sharding_enabled": comments_shard_count > 1,
                 "recommended_comments_shard_count": recommended_comments_shard_count,
+                "strategy_warnings": strategy_warnings,
                 "timing": {
                     "target_enumeration_ms": target_enumeration_ms,
                     "target_source_ids_count": target_source_ids_count,
@@ -1782,12 +1884,15 @@ def preview_social_account_comments_scrape(
     max_posts: int | None = None,
     refresh_policy: str = "stale_or_missing",
     target_filter: str | None = None,
+    comments_load_strategy: str = "cursor_api",
 ) -> dict[str, Any]:
     started_at = time_module.perf_counter()
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     normalized_mode = str(mode or "").strip().lower()
     normalized_target_filter = _normalize_instagram_comments_target_filter(target_filter)
+    normalized_load_strategy = _normalize_instagram_comments_load_strategy(comments_load_strategy)
+    _assert_instagram_comments_load_strategy_enabled(normalized_load_strategy)
     if normalized_platform != "instagram":
         raise SocialIngestValidationError(
             "SOCIAL_ACCOUNT_COMMENTS_UNSUPPORTED_PLATFORM",
@@ -1804,6 +1909,16 @@ def preview_social_account_comments_scrape(
         normalized_source_id = str(source_id or "").strip()
         target_source_ids = [normalized_source_id] if normalized_source_id else []
         target_count = len(target_source_ids)
+        recommended_shard_count = 1
+        effective_shard_count = 1
+        strategy_metadata = _instagram_comments_load_strategy_metadata(
+            load_strategy=normalized_load_strategy,
+            mode=normalized_mode,
+            target_count=target_count,
+            recommended_shard_count=recommended_shard_count,
+            effective_shard_count=effective_shard_count,
+        )
+        strategy_warnings = _instagram_comments_load_strategy_warnings(strategy_metadata)
         return {
             "dry_run": True,
             "platform": normalized_platform,
@@ -1812,9 +1927,11 @@ def preview_social_account_comments_scrape(
             "refresh_policy": str(refresh_policy or "stale_or_missing").strip().lower() or "stale_or_missing",
             "target_priority": "single_post",
             "target_source_ids_count": target_count,
+            **strategy_metadata,
             "comments_shard_count": 1,
             "comments_sharding_enabled": False,
-            "recommended_comments_shard_count": 1,
+            "recommended_comments_shard_count": recommended_shard_count,
+            "strategy_warnings": strategy_warnings,
             "sample_target_source_ids": target_source_ids[:1],
             "timing": {
                 "target_preview_ms": round((time_module.perf_counter() - started_at) * 1000, 1),
@@ -1858,12 +1975,35 @@ def preview_social_account_comments_scrape(
         )
     timing = _metadata_dict(plan.get("timing"))
     timing["total_ms"] = round((time_module.perf_counter() - started_at) * 1000, 1)
+    target_count = _normalize_non_negative_int(plan.get("target_source_ids_count"))
+    recommended_shard_count = _normalize_non_negative_int(
+        plan.get("recommended_comments_shard_count")
+    ) or _instagram_comments_recommended_shard_count(target_count=target_count)
+    default_shard_count = _normalize_non_negative_int(plan.get("comments_shard_count")) or 1
+    effective_shard_count = (
+        1
+        if normalized_load_strategy == "single_session_load_all"
+        else default_shard_count
+    )
+    strategy_metadata = _instagram_comments_load_strategy_metadata(
+        load_strategy=normalized_load_strategy,
+        mode=normalized_mode,
+        target_count=target_count,
+        recommended_shard_count=recommended_shard_count,
+        effective_shard_count=effective_shard_count,
+    )
+    strategy_warnings = _instagram_comments_load_strategy_warnings(strategy_metadata)
     return {
         "dry_run": True,
         "platform": normalized_platform,
         "account_handle": normalized_account,
         "mode": normalized_mode,
         **plan,
+        **strategy_metadata,
+        "comments_shard_count": effective_shard_count,
+        "comments_sharding_enabled": effective_shard_count > 1,
+        "recommended_comments_shard_count": recommended_shard_count,
+        "strategy_warnings": strategy_warnings,
         "timing": timing,
     }
 
