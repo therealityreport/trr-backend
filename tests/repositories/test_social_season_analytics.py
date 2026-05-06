@@ -6664,6 +6664,86 @@ def test_preview_social_account_comments_scrape_uses_bounded_profile_target_plan
     assert captured["params"] == ["thetraitorsus", "thetraitorsus", 12]
 
 
+def test_preview_social_account_comments_scrape_rejects_disabled_single_session_load_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED", raising=False)
+
+    with pytest.raises(social_repo.SocialIngestValidationError) as exc_info:
+        social_repo.preview_social_account_comments_scrape(
+            "instagram",
+            "thetraitorsus",
+            mode="single_post",
+            source_id="C123",
+            comments_load_strategy="single_session_load_all",
+        )
+
+    assert exc_info.value.code == "SOCIAL_INSTAGRAM_COMMENTS_LOAD_STRATEGY_DISABLED"
+    assert "single_session_load_all is disabled" in str(exc_info.value)
+
+
+def test_preview_social_account_comments_scrape_reports_single_session_post_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED", "true")
+
+    payload = social_repo.preview_social_account_comments_scrape(
+        "instagram",
+        "thetraitorsus",
+        mode="single_post",
+        source_id="C123",
+        comments_load_strategy="single_session_load_all",
+    )
+
+    assert payload["dry_run"] is True
+    assert payload["comments_load_strategy"] == "single_session_load_all"
+    assert payload["comments_session_scope"] == "post_continuous"
+    assert payload["comments_internal_pagination"] == "cursor_preserved"
+    assert payload["comments_sharding_forced_single_session"] is False
+    assert payload["comments_shard_count"] == 1
+    assert payload["effective_comments_shard_count"] == 1
+    assert payload["recommended_comments_shard_count"] == 1
+    assert payload["single_session_enabled"] is True
+    assert payload["strategy_warnings"] == []
+
+
+def test_preview_social_account_comments_scrape_single_session_profile_forces_one_shard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with instagram_comments_pipeline._INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE_LOCK:
+        instagram_comments_pipeline._INSTAGRAM_COMMENTS_TARGET_PREVIEW_CACHE.clear()
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT", "8")
+    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {
+            "raw_target_source_ids_count": 431,
+            "sample_target_source_ids": ["C123", "C456", "C789"],
+        },
+    )
+
+    payload = social_repo.preview_social_account_comments_scrape(
+        "instagram",
+        "thetraitorsus",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+        comments_load_strategy="single_session_load_all",
+    )
+
+    assert payload["target_source_ids_count"] == 431
+    assert payload["comments_load_strategy"] == "single_session_load_all"
+    assert payload["comments_session_scope"] == "profile_single_worker"
+    assert payload["comments_shard_count"] == 1
+    assert payload["effective_comments_shard_count"] == 1
+    assert payload["recommended_comments_shard_count"] == 8
+    assert payload["comments_sharding_forced_single_session"] is True
+    assert payload["comments_sharding_enabled"] is False
+    assert payload["strategy_warnings"][0]["code"] == "INSTAGRAM_COMMENTS_SINGLE_SESSION_FORCES_ONE_SHARD"
+
+
 def test_preview_social_account_comments_scrape_reuses_bounded_profile_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7536,6 +7616,75 @@ def test_start_social_account_comments_scrape_shards_profile_targets(
     assert {job["max_attempts"] for job in created_jobs} == {12}
     assert payload["timing"]["target_source_ids_count"] == 10
     assert dispatch_calls == [{"run_id": "comments-run-1"}]
+
+
+def test_start_social_account_comments_scrape_single_session_profile_uses_one_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_runs: list[dict[str, Any]] = []
+    created_jobs: list[dict[str, Any]] = []
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT", "4")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SHARD_SESSIONS", "true")
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(social_repo.pg, "db_cursor", lambda conn=None, **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one_with_cursor",
+        lambda *_args, **kwargs: (
+            {"locked": True}
+            if "pg_try_advisory_lock" in (kwargs.get("query") or (_args[1] if len(_args) > 1 else ""))
+            else {"unlocked": True}
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [{}])
+    monkeypatch.setattr(social_repo, "get_active_social_account_comments_run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
+    monkeypatch.setattr(social_repo, "is_modal_remote_executor_enabled", lambda: True)
+    monkeypatch.setattr(social_repo, "assert_worker_available_when_queue_enabled", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_instagram_social_account_comment_target_shortcodes",
+        lambda *_args, **_kwargs: [f"C{i:03d}" for i in range(10)],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_run",
+        lambda *_args, **kwargs: created_runs.append(dict(kwargs.get("config") or {})) or "comments-run-1",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_job",
+        lambda *_args, **kwargs: created_jobs.append(dict(kwargs)) or "comments-job-1",
+    )
+    monkeypatch.setattr(social_repo, "dispatch_due_social_jobs", lambda **_kwargs: {"dispatched_job_ids": []})
+
+    payload = social_repo.start_social_account_comments_scrape(
+        "instagram",
+        "thetraitorsus",
+        mode="profile",
+        refresh_policy="all_saved_posts",
+        comments_load_strategy="single_session_load_all",
+    )
+
+    assert payload["run_id"] == "comments-run-1"
+    assert payload["target_source_ids_count"] == 10
+    assert payload["comments_load_strategy"] == "single_session_load_all"
+    assert payload["comments_session_scope"] == "profile_single_worker"
+    assert payload["comments_shard_count"] == 1
+    assert payload["effective_comments_shard_count"] == 1
+    assert payload["recommended_comments_shard_count"] == 2
+    assert payload["comments_sharding_forced_single_session"] is True
+    assert payload["strategy_warnings"][0]["code"] == "INSTAGRAM_COMMENTS_SINGLE_SESSION_FORCES_ONE_SHARD"
+    assert len(created_jobs) == 1
+    assert created_runs[0]["comments_load_strategy"] == "single_session_load_all"
+    assert created_runs[0]["comments_shard_count"] == 1
+    assert created_runs[0]["comments_proxy_shard_sessions"] is False
+    assert created_jobs[0]["config"]["comments_load_strategy"] == "single_session_load_all"
+    assert created_jobs[0]["config"]["target_source_ids"] == [f"C{i:03d}" for i in range(10)]
+    assert created_jobs[0]["config"]["comments_shard_count"] == 1
+    assert created_jobs[0]["config"]["comments_shard_target_count"] == 10
 
 
 def test_start_social_account_comments_scrape_does_not_shard_single_post(

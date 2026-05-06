@@ -116,6 +116,12 @@ SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_PAGES=250
 SOCIAL_INSTAGRAM_COMMENT_PAGINATION_MAX_SECONDS=180
 SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_PAGES=100
 SOCIAL_INSTAGRAM_REPLY_PAGINATION_MAX_SECONDS=120
+SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED=false
+SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_CLICK_LIMIT=10
+SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_SCROLL_LIMIT=12
+SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_STALL_LIMIT=3
+SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_DEADLINE_SECONDS=45
+SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS=5000
 
 # Browser mode (false for visual debugging)
 SOCIAL_INSTAGRAM_COMMENTS_HEADLESS=true
@@ -136,6 +142,8 @@ Proxy behavior:
 - `SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS` is converted to whole minutes and clamped to Decodo's supported `1..1440` minute range.
 - `SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS` keeps highest precedence and bypasses all Decodo username shaping.
 - Sticky-session support in this change is intentionally comments-lane-only; posts-lane parity is a separate decision.
+- `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_LOAD_ALL_ENABLED=true` enables the opt-in `single_session_load_all` request strategy. It preserves API cursor pagination internally, falls back to bounded rendered post hydration only when needed, and forces profile comments runs to one shard by default.
+- The `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_RENDERED_*` and `SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS` values bound rendered hydration so a large post stops as retryable/incomplete instead of running unbounded.
 
 ---
 

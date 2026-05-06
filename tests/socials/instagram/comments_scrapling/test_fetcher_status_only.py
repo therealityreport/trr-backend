@@ -797,3 +797,97 @@ def test_coauthor_relay_prefers_authenticated_session_for_parent_comments() -> N
     assert posted_variables["media_id"] == "123"
     fetcher._fetch_public_relay_child_comments_for_status_only.assert_awaited_once()
     assert fetcher._fetch_public_relay_child_comments_for_status_only.await_args.kwargs["relay_is_logged_in"] is True
+
+
+def test_single_session_load_all_memory_guardrail_marks_retryable(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS", "1")
+    fetcher = _build_fetcher()
+    fetcher._fetch_json_response = AsyncMock(
+        return_value={
+            "payload": {
+                "comments": [{"id": "1"}, {"id": "2"}],
+                "has_more_comments": False,
+            },
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+        }
+    )
+    fetcher._parser.parse_comment = MagicMock(
+        side_effect=[_comment("api-1", text="first"), _comment("api-2", text="second")]
+    )
+    fetcher._fetch_rendered_single_session_load_all = AsyncMock(return_value=([], {}))
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "ABC123",
+            max_comments=0,
+            fetch_replies=False,
+            expected_comment_count=3,
+            load_strategy="single_session_load_all",
+        )
+    )
+
+    assert result.fetch_failed is True
+    assert result.retryable is True
+    assert result.fetch_reason == "memory_guardrail_reached"
+    assert [comment.comment_id for comment in result.comments] == ["api-1", "api-2"]
+    assert result.diagnostic_metadata["strategy_decision"]["selected_strategy"] == "single_session_load_all"
+    assert result.diagnostic_metadata["api_pages_loaded"] == 1
+    assert result.diagnostic_metadata["api_rows_seen"] == 2
+    assert result.diagnostic_metadata["memory_guardrail"] == {
+        "max_in_memory_rows": 1,
+        "current_rows": 2,
+        "reached": True,
+        "stop_reason": "memory_guardrail_reached",
+    }
+    fetcher._fetch_rendered_single_session_load_all.assert_not_awaited()
+
+
+def test_single_session_load_all_uses_rendered_hydration_only_after_api_gap(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_SINGLE_SESSION_MAX_IN_MEMORY_ROWS", "10")
+    fetcher = _build_fetcher()
+    fetcher._fetch_json_response = AsyncMock(
+        return_value={
+            "payload": {
+                "comments": [{"id": "1"}],
+                "has_more_comments": False,
+            },
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+        }
+    )
+    fetcher._parser.parse_comment = MagicMock(return_value=_comment("api-1", text="api"))
+    fetcher._fetch_rendered_comments_after_revealing_hidden = AsyncMock(return_value=[])
+    fetcher._fetch_rendered_single_session_load_all = AsyncMock(
+        return_value=(
+            [_comment("api-1", text="duplicate"), _comment("rendered-1", text="rendered")],
+            {"reason": "rendered_comments_found", "rendered_rows_seen": 2},
+        )
+    )
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "ABC123",
+            max_comments=0,
+            fetch_replies=False,
+            expected_comment_count=2,
+            load_strategy="single_session_load_all",
+        )
+    )
+
+    assert [comment.comment_id for comment in result.comments] == ["api-1", "rendered-1"]
+    assert result.fetch_failed is False
+    assert result.retryable is False
+    assert result.fetch_reason == "single_session_rendered_hydration_recovered"
+    assert result.diagnostic_metadata["fallback_trigger"] == "api_complete_expected_gap"
+    assert result.diagnostic_metadata["lane_order"] == ["cursor_api", "rendered_hydration"]
+    assert result.diagnostic_metadata["api_rows_seen"] == 1
+    assert result.diagnostic_metadata["rendered_load_attempts"] == 1
+    assert result.diagnostic_metadata["rendered_rows_seen"] == 2
+    assert result.diagnostic_metadata["rendered_merged_comments"] == 1
+    assert result.diagnostic_metadata["merged_comments"] == 2
+    fetcher._fetch_rendered_single_session_load_all.assert_awaited_once()

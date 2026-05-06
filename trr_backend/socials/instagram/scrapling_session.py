@@ -42,9 +42,15 @@ def scrapling_session_from_auth(
     *,
     browser_account_id: str | None,
 ) -> InstagramScraplingSession:
+    effective_browser_account_id = (
+        str(auth_session.session_account_id or "").strip()
+        or str(auth_session.browser_account_id or "").strip()
+        or str(browser_account_id or "").strip()
+        or None
+    )
     return InstagramScraplingSession(
         auth_session=auth_session,
-        browser_account_id=auth_session.browser_account_id or browser_account_id,
+        browser_account_id=effective_browser_account_id,
         cookies=cookies_to_scrapling(auth_session.cookies),
     )
 
