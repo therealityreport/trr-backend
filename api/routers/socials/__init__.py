@@ -75,6 +75,13 @@ def normalize_source_scope_param(value: str | None, *, default: str = "network")
     raise ValueError(f"Unsupported source scope: {value}")
 
 
+def preserve_source_scope_param(value: str | None, *, default: str = "network") -> str:
+    normalized = str(value or default).strip().lower() or default
+    if normalized in {"bravo", "network", "creator", "community", "news"}:
+        return normalized
+    raise ValueError(f"Unsupported source scope: {value}")
+
+
 class SourceScopedRequest(BaseModel):
     source_scope: SourceScopeParam = Field(default="network")
 
@@ -3459,10 +3466,15 @@ class CatalogResumeTailRequest(SourceScopedRequest):
     allow_inline_dev_fallback: bool = Field(default=False)
 
 
-class CatalogRemediateDriftRequest(SourceScopedRequest):
+class CatalogRemediateDriftRequest(BaseModel):
     run_id: UUID | None = None
     requeue_canary: bool = Field(default=False)
-    source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="network")
+    source_scope: Literal["bravo", "network", "creator", "community", "news"] = Field(default="bravo")
+
+    @model_validator(mode="after")
+    def normalize_source_scope(self) -> CatalogRemediateDriftRequest:
+        self.source_scope = preserve_source_scope_param(self.source_scope, default="bravo")  # type: ignore[assignment]
+        return self
 
 
 class ApifyBackfillRequest(BaseModel):
@@ -4212,6 +4224,7 @@ async def orchestrate_season_social_ingest(
 async def create_season_sync_session(
     season_id: UUID,
     payload: SeasonSocialIngestRequest,
+    request: Request,
     _: BackgroundTasks,
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
@@ -4224,6 +4237,13 @@ async def create_season_sync_session(
 
     sid = str(season_id)
     try:
+        raw_payload = await request.json()
+        raw_source_scope = raw_payload.get("source_scope") if isinstance(raw_payload, Mapping) else None
+        source_scope = (
+            preserve_source_scope_param(str(raw_source_scope), default=payload.source_scope)
+            if raw_source_scope is not None
+            else payload.source_scope
+        )
         queue_enabled = is_queue_enabled()
         remote_plane_enforced = is_remote_job_plane_enabled()
         blocked_platforms = _blocked_remote_only_platforms(payload.platforms)
@@ -4290,7 +4310,7 @@ async def create_season_sync_session(
                 ) from exc
         resolved_date_start, resolved_date_end, _ = _resolve_ingest_window(
             season_id=sid,
-            source_scope=payload.source_scope,
+            source_scope=source_scope,
             week_index=payload.week_index,
             timezone=payload.timezone,
             date_start=payload.date_start,
@@ -4299,12 +4319,13 @@ async def create_season_sync_session(
         if resolved_date_start is None or resolved_date_end is None:
             raise HTTPException(status_code=400, detail="date_start/date_end or week_index is required")
         config = payload.model_dump()
+        config["source_scope"] = source_scope
         config["date_start"] = resolved_date_start
         config["date_end"] = resolved_date_end
         result = await _run_admin_repo_call(
             create_sync_session,
             sid,
-            source_scope=payload.source_scope,
+            source_scope=source_scope,
             platforms=payload.platforms,
             date_start=resolved_date_start,
             date_end=resolved_date_end,
@@ -4986,7 +5007,7 @@ def get_instagram_profile_detail_route(
 def get_instagram_profile_relationships_route(
     account_handle: str,
     relationship_type: Literal["following"] = Query(default="following", alias="type"),
-    source_scope: str = Query(default="network"),
+    source_scope: str = Query(default="bravo"),
     page: int = Query(default=1, ge=1, le=10_000),
     page_size: int = Query(default=25, ge=1, le=100),
     _: InternalAdminUser = None,
@@ -4994,9 +5015,10 @@ def get_instagram_profile_relationships_route(
     from trr_backend.socials.instagram.profile_stages import get_instagram_profile_relationships
 
     try:
+        canonical_source_scope = preserve_source_scope_param(source_scope, default="bravo")
         return get_instagram_profile_relationships(
             account_handle=account_handle,
-            source_scope=source_scope,
+            source_scope=canonical_source_scope,
             relationship_type=relationship_type,
             page=page,
             page_size=page_size,
