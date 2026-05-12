@@ -68,7 +68,7 @@ def test_select_comments_proxy_decodo_browser_proxy_is_dict_with_raw_password(mo
     assert isinstance(config.browser_proxy, dict)
     assert config.browser_proxy["password"] == "z1Snjx5L3xT2ektx=B"  # literal =, no %3D
     assert config.browser_proxy["server"] == "http://gate.decodo.com:7000"
-    assert config.browser_proxy["username"] == "spq99jlvis"
+    assert config.browser_proxy["username"].startswith("spq99jlvis")
 
 
 def test_select_comments_proxy_api_url_has_encoded_credentials(monkeypatch) -> None:
@@ -114,6 +114,7 @@ def test_select_comments_proxy_returns_none_when_no_proxy_configured(monkeypatch
 def test_select_comments_proxy_adds_decodo_sticky_session_and_duration(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", "false")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
     monkeypatch.setenv("DECODO_USERNAME", "user-username")
@@ -132,7 +133,7 @@ def test_select_comments_proxy_adds_decodo_sticky_session_and_duration(monkeypat
     assert config.fingerprint == "gate.decodo.com:7000:decodo"
 
 
-def test_select_comments_proxy_shard_sessions_do_not_force_sticky_affinity(monkeypatch) -> None:
+def test_select_comments_proxy_defaults_to_base_decodo_credentials(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
@@ -143,10 +144,10 @@ def test_select_comments_proxy_shard_sessions_do_not_force_sticky_affinity(monke
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
 
     config = select_comments_proxy(session_key="thetraitorsus:comments:3")
-
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
     assert config.browser_proxy["username"] == "user-username"
+    assert "session-" not in config.api_proxy_url
     assert config.session_mode == "rotating"
 
 
@@ -168,6 +169,7 @@ def test_select_comments_proxy_ignores_sticky_env_for_explicit_proxy_urls(monkey
 def test_select_comments_proxy_clamps_invalid_or_large_ttl_to_supported_minutes(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", "false")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "999999")
     monkeypatch.setenv("DECODO_USERNAME", "user-username")
@@ -185,6 +187,7 @@ def test_select_comments_proxy_clamps_invalid_or_large_ttl_to_supported_minutes(
 def test_select_comments_proxy_fingerprint_stays_log_safe_under_sticky_mode(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", "false")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
     monkeypatch.setenv("DECODO_USERNAME", "user-username")
@@ -203,6 +206,7 @@ def test_select_comments_proxy_fingerprint_stays_log_safe_under_sticky_mode(monk
 def test_select_comments_proxy_preserves_preconfigured_sticky_username(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", "false")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
     monkeypatch.setenv("DECODO_USERNAME", "user-username-session-fixed123-sessionduration-30")
@@ -221,6 +225,7 @@ def test_resolve_comments_scrapling_session_reuses_instagram_auth_session(monkey
     fake_session = SimpleNamespace(
         cookies={"sessionid": "session-cookie", "csrftoken": "csrf-cookie"},
         browser_account_id="bravotv",
+        session_account_id=None,
     )
 
     monkeypatch.setattr(

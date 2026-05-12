@@ -856,9 +856,7 @@ def _resolution_attempt(
 
 def _graphql_doc_ids() -> list[str]:
     override = str(
-        os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_IDS")
-        or os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_ID")
-        or ""
+        os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_IDS") or os.getenv("INSTAGRAM_SHORTCODE_GRAPHQL_DOC_ID") or ""
     ).strip()
     ids: list[str] = []
     if override:

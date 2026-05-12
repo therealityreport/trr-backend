@@ -23,36 +23,36 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from trr_backend.socials.twitter.auth import has_cookie_auth
+from trr_backend.socials.twitter.diagnostics import classify_twitter_search_complete
 from trr_backend.socials.twitter.fallbacks import TwitterRuntimeState, build_fallback_chain
 from trr_backend.socials.twitter.graphql import classify_search_transport
+from trr_backend.socials.twitter.query import (
+    WHOLE_DAY_WINDOW_CONTRACT,
+    build_twitter_search_query,
+    normalize_twitter_search_window,
+)
 
 logger = logging.getLogger(__name__)
 
-ADVANCED_QUERY_HINT_RE = re.compile(
-    r'(^|\s)(from:|to:|since:|until:|filter:|-filter:)|\bOR\b|\bAND\b|[()"]',
-    re.IGNORECASE,
-)
 MEDIA_URL_EXTENSION_RE = re.compile(r"\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|m4v|mov|webm)(?:$|[?#])", re.IGNORECASE)
-WHOLE_DAY_WINDOW_CONTRACT = "whole_day"
-TWITTER_COMPLETE_STOP_REASONS = {"complete", "no_cursor", "no_tweet_entries", "older_than_window_repeated"}
 
 
-def normalize_twitter_search_window(date_start: datetime, date_end: datetime) -> tuple[datetime, datetime]:
-    """Normalize the public Twitter search contract to whole-day bounds."""
-    start_day = date_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_day_exclusive = date_end.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    return start_day, end_day_exclusive
-
-
-def classify_twitter_search_complete(
-    *,
-    stop_reason: str | None,
-    retryable: bool = False,
-    error_code: str | None = None,
-) -> bool:
-    if retryable or error_code:
+def _is_search_timeline_response_url(response_url: str) -> bool:
+    normalized = str(response_url or "")
+    if "SearchTimeline" not in normalized:
         return False
-    return str(stop_reason or "").strip() in TWITTER_COMPLETE_STOP_REASONS
+    parsed = urlparse(normalized)
+    path = parsed.path or ""
+    if path.endswith("/SearchTimeline") or "/SearchTimeline/" in path:
+        return True
+    return "/graphql/" in path and path.rsplit("/", 1)[-1] == "SearchTimeline"
+
+
+def _normalize_int_meta(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass
@@ -98,28 +98,10 @@ class TwitterScrapeConfig:
 
     def build_search_query(self) -> str:
         """Build Twitter advanced search query string."""
-        parts = []
-
-        normalized_query = self.query.strip()
-
-        # Add the main query (supports raw advanced query passthrough).
-        if ADVANCED_QUERY_HINT_RE.search(normalized_query):
-            parts.append(normalized_query)
-        elif normalized_query.startswith("#") or normalized_query.startswith("@"):
-            parts.append(normalized_query)
-        else:
-            # Search for exact phrase or hashtag
-            parts.append(f'"{normalized_query}" OR #{normalized_query}')
-
-        # Add date filters
-        parts.append(f"since:{self.date_start.strftime('%Y-%m-%d')}")
-        parts.append(f"until:{self.date_end.strftime('%Y-%m-%d')}")
-
         # Note: -filter:replies and -filter:links operators cause 404 errors
         # from Twitter's current API. Skip them; replies/links are filtered
         # client-side when needed.
-
-        return " ".join(parts)
+        return build_twitter_search_query(self.query, self.date_start, self.date_end)
 
 
 @dataclass
@@ -152,6 +134,12 @@ class Tweet:
     user_id: str | None = None
     user_profile_url: str | None = None
     user_avatar_url: str | None = None
+    bookmarks: int = 0
+    shares: int = 0
+    thread_root_tweet_id: str | None = None
+    thread_position: int | None = None
+    is_thread_part: bool = False
+    twitter_context_role: str | None = None
 
     # Optional tracking metadata
     show_id: int | None = None
@@ -368,6 +356,7 @@ class TwitterScraper:
         self._quote_search_timeline_unavailable = False
         self._last_twikit_search_error: str | None = None
         self._last_playwright_search_error: str | None = None
+        self._last_playwright_search_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self._last_transport = "requests"
         self._fallback_chain: list[str] = []
@@ -418,6 +407,20 @@ class TwitterScraper:
         self.last_quote_fetch_reason = normalized
         if self._is_auth_related_failure(normalized):
             self.comments_auth_failed = True
+
+    @staticmethod
+    def _resolve_playwright_search_page_budget(config: TwitterScrapeConfig) -> int:
+        if config.max_pages:
+            return max(1, int(config.max_pages))
+        raw_budget = (
+            os.getenv("SOCIAL_TWITTER_PLAYWRIGHT_SEARCH_MAX_PAGES")
+            or os.getenv("SOCIAL_TWITTER_PLAYWRIGHT_MAX_PAGES")
+            or "30"
+        )
+        try:
+            return max(1, min(int(raw_budget), 80))
+        except (TypeError, ValueError):
+            return 30
 
     def _create_session(self) -> requests.Session:
         """Create a session with retry logic."""
@@ -1255,6 +1258,17 @@ class TwitterScraper:
         # Get engagement metrics
         views_data = result.get("views", {})
         views = int(views_data.get("count", 0)) if views_data.get("count") else 0
+        try:
+            retweets_count = int(tweet.get("retweet_count", 0) or 0)
+        except (TypeError, ValueError):
+            retweets_count = 0
+        try:
+            bookmarks_count = int(tweet.get("bookmark_count", 0) or 0)
+        except (TypeError, ValueError):
+            bookmarks_count = 0
+        thread_root_tweet_id = self._normalize_optional_tweet_id(
+            tweet.get("conversation_id_str") or tweet.get("conversation_id") or tweet_id
+        )
 
         text = self._strip_media_url_text(
             text=str(tweet.get("full_text", "") or tweet.get("text", "")),
@@ -1272,7 +1286,7 @@ class TwitterScraper:
             hashtags=self._extract_hashtags(text),
             mentions=self._extract_mentions(text),
             likes=tweet.get("favorite_count", 0),
-            retweets=tweet.get("retweet_count", 0),
+            retweets=retweets_count,
             replies=tweet.get("reply_count", 0),
             quotes=tweet.get("quote_count", 0),
             views=views,
@@ -1290,6 +1304,10 @@ class TwitterScraper:
             user_id=user_id,
             user_profile_url=user_profile_url,
             user_avatar_url=user_avatar_url,
+            bookmarks=bookmarks_count,
+            shares=retweets_count,
+            thread_root_tweet_id=thread_root_tweet_id,
+            is_thread_part=bool(thread_root_tweet_id and thread_root_tweet_id != tweet_id),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -1331,6 +1349,17 @@ class TwitterScraper:
             tweet_data.get("quoted_status_id_str") or tweet_data.get("quoted_status_id")
         )
         is_quote = bool(tweet_data.get("quoted_status") or tweet_data.get("is_quote_status") or quoted_tweet_id)
+        try:
+            retweets_count = int(tweet_data.get("retweet_count", 0) or 0)
+        except (TypeError, ValueError):
+            retweets_count = 0
+        try:
+            bookmarks_count = int(tweet_data.get("bookmark_count", 0) or 0)
+        except (TypeError, ValueError):
+            bookmarks_count = 0
+        thread_root_tweet_id = self._normalize_optional_tweet_id(
+            tweet_data.get("conversation_id_str") or tweet_data.get("conversation_id") or tweet_id
+        )
 
         return Tweet(
             tweet_id=tweet_id,
@@ -1340,7 +1369,7 @@ class TwitterScraper:
             hashtags=self._extract_hashtags(text),
             mentions=self._extract_mentions(text),
             likes=tweet_data.get("favorite_count", 0),
-            retweets=tweet_data.get("retweet_count", 0),
+            retweets=retweets_count,
             replies=tweet_data.get("reply_count", 0),
             quotes=tweet_data.get("quote_count", 0),
             views=0,
@@ -1358,6 +1387,10 @@ class TwitterScraper:
             user_id=user_id,
             user_profile_url=user_profile_url,
             user_avatar_url=user_avatar_url,
+            bookmarks=bookmarks_count,
+            shares=retweets_count,
+            thread_root_tweet_id=thread_root_tweet_id,
+            is_thread_part=bool(thread_root_tweet_id and thread_root_tweet_id != tweet_id),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -1434,6 +1467,14 @@ class TwitterScraper:
             or raw_data.get("retweeted_tweet_result")
             or str(getattr(raw_tweet, "retweeted_tweet_id", "") or "").strip()
         )
+        retweets_count = _as_int(getattr(raw_tweet, "retweet_count", 0) or legacy.get("retweet_count"))
+        thread_root_tweet_id = self._normalize_optional_tweet_id(
+            legacy.get("conversation_id_str")
+            or legacy.get("conversation_id")
+            or raw_data.get("conversation_id_str")
+            or raw_data.get("conversation_id")
+            or tweet_id
+        )
 
         return Tweet(
             tweet_id=tweet_id,
@@ -1443,7 +1484,7 @@ class TwitterScraper:
             hashtags=self._extract_hashtags(text),
             mentions=self._extract_mentions(text),
             likes=_as_int(getattr(raw_tweet, "favorite_count", 0) or legacy.get("favorite_count")),
-            retweets=_as_int(getattr(raw_tweet, "retweet_count", 0) or legacy.get("retweet_count")),
+            retweets=retweets_count,
             replies=_as_int(getattr(raw_tweet, "reply_count", 0) or legacy.get("reply_count")),
             quotes=_as_int(getattr(raw_tweet, "quote_count", 0) or legacy.get("quote_count")),
             views=_as_int(getattr(raw_tweet, "view_count", 0) or views_data.get("count")),
@@ -1469,6 +1510,10 @@ class TwitterScraper:
             )
             if user
             else None,
+            bookmarks=_as_int(getattr(raw_tweet, "bookmark_count", 0) or legacy.get("bookmark_count")),
+            shares=retweets_count,
+            thread_root_tweet_id=thread_root_tweet_id,
+            is_thread_part=bool(thread_root_tweet_id and thread_root_tweet_id != tweet_id),
             show_id=config.show_id,
             season_number=config.season_number,
             person_id=config.person_id,
@@ -1693,20 +1738,30 @@ class TwitterScraper:
         max_pages: int = 5,
         delay: float = 0.5,
     ) -> list[Tweet]:
+        page_budget = max(1, int(max_pages or 1))
         auth_token = str(self.cookies.get("auth_token") or "").strip()
         csrf_token = str(self.cookies.get("ct0") or "").strip()
         self._last_playwright_search_error = None
+        self._last_playwright_search_meta = {
+            "page_budget": page_budget,
+            "payloads_captured": 0,
+            "scrolls_performed": 0,
+            "stop_reason": None,
+        }
         if not auth_token or not csrf_token:
             self._last_playwright_search_error = "playwright_missing_auth_cookie"
+            self._last_playwright_search_meta["stop_reason"] = "playwright_missing_auth_cookie"
             return []
 
         try:
             from playwright.async_api import async_playwright
         except Exception:
             self._last_playwright_search_error = "playwright_unavailable"
+            self._last_playwright_search_meta["stop_reason"] = "playwright_unavailable"
             return []
 
         payloads: list[dict[str, Any]] = []
+        capture_meta = dict(self._last_playwright_search_meta)
 
         async def _capture_payloads() -> list[dict[str, Any]]:
             async with async_playwright() as playwright:
@@ -1745,7 +1800,7 @@ class TwitterScraper:
 
                 async def _on_response(response: Any) -> None:
                     response_url = str(response.url or "")
-                    if "/SearchTimeline?" not in response_url:
+                    if not _is_search_timeline_response_url(response_url):
                         return
                     if int(response.status) != 200:
                         return
@@ -1757,30 +1812,41 @@ class TwitterScraper:
                         payloads.append(response_payload)
 
                 page.on("response", _on_response)
-                await page.goto(
-                    f"https://x.com/search?q={quote(query, safe='')}&src=typed_query&f=live",
-                    wait_until="domcontentloaded",
-                    timeout=45000,
-                )
-                await page.wait_for_timeout(4000)
-
-                max_scrolls = max(8, min(max_pages * 6, 80))
+                search_url = f"https://x.com/search?q={quote(query, safe='')}&src=typed_query&f=live"
+                max_scrolls = max(8, min(page_budget * 6, 240))
                 wait_ms = max(int(delay * 1000), 1200)
-                stagnant_cycles = 0
-                payload_count = len(payloads)
-                for _ in range(max_scrolls):
-                    await page.keyboard.press("End")
-                    await page.mouse.wheel(0, 12000)
-                    await page.wait_for_timeout(wait_ms)
-                    if len(payloads) == payload_count:
-                        stagnant_cycles += 1
-                    else:
-                        stagnant_cycles = 0
-                        payload_count = len(payloads)
-                    if len(payloads) >= max_pages and stagnant_cycles >= 3:
-                        break
-                    if stagnant_cycles >= 10:
-                        break
+
+                async def _scroll_search_results() -> None:
+                    stagnant_cycles = 0
+                    payload_count = len(payloads)
+                    capture_meta["stop_reason"] = "playwright_scroll_budget_reached"
+                    for _scroll_index in range(max_scrolls):
+                        capture_meta["scrolls_performed"] = int(capture_meta.get("scrolls_performed") or 0) + 1
+                        await page.keyboard.press("End")
+                        await page.mouse.wheel(0, 12000)
+                        await page.wait_for_timeout(wait_ms)
+                        if len(payloads) == payload_count:
+                            stagnant_cycles += 1
+                        else:
+                            stagnant_cycles = 0
+                            payload_count = len(payloads)
+                        if len(payloads) >= page_budget and stagnant_cycles >= 3:
+                            capture_meta["stop_reason"] = "playwright_payload_budget_reached"
+                            break
+                        if stagnant_cycles >= 10:
+                            capture_meta["stop_reason"] = "playwright_no_more_payloads"
+                            break
+
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(4000)
+                await _scroll_search_results()
+                if not payloads:
+                    capture_meta["payload_retry_performed"] = True
+                    capture_meta["stop_reason"] = "playwright_no_search_payload_retry"
+                    await page.reload(wait_until="domcontentloaded", timeout=45000)
+                    await page.wait_for_timeout(4000)
+                    await _scroll_search_results()
+                capture_meta["payloads_captured"] = len(payloads)
 
                 await page.close()
                 await context.close()
@@ -1802,10 +1868,22 @@ class TwitterScraper:
         except Exception:
             logger.error("Playwright search fallback failed for query=%s", query, exc_info=True)
             self._last_playwright_search_error = "playwright_error"
+            self._last_playwright_search_meta = {
+                **capture_meta,
+                "payloads_captured": len(payloads),
+                "page_budget": page_budget,
+                "stop_reason": "playwright_error",
+            }
             return []
 
+        self._last_playwright_search_meta = {
+            **capture_meta,
+            "payloads_captured": len(captured_payloads),
+            "page_budget": page_budget,
+        }
         if not captured_payloads:
             self._last_playwright_search_error = "playwright_no_search_payload"
+            self._last_playwright_search_meta["stop_reason"] = "playwright_no_search_payload"
             return []
 
         tweets: list[Tweet] = []
@@ -1838,6 +1916,7 @@ class TwitterScraper:
 
         if not tweets:
             self._last_playwright_search_error = "playwright_no_tweet_entries"
+            self._last_playwright_search_meta["stop_reason"] = "playwright_no_tweet_entries"
         return tweets
 
     def _scrape_via_twikit(self, config: TwitterScrapeConfig) -> list[Tweet]:
@@ -1971,6 +2050,8 @@ class TwitterScraper:
                         )
                         if t.user
                         else None,
+                        bookmarks=int(getattr(t, "bookmark_count", 0) or 0),
+                        shares=int(t.retweet_count or 0),
                         show_id=config.show_id,
                         season_number=config.season_number,
                         person_id=config.person_id,
@@ -2092,6 +2173,61 @@ class TwitterScraper:
                     flags.append(name)
         return list(dict.fromkeys(flags))
 
+    def _extract_replies_from_tweet_detail_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        tweet_id: str,
+        seen_ids: set[str],
+    ) -> tuple[list[Tweet], str | None]:
+        instructions = (
+            payload.get("data", {}).get("threaded_conversation_with_injections_v2", {}).get("instructions", [])
+        )
+        replies: list[Tweet] = []
+        next_cursor: str | None = None
+        config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
+
+        def _append_reply(tweet_result: Any) -> None:
+            if not isinstance(tweet_result, dict) or not tweet_result:
+                return
+            tweet = self._parse_tweet_result(tweet_result, config)
+            if not tweet or tweet.tweet_id == tweet_id:
+                return
+            if tweet.is_quote:
+                return
+            reply_to_id = str(tweet.reply_to_tweet_id or "").strip()
+            thread_root_id = str(tweet.thread_root_tweet_id or "").strip()
+            if not reply_to_id and thread_root_id != tweet_id:
+                return
+            if tweet.tweet_id in seen_ids:
+                return
+            seen_ids.add(tweet.tweet_id)
+            replies.append(tweet)
+
+        for instruction in instructions:
+            if instruction.get("type") != "TimelineAddEntries":
+                continue
+            for entry in instruction.get("entries", []):
+                entry_id = str(entry.get("entryId") or "")
+                content = entry.get("content", {}) if isinstance(entry.get("content"), dict) else {}
+                if entry_id.startswith("cursor-bottom-") or content.get("cursorType") == "Bottom":
+                    cursor_value = str(content.get("value") or "").strip()
+                    if cursor_value:
+                        next_cursor = cursor_value
+                    continue
+                if entry_id.startswith("conversationthread-"):
+                    for item in content.get("items", []) or []:
+                        tweet_result = (
+                            item.get("item", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                        )
+                        _append_reply(tweet_result)
+                    continue
+                if entry_id.startswith("tweet-"):
+                    tweet_result = content.get("itemContent", {}).get("tweet_results", {}).get("result", {})
+                    _append_reply(tweet_result)
+
+        return replies, next_cursor
+
     def fetch_tweet_replies(
         self,
         tweet_id: str,
@@ -2099,6 +2235,7 @@ class TwitterScraper:
         *,
         search_max_pages: int = 20,
         twikit_max_pages: int = 5,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[Tweet]:
         """Fetch replies to a specific tweet."""
         import json
@@ -2112,7 +2249,6 @@ class TwitterScraper:
         variables = {
             "focalTweetId": tweet_id,
             "with_rux_injections": False,
-            "rankingMode": "Relevance",
             "includePromotedContent": False,
             "withCommunity": True,
             "withQuickPromoteEligibilityTweetFields": True,
@@ -2123,10 +2259,23 @@ class TwitterScraper:
         features = dict(self.FEATURES)
         features.update(self.TWEET_DETAIL_FEATURE_OVERRIDES)
         headers = self._get_headers()
+        max_detail_pages = max(1, int(search_max_pages or 1))
+        ranking_modes = ["Relevance"]
+        if max_detail_pages > 5:
+            ranking_modes.append("Recency")
 
-        def _request(detail_features: dict[str, bool]) -> requests.Response:
+        def _request(
+            detail_features: dict[str, bool],
+            *,
+            ranking_mode: str,
+            cursor: str | None = None,
+        ) -> requests.Response:
+            request_variables = dict(variables)
+            request_variables["rankingMode"] = ranking_mode
+            if cursor:
+                request_variables["cursor"] = cursor
             params = {
-                "variables": json.dumps(variables),
+                "variables": json.dumps(request_variables),
                 "features": json.dumps(detail_features),
             }
             url = f"{self._tweet_detail_url}?{urllib.parse.urlencode(params)}"
@@ -2137,24 +2286,95 @@ class TwitterScraper:
                 timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
 
+        replies: list[Tweet] = []
+        seen_ids: set[str] = set()
+        detail_page_count = 0
+
+        def _emit_reply_progress(
+            *,
+            phase: str,
+            pages_scanned: int,
+            page_replies: int = 0,
+            ranking_mode: str | None = None,
+        ) -> None:
+            if progress_callback is None:
+                return
+            try:
+                payload: dict[str, Any] = {
+                    "phase": phase,
+                    "pages_scanned": max(0, int(pages_scanned)),
+                    "comments_fetched": len(replies),
+                    "page_comments_fetched": max(0, int(page_replies)),
+                    "tweet_id": str(tweet_id or "").strip(),
+                }
+                if ranking_mode:
+                    payload["ranking_mode"] = ranking_mode
+                progress_callback(payload)
+            except Exception:
+                logger.debug("Twitter reply progress callback raised", exc_info=True)
+
         try:
-            response = _request(features)
-            if response.status_code == 404:
-                # Hashes rotate frequently; force one rediscovery and retry.
-                self._detail_hash = None
-                self._discover_graphql_hashes()
-                response = _request(features)
-            if response.status_code == 400:
-                # Twitter frequently adds required flags. Auto-apply once when signaled.
-                missing_flags = self._extract_required_feature_flags(response)
-                if missing_flags:
-                    logger.info("TweetDetail requires %d additional feature flags; retrying", len(missing_flags))
-                    for flag in missing_flags:
-                        features[flag] = False
-                    response = _request(features)
-            self._track_response_status(response.status_code)
-            response.raise_for_status()
-            data = response.json()
+            for ranking_mode in ranking_modes:
+                next_cursor: str | None = None
+                ranking_page_count = 0
+                stagnant_pages = 0
+                while True:
+                    detail_page_count += 1
+                    ranking_page_count += 1
+                    if detail_page_count > 1:
+                        self._rate_limit(delay)
+                    response = _request(features, ranking_mode=ranking_mode, cursor=next_cursor)
+                    if response.status_code == 404:
+                        # Hashes rotate frequently; force one rediscovery and retry.
+                        self._detail_hash = None
+                        self._discover_graphql_hashes()
+                        response = _request(features, ranking_mode=ranking_mode, cursor=next_cursor)
+                    if response.status_code == 400:
+                        # Twitter frequently adds required flags. Auto-apply once when signaled.
+                        missing_flags = self._extract_required_feature_flags(response)
+                        if missing_flags:
+                            logger.info(
+                                "TweetDetail requires %d additional feature flags; retrying",
+                                len(missing_flags),
+                            )
+                            for flag in missing_flags:
+                                features[flag] = False
+                            response = _request(features, ranking_mode=ranking_mode, cursor=next_cursor)
+                    self._track_response_status(response.status_code)
+                    response.raise_for_status()
+                    data = response.json()
+                    if not isinstance(data, dict):
+                        self._set_reply_failure_reason("parse_error")
+                        break
+                    if data.get("errors"):
+                        self._set_reply_failure_reason("api_errors")
+
+                    before_count = len(replies)
+                    page_replies, cursor = self._extract_replies_from_tweet_detail_payload(
+                        payload=data,
+                        tweet_id=tweet_id,
+                        seen_ids=seen_ids,
+                    )
+                    replies.extend(page_replies)
+                    _emit_reply_progress(
+                        phase=f"tweet_detail_{ranking_mode.lower()}_replies_page",
+                        pages_scanned=detail_page_count,
+                        page_replies=len(page_replies),
+                        ranking_mode=ranking_mode,
+                    )
+                    if len(replies) == before_count:
+                        stagnant_pages += 1
+                    else:
+                        stagnant_pages = 0
+                    if not cursor:
+                        break
+                    next_cursor = cursor
+                    if ranking_page_count >= max_detail_pages:
+                        self._set_reply_failure_reason("tweet_detail_max_pages_reached")
+                        break
+                    if stagnant_pages >= 3:
+                        self._set_reply_failure_reason("tweet_detail_stagnant_cursor")
+                        break
         except requests.exceptions.RequestException as e:
             status_code = getattr(getattr(e, "response", None), "status_code", None)
             if status_code is not None:
@@ -2163,6 +2383,12 @@ class TwitterScraper:
             else:
                 self._set_reply_failure_reason("request_error")
             logger.error(f"Tweet detail request failed: {e}")
+            if replies:
+                _emit_reply_progress(
+                    phase="tweet_detail_replies_partial",
+                    pages_scanned=detail_page_count,
+                )
+                return replies
             fallback_replies = self._fetch_tweet_replies_via_search(
                 tweet_id=tweet_id,
                 delay=delay,
@@ -2177,8 +2403,12 @@ class TwitterScraper:
             if fallback_replies:
                 self.last_reply_fetch_reason = None
             return fallback_replies
-        if not isinstance(data, dict):
-            self._set_reply_failure_reason("parse_error")
+
+        if replies:
+            return replies
+
+        fallback_replies = []
+        if self.last_reply_fetch_reason == "parse_error":
             fallback_replies = self._fetch_tweet_replies_via_search(
                 tweet_id=tweet_id,
                 delay=delay,
@@ -2193,35 +2423,8 @@ class TwitterScraper:
             if fallback_replies:
                 self.last_reply_fetch_reason = None
             return fallback_replies
-        if data.get("errors"):
-            self._set_reply_failure_reason("api_errors")
 
-        # Parse replies from response
-        replies = []
-        instructions = data.get("data", {}).get("threaded_conversation_with_injections_v2", {}).get("instructions", [])
-
-        for instruction in instructions:
-            if instruction.get("type") != "TimelineAddEntries":
-                continue
-
-            for entry in instruction.get("entries", []):
-                # Skip the focal tweet and cursor entries
-                if not entry.get("entryId", "").startswith("conversationthread-"):
-                    continue
-
-                items = entry.get("content", {}).get("items", [])
-                for item in items:
-                    tweet_result = (
-                        item.get("item", {}).get("itemContent", {}).get("tweet_results", {}).get("result", {})
-                    )
-                    if tweet_result:
-                        config = TwitterScrapeConfig(query="", date_start=datetime.now(), date_end=datetime.now())
-                        tweet = self._parse_tweet_result(tweet_result, config)
-                        if tweet and tweet.tweet_id != tweet_id:
-                            replies.append(tweet)
-
-        # Always supplement with SearchTimeline results for better coverage
-        seen_ids = {r.tweet_id for r in replies}
+        # Supplement with SearchTimeline results when TweetDetail has no usable reply entries.
         try:
             search_replies = self._fetch_tweet_replies_via_search(
                 tweet_id=tweet_id,
@@ -2489,8 +2692,39 @@ class TwitterScraper:
                 quotes.append(tweet)
         return quotes, next_cursor
 
+    def _emit_quote_fetch_progress(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        *,
+        phase: str,
+        tweet_id: str,
+        pages_scanned: int,
+        quotes_fetched: int = 0,
+        page_quotes_fetched: int = 0,
+        **extra: Any,
+    ) -> None:
+        if progress_callback is None:
+            return
+        try:
+            payload: dict[str, Any] = {
+                "phase": phase,
+                "pages_scanned": max(0, int(pages_scanned)),
+                "quotes_fetched": max(0, int(quotes_fetched)),
+                "page_quotes_fetched": max(0, int(page_quotes_fetched)),
+                "tweet_id": str(tweet_id or "").strip(),
+            }
+            payload.update(extra)
+            progress_callback(payload)
+        except Exception:
+            logger.debug("Twitter quote progress callback raised", exc_info=True)
+
     def _fetch_tweet_quotes_via_playwright(
-        self, *, tweet_id: str, max_pages: int = 5, delay: float = 0.5
+        self,
+        *,
+        tweet_id: str,
+        max_pages: int = 5,
+        delay: float = 0.5,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[Tweet]:
         auth_token = str(self.cookies.get("auth_token") or "").strip()
         csrf_token = str(self.cookies.get("ct0") or "").strip()
@@ -2545,7 +2779,7 @@ class TwitterScraper:
 
                 async def _on_response(response: Any) -> None:
                     response_url = str(response.url or "")
-                    if "/SearchTimeline?" not in response_url:
+                    if not _is_search_timeline_response_url(response_url):
                         return
                     if encoded_marker not in response_url and raw_marker not in response_url:
                         return
@@ -2566,11 +2800,11 @@ class TwitterScraper:
                 )
                 await page.wait_for_timeout(4000)
 
-                max_scrolls = max(8, min(max_pages * 6, 80))
+                max_scrolls = max(8, min(max_pages * 6, 240))
                 wait_ms = max(int(delay * 1000), 1200)
                 stagnant_cycles = 0
                 payload_count = len(payloads)
-                for _ in range(max_scrolls):
+                for scroll_index in range(1, max_scrolls + 1):
                     await page.keyboard.press("End")
                     await page.mouse.wheel(0, 12000)
                     await page.wait_for_timeout(wait_ms)
@@ -2583,6 +2817,16 @@ class TwitterScraper:
                         break
                     if stagnant_cycles >= 10:
                         break
+                    if scroll_index == 1 or scroll_index % 5 == 0 or len(payloads) != payload_count:
+                        self._emit_quote_fetch_progress(
+                            progress_callback,
+                            phase="playwright_quote_scroll",
+                            tweet_id=tweet_id,
+                            pages_scanned=scroll_index,
+                            quotes_fetched=0,
+                            payloads_captured=len(payloads),
+                            stagnant_cycles=stagnant_cycles,
+                        )
 
                 await page.close()
                 await context.close()
@@ -2624,7 +2868,14 @@ class TwitterScraper:
             self._set_quote_failure_reason("playwright_no_quote_entries")
         return quotes
 
-    def _fetch_tweet_quotes_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 5) -> list[Tweet]:
+    def _fetch_tweet_quotes_via_search(
+        self,
+        *,
+        tweet_id: str,
+        delay: float,
+        max_pages: int = 5,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[Tweet]:
         """Fetch quote tweets using SearchTimeline with quoted_tweet_id operator."""
         if self._quote_search_timeline_unavailable:
             self._set_quote_failure_reason("http_404")
@@ -2705,6 +2956,14 @@ class TwitterScraper:
             )
             quotes.extend(page_quotes)
             page_count = len(page_quotes)
+            self._emit_quote_fetch_progress(
+                progress_callback,
+                phase="quote_search_page",
+                tweet_id=tweet_id,
+                pages_scanned=page_num,
+                quotes_fetched=len(quotes),
+                page_quotes_fetched=page_count,
+            )
 
             if not next_cursor:
                 break
@@ -2713,7 +2972,13 @@ class TwitterScraper:
             cursor = next_cursor
         return quotes
 
-    def fetch_tweet_quotes(self, tweet_id: str, delay: float = 2.0, max_pages: int = 5) -> list[Tweet]:
+    def fetch_tweet_quotes(
+        self,
+        tweet_id: str,
+        delay: float = 2.0,
+        max_pages: int = 5,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[Tweet]:
         """Fetch quote tweets for a specific root tweet."""
         self.last_quote_fetch_reason = None
         attempts: list[dict[str, Any]] = []
@@ -2739,7 +3004,12 @@ class TwitterScraper:
 
         # Primary: SearchTimeline with quoted_tweet_id (has pagination, finds all quote types).
         self.last_quote_fetch_reason = None
-        search_quotes = self._fetch_tweet_quotes_via_search(tweet_id=tweet_id, delay=delay, max_pages=max_pages)
+        search_quotes = self._fetch_tweet_quotes_via_search(
+            tweet_id=tweet_id,
+            delay=delay,
+            max_pages=max_pages,
+            progress_callback=progress_callback,
+        )
         search_reason = None if search_quotes else self.last_quote_fetch_reason
         _record_attempt("search_timeline", count=len(search_quotes), failure_reason=search_reason)
         if search_quotes:
@@ -2788,6 +3058,7 @@ class TwitterScraper:
             tweet_id=tweet_id,
             max_pages=max_pages,
             delay=max(delay, 0.2),
+            progress_callback=progress_callback,
         )
         playwright_reason = None if playwright_quotes else self.last_quote_fetch_reason
         _record_attempt("playwright", count=len(playwright_quotes), failure_reason=playwright_reason)
@@ -3057,7 +3328,7 @@ class TwitterScraper:
                 playwright_tweets = self._fetch_search_via_playwright(
                     query=search_query,
                     config=config,
-                    max_pages=config.max_pages or 5,
+                    max_pages=self._resolve_playwright_search_page_budget(config),
                     delay=max(config.delay_seconds, 0.2),
                 )
                 playwright_checked_total = len(playwright_tweets)
@@ -3069,6 +3340,9 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "playwright"
+                    playwright_stop_reason = str(
+                        (self._last_playwright_search_meta or {}).get("stop_reason") or ""
+                    ).strip()
                     self._emit_progress(
                         progress_cb,
                         phase="scrape_playwright_fallback",
@@ -3076,6 +3350,12 @@ class TwitterScraper:
                         posts_checked=posts_checked_total,
                         matched_posts=len(tweets),
                     )
+                else:
+                    playwright_stop_reason = str(
+                        (self._last_playwright_search_meta or {}).get("stop_reason") or ""
+                    ).strip()
+                if playwright_stop_reason:
+                    stop_reason = playwright_stop_reason
         elif graphql_failed and not tweets:
             fallback_triggered = True
             if self._twikit_credentials:
@@ -3107,7 +3387,7 @@ class TwitterScraper:
                 playwright_tweets = self._fetch_search_via_playwright(
                     query=search_query,
                     config=config,
-                    max_pages=config.max_pages or 5,
+                    max_pages=self._resolve_playwright_search_page_budget(config),
                     delay=max(config.delay_seconds, 0.2),
                 )
                 playwright_checked_total = len(playwright_tweets)
@@ -3119,6 +3399,9 @@ class TwitterScraper:
                 )
                 if tweets:
                     retrieval_mode = "playwright"
+                    playwright_stop_reason = str(
+                        (self._last_playwright_search_meta or {}).get("stop_reason") or ""
+                    ).strip()
                     self._emit_progress(
                         progress_cb,
                         phase="scrape_playwright_fallback",
@@ -3126,6 +3409,12 @@ class TwitterScraper:
                         posts_checked=posts_checked_total,
                         matched_posts=len(tweets),
                     )
+                else:
+                    playwright_stop_reason = str(
+                        (self._last_playwright_search_meta or {}).get("stop_reason") or ""
+                    ).strip()
+                if playwright_stop_reason:
+                    stop_reason = playwright_stop_reason
             if not tweets and not self._twikit_credentials:
                 logger.warning(
                     "Twitter requires authentication for search. "
@@ -3135,15 +3424,21 @@ class TwitterScraper:
 
         twikit_failure_reason = str(self._last_twikit_search_error or "").strip() or None
         playwright_failure_reason = str(self._last_playwright_search_error or "").strip() or None
-        fallback_exhausted = not tweets and bool(graphql_failed or twikit_failure_reason or playwright_failure_reason)
-        retryable = graphql_failed and not tweets
+        playwright_empty_result = playwright_failure_reason == "playwright_no_tweet_entries"
+        fallback_exhausted = (
+            not tweets
+            and not playwright_empty_result
+            and bool(graphql_failed or twikit_failure_reason or playwright_failure_reason)
+        )
+        retryable = graphql_failed and not tweets and not playwright_empty_result
         error_code = "twitter_search_fallback_exhausted" if retryable else None
         complete = classify_twitter_search_complete(
             stop_reason=stop_reason,
             retryable=retryable,
             error_code=error_code,
         )
-        runtime_stop_reason = "complete" if tweets and retrieval_mode != "graphql" else stop_reason
+        runtime_complete = complete or (bool(tweets) and retrieval_mode not in {"graphql", "playwright"})
+        runtime_stop_reason = "complete" if tweets and retrieval_mode != "graphql" and runtime_complete else stop_reason
         self._runtime_state = TwitterRuntimeState(
             request_count=int(getattr(self, "_request_count", 0) or 0),
             transport=classify_search_transport(retrieval_mode),
@@ -3153,7 +3448,7 @@ class TwitterScraper:
             ),
             stop_reason=runtime_stop_reason,
             retryable=retryable,
-            complete=complete or bool(tweets),
+            complete=runtime_complete,
         )
 
         logger.info("Search complete: found %d tweets (%d checked)", len(tweets), posts_checked_total)
@@ -3191,6 +3486,15 @@ class TwitterScraper:
             "twikit_checked": twikit_checked_total,
             "syndication_checked": syndication_checked_total,
             "playwright_checked": playwright_checked_total,
+            "playwright_page_budget": _normalize_int_meta((self._last_playwright_search_meta or {}).get("page_budget")),
+            "playwright_payloads_captured": _normalize_int_meta(
+                (self._last_playwright_search_meta or {}).get("payloads_captured")
+            ),
+            "playwright_scrolls_performed": _normalize_int_meta(
+                (self._last_playwright_search_meta or {}).get("scrolls_performed")
+            ),
+            "playwright_stop_reason": str((self._last_playwright_search_meta or {}).get("stop_reason") or "").strip()
+            or None,
             "complete": complete,
         }
         if fallback_exhausted and error_code:

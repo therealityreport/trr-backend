@@ -796,9 +796,7 @@ def _get_show_assets_impl(
         str(source).strip().lower() for source in (sources or []) if isinstance(source, str) and source.strip()
     }
     source_fetch_limit = (
-        ASSET_FULL_FETCH_LIMIT
-        if full
-        else (ASSET_QUERY_LIMIT + 1 if normalized_sources else fetch_limit)
+        ASSET_FULL_FETCH_LIMIT if full else (ASSET_QUERY_LIMIT + 1 if normalized_sources else fetch_limit)
     )
     assets: list[dict[str, Any]] = []
     hosted_url_seen: set[str] = set()
@@ -1007,9 +1005,7 @@ def _get_show_season_assets_impl(
         str(source).strip().lower() for source in (sources or []) if isinstance(source, str) and source.strip()
     }
     source_fetch_limit = (
-        ASSET_FULL_FETCH_LIMIT
-        if full
-        else (ASSET_QUERY_LIMIT + 1 if normalized_sources else fetch_limit)
+        ASSET_FULL_FETCH_LIMIT if full else (ASSET_QUERY_LIMIT + 1 if normalized_sources else fetch_limit)
     )
     assets: list[dict[str, Any]] = []
     hosted_url_seen: set[str] = set()
@@ -2715,7 +2711,9 @@ def _shape_show_cast_payload(
     min_episodes_value = (
         0
         if normalized_roster_mode == "imdb_show_membership" and min_episodes is None
-        else DEFAULT_CAST_MIN_EPISODES if min_episodes is None else max(min_episodes, 0)
+        else DEFAULT_CAST_MIN_EPISODES
+        if min_episodes is None
+        else max(min_episodes, 0)
     )
 
     cast_rows = (
@@ -2786,14 +2784,17 @@ def get_show_cast(
     rows, query_count = _fetch_show_cast_base_rows(show_id, include_photos=include_photos)
     links_eligibility_show_total_seasons: int | None = None
     if eligibility_mode == "links":
-        show_row = pg.fetch_one(
-            """
+        show_row = (
+            pg.fetch_one(
+                """
             SELECT show_total_seasons
             FROM core.shows
             WHERE id = %s::uuid
             """,
-            [show_id],
-        ) or {}
+                [show_id],
+            )
+            or {}
+        )
         links_eligibility_show_total_seasons = _normalize_int(show_row.get("show_total_seasons")) or None
         query_count += 1
     payload = _shape_show_cast_payload(
@@ -2817,14 +2818,17 @@ def get_show_links_eligible_people(
     person_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     rows, query_count = _fetch_show_cast_base_rows(show_id, include_photos=False)
-    show_row = pg.fetch_one(
-        """
+    show_row = (
+        pg.fetch_one(
+            """
         SELECT show_total_seasons
         FROM core.shows
         WHERE id = %s::uuid
         """,
-        [show_id],
-    ) or {}
+            [show_id],
+        )
+        or {}
+    )
     query_count += 1
     filtered_rows = _filter_show_cast_rows_for_links(
         rows,
@@ -3653,20 +3657,22 @@ def get_people_home(limit: int | None = None, *, firebase_uid: str | None = None
             sections = {
                 "recentlyViewed": build_section(
                     lambda _cur: (
-                        [],
-                        0,
-                        "Views",
-                        "view_count",
-                    )
-                    if not firebase_uid
-                    else (
-                        lambda result: (
-                            [{**row, "latest_at": row.get("last_viewed_at")} for row in result[0]],
-                            result[1],
+                        (
+                            [],
+                            0,
                             "Views",
                             "view_count",
                         )
-                    )(_recent_people_views(firebase_uid, normalized_limit, cur=cur)),
+                        if not firebase_uid
+                        else (
+                            lambda result: (
+                                [{**row, "latest_at": row.get("last_viewed_at")} for row in result[0]],
+                                result[1],
+                                "Views",
+                                "view_count",
+                            )
+                        )(_recent_people_views(firebase_uid, normalized_limit, cur=cur))
+                    ),
                     cur=cur,
                 ),
                 "mostPopular": build_section(

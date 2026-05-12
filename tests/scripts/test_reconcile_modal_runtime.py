@@ -127,9 +127,7 @@ def test_reconcile_modal_runtime_blocks_when_secret_apply_times_out(monkeypatch:
     monkeypatch.setattr(
         cli,
         "apply_named_secrets",
-        lambda repo_root=cli.REPO_ROOT: (_ for _ in ()).throw(
-            subprocess.TimeoutExpired(cmd=["python"], timeout=300)
-        ),
+        lambda repo_root=cli.REPO_ROOT: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["python"], timeout=300)),
     )
 
     result = cli.reconcile_modal_runtime()

@@ -26,13 +26,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CHROME_PROFILE_DIR = (
-    Path.home()
-    / "Library"
-    / "Application Support"
-    / "Google"
-    / "Chrome"
-)
+CHROME_PROFILE_DIR = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
 REQUIRED_COOKIE_FIELDS = ("sessionid", "csrftoken", "ds_user_id")
 
 # Cookie file locations to update
@@ -54,17 +48,11 @@ def _find_chrome_profile(profile_name: str) -> Path:
             # Also check the account info / email
             account_info = prefs.get("account_info", [])
             emails = [a.get("email", "") for a in account_info if isinstance(a, dict)]
-            if (
-                name.lower() == profile_name.lower()
-                or profile_name.lower() in [e.lower() for e in emails]
-            ):
+            if name.lower() == profile_name.lower() or profile_name.lower() in [e.lower() for e in emails]:
                 return entry
         except (json.JSONDecodeError, OSError):
             continue
-    raise FileNotFoundError(
-        f"Chrome profile '{profile_name}' not found. "
-        f"Available profiles in {CHROME_PROFILE_DIR}"
-    )
+    raise FileNotFoundError(f"Chrome profile '{profile_name}' not found. Available profiles in {CHROME_PROFILE_DIR}")
 
 
 def _extract_cookies(profile_path: Path) -> dict[str, str]:
@@ -151,7 +139,7 @@ def _push_to_modal(source_env: Path) -> tuple[bool, str]:
         "--apply",
     ]
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
         return True, "secrets pushed successfully"
     except subprocess.CalledProcessError as exc:
         return False, f"prepare_named_secrets failed: {exc.stderr[:200]}"
@@ -163,7 +151,7 @@ def _deploy_modal() -> tuple[bool, str]:
     """Deploy Modal app to pick up new secrets."""
     cmd = [_python_command(), "-m", "modal", "deploy", "-m", "trr_backend.modal_jobs"]
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
         return True, "modal app deployed"
     except subprocess.CalledProcessError as exc:
         return False, f"modal deploy failed: {exc.stderr[:200]}"
@@ -250,12 +238,14 @@ def main() -> int:
     # Step 2: Extract cookies
     try:
         cookies = _extract_cookies(profile_path)
-        summary["steps"].append({
-            "name": "extract_cookies",
-            "status": "ok",
-            "cookie_count": len(cookies),
-            "has_sessionid": bool(cookies.get("sessionid")),
-        })
+        summary["steps"].append(
+            {
+                "name": "extract_cookies",
+                "status": "ok",
+                "cookie_count": len(cookies),
+                "has_sessionid": bool(cookies.get("sessionid")),
+            }
+        )
     except Exception as exc:
         summary["steps"].append({"name": "extract_cookies", "status": "failed", "error": str(exc)})
         summary["failure_reason"] = "extraction_failed"

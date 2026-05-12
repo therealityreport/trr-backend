@@ -153,16 +153,16 @@ def _validate_startup_config() -> None:
     # the compatibility TRR_DB_URL.
     invalid_lanes = {"unknown", "other", "pooler"}
 
-    if winner_connection_class in invalid_lanes or (
-        not direct_source_allowed
-    ) or (
-        winner_connection_class == "direct" and not direct_local_allowed
-    ) or (
-        winner_connection_class == "transaction" and not transaction_flight_allowed
+    if (
+        winner_connection_class in invalid_lanes
+        or (not direct_source_allowed)
+        or (winner_connection_class == "direct" and not direct_local_allowed)
+        or (winner_connection_class == "transaction" and not transaction_flight_allowed)
     ):
         raise RuntimeError(
             f"Invalid runtime connection lane: {winner_connection_class}\n"
-            f"Only session-mode pooler (:5432), local Postgres, local TRR_DB_DIRECT_URL, and explicit transaction flight tests are supported.\n"
+            "Only session-mode pooler (:5432), local Postgres, local TRR_DB_DIRECT_URL, "
+            "and explicit transaction flight tests are supported.\n"
             f"Use session-mode pooler (:5432) via TRR_DB_SESSION_URL or TRR_DB_URL. "
             f"Local direct database runs must use {DIRECT_DB_ENV}. "
             f"Transaction tests must use {TRANSACTION_DB_ENV} with TRR_DB_TRANSACTION_FLIGHT_TEST=1.\n"

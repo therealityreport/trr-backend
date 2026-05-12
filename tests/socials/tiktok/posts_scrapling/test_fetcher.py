@@ -124,6 +124,33 @@ def test_tiktok_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):
     assert "cookies" not in meta
 
 
+def test_tiktok_runtime_metadata_exposes_proxy_fingerprint_only(_mock_scrapling):
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+    from trr_backend.socials.tiktok.posts_scrapling.proxy import TikTokPostsProxyConfig
+
+    proxy_config = TikTokPostsProxyConfig(
+        browser_proxy="http://tiktokuser:secret-pass@proxy.example.test:8000",
+        api_proxy_url="http://api-user:api-secret@proxy.example.test:8000",
+        proxy_rotator=None,
+        fingerprint="proxy.example.test:8000:explicit",
+    )
+    fetcher = TikTokPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={},
+        proxy_config=proxy_config,
+    )
+
+    meta = fetcher.runtime_metadata
+    serialized = repr(meta)
+    assert meta["selected_proxy_fingerprint"] == "proxy.example.test:8000:explicit"
+    assert "tiktokuser" not in serialized
+    assert "secret-pass" not in serialized
+    assert "api-user" not in serialized
+    assert "api-secret" not in serialized
+    assert "api_proxy_url" not in meta
+    assert "browser_proxy" not in meta
+
+
 def test_tiktok_warmup_emits_structured_log_success(_mock_scrapling, caplog):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock

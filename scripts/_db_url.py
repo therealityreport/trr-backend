@@ -64,7 +64,8 @@ def resolve_db_url(
             return ResolvedDbUrl(value=local_value, source="supabase status (local)", deprecated=False)
 
     raise RuntimeError(
-        "No database URL configured. Set TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, TRR_DB_URL, optionally TRR_DB_FALLBACK_URL, "
+        "No database URL configured. Set TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, TRR_DB_URL, "
+        "optionally TRR_DB_FALLBACK_URL, "
         "and use DATABASE_URL only for tooling-specific flows."
     )
 

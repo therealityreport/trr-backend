@@ -53,8 +53,10 @@ def _instagram_post_source_urls(post_row: dict[str, Any]) -> tuple[str, list[str
     )
     return source_thumbnail_url, source_media_urls
 
+
 def _instagram_post_needs_media_mirror(post_row: dict[str, Any], *, conn: Any | None = None) -> bool:
     return _platform_post_needs_media_mirror("instagram", post_row, conn=conn)
+
 
 def _update_instagram_post_media_mirror_fields(
     *,
@@ -80,6 +82,7 @@ def _update_instagram_post_media_mirror_fields(
         media_mirror_last_job_id=media_mirror_last_job_id,
         conn=conn,
     )
+
 
 def _update_instagram_post_source_media_fields(
     *,
@@ -112,6 +115,7 @@ def _update_instagram_post_source_media_fields(
     with pg.db_cursor(conn=conn) as cur:
         pg.fetch_one_with_cursor(cur, sql, params)
 
+
 def _enqueue_instagram_media_mirror_job(
     context: SeasonContext | None,
     *,
@@ -135,6 +139,7 @@ def _enqueue_instagram_media_mirror_job(
         conn=conn,
     )
 
+
 def _run_instagram_media_mirror_stage(
     *,
     context: SeasonContext,
@@ -147,6 +152,7 @@ def _run_instagram_media_mirror_stage(
         job_id=job_id,
         config=config,
     )
+
 
 def requeue_instagram_media_mirror_jobs(
     season_id: str,
@@ -169,22 +175,22 @@ def requeue_instagram_media_mirror_jobs(
 
 
 _LOCAL_ROOM_NAMES = {
-    '_instagram_post_source_urls',
-    '_instagram_post_needs_media_mirror',
-    '_update_instagram_post_media_mirror_fields',
-    '_update_instagram_post_source_media_fields',
-    '_enqueue_instagram_media_mirror_job',
-    '_run_instagram_media_mirror_stage',
-    'requeue_instagram_media_mirror_jobs',
+    "_instagram_post_source_urls",
+    "_instagram_post_needs_media_mirror",
+    "_update_instagram_post_media_mirror_fields",
+    "_update_instagram_post_source_media_fields",
+    "_enqueue_instagram_media_mirror_job",
+    "_run_instagram_media_mirror_stage",
+    "requeue_instagram_media_mirror_jobs",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    '_instagram_post_source_urls',
-    '_instagram_post_needs_media_mirror',
-    '_update_instagram_post_media_mirror_fields',
-    '_update_instagram_post_source_media_fields',
-    '_enqueue_instagram_media_mirror_job',
-    '_run_instagram_media_mirror_stage',
-    'requeue_instagram_media_mirror_jobs',
+    "_instagram_post_source_urls",
+    "_instagram_post_needs_media_mirror",
+    "_update_instagram_post_media_mirror_fields",
+    "_update_instagram_post_source_media_fields",
+    "_enqueue_instagram_media_mirror_job",
+    "_run_instagram_media_mirror_stage",
+    "requeue_instagram_media_mirror_jobs",
 ]

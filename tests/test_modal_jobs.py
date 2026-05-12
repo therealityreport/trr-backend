@@ -203,6 +203,8 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
 
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
     assert os.environ["TRR_REMOTE_EXECUTOR"] == "modal"
+    assert os.environ["TRR_DB_POOL_MINCONN"] == "1"
+    assert os.environ["TRR_DB_POOL_MAXCONN"] == "4"
     assert os.environ["SOCIAL_QUEUE_ENABLED"] == "true"
 
 
@@ -210,10 +212,12 @@ def test_inject_modal_runtime_defaults_overrides_explicit_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "custom")
+    monkeypatch.setenv("TRR_DB_POOL_MAXCONN", "1")
 
     modal_jobs._inject_modal_runtime_defaults()
 
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
+    assert os.environ["TRR_DB_POOL_MAXCONN"] == "4"
 
 
 def test_inject_modal_runtime_defaults_clears_object_storage_profile_when_static_creds_present(

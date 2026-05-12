@@ -18,9 +18,7 @@ _MISSING_TABLE_MARKERS = ("fandom_page_directory", "does not exist", "undefined 
 
 def _is_missing_table_error(exc: Exception) -> bool:
     message = str(exc or "").lower()
-    return "fandom_page_directory" in message and (
-        "does not exist" in message or "undefined table" in message
-    )
+    return "fandom_page_directory" in message and ("does not exist" in message or "undefined table" in message)
 
 
 def _canonical_allpages_url(*, community_domain: str, review_allpages_url: str | None = None) -> str:
@@ -74,9 +72,7 @@ def search_active_page_directory_entries(
     params: list[Any] = [normalized_domain]
     for query in normalized_queries:
         like = "%" + "%".join(query.replace("_", " ").split()) + "%"
-        clauses.append(
-            "(page_title ILIKE %s OR replace(page_slug, '_', ' ') ILIKE %s OR page_url ILIKE %s)"
-        )
+        clauses.append("(page_title ILIKE %s OR replace(page_slug, '_', ' ') ILIKE %s OR page_url ILIKE %s)")
         params.extend([like, like, like])
     params.append(max(1, min(int(limit), 200)))
 
@@ -95,7 +91,7 @@ def search_active_page_directory_entries(
             FROM core.fandom_page_directory
             WHERE community_domain = %s
               AND is_active = true
-              AND ({' OR '.join(clauses)})
+              AND ({" OR ".join(clauses)})
             ORDER BY last_seen_at DESC, page_title ASC
             LIMIT %s
             """,

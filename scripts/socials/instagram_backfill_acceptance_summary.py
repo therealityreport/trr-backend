@@ -16,7 +16,6 @@ from typing import Any
 
 from trr_backend.db import pg
 
-
 POOL_ERROR_RE = re.compile(
     r"(poolerror|pool_capacity|connection pool exhausted|database service unavailable)",
     re.IGNORECASE,
@@ -101,9 +100,7 @@ def _job_account(job: dict[str, Any]) -> str | None:
 
 def _runtime_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return (
-        _metadata_dict(metadata.get("fetcher_runtime"))
-        or _metadata_dict(metadata.get("runtime_metadata"))
-        or metadata
+        _metadata_dict(metadata.get("fetcher_runtime")) or _metadata_dict(metadata.get("runtime_metadata")) or metadata
     )
 
 
@@ -173,9 +170,7 @@ def build_summary(*, run_id: str, platform: str | None, account: str | None) -> 
         if completed_at and (timing["completed_at"] is None or completed_at > timing["completed_at"]):
             timing["completed_at"] = completed_at
 
-        fingerprint = str(
-            runtime.get("selected_proxy_fingerprint") or runtime.get("proxy_fingerprint") or ""
-        ).strip()
+        fingerprint = str(runtime.get("selected_proxy_fingerprint") or runtime.get("proxy_fingerprint") or "").strip()
         if fingerprint:
             proxy_fingerprints[fingerprint] += 1
         session_mode = str(runtime.get("proxy_session_mode") or "").strip()
@@ -233,10 +228,7 @@ def build_summary(*, run_id: str, platform: str | None, account: str | None) -> 
         "jobs": {
             "matched": matched_jobs,
             "status_counts": dict(sorted(status_counts.items())),
-            "stage_counts": {
-                stage: dict(sorted(counts.items()))
-                for stage, counts in sorted(stage_counts.items())
-            },
+            "stage_counts": {stage: dict(sorted(counts.items())) for stage, counts in sorted(stage_counts.items())},
             "failed": failed_jobs,
         },
         "stage_timings": stage_timings,

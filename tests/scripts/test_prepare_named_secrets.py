@@ -35,6 +35,8 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
     assert result["TRR_DB_URL"] == "postgresql://example"
     assert result["TRR_JOB_PLANE_MODE"] == "remote"
     assert result["TRR_REMOTE_EXECUTOR"] == "modal"
+    assert result["TRR_DB_POOL_MINCONN"] == "1"
+    assert result["TRR_DB_POOL_MAXCONN"] == "4"
     assert (
         result["TRR_MODAL_RUNTIME_SECRET_NAME"]
         == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_RUNTIME_SECRET_NAME"]
@@ -59,6 +61,7 @@ def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
     result = cli._apply_runtime_overrides(
         {
             "TRR_DB_URL": "postgresql://example",
+            "TRR_DB_POOL_MAXCONN": "1",
             "SOCIAL_WORKER_POOL_COMMENTS": "4",
             "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "4",
         },
@@ -67,6 +70,7 @@ def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
 
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
     assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
+    assert result["TRR_DB_POOL_MAXCONN"] == "4"
 
 
 def test_apply_runtime_overrides_can_be_disabled() -> None:
@@ -135,6 +139,21 @@ def test_split_env_materializes_file_backed_social_auth(tmp_path) -> None:
         "SOCIAL_INSTAGRAM_COOKIES_JSON": '{"sessionid":"abc123"}',
         "SOCIALBLADE_EMAIL": "ops@example.com",
     }
+
+
+def test_split_env_prefers_configured_cookie_file_over_stale_inline_json(tmp_path) -> None:
+    cookie_file = tmp_path / "instagram-cookies.json"
+    cookie_file.write_text('{\n  "sessionid": "fresh-file-session"\n}\n', encoding="utf-8")
+
+    _runtime_values, social_values = cli._split_env(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "SOCIAL_INSTAGRAM_COOKIES_JSON": '{"sessionid":"stale-env-session"}',
+            "SOCIAL_INSTAGRAM_COOKIES_FILE": str(cookie_file),
+        }
+    )
+
+    assert social_values["SOCIAL_INSTAGRAM_COOKIES_JSON"] == '{"sessionid":"fresh-file-session"}'
 
 
 def test_split_env_raises_for_missing_file_backed_social_auth() -> None:

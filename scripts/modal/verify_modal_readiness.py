@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Verify Modal secrets, app deployment, and function resolution for TRR cutover."""
 
 from __future__ import annotations
@@ -18,7 +19,9 @@ DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_API_FUNCTION = "serve_backend_api"
 DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION = "probe_social_remote_auth"
 DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION = "probe_instagram_posts_auth"
+DEFAULT_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION = "probe_instagram_comments_auth"
 DEFAULT_GETTY_REMOTE_PROBE_FUNCTION = "probe_getty_remote_access"
+BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -26,11 +29,12 @@ if REPO_ROOT not in sys.path:
 from scripts._workspace_runtime_env import apply_workspace_runtime_env
 from trr_backend.modal_dispatch import (
     modal_social_comments_job_function_name,
-    modal_social_job_function_names,
     modal_social_job_function_name,
+    modal_social_job_function_names,
     modal_social_media_job_function_name,
     modal_social_posts_job_function_name,
 )
+from trr_backend.utils.env import load_env
 
 
 def _load_get_app_objects() -> Callable[..., dict[str, Any]]:
@@ -94,6 +98,18 @@ def _parse_args() -> argparse.Namespace:
         default="",
         metavar="HANDLE",
         help="Optionally run the deployed Instagram profile-posts auth probe for an account handle.",
+    )
+    parser.add_argument(
+        "--probe-instagram-comments-auth",
+        default="",
+        metavar="HANDLE",
+        help="Optionally run the deployed Instagram comments auth probe for an account handle.",
+    )
+    parser.add_argument(
+        "--probe-instagram-comments-shortcode",
+        default="",
+        metavar="SHORTCODE",
+        help="Optional shortcode for --probe-instagram-comments-auth; defaults to a recent commentable saved post.",
     )
     parser.add_argument(
         "--probe-getty-remote-access",
@@ -192,9 +208,15 @@ def expected_function_names() -> tuple[str, ...]:
         or "probe_reddit_refresh_runtime",
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
-        str(os.getenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION") or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION)
-        .strip()
+        str(
+            os.getenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION") or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION
+        ).strip()
         or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION,
+        str(
+            os.getenv("TRR_MODAL_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION")
+            or DEFAULT_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION
+        ).strip()
+        or DEFAULT_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION).strip()
         or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
@@ -220,9 +242,20 @@ def social_auth_probe_function_name() -> str:
 
 def instagram_posts_auth_probe_function_name() -> str:
     return (
-        str(os.getenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION") or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION)
-        .strip()
+        str(
+            os.getenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION") or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION
+        ).strip()
         or DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION
+    )
+
+
+def instagram_comments_auth_probe_function_name() -> str:
+    return (
+        str(
+            os.getenv("TRR_MODAL_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION")
+            or DEFAULT_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION
+        ).strip()
+        or DEFAULT_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION
     )
 
 
@@ -310,6 +343,15 @@ def invoke_remote_auth_probe(
     return dict(payload)
 
 
+def _resolve_instagram_comments_probe_shortcode(account_handle: str) -> str | None:
+    try:
+        from trr_backend.repositories import social_season_analytics as social_repo
+
+        return social_repo._instagram_comments_auth_probe_shortcode(account_handle)  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def verify_modal_readiness(
     *,
     app_name: str,
@@ -319,6 +361,8 @@ def verify_modal_readiness(
     modal_environment: str = "",
     probe_remote_auth_platform: str | None = None,
     probe_instagram_posts_auth_handle: str | None = None,
+    probe_instagram_comments_auth_handle: str | None = None,
+    probe_instagram_comments_auth_shortcode: str | None = None,
     probe_getty_remote_access: bool = False,
 ) -> dict[str, Any]:
     social_jobs_are_enabled = social_jobs_enabled()
@@ -445,6 +489,63 @@ def verify_modal_readiness(
                     }
                 )
 
+    instagram_comments_auth_probe: dict[str, Any] | None = None
+    if probe_instagram_comments_auth_handle:
+        probe_function_name = instagram_comments_auth_probe_function_name()
+        probe_handle = app_function_handles.get(probe_function_name)
+        probe_shortcode = str(probe_instagram_comments_auth_shortcode or "").strip() or (
+            _resolve_instagram_comments_probe_shortcode(probe_instagram_comments_auth_handle) or ""
+        )
+        if not probe_shortcode:
+            instagram_comments_auth_probe = {
+                "platform": "instagram",
+                "account_handle": probe_instagram_comments_auth_handle,
+                "ready": False,
+                "reason": "comments_probe_shortcode_unavailable",
+                "execution_backend": "modal",
+                "status": "fetch_blocked",
+                "result": "fetch_blocked",
+            }
+        elif probe_handle is None or probe_function_name in missing_functions:
+            instagram_comments_auth_probe = {
+                "platform": "instagram",
+                "account_handle": probe_instagram_comments_auth_handle,
+                "shortcode": probe_shortcode,
+                "ready": False,
+                "reason": "probe_function_unavailable",
+                "execution_backend": "modal",
+            }
+        else:
+            try:
+                payload = probe_handle.remote(probe_instagram_comments_auth_handle, probe_shortcode)
+            except Exception as exc:  # noqa: BLE001
+                instagram_comments_auth_probe = {
+                    "platform": "instagram",
+                    "account_handle": probe_instagram_comments_auth_handle,
+                    "shortcode": probe_shortcode,
+                    "ready": False,
+                    "reason": "probe_invocation_failed",
+                    "execution_backend": "modal",
+                    "detail": {
+                        "phase": "comments_auth_probe",
+                        "exception_class": type(exc).__name__,
+                        "message": str(exc)[:240],
+                    },
+                }
+            else:
+                instagram_comments_auth_probe = (
+                    dict(payload)
+                    if isinstance(payload, dict)
+                    else {
+                        "platform": "instagram",
+                        "account_handle": probe_instagram_comments_auth_handle,
+                        "shortcode": probe_shortcode,
+                        "ready": False,
+                        "reason": "probe_payload_invalid",
+                        "execution_backend": "modal",
+                    }
+                )
+
     getty_remote_probe: dict[str, Any] | None = None
     if probe_getty_remote_access:
         probe_function_name = getty_remote_probe_function_name()
@@ -470,11 +571,15 @@ def verify_modal_readiness(
                     },
                 }
             else:
-                getty_remote_probe = dict(payload) if isinstance(payload, dict) else {
-                    "platform": "getty",
-                    "ready": False,
-                    "reason": "probe_payload_invalid",
-                }
+                getty_remote_probe = (
+                    dict(payload)
+                    if isinstance(payload, dict)
+                    else {
+                        "platform": "getty",
+                        "ready": False,
+                        "reason": "probe_payload_invalid",
+                    }
+                )
 
     blocking_probe_failures: list[str] = []
     advisory_probe_failures: list[str] = []
@@ -487,6 +592,12 @@ def verify_modal_readiness(
             str(instagram_posts_auth_probe.get("reason") or "instagram_posts_auth_probe_failed").strip()
             or "instagram_posts_auth_probe_failed"
         )
+    if instagram_comments_auth_probe is not None and not bool(instagram_comments_auth_probe.get("ready")):
+        comments_reason = (
+            str(instagram_comments_auth_probe.get("reason") or "instagram_comments_auth_probe_failed").strip()
+            or "instagram_comments_auth_probe_failed"
+        )
+        blocking_probe_failures.append(comments_reason)
     if getty_remote_probe is not None and not bool(getty_remote_probe.get("ready")):
         advisory_probe_failures.append(
             str(getty_remote_probe.get("reason") or "getty_remote_probe_failed").strip() or "getty_remote_probe_failed"
@@ -522,6 +633,7 @@ def verify_modal_readiness(
         "missing_web_endpoints": missing_web_endpoints,
         "remote_auth_probe": remote_auth_probe,
         "instagram_posts_auth_probe": instagram_posts_auth_probe,
+        "instagram_comments_auth_probe": instagram_comments_auth_probe,
         "getty_remote_probe": getty_remote_probe,
         "blocking_probe_failures": blocking_probe_failures,
         "advisory_probe_failures": advisory_probe_failures,
@@ -567,6 +679,13 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
             "  Instagram posts auth probe: "
             f"{probe.get('account_handle')}: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}"
         )
+    if summary.get("instagram_comments_auth_probe"):
+        probe = summary["instagram_comments_auth_probe"]
+        probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
+        print(
+            "  Instagram comments auth probe: "
+            f"{probe.get('account_handle')}: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}"
+        )
     if summary.get("getty_remote_probe"):
         probe = summary["getty_remote_probe"]
         probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
@@ -579,6 +698,7 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
 
 def main() -> int:
     apply_workspace_runtime_env(repo_root=Path(REPO_ROOT))
+    load_env()
     args = _parse_args()
     summary = verify_modal_readiness(
         app_name=args.app_name,
@@ -588,6 +708,8 @@ def main() -> int:
         modal_environment=args.env,
         probe_remote_auth_platform=str(args.probe_remote_auth or "").strip() or None,
         probe_instagram_posts_auth_handle=str(args.probe_instagram_posts_auth or "").strip() or None,
+        probe_instagram_comments_auth_handle=str(args.probe_instagram_comments_auth or "").strip() or None,
+        probe_instagram_comments_auth_shortcode=str(args.probe_instagram_comments_shortcode or "").strip() or None,
         probe_getty_remote_access=bool(args.probe_getty_remote_access),
     )
     if args.json:

@@ -368,11 +368,7 @@ def _maybe_start_deferred_comments_followup(
         error_message = str(exc)
         retryable_reason = _deferred_comments_followup_retryable_reason(exc)
         retryable = retryable_reason is not None
-        prior_failures = [
-            dict(item)
-            for item in list(followup.get("failure_history") or [])
-            if isinstance(item, dict)
-        ]
+        prior_failures = [dict(item) for item in list(followup.get("failure_history") or []) if isinstance(item, dict)]
         prior_failures.append(
             {
                 "failed_at": now_iso,
@@ -607,9 +603,7 @@ def _persist_incremented_run_create_counters(
     total_jobs = legacy._normalize_non_negative_int(row.get("total_jobs")) + 1
     completed_jobs = legacy._normalize_non_negative_int(row.get("completed_jobs"))
     failed_jobs = legacy._normalize_non_negative_int(row.get("failed_jobs"))
-    active_jobs = legacy._normalize_non_negative_int(row.get("active_jobs")) + (
-        1 if _status_is_active(status) else 0
-    )
+    active_jobs = legacy._normalize_non_negative_int(row.get("active_jobs")) + (1 if _status_is_active(status) else 0)
     items_found_total = legacy._normalize_non_negative_int(row.get("items_found_total"))
     stage_counts = _normalize_stage_counts(row.get("stage_counts"))
     stage_counts = _increment_stage_counter(stage_counts, stage=stage_key, key="total", delta=1)
@@ -714,7 +708,14 @@ def _recompute_run_summary_from_jobs(run_id: str) -> dict[str, Any]:
                   and child.id <> j.id
                   and coalesce(child.config->>'stage', child.metadata->>'stage', child.job_type) =
                     coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type)
-                  and child.config->>'comments_retry_rebalance_source_job_id' = j.id::text
+                  and (
+                    child.config->>'comments_retry_rebalance_source_job_id' = j.id::text
+                    or (
+                      child.created_at > j.created_at
+                      and nullif(child.config->>'comments_shard_index', '') =
+                        nullif(j.config->>'comments_shard_index', '')
+                    )
+                  )
               )
             ) as superseded_by_comments_rebalance
           from social.scrape_jobs j

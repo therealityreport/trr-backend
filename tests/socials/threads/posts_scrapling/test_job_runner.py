@@ -231,6 +231,7 @@ def test_threads_job_runner_marks_cancelled_job(
     assert metadata["run_status_at_cancel"] == "running"
     assert metadata["activity"]["phase"] == "cancelled"
     assert "raw-session-secret" not in repr(metadata)
+    assert "raw-csrf-secret" not in repr(metadata)
 
 
 def test_threads_job_runner_marks_cancelled_run(
@@ -383,6 +384,8 @@ def test_threads_job_runner_returns_degraded_summary_when_final_read_saturated(
     assert result["metadata"]["database_service_unavailable"] is True
     assert result["metadata"]["stage_counters"] == {"posts": 1, "pages": 1}
     assert result["metadata"]["persist_counters"]["posts_upserted"] == 1
+    assert "raw-session-secret" not in repr(result["metadata"])
+    assert "raw-csrf-secret" not in repr(result["metadata"])
 
 
 def test_threads_job_runner_defers_run_finalization_when_db_saturated(

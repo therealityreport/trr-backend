@@ -129,8 +129,7 @@ def select_default_method(results: Iterable[CandidateResult | Mapping[str, Any]]
             incomplete.append(candidate.method)
     if incomplete:
         raise BenchmarkEvidenceError(
-            f"Runtime method completeness must be >= {MIN_COMPLETENESS:.2f}: "
-            + ", ".join(sorted(incomplete))
+            f"Runtime method completeness must be >= {MIN_COMPLETENESS:.2f}: " + ", ".join(sorted(incomplete))
         )
 
     failed = [candidate.method for candidate in candidates if candidate.failed]

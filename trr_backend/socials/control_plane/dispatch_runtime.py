@@ -34,6 +34,8 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
                   run_id::text as run_id,
                   status,
                   items_found,
+                  attempt_count,
+                  max_attempts,
                   error_message,
                   last_error_code,
                   metadata
@@ -58,6 +60,56 @@ def recover_dispatch_blocked_no_progress_jobs(*, limit: int = 100) -> list[dict[
             last_dispatch_error_code=dispatch.get("last_dispatch_error_code"),
             last_dispatch_error=dispatch.get("last_dispatch_error"),
         )
+        attempt_count = legacy._normalize_non_negative_int(full_row.get("attempt_count"))
+        max_attempts = max(1, legacy._normalize_non_negative_int(full_row.get("max_attempts")) or 1)
+        if reason == legacy.STALE_MODAL_DISPATCH_UNCLAIMED_ERROR_CODE and attempt_count < max_attempts:
+            now_utc = legacy._now_utc()
+            retry_dispatch = {
+                **dispatch,
+                "remote_invocation_id": None,
+                "remote_invocation_status": None,
+                "remote_invocation_checked_at": None,
+                "remote_task_id": None,
+                "remote_pending_since": None,
+                "remote_blocked_reason": None,
+                "lease_expires_at": None,
+                "last_dispatch_error": None,
+                "last_dispatch_error_code": None,
+                "last_dispatch_error_at": None,
+                "dispatch_attempt_count": 0,
+                "dispatch_blocked_failure_count": 0,
+                "dispatch_blocked_terminalized_at": None,
+                "stale_unclaimed_dispatch_exhausted": False,
+            }
+            legacy._finish_job(
+                job_id,
+                status="retrying",
+                items_found=legacy._normalize_non_negative_int(full_row.get("items_found")),
+                error_message=None,
+                metadata={
+                    "dispatch": retry_dispatch,
+                    "retryable_failure_recovery": {
+                        "reason": reason,
+                        "recovered_at": legacy._iso(now_utc),
+                        "source": "recover_dispatch_blocked_no_progress_jobs",
+                    },
+                },
+                last_error_code=None,
+                last_error_class=None,
+                next_available_at=now_utc + timedelta(seconds=max(5, legacy._modal_dispatch_retry_delay_seconds())),
+            )
+            run_id = str(full_row.get("run_id") or "").strip()
+            if run_id:
+                affected_run_ids.add(run_id)
+            recovered.append(
+                {
+                    "id": job_id,
+                    "run_id": run_id or None,
+                    "status": "retrying",
+                    "stuck_reason": reason,
+                }
+            )
+            continue
         legacy._finish_job(
             job_id,
             status="failed",
@@ -162,10 +214,7 @@ def recover_stale_unclaimed_dispatched_jobs(
                 row,
                 lease_expires_at=refreshed_lease_expires_at,
             )
-            if (
-                legacy._modal_invocation_is_nonterminal(str(inspection.get("status") or ""))
-                or str(inspection.get("status") or "").strip().lower() == "unknown"
-            ):
+            if legacy._modal_invocation_is_nonterminal(str(inspection.get("status") or "")):
                 continue
 
         recovery_count = legacy._dispatch_metadata_recovery_count(dispatch) + 1
@@ -311,6 +360,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             break
         stage = legacy._job_stage_from_row(job)
         platform = legacy._normalize_platform_name(job.get("platform")) or "unknown"
+        status = str(job.get("status") or "").strip().lower()
         job_run_id = str(job.get("run_id") or "").strip()
         job_config = legacy._metadata_dict(job.get("config"))
         job_dispatch = legacy._job_dispatch_metadata(job)
@@ -344,7 +394,29 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                         running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
                 continue
             if inspection_status == "unknown":
-                continue
+                job_id_for_clear = str(job.get("id") or "").strip()
+                if status == "retrying" and job_id_for_clear:
+                    legacy._touch_job_dispatch_metadata(
+                        job_id_for_clear,
+                        dispatch_backend=str(job_dispatch.get("dispatch_backend") or "modal"),
+                        dispatch_requested_at=legacy._coerce_dt(job_dispatch.get("dispatch_requested_at")),
+                        dispatch_attempt_count=legacy._dispatch_metadata_attempt_count(job_dispatch),
+                        remote_invocation_id=None,
+                        lease_expires_at=None,
+                        remote_invocation_status="unknown",
+                        remote_invocation_checked_at=legacy._now_utc(),
+                        remote_task_id=None,
+                        remote_pending_since=None,
+                        remote_blocked_reason=None,
+                    )
+                    job_dispatch = {
+                        **job_dispatch,
+                        "remote_invocation_id": None,
+                        "lease_expires_at": None,
+                        "remote_invocation_status": "unknown",
+                    }
+                else:
+                    continue
         if legacy._dispatch_request_is_fresh(job):
             continue
         if running_by_stage.get(stage, 0) >= legacy._modal_dispatch_stage_global_cap(stage):

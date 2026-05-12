@@ -242,9 +242,7 @@ def _env_flag(name: str, *, default: bool) -> bool:
 
 def _resolve_browser_seed_profile_dir() -> Path | None:
     raw = str(
-        os.getenv("IMDB_FULLCREDITS_BROWSER_PROFILE_DIR")
-        or os.getenv("IMDB_BROWSER_SEED_PROFILE_DIR")
-        or ""
+        os.getenv("IMDB_FULLCREDITS_BROWSER_PROFILE_DIR") or os.getenv("IMDB_BROWSER_SEED_PROFILE_DIR") or ""
     ).strip()
     if raw:
         path = Path(raw).expanduser()
@@ -918,8 +916,8 @@ def normalize_graphql_credits_to_cast_rows(
 
         raw_role_text = ", ".join(role_parts) if role_parts else None
         episode_count_raw = (node.get("episodeCredits") or {}).get("total")
-        episode_count = episode_count_raw if isinstance(episode_count_raw, int) else _parse_optional_int_like(
-            episode_count_raw
+        episode_count = (
+            episode_count_raw if isinstance(episode_count_raw, int) else _parse_optional_int_like(episode_count_raw)
         )
 
         # IMPORTANT: The GraphQL query (fetch_title_credits_paginated_v2) already filters

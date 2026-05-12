@@ -49,6 +49,8 @@ EXEMPT_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/v1/admin/shows/[^/]+/seasons/[^/]+/assets/batch-jobs/stream$"),
     re.compile(r"^/api/v1/admin/socials/live-status/stream$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/catalog/backfill$"),
+    re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/catalog/runs/[^/]+/repair-auth$"),
+    re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/cookies/refresh$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/posts$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/summary$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/catalog/runs/[^/]+/progress$"),

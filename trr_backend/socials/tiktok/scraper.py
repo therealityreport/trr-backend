@@ -249,6 +249,7 @@ class TikTokScraper:
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_TIMEOUT_SECONDS = (10, 45)
+    COMMENT_REQUEST_TIMEOUT_SECONDS = 30
 
     def __init__(
         self,
@@ -260,9 +261,7 @@ class TikTokScraper:
     ):
         self.cookies = cookies or {}
         self._direct_comment_api_enabled_override = (
-            bool(direct_comment_api_enabled_override)
-            if direct_comment_api_enabled_override is not None
-            else None
+            bool(direct_comment_api_enabled_override) if direct_comment_api_enabled_override is not None else None
         )
         self._http_client_name_input = (
             str(http_client_name or os.getenv("SOCIAL_TIKTOK_HTTP_CLIENT") or "").strip().lower() or DEFAULT_HTTP_CLIENT
@@ -272,9 +271,7 @@ class TikTokScraper:
         )
         explicit_proxy_urls = [str(value or "").strip() for value in (proxy_urls or []) if str(value or "").strip()]
         env_proxy_urls = [
-            value.strip()
-            for value in str(os.getenv("SOCIAL_TIKTOK_PROXY_URLS") or "").split(",")
-            if value.strip()
+            value.strip() for value in str(os.getenv("SOCIAL_TIKTOK_PROXY_URLS") or "").split(",") if value.strip()
         ]
         crawlee_proxy_urls = [
             value.strip()
@@ -401,8 +398,8 @@ class TikTokScraper:
                     payload[key] = self.last_retrieval_meta[key]
         payload.update(
             self._run_context_meta(
-            retrieval_mode=context_mode or str(values.get("retrieval_mode") or "").strip() or None,
-            auth_mode=auth_mode,
+                retrieval_mode=context_mode or str(values.get("retrieval_mode") or "").strip() or None,
+                auth_mode=auth_mode,
             )
         )
         if context_mode == "ytdlp":
@@ -482,9 +479,7 @@ class TikTokScraper:
             except (TypeError, ValueError):
                 content_length = len(response.content or b"")
             request_id = (
-                str(headers.get("x-tt-logid") or "").strip()
-                or str(headers.get("x-request-id") or "").strip()
-                or None
+                str(headers.get("x-tt-logid") or "").strip() or str(headers.get("x-request-id") or "").strip() or None
             )
             payload.update(
                 {
@@ -1658,11 +1653,7 @@ class TikTokScraper:
 
         user_agent = self._get_headers().get("user-agent", "Mozilla/5.0")
         timeout_ms = 60_000
-        max_posts = (
-            config.max_pages * TIKTOK_POSTS_PER_PAGE
-            if config.max_pages
-            else TIKTOK_DEFAULT_MAX_POSTS
-        )
+        max_posts = config.max_pages * TIKTOK_POSTS_PER_PAGE if config.max_pages else TIKTOK_DEFAULT_MAX_POSTS
 
         browser: Any | None = None
         context: Any | None = None
@@ -2302,6 +2293,7 @@ class TikTokScraper:
         delay: float = 2.0,
         *,
         fast_mode: bool = False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list["TikTokComment"]:
         """
         Fetch comments for a TikTok video including replies.
@@ -2335,6 +2327,22 @@ class TikTokScraper:
         cursor = 0
         comments_fetched = 0
 
+        def _emit_progress(phase: str, **payload: Any) -> None:
+            if progress_callback is None:
+                return
+            event = {
+                "phase": phase,
+                "video_id": video_id,
+                "comments_fetched": comments_fetched,
+                **payload,
+            }
+            try:
+                progress_callback(event)
+            except Exception:  # noqa: BLE001
+                logger.debug("TikTok comment progress callback failed video_id=%s", video_id, exc_info=True)
+
+        _emit_progress("fetch_tiktok_comments_start")
+
         while True:
             self._rate_limit(delay, fast_mode=fast_mode)
 
@@ -2346,6 +2354,7 @@ class TikTokScraper:
                 "aid": 1988,
             }
             headers = self._get_headers(post_url or "https://www.tiktok.com/")
+            _emit_progress("fetch_tiktok_comments_request", cursor=cursor)
 
             try:
                 response = self.session.get(
@@ -2353,7 +2362,7 @@ class TikTokScraper:
                     params=params,
                     headers=headers,
                     cookies=self.cookies,
-                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                    timeout=self.COMMENT_REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
                 data = self._safe_response_json(response, endpoint="fetch_comments")
@@ -2400,6 +2409,7 @@ class TikTokScraper:
                         post_url,
                         delay,
                         fast_mode=fast_mode,
+                        progress_callback=progress_callback,
                     )
                     comment.replies = replies
                     logger.info(f"  Comment {comment.comment_id}: {len(replies)} replies fetched")
@@ -2408,6 +2418,7 @@ class TikTokScraper:
                     break
 
             logger.info(f"Fetched {len(comments)} comments so far...")
+            _emit_progress("fetch_tiktok_comments_page", cursor=cursor, comments_fetched=len(comments))
 
             # Check for more pages
             if max_comments and comments_fetched >= max_comments:
@@ -2419,6 +2430,7 @@ class TikTokScraper:
                 break
 
         logger.info(f"Total: {len(comments)} comments fetched for video {video_id}")
+        _emit_progress("fetch_tiktok_comments_done", comments_fetched=len(comments))
         return comments
 
     def _fetch_comment_replies(
@@ -2429,10 +2441,31 @@ class TikTokScraper:
         delay: float = 2.0,
         *,
         fast_mode: bool = False,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list["TikTokComment"]:
         """Fetch replies to a specific comment."""
         replies = []
         cursor = 0
+
+        def _emit_progress(phase: str, **payload: Any) -> None:
+            if progress_callback is None:
+                return
+            event = {
+                "phase": phase,
+                "video_id": video_id,
+                "comment_id": comment_id,
+                "replies_fetched": len(replies),
+                **payload,
+            }
+            try:
+                progress_callback(event)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "TikTok reply progress callback failed video_id=%s comment_id=%s",
+                    video_id,
+                    comment_id,
+                    exc_info=True,
+                )
 
         while True:
             self._rate_limit(delay, fast_mode=fast_mode)
@@ -2446,6 +2479,7 @@ class TikTokScraper:
                 "aid": 1988,
             }
             headers = self._get_headers(post_url or "https://www.tiktok.com/")
+            _emit_progress("fetch_tiktok_comment_replies_request", cursor=cursor)
 
             try:
                 response = self.session.get(
@@ -2453,7 +2487,7 @@ class TikTokScraper:
                     params=params,
                     headers=headers,
                     cookies=self.cookies,
-                    timeout=self.REQUEST_TIMEOUT_SECONDS,
+                    timeout=self.COMMENT_REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
                 data = self._safe_response_json(response, endpoint="fetch_comment_replies")
@@ -2490,6 +2524,7 @@ class TikTokScraper:
             for reply_data in data.get("comments", []):
                 reply = self._parse_comment(reply_data, video_id, post_url, is_reply=True, parent_id=comment_id)
                 replies.append(reply)
+            _emit_progress("fetch_tiktok_comment_replies_page", cursor=cursor, replies_fetched=len(replies))
 
             # Check for more pages
             if not data.get("has_more", False):

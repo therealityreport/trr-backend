@@ -1,4 +1,4 @@
-"""Posts-only Twitter/X shared catalog orchestration.
+"""Twitter/X shared catalog orchestration.
 
 The module is intentionally wired through callbacks for monolith-owned helpers,
 auth, scraper construction, and persistence so platform code can be imported
@@ -7,6 +7,8 @@ without pulling repository surfaces back into the Twitter package.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -17,6 +19,11 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from trr_backend.socials.twitter.scraper import TwitterScrapeConfig, TwitterScraper
 
 SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE = "shared_account_catalog_backfill"
+TWITTER_FALLBACK_PAGE_SIZE = 10
+TWITTER_COMMENT_MIN_PAGE_BUDGET = 5
+TWITTER_COMMENT_MAX_PAGE_BUDGET = 120
+
+logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -186,6 +193,68 @@ def _shared_stage_post_limit(config: Mapping[str, Any] | None, *, default: int =
     return parsed
 
 
+def _resolve_positive_int_env(name: str, default: int, *, minimum: int = 0, maximum: int | None = None) -> int:
+    try:
+        parsed = int(str(os.getenv(name, str(default))).strip())
+    except (TypeError, ValueError):
+        parsed = int(default)
+    parsed = max(int(minimum), parsed)
+    if maximum is not None:
+        parsed = min(int(maximum), parsed)
+    return parsed
+
+
+def _resolve_non_negative_float_env(name: str, default: float) -> float:
+    try:
+        parsed = float(str(os.getenv(name, str(default))).strip())
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return max(0.0, parsed)
+
+
+def _shared_catalog_comments_requested(config: Mapping[str, Any] | None) -> bool:
+    metadata = _metadata_dict(config)
+    if bool(metadata.get("twitter_comments_in_posts_stage")):
+        return True
+    selected = metadata.get("effective_selected_tasks")
+    if not isinstance(selected, list):
+        selected = metadata.get("selected_tasks")
+    return any(str(task or "").strip().lower() == "comments" for task in (selected or []))
+
+
+def _shared_catalog_comment_limit(config: Mapping[str, Any] | None) -> int | None:
+    metadata = _metadata_dict(config)
+    for key in ("max_comments_per_post", "catalog_max_comments_per_post"):
+        if metadata.get(key) is None:
+            continue
+        try:
+            parsed = int(metadata.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        return None if parsed <= 0 else parsed
+    return None
+
+
+def _twitter_page_budget_for_expected_count(expected_count: int) -> int:
+    expected = max(0, int(expected_count or 0))
+    estimated_pages = ((expected + TWITTER_FALLBACK_PAGE_SIZE - 1) // TWITTER_FALLBACK_PAGE_SIZE) + 2
+    return min(TWITTER_COMMENT_MAX_PAGE_BUDGET, max(TWITTER_COMMENT_MIN_PAGE_BUDGET, estimated_pages))
+
+
+def _twitter_context_role(*, account_handle: str, tweet: Any) -> str | None:
+    if bool(getattr(tweet, "is_quote", False)):
+        return "quote"
+    normalized_account = _normalize_account_handle(account_handle)
+    normalized_username = _normalize_account_handle(getattr(tweet, "username", ""))
+    if bool(getattr(tweet, "is_reply", False)) and normalized_account and normalized_username == normalized_account:
+        return "account_reply"
+    if bool(getattr(tweet, "is_reply", False)):
+        return "audience_reply"
+    if normalized_account and normalized_username == normalized_account:
+        return "account_post"
+    return None
+
+
 def _shared_catalog_progress_pages_scanned(retrieval_meta: Mapping[str, Any] | None) -> int:
     meta = _metadata_dict(retrieval_meta)
     direct = _normalize_non_negative_int(meta.get("pages_scanned"))
@@ -232,6 +301,7 @@ class TwitterPostsCatalogDependencies:
     shared_catalog_progress_pages_scanned: Callable[[Mapping[str, Any] | None], int] = (
         _shared_catalog_progress_pages_scanned
     )
+    load_existing_catalog_posts: Callable[..., Sequence[Any]] | None = None
     persist_shared_catalog_posts_with_progress: Callable[..., list[dict[str, Any]]] | None = None
     upsert_shared_catalog_post: Callable[..., dict[str, Any] | None] | None = None
     upsert_tweet: Callable[..., dict[str, Any] | None] | None = None
@@ -317,18 +387,337 @@ def _persist_tweets(
     *,
     deps: TwitterPostsCatalogDependencies,
     job_id: str,
+    run_id: str | None,
     account_handle: str,
     posts: Sequence[Any],
+    progress_cb: ProgressCallback | None = None,
+    retrieval_meta: Mapping[str, Any] | None = None,
+    phase: str = "materialize_catalog_posts",
 ) -> list[dict[str, Any]]:
     if deps.upsert_tweet is None:
         raise RuntimeError("upsert_tweet dependency is required outside shared catalog mode")
 
     rows: list[dict[str, Any]] = []
-    for tweet in posts:
-        row = deps.upsert_tweet(None, job_id=job_id, run_id=None, account=account_handle, tweet=tweet)
+    total_posts = max(0, int(len(posts)))
+    for index, tweet in enumerate(posts, start=1):
+        row = deps.upsert_tweet(None, job_id=job_id, run_id=run_id, account=account_handle, tweet=tweet)
         if row:
             rows.append(row)
+        if progress_cb and (index == 1 or index % 25 == 0 or index == total_posts):
+            progress_cb(
+                {
+                    "phase": phase,
+                    "pages_scanned": _shared_catalog_progress_pages_scanned(retrieval_meta),
+                    "posts_checked": index,
+                    "matched_posts": total_posts,
+                    "materialized_posts": len(rows),
+                }
+            )
     return rows
+
+
+def _fetch_tweet_replies(
+    *,
+    scraper: Any,
+    tweet_id: str,
+    page_budget_count: int,
+    delay: float,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> list[Any]:
+    fetch = getattr(scraper, "fetch_tweet_replies", None)
+    if not callable(fetch):
+        raise AttributeError("fetch_tweet_replies")
+    page_budget = _twitter_page_budget_for_expected_count(page_budget_count)
+    try:
+        return list(
+            fetch(
+                tweet_id,
+                delay=delay,
+                search_max_pages=page_budget,
+                twikit_max_pages=page_budget,
+                progress_callback=progress_callback,
+            )
+            or []
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "progress_callback" in message:
+            try:
+                return list(
+                    fetch(
+                        tweet_id,
+                        delay=delay,
+                        search_max_pages=page_budget,
+                        twikit_max_pages=page_budget,
+                    )
+                    or []
+                )
+            except TypeError as fallback_exc:
+                message = str(fallback_exc)
+        if "search_max_pages" in message or "twikit_max_pages" in message:
+            return list(fetch(tweet_id, delay=delay) or [])
+        raise
+
+
+def _fetch_tweet_quotes(
+    *,
+    scraper: Any,
+    tweet_id: str,
+    page_budget_count: int,
+    delay: float,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> list[Any]:
+    fetch = getattr(scraper, "fetch_tweet_quotes", None)
+    if not callable(fetch):
+        return []
+    page_budget = _twitter_page_budget_for_expected_count(page_budget_count)
+    try:
+        return list(
+            fetch(
+                tweet_id,
+                delay=delay,
+                max_pages=page_budget,
+                progress_callback=progress_callback,
+            )
+            or []
+        )
+    except TypeError as exc:
+        if "progress_callback" in str(exc):
+            return list(fetch(tweet_id, delay=delay, max_pages=page_budget) or [])
+        raise
+
+
+def _interaction_page_budget_count(*, expected_count: int, comment_limit: int | None) -> int:
+    expected = max(0, int(expected_count or 0))
+    if comment_limit is None:
+        return expected
+    return min(expected, max(0, int(comment_limit or 0)))
+
+
+def _persist_tweet_interactions(
+    *,
+    deps: TwitterPostsCatalogDependencies,
+    scraper: Any,
+    job_id: str,
+    run_id: str | None,
+    account_handle: str,
+    posts: Sequence[Any],
+    config: Mapping[str, Any],
+    retrieval_meta: MutableMapping[str, Any],
+    progress_cb: ProgressCallback | None,
+) -> dict[str, int]:
+    if deps.upsert_tweet is None:
+        raise RuntimeError("upsert_tweet dependency is required to persist Twitter comments")
+    if not _shared_catalog_comments_requested(config):
+        return {
+            "comments_fetched": 0,
+            "comments_upserted": 0,
+            "quotes_fetched": 0,
+            "quotes_upserted": 0,
+            "comment_errors": 0,
+            "quote_errors": 0,
+        }
+
+    comment_limit = _shared_catalog_comment_limit(config)
+    comment_delay = _resolve_non_negative_float_env("SOCIAL_TWITTER_COMMENT_DELAY_SEC", 0.5)
+    stats = {
+        "comments_fetched": 0,
+        "comments_upserted": 0,
+        "quotes_fetched": 0,
+        "quotes_upserted": 0,
+        "comment_errors": 0,
+        "quote_errors": 0,
+    }
+    comment_fail_reasons: set[str] = set()
+    quote_fail_reasons: set[str] = set()
+    total_posts = max(0, int(len(posts)))
+
+    def _emit_interaction_progress(
+        *,
+        index: int,
+        tweet_id: str,
+        phase: str,
+        current_comments_fetched: int = 0,
+        current_quotes_fetched: int = 0,
+    ) -> None:
+        if not progress_cb:
+            return
+        progress_cb(
+            {
+                "phase": phase,
+                "pages_scanned": _shared_catalog_progress_pages_scanned(retrieval_meta),
+                "posts_checked": index,
+                "matched_posts": total_posts,
+                "scraped_comments": (
+                    stats["comments_fetched"]
+                    + stats["quotes_fetched"]
+                    + max(0, int(current_comments_fetched or 0))
+                    + max(0, int(current_quotes_fetched or 0))
+                ),
+                "comments_upserted": stats["comments_upserted"] + stats["quotes_upserted"],
+                "current_source_id": tweet_id,
+            }
+        )
+
+    for index, post in enumerate(posts, start=1):
+        tweet_id = str(getattr(post, "tweet_id", "") or "").strip()
+        if not tweet_id:
+            continue
+        expected_replies = _normalize_non_negative_int(getattr(post, "replies", 0))
+        expected_quotes = _normalize_non_negative_int(getattr(post, "quotes", 0))
+        if expected_replies <= 0 and expected_quotes <= 0:
+            continue
+        _emit_interaction_progress(index=index, tweet_id=tweet_id, phase="comments_fetch")
+
+        replies: list[Any] = []
+        try:
+
+            def _on_reply_fetch_progress(
+                payload: dict[str, Any],
+                *,
+                _index: int = index,
+                _tweet_id: str = tweet_id,
+            ) -> None:
+                _emit_interaction_progress(
+                    index=_index,
+                    tweet_id=_tweet_id,
+                    phase=str(payload.get("phase") or "tweet_detail_replies_page"),
+                    current_comments_fetched=_normalize_non_negative_int(payload.get("comments_fetched")),
+                )
+
+            replies = _fetch_tweet_replies(
+                scraper=scraper,
+                tweet_id=tweet_id,
+                page_budget_count=_interaction_page_budget_count(
+                    expected_count=expected_replies,
+                    comment_limit=comment_limit,
+                ),
+                delay=comment_delay,
+                progress_callback=_on_reply_fetch_progress,
+            )
+            if comment_limit is not None:
+                replies = replies[:comment_limit]
+            _emit_interaction_progress(
+                index=index,
+                tweet_id=tweet_id,
+                phase="twitter_replies_fetch_done",
+                current_comments_fetched=len(replies),
+            )
+            fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "").strip()
+            if fail_reason:
+                comment_fail_reasons.add(fail_reason)
+                if not replies:
+                    stats["comment_errors"] += 1
+        except Exception:
+            stats["comment_errors"] += 1
+            comment_fail_reasons.add("fetch_exception")
+            replies = []
+
+        for reply_index, reply in enumerate(replies, start=1):
+            if not getattr(reply, "reply_to_tweet_id", None):
+                reply.reply_to_tweet_id = tweet_id
+            reply.is_reply = True
+            if not str(getattr(reply, "thread_root_tweet_id", "") or "").strip():
+                reply.thread_root_tweet_id = tweet_id
+            reply.is_thread_part = True
+            if not str(getattr(reply, "twitter_context_role", "") or "").strip():
+                reply.twitter_context_role = _twitter_context_role(account_handle=account_handle, tweet=reply)
+            row = deps.upsert_tweet(
+                None,
+                job_id=job_id,
+                run_id=run_id,
+                account=account_handle,
+                tweet=reply,
+                persist_stats=None,
+            )
+            stats["comments_fetched"] += 1
+            if row:
+                stats["comments_upserted"] += 1
+            if reply_index == 1 or reply_index % 25 == 0 or reply_index == len(replies):
+                _emit_interaction_progress(
+                    index=index,
+                    tweet_id=tweet_id,
+                    phase="persist_twitter_replies",
+                )
+
+        quotes: list[Any] = []
+        try:
+            _emit_interaction_progress(index=index, tweet_id=tweet_id, phase="twitter_quotes_fetch")
+
+            def _on_quote_fetch_progress(
+                payload: dict[str, Any],
+                *,
+                _index: int = index,
+                _tweet_id: str = tweet_id,
+            ) -> None:
+                _emit_interaction_progress(
+                    index=_index,
+                    tweet_id=_tweet_id,
+                    phase=str(payload.get("phase") or "twitter_quotes_fetch"),
+                    current_quotes_fetched=_normalize_non_negative_int(payload.get("quotes_fetched")),
+                )
+
+            quotes = _fetch_tweet_quotes(
+                scraper=scraper,
+                tweet_id=tweet_id,
+                page_budget_count=_interaction_page_budget_count(
+                    expected_count=expected_quotes,
+                    comment_limit=comment_limit,
+                ),
+                delay=comment_delay,
+                progress_callback=_on_quote_fetch_progress,
+            )
+            if comment_limit is not None:
+                quotes = quotes[:comment_limit]
+            _emit_interaction_progress(
+                index=index,
+                tweet_id=tweet_id,
+                phase="twitter_quotes_fetch_done",
+                current_quotes_fetched=len(quotes),
+            )
+            fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "").strip()
+            if fail_reason:
+                quote_fail_reasons.add(fail_reason)
+                if not quotes:
+                    stats["quote_errors"] += 1
+        except Exception:
+            stats["quote_errors"] += 1
+            quote_fail_reasons.add("fetch_exception")
+            quotes = []
+
+        for quote_index, quote in enumerate(quotes, start=1):
+            quote.is_reply = False
+            quote.reply_to_tweet_id = None
+            quote.is_quote = True
+            if not getattr(quote, "quoted_tweet_id", None):
+                quote.quoted_tweet_id = tweet_id
+            if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
+                continue
+            if not str(getattr(quote, "twitter_context_role", "") or "").strip():
+                quote.twitter_context_role = "quote"
+            row = deps.upsert_tweet(
+                None,
+                job_id=job_id,
+                run_id=run_id,
+                account=account_handle,
+                tweet=quote,
+                persist_stats=None,
+            )
+            stats["quotes_fetched"] += 1
+            if row:
+                stats["quotes_upserted"] += 1
+            if quote_index == 1 or quote_index % 25 == 0 or quote_index == len(quotes):
+                _emit_interaction_progress(
+                    index=index,
+                    tweet_id=tweet_id,
+                    phase="persist_twitter_quotes",
+                )
+
+    if comment_fail_reasons:
+        retrieval_meta["comment_fail_reasons"] = sorted(comment_fail_reasons)
+    if quote_fail_reasons:
+        retrieval_meta["quote_fail_reasons"] = sorted(quote_fail_reasons)
+    return stats
 
 
 def _twitter_profile_snapshot_from_posts(
@@ -383,6 +772,115 @@ def _twitter_profile_snapshot_from_posts(
     }
 
 
+def _catalog_seeded_fallback_needed(
+    *,
+    deps: TwitterPostsCatalogDependencies,
+    config: Mapping[str, Any],
+    catalog_posts: Sequence[Any],
+    retrieval_meta: Mapping[str, Any],
+) -> bool:
+    if not deps.shared_catalog_mode(config):
+        return False
+    if catalog_posts:
+        return False
+    if deps.load_existing_catalog_posts is None:
+        return False
+
+    error_code = str(retrieval_meta.get("error_code") or retrieval_meta.get("last_error_code") or "").strip().lower()
+    stop_reason = (
+        str(
+            retrieval_meta.get("stop_reason")
+            or retrieval_meta.get("retrieval_stop_reason")
+            or retrieval_meta.get("playwright_failure_reason")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    return error_code == "twitter_search_fallback_exhausted" or stop_reason in {
+        "playwright_no_search_payload",
+        "playwright_no_search_payload_retry",
+        "playwright_no_tweet_entries",
+        "no_tweet_entries",
+    }
+
+
+def _load_catalog_seeded_posts(
+    *,
+    deps: TwitterPostsCatalogDependencies,
+    run_id: str | None,
+    account_handle: str,
+    date_start: datetime,
+    date_end: datetime,
+    config: Mapping[str, Any],
+    retrieval_meta: MutableMapping[str, Any],
+    progress_cb: ProgressCallback | None,
+) -> list[Any]:
+    if deps.load_existing_catalog_posts is None:
+        return []
+
+    original_error_code = str(retrieval_meta.get("error_code") or "").strip() or None
+    original_error_class = str(retrieval_meta.get("error_class") or "").strip() or None
+    original_stop_reason = str(retrieval_meta.get("stop_reason") or "").strip() or None
+    try:
+        seeded_posts = list(
+            deps.load_existing_catalog_posts(
+                run_id=run_id,
+                account_handle=account_handle,
+                date_start=date_start,
+                date_end=date_end,
+                config=config,
+                retrieval_meta=retrieval_meta,
+            )
+            or []
+        )
+    except Exception:  # noqa: BLE001
+        retrieval_meta["catalog_seeded_fallback_error"] = "load_existing_catalog_posts_failed"
+        logger.warning(
+            "Twitter catalog-seeded fallback failed for @%s window=%s..%s",
+            account_handle,
+            date_start,
+            date_end,
+            exc_info=True,
+        )
+        return []
+
+    if not seeded_posts:
+        retrieval_meta["catalog_seeded_fallback_checked"] = True
+        retrieval_meta["catalog_seeded_post_count"] = 0
+        return []
+
+    retrieval_meta["catalog_seeded_fallback"] = True
+    retrieval_meta["catalog_seeded_post_count"] = len(seeded_posts)
+    retrieval_meta["catalog_seeded_original_error_code"] = original_error_code
+    retrieval_meta["catalog_seeded_original_error_class"] = original_error_class
+    retrieval_meta["catalog_seeded_original_stop_reason"] = original_stop_reason
+    retrieval_meta["retrieval_mode"] = "catalog_seeded_window"
+    retrieval_meta["stop_reason"] = "catalog_seeded_window"
+    retrieval_meta["error_code"] = None
+    retrieval_meta["error_class"] = None
+    retrieval_meta["retryable"] = False
+    retrieval_meta["complete"] = True
+    retrieval_meta["posts_checked"] = max(
+        _normalize_non_negative_int(retrieval_meta.get("posts_checked")),
+        len(seeded_posts),
+    )
+    retrieval_meta["tweet_count"] = max(
+        _normalize_non_negative_int(retrieval_meta.get("tweet_count")),
+        len(seeded_posts),
+    )
+    if progress_cb:
+        progress_cb(
+            {
+                "phase": "catalog_seeded_fallback",
+                "pages_scanned": _shared_catalog_progress_pages_scanned(retrieval_meta),
+                "posts_checked": len(seeded_posts),
+                "matched_posts": len(seeded_posts),
+            }
+        )
+    return seeded_posts
+
+
 def scrape_shared_twitter_posts(
     *,
     run_id: str | None,
@@ -409,6 +907,33 @@ def scrape_shared_twitter_posts(
     posts = list(scraper.scrape(scrape_config, progress_cb=progress_cb))
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
     catalog_posts = [tweet for tweet in posts if not bool(getattr(tweet, "is_reply", False))]
+    if _catalog_seeded_fallback_needed(
+        deps=deps,
+        config=config,
+        catalog_posts=catalog_posts,
+        retrieval_meta=retrieval_meta,
+    ):
+        seeded_posts = _load_catalog_seeded_posts(
+            deps=deps,
+            run_id=run_id,
+            account_handle=account_handle,
+            date_start=scrape_config.date_start,
+            date_end=scrape_config.date_end,
+            config=config,
+            retrieval_meta=retrieval_meta,
+            progress_cb=progress_cb,
+        )
+        if seeded_posts:
+            posts = seeded_posts
+            catalog_posts = seeded_posts
+        elif retrieval_meta.get("catalog_seeded_fallback_checked"):
+            retrieval_meta["catalog_seeded_empty_window"] = True
+            retrieval_meta["retrieval_mode"] = "catalog_seeded_empty_window"
+            retrieval_meta["stop_reason"] = "catalog_seeded_empty_window"
+            retrieval_meta["error_code"] = None
+            retrieval_meta["error_class"] = None
+            retrieval_meta["retryable"] = False
+            retrieval_meta["complete"] = True
 
     if deps.shared_catalog_mode(config):
         rows = _persist_shared_catalog_posts(
@@ -419,10 +944,56 @@ def scrape_shared_twitter_posts(
             retrieval_meta=retrieval_meta,
             progress_cb=progress_cb,
         )
+        materialized_rows = (
+            _persist_tweets(
+                deps=deps,
+                job_id=job_id,
+                run_id=run_id,
+                account_handle=account_handle,
+                posts=catalog_posts,
+                progress_cb=progress_cb,
+                retrieval_meta=retrieval_meta,
+            )
+            if deps.upsert_tweet is not None
+            else []
+        )
+        interaction_stats = {
+            "comments_fetched": 0,
+            "comments_upserted": 0,
+            "quotes_fetched": 0,
+            "quotes_upserted": 0,
+            "comment_errors": 0,
+            "quote_errors": 0,
+        }
+        if _shared_catalog_comments_requested(config):
+            interaction_stats = _persist_tweet_interactions(
+                deps=deps,
+                scraper=scraper,
+                job_id=job_id,
+                run_id=run_id,
+                account_handle=account_handle,
+                posts=catalog_posts,
+                config=config,
+                retrieval_meta=retrieval_meta,
+                progress_cb=progress_cb,
+            )
         retrieval_meta["persist_counters"] = {
             "posts_upserted": len(rows),
-            "comments_upserted": 0,
+            "catalog_posts_upserted": len(rows),
+            "materialized_posts_upserted": len(materialized_rows),
+            "comments_upserted": interaction_stats["comments_upserted"],
         }
+        if _shared_catalog_comments_requested(config):
+            retrieval_meta["comment_stats"] = {
+                "comments_fetched": interaction_stats["comments_fetched"],
+                "comments_upserted": interaction_stats["comments_upserted"],
+                "comment_errors": interaction_stats["comment_errors"],
+            }
+            retrieval_meta["quote_stats"] = {
+                "quotes_fetched": interaction_stats["quotes_fetched"],
+                "quotes_upserted": interaction_stats["quotes_upserted"],
+                "quote_errors": interaction_stats["quote_errors"],
+            }
         retrieval_meta["posts_checked"] = deps.shared_catalog_progress_posts_checked(
             retrieval_meta,
             matched_posts=len(catalog_posts),
@@ -432,8 +1003,11 @@ def scrape_shared_twitter_posts(
         rows = _persist_tweets(
             deps=deps,
             job_id=job_id,
+            run_id=None,
             account_handle=account_handle,
             posts=catalog_posts,
+            progress_cb=progress_cb,
+            retrieval_meta=retrieval_meta,
         )
 
     retrieval_meta["profile_snapshot"] = deps.merge_social_profile_snapshots(

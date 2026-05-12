@@ -196,9 +196,7 @@ def test_comments_job_runner_passes_single_session_strategy_and_records_saved_on
         runtime_metadata = {
             "transport": "test",
             "request_count": 1,
-            "comments_load_strategy": {
-                "last": {"strategy_decision": {"selected_strategy": "single_session_load_all"}}
-            },
+            "comments_load_strategy": {"last": {"strategy_decision": {"selected_strategy": "single_session_load_all"}}},
         }
 
         async def warmup(self) -> None:

@@ -6,9 +6,7 @@ from typing import Any
 
 from ._surfaces import RouteRecord, routes_matching
 
-ROUTE_PREFIXES = (
-    "/admin/socials/seasons/",
-)
+ROUTE_PREFIXES = ("/admin/socials/seasons/",)
 
 
 def surface_routes(router: Any) -> list[RouteRecord]:
@@ -17,4 +15,3 @@ def surface_routes(router: Any) -> list[RouteRecord]:
         for record in routes_matching(router, ROUTE_PREFIXES)
         if "/analytics" in record[1] or "/tiktok/" in record[1] or "/mirror/" in record[1]
     ]
-

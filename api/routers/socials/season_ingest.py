@@ -18,4 +18,3 @@ def surface_routes(router: Any) -> list[RouteRecord]:
         for record in routes_matching(router, ROUTE_PREFIXES)
         if "/analytics" not in record[1] and "/tiktok/" not in record[1]
     ]
-

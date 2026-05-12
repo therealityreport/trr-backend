@@ -37,7 +37,7 @@ def _live_row(
         "is_exclusion": is_exclusion,
         "constraint_name": constraint_name,
         "constraint_type": "p" if constraint_name else None,
-        "index_definition": f'CREATE INDEX {index} ON {schema}.{table} (created_at)',
+        "index_definition": f"CREATE INDEX {index} ON {schema}.{table} (created_at)",
     }
 
 

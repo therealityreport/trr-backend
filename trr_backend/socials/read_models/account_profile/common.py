@@ -276,9 +276,7 @@ def _clone_social_account_profile_comment_thread(item: dict[str, Any]) -> dict[s
     return {
         **item,
         "replies": [
-            _clone_social_account_profile_comment_thread(reply)
-            for reply in replies
-            if isinstance(reply, dict)
+            _clone_social_account_profile_comment_thread(reply) for reply in replies if isinstance(reply, dict)
         ],
     }
 
@@ -469,6 +467,18 @@ def get_social_account_profile_summary(
                     query_name="lite_header_stats",
                     loader=lambda: _call_profile_summary_loader_with_conn(
                         _instagram_social_account_lite_header_stats,
+                        normalized_account,
+                        conn=summary_conn,
+                    ),
+                    fallback=lambda _exc: {},
+                )
+            elif normalized_platform == "tiktok" and normalized_detail in {"full", "lite"}:
+                query_loaders["lite_header_stats"] = lambda: _timed_social_account_profile_summary_query(
+                    platform=normalized_platform,
+                    account_handle=normalized_account,
+                    query_name="lite_header_stats",
+                    loader=lambda: _call_profile_summary_loader_with_conn(
+                        _tiktok_social_account_lite_header_stats,
                         normalized_account,
                         conn=summary_conn,
                     ),
@@ -700,7 +710,7 @@ def get_social_account_profile_summary(
             )
         with _social_profile_perf_span(breakdown, "finalize_payload"):
             primary_source_metadata = _metadata_dict((source_rows[0] or {}).get("metadata")) if source_rows else {}
-            primary_source_scope = str((source_rows[0] or {}).get("source_scope")) if source_rows else ""
+            primary_source_scope = str((source_rows[0] or {}).get("source_scope") or "") if source_rows else ""
             shared_profile = _shared_profile_contract(
                 source_scope=primary_source_scope.strip() or "network",
                 platform=normalized_platform,
@@ -789,6 +799,7 @@ def get_social_account_profile_summary(
             handle=normalized_account,
             breakdown=breakdown,
         )
+
 
 def get_social_account_profile_posts(
     platform: str,
@@ -885,6 +896,7 @@ def get_social_account_profile_posts(
             "total_pages": max(1, (total + safe_page_size - 1) // safe_page_size) if safe_page_size else 1,
         },
     }
+
 
 def get_social_account_profile_comments(
     platform: str,
@@ -1013,7 +1025,9 @@ def get_social_account_profile_comments(
                 breakdown_active_condition = "bc.is_missing is not true" if lifecycle_supported else "true"
                 breakdown_missing_condition = "bc.is_missing is true" if lifecycle_supported else "false"
                 breakdown_fb_crosspost_condition = "coalesce(to_jsonb(bc) ->> 'phase', '') = 'fb_crosspost'"
-                breakdown_parent_external_expr = "nullif(coalesce(to_jsonb(bc) ->> 'parent_comment_external_id', ''), '')"
+                breakdown_parent_external_expr = (
+                    "nullif(coalesce(to_jsonb(bc) ->> 'parent_comment_external_id', ''), '')"
+                )
                 breakdown_reply_depth_expr = """
                             case
                               when coalesce(to_jsonb(bc) ->> 'reply_depth', '') ~ '^[0-9]+$'
@@ -1568,11 +1582,7 @@ def get_social_account_profile_comments(
                         comments_params,
                     )
             with _social_profile_perf_span(breakdown, "finalize_payload"):
-                items = [
-                    _format_instagram_profile_comment_row(row)
-                    for row in rows
-                    if str(row.get("id") or "").strip()
-                ]
+                items = [_format_instagram_profile_comment_row(row) for row in rows if str(row.get("id") or "").strip()]
                 if normalized_post_source_id:
                     items = _thread_social_account_profile_comment_items(items)
                 total = _normalize_non_negative_int((rows[0] or {}).get("total_count")) if rows else 0
@@ -1587,9 +1597,7 @@ def get_social_account_profile_comments(
                 }
                 if normalized_post_source_id:
                     breakdown_row = rows[0] if rows else {}
-                    facebook_comments = _normalize_non_negative_int(
-                        breakdown_row.get("breakdown_facebook_comments")
-                    )
+                    facebook_comments = _normalize_non_negative_int(breakdown_row.get("breakdown_facebook_comments"))
                     comment_breakdown = build_instagram_comment_breakdown(
                         reported_comments=breakdown_row.get("breakdown_reported_comments"),
                         saved_parent_comments=breakdown_row.get("breakdown_saved_parent_comments"),
@@ -1601,9 +1609,7 @@ def get_social_account_profile_comments(
                         facebook_crosspost_source=breakdown_row.get("facebook_crosspost_source"),
                     )
                     payload["comment_breakdown"] = comment_breakdown
-                    payload["comment_completeness"] = instagram_comment_completeness_from_breakdown(
-                        comment_breakdown
-                    )
+                    payload["comment_completeness"] = instagram_comment_completeness_from_breakdown(comment_breakdown)
                     payload["facebook_crosspost"] = instagram_facebook_crosspost_payload_from_row(
                         breakdown_row,
                         facebook_comments=facebook_comments,
@@ -1617,6 +1623,7 @@ def get_social_account_profile_comments(
             handle=normalized_account,
             breakdown=breakdown,
         )
+
 
 def get_social_account_profile_hashtags(
     platform: str,
@@ -1649,6 +1656,7 @@ def get_social_account_profile_hashtags(
         )
     }
 
+
 def get_social_account_profile_collaborators_tags(platform: str, account_handle: str) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1670,20 +1678,21 @@ def get_social_account_profile_collaborators_tags(platform: str, account_handle:
         "mentions": payload.get("mentions", []),
     }
 
+
 _LOCAL_ROOM_NAMES = {
-    '_social_account_profile_post_item',
-    'get_social_account_profile_summary',
-    'get_social_account_profile_posts',
-    'get_social_account_profile_comments',
-    'get_social_account_profile_hashtags',
-    'get_social_account_profile_collaborators_tags',
+    "_social_account_profile_post_item",
+    "get_social_account_profile_summary",
+    "get_social_account_profile_posts",
+    "get_social_account_profile_comments",
+    "get_social_account_profile_hashtags",
+    "get_social_account_profile_collaborators_tags",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    'get_social_account_profile_summary',
-    'get_social_account_profile_posts',
-    'get_social_account_profile_comments',
-    'get_social_account_profile_hashtags',
-    'get_social_account_profile_collaborators_tags',
+    "get_social_account_profile_summary",
+    "get_social_account_profile_posts",
+    "get_social_account_profile_comments",
+    "get_social_account_profile_hashtags",
+    "get_social_account_profile_collaborators_tags",
 ]

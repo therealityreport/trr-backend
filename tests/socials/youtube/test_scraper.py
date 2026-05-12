@@ -1,6 +1,8 @@
 """Unit tests for YouTube scraper traversal and comment parsing behavior."""
 
+import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from trr_backend.socials.youtube.scraper import YouTubeComment, YouTubeScrapeConfig, YouTubeScraper, YouTubeVideo
 
@@ -45,6 +47,70 @@ def test_apply_surface_guaranteed_limit_overrides_small_cap_when_both_surfaces_p
     assert effective_limit == 2
     assert len(limited) == 2
     assert {"videos", "shorts"} <= {scraper._video_surface(video) for video in limited}
+
+
+def test_scrape_playlist_uses_ytdlp_entries_for_videos_and_shorts(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    playlist_id = "PLCsQHuMS6NoyF7gnzgOo7UxUrCcMtMH1v"
+    progress_events: list[dict[str, int | str]] = []
+    payload = {
+        "id": playlist_id,
+        "title": "The Traitors",
+        "playlist_count": 2,
+        "entries": [
+            {
+                "id": "video12345",
+                "title": "The Traitors season 3 trailer",
+                "description": "Peacock preview",
+                "timestamp": int(datetime(2025, 1, 1, tzinfo=UTC).timestamp()),
+                "duration": 180,
+                "webpage_url": "https://www.youtube.com/watch?v=video12345",
+                "view_count": 100,
+                "like_count": 10,
+                "comment_count": 5,
+                "channel_id": "channel-peacock",
+                "channel": "Peacock",
+                "thumbnail": "https://img.test/video.jpg",
+            },
+            {
+                "id": "short12345",
+                "title": "Roundtable reveal",
+                "description": "A short clip",
+                "timestamp": int(datetime(2025, 1, 2, tzinfo=UTC).timestamp()),
+                "duration": 42,
+                "webpage_url": "https://www.youtube.com/shorts/short12345",
+                "view_count": 200,
+                "like_count": 20,
+                "comment_count": 7,
+                "channel_id": "channel-peacock",
+                "channel": "Peacock",
+                "thumbnail": "https://img.test/short.jpg",
+            },
+        ],
+    }
+
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _binary: "/usr/bin/yt-dlp")
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "trr_backend.socials.youtube.scraper.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+    )
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            source_type="playlist",
+            playlist_url=f"https://www.youtube.com/playlist?list={playlist_id}",
+            enforce_keyword_filter=False,
+        ),
+        progress_cb=lambda event: progress_events.append(dict(event)),
+    )
+
+    assert [video.video_id for video in videos] == ["short12345", "video12345"]
+    assert {video.source_surface for video in videos} == {"videos", "shorts"}
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "playlist_ytdlp"
+    assert scraper.last_retrieval_meta["playlist_id"] == playlist_id
+    assert scraper.last_retrieval_meta["posts_checked"] == 2
+    assert progress_events[-1]["phase"] == "scrape_complete"
 
 
 def test_extract_channel_header_avatar_from_data_prefers_yt3_and_upscales() -> None:

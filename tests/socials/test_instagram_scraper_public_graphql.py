@@ -669,22 +669,28 @@ def test_scrape_graphql_marks_initial_failure_without_shortcode_fallback(monkeyp
     monkeypatch.setattr(scraper, "fetch_posts_graphql", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(scraper, "_extract_profile_total_posts", lambda *_args, **_kwargs: None)
 
-    posts = scraper._scrape_graphql(type("Cfg", (), {
-        "username": "bravotv",
-        "delay_seconds": 0.0,
-        "max_pages": 1,
-        "no_match_page_limit": None,
-        "max_scrape_seconds": 60.0,
-        "date_start": None,
-        "date_end": None,
-        "hashtags": [],
-        "fast_mode": False,
-        "matches_hashtags": lambda self, text: True,
-        "is_in_date_range": lambda self, ts: True,
-        "show_id": None,
-        "season_number": None,
-        "person_id": None,
-    })())
+    posts = scraper._scrape_graphql(
+        type(
+            "Cfg",
+            (),
+            {
+                "username": "bravotv",
+                "delay_seconds": 0.0,
+                "max_pages": 1,
+                "no_match_page_limit": None,
+                "max_scrape_seconds": 60.0,
+                "date_start": None,
+                "date_end": None,
+                "hashtags": [],
+                "fast_mode": False,
+                "matches_hashtags": lambda self, text: True,
+                "is_in_date_range": lambda self, ts: True,
+                "show_id": None,
+                "season_number": None,
+                "person_id": None,
+            },
+        )()
+    )
 
     assert posts == []
     assert scraper.last_retrieval_meta["initial_page_failed"] is True
@@ -696,7 +702,16 @@ def test_fetch_posts_graphql_uses_request_client(monkeypatch: pytest.MonkeyPatch
     calls: list[str] = []
 
     class _Client:
-        def post_form_json(self, url: str, *, query_type: str, headers: dict[str, Any], cookies: dict[str, str], data: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        def post_form_json(
+            self,
+            url: str,
+            *,
+            query_type: str,
+            headers: dict[str, Any],
+            cookies: dict[str, str],
+            data: dict[str, Any],
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
             del url, headers, cookies, data
             calls.append(query_type)
             return {
@@ -717,11 +732,15 @@ def test_fetch_posts_graphql_uses_request_client(monkeypatch: pytest.MonkeyPatch
     assert calls == ["graphql_profile_posts"]
 
 
-def test_redirect_login_failure_marks_auth_block_and_attempts_interactive_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_redirect_login_failure_marks_auth_block_and_attempts_interactive_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
     monkeypatch.setattr(scraper, "_is_local_environment", lambda: True)
     monkeypatch.setattr(scraper, "_playwright_graphql_fallback_enabled", lambda: False)
-    monkeypatch.setattr(scraper, "_try_interactive_login", lambda: {"refreshed": False, "reason": "interactive_login_error"})
+    monkeypatch.setattr(
+        scraper, "_try_interactive_login", lambda: {"refreshed": False, "reason": "interactive_login_error"}
+    )
     monkeypatch.setattr(scraper, "_try_auto_refresh_cookies", lambda: {"refreshed": False, "reason": "noop"})
     monkeypatch.setattr(
         scraper,
@@ -793,7 +812,11 @@ def test_checkpoint_failure_does_not_retire_identity(monkeypatch: pytest.MonkeyP
 
     scraper._identity_pool = _Pool()
     scraper._active_identity = type("Identity", (), {"session_id": "ig-1", "cookies": dict(scraper.cookies)})()
-    monkeypatch.setattr(scraper, "_try_auto_refresh_cookies", lambda: refresh_attempted.append(True) or {"refreshed": False, "reason": "noop"})
+    monkeypatch.setattr(
+        scraper,
+        "_try_auto_refresh_cookies",
+        lambda: refresh_attempted.append(True) or {"refreshed": False, "reason": "noop"},
+    )
     monkeypatch.setattr(scraper, "_playwright_graphql_fallback_enabled", lambda: False)
     monkeypatch.setattr(scraper, "_is_local_environment", lambda: False)
     monkeypatch.setattr(

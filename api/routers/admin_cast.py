@@ -56,9 +56,7 @@ def _group_cast_summary_rows(
     rows: list[dict[str, Any]],
 ) -> CastSummaryBatchResponse:
     ordered_show_ids = list(dict.fromkeys(show_ids))
-    cast_members_by_show_id: dict[str, list[CastSummaryMember]] = {
-        show_id: [] for show_id in ordered_show_ids
-    }
+    cast_members_by_show_id: dict[str, list[CastSummaryMember]] = {show_id: [] for show_id in ordered_show_ids}
 
     for row in rows:
         show_id = str(row.get("show_id") or "").strip()

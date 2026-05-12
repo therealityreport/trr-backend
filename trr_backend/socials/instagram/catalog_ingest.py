@@ -128,6 +128,7 @@ def _shared_instagram_catalog_graphql_page_size() -> int:
         return max(33, min(50, val))
     return 50
 
+
 def _shared_instagram_catalog_delay_seconds(
     *,
     base_delay: float,
@@ -149,6 +150,7 @@ def _shared_instagram_catalog_delay_seconds(
     if success_streak >= 5:
         return round(base_delay * 2, 4)
     return round(base_delay * 3, 4)
+
 
 def _upsert_instagram_post(
     context: SeasonContext | None,
@@ -269,15 +271,10 @@ def _upsert_instagram_post(
         facebook_crosspost_raw = raw_facebook_crosspost if isinstance(raw_facebook_crosspost, dict) else {}
     facebook_crosspost_payload: dict[str, Any] = dict(facebook_crosspost_raw or {})
     crosspost_observed_at = _coerce_dt(
-        getattr(post, "facebook_crosspost_observed_at", None)
-        or facebook_crosspost_payload.get("observed_at")
+        getattr(post, "facebook_crosspost_observed_at", None) or facebook_crosspost_payload.get("observed_at")
     )
     crosspost_source = (
-        str(
-            getattr(post, "facebook_crosspost_source", None)
-            or facebook_crosspost_payload.get("source")
-            or ""
-        ).strip()
+        str(getattr(post, "facebook_crosspost_source", None) or facebook_crosspost_payload.get("source") or "").strip()
         or None
     )
     fb_comment_count = getattr(post, "fb_comment_count", None)
@@ -300,8 +297,7 @@ def _upsert_instagram_post(
     if not isinstance(social_context, dict):
         social_context = {}
     facebook_post_id = (
-        str(getattr(post, "facebook_post_id", None) or facebook_crosspost_payload.get("post_id") or "").strip()
-        or None
+        str(getattr(post, "facebook_post_id", None) or facebook_crosspost_payload.get("post_id") or "").strip() or None
     )
     facebook_post_url = (
         str(getattr(post, "facebook_post_url", None) or facebook_crosspost_payload.get("post_url") or "").strip()
@@ -515,6 +511,7 @@ def _upsert_instagram_post(
     _sync_instagram_canonical_post(legacy_row=row, payload=payload, post=post, conn=conn)
     return row
 
+
 def _upsert_shared_catalog_instagram_post(
     *,
     run_id: str | None,
@@ -566,6 +563,7 @@ def _upsert_shared_catalog_instagram_post(
     if row:
         _sync_instagram_catalog_post_collaborators(row, conn=conn)
     return row
+
 
 def _shared_catalog_instagram_post_payload(
     *,
@@ -620,6 +618,7 @@ def _shared_catalog_instagram_post_payload(
         video_duration=getattr(post, "video_duration", None),
     )
 
+
 def _batch_upsert_shared_catalog_instagram_posts(
     *,
     run_id: str | None,
@@ -657,6 +656,7 @@ def _batch_upsert_shared_catalog_instagram_posts(
         _sync_instagram_catalog_post_collaborators(row, conn=conn)
     return rows
 
+
 def _build_instagram_scraper_with_auth_fallback(
     *,
     browser_account_id: str | None = None,
@@ -680,6 +680,7 @@ def _build_instagram_scraper_with_auth_fallback(
         browser_account_id=_sanitize_instagram_browser_account_id(browser_account_id),
     )
 
+
 def _build_shared_instagram_scraper(*, authenticated: bool = False, browser_account_id: str | None = None):
     from trr_backend.socials.instagram import InstagramScraper
 
@@ -694,9 +695,11 @@ def _build_shared_instagram_scraper(*, authenticated: bool = False, browser_acco
     # avoid depending on auth cookies when the public transport is healthy.
     return InstagramScraper(cookies={}, browser_account_id=browser_account_id)
 
+
 def _shared_instagram_graphql_page_has_posts(data: Mapping[str, Any] | None) -> bool:
     connection = ((data or {}).get("data") or {}).get("xdt_api__v1__feed__user_timeline_graphql_connection") or {}
     return bool(connection.get("edges") or [])
+
 
 def _shared_instagram_graphql_candidate_scrapers(
     *,
@@ -716,6 +719,7 @@ def _shared_instagram_graphql_candidate_scrapers(
     elif not candidates:
         candidates.append(("public", public_scraper))
     return candidates
+
 
 def _shared_instagram_graphql_empty_page_meta(
     *,
@@ -742,6 +746,7 @@ def _shared_instagram_graphql_empty_page_meta(
     meta["graphql_cursor"] = str(cursor or "").strip() or None
     meta["transport"] = transport
     return meta
+
 
 def _fetch_shared_instagram_graphql_page(
     *,
@@ -786,6 +791,7 @@ def _fetch_shared_instagram_graphql_page(
         chosen_transport = transport
     return None, last_meta, chosen_transport
 
+
 def _shared_instagram_frontier_auth_validation(config: Mapping[str, Any] | None = None) -> tuple[bool, str | None]:
     _sync_core_overrides()
     metadata = _metadata_dict(config)
@@ -804,6 +810,7 @@ def _shared_instagram_frontier_auth_validation(config: Mapping[str, Any] | None 
     if not is_valid:
         return False, validation_reason
     return True, None
+
 
 def _shared_instagram_frontier_auth_state(
     config: Mapping[str, Any] | None = None,
@@ -825,6 +832,7 @@ def _shared_instagram_frontier_auth_state(
 
     return True, None
 
+
 def _shared_instagram_frontier_auth_error_code(auth_reason: str | None) -> str:
     normalized_reason = str(auth_reason or "").strip().lower()
     if normalized_reason == "checkpoint_required":
@@ -836,6 +844,7 @@ def _shared_instagram_frontier_auth_error_code(auth_reason: str | None) -> str:
     if normalized_reason:
         return f"instagram_graphql_auth_{normalized_reason}"
     return "instagram_graphql_auth_blocked"
+
 
 def _shared_instagram_frontier_transport_preferences(
     config: Mapping[str, Any] | None,
@@ -856,6 +865,7 @@ def _shared_instagram_frontier_transport_preferences(
         allow_public_fallback = not (preferred_transport == "authenticated" and auth_allowed)
     return preferred_transport, allow_public_fallback
 
+
 def _shared_instagram_posted_at_bounds(posts: Sequence[Any]) -> tuple[datetime | None, datetime | None]:
     oldest_posted_at: datetime | None = None
     newest_posted_at: datetime | None = None
@@ -869,6 +879,7 @@ def _shared_instagram_posted_at_bounds(posts: Sequence[Any]) -> tuple[datetime |
             newest_posted_at = posted_at
     return oldest_posted_at, newest_posted_at
 
+
 def _shared_instagram_graphql_delay_seconds(*, jitter: bool = False) -> float:
     base_delay = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
     if not jitter:
@@ -876,9 +887,11 @@ def _shared_instagram_graphql_delay_seconds(*, jitter: bool = False) -> float:
     seed = int(time_module.time() * 1000) % 9
     return base_delay + (0.03 * seed)
 
+
 def _shared_instagram_account_lock_key(account_handle: str) -> int:
     normalized_account = str(account_handle or "").strip().lower() or "instagram"
     return int(hashlib.md5(f"instagram-account:{normalized_account}".encode()).hexdigest()[:15], 16) % (2**31)
+
 
 def _shared_instagram_account_lock_max_attempts() -> int:
     raw_value = str(os.getenv("SOCIAL_INSTAGRAM_ACCOUNT_LOCK_MAX_ATTEMPTS") or "").strip()
@@ -887,6 +900,7 @@ def _shared_instagram_account_lock_max_attempts() -> int:
     if os.getenv("PYTEST_CURRENT_TEST"):
         return 2
     return 40
+
 
 def _shared_instagram_account_lock_wait_seconds() -> float:
     raw_value = str(os.getenv("SOCIAL_INSTAGRAM_ACCOUNT_LOCK_WAIT_SECONDS") or "").strip()
@@ -898,6 +912,7 @@ def _shared_instagram_account_lock_wait_seconds() -> float:
     if os.getenv("PYTEST_CURRENT_TEST"):
         return 0.0
     return 15.0
+
 
 def _shared_instagram_account_execution(account_handle: str):
     from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
@@ -965,6 +980,7 @@ def _shared_instagram_account_execution(account_handle: str):
                         exc_info=True,
                     )
 
+
 def _fetch_shared_instagram_graphql_posts_page(
     *,
     account_handle: str,
@@ -986,11 +1002,7 @@ def _fetch_shared_instagram_graphql_posts_page(
     browser_sessions = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
     with browser_sessions.execution_lock(account_handle):
         public_scraper = build_scraper(browser_account_id=account_handle)
-        auth_scraper = (
-            build_scraper(authenticated=True, browser_account_id=account_handle)
-            if auth_allowed
-            else None
-        )
+        auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
         scrape_config = ScrapeConfig(username=account_handle, hashtags=[], delay_seconds=delay_seconds, max_pages=None)
         data, page_meta, selected_transport = fetch_graphql_page(
             account_handle=account_handle,
@@ -1015,6 +1027,7 @@ def _fetch_shared_instagram_graphql_posts_page(
             meta["total_posts"] = total_posts
     return page_posts, page_info, meta, selected_transport
 
+
 def _discover_instagram_cursor_partitions(
     *,
     account_handle: str,
@@ -1032,11 +1045,7 @@ def _discover_instagram_cursor_partitions(
     )
     with _context_manager_from_callable(account_execution, account_handle):
         public_scraper = build_scraper(browser_account_id=account_handle)
-        auth_scraper = (
-            build_scraper(authenticated=True, browser_account_id=account_handle)
-            if auth_allowed
-            else None
-        )
+        auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
         # Avoid the public web_profile_info endpoint here; on Modal it frequently
         # 429s before we ever reach the warmed public GraphQL path.
         total_posts = None
@@ -1203,6 +1212,7 @@ def _discover_instagram_cursor_partitions(
             },
         }
 
+
 def _scrape_shared_instagram_posts_partitioned(
     *,
     run_id: str | None,
@@ -1227,11 +1237,7 @@ def _scrape_shared_instagram_posts_partitioned(
     with _context_manager_from_callable(account_execution, account_handle):
         public_scraper = build_scraper(browser_account_id=account_handle)
         auth_allowed, _auth_reason = auth_validation(config)
-        auth_scraper = (
-            build_scraper(authenticated=True, browser_account_id=account_handle)
-            if auth_allowed
-            else None
-        )
+        auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
         base_delay_seconds = float((os.getenv("SOCIAL_INSTAGRAM_DELAY_SEC") or "").strip() or "0.15")
         catalog_page_size = _shared_instagram_catalog_graphql_page_size()
         scrape_config = ScrapeConfig(
@@ -1374,15 +1380,7 @@ INSTAGRAM_DETAIL_REFRESH_PROGRESS_INTERVAL_SECONDS = 5.0
 
 
 def _instagram_detail_refresh_policy(config: Mapping[str, Any]) -> str:
-    raw_policy = (
-        str(
-            config.get("details_refresh_policy")
-            or config.get("detail_refresh_policy")
-            or ""
-        )
-        .strip()
-        .lower()
-    )
+    raw_policy = str(config.get("details_refresh_policy") or config.get("detail_refresh_policy") or "").strip().lower()
     if raw_policy:
         return raw_policy.replace("-", "_")
     if bool(config.get("details_refresh_dry_run")):
@@ -1434,14 +1432,11 @@ def _instagram_detail_refresh_dry_run_enabled(*, policy: str, config: Mapping[st
 
 def _instagram_detail_refresh_stale_metadata_age(config: Mapping[str, Any] | None = None) -> timedelta:
     config = config or {}
-    raw_days = (
-        str(
-            config.get("details_refresh_stale_metadata_days")
-            or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_STALE_METADATA_DAYS")
-            or ""
-        )
-        .strip()
-    )
+    raw_days = str(
+        config.get("details_refresh_stale_metadata_days")
+        or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_STALE_METADATA_DAYS")
+        or ""
+    ).strip()
     try:
         days = int(raw_days or INSTAGRAM_DETAIL_REFRESH_DEFAULT_STALE_METADATA_DAYS)
     except ValueError:
@@ -1450,14 +1445,11 @@ def _instagram_detail_refresh_stale_metadata_age(config: Mapping[str, Any] | Non
 
 
 def _instagram_detail_refresh_write_batch_size(config: Mapping[str, Any]) -> int:
-    raw_size = (
-        str(
-            config.get("details_refresh_write_batch_size")
-            or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_WRITE_BATCH_SIZE")
-            or ""
-        )
-        .strip()
-    )
+    raw_size = str(
+        config.get("details_refresh_write_batch_size")
+        or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_WRITE_BATCH_SIZE")
+        or ""
+    ).strip()
     try:
         size = int(raw_size or INSTAGRAM_DETAIL_REFRESH_WRITE_BATCH_SIZE)
     except ValueError:
@@ -1466,14 +1458,11 @@ def _instagram_detail_refresh_write_batch_size(config: Mapping[str, Any]) -> int
 
 
 def _instagram_detail_refresh_progress_every_posts(config: Mapping[str, Any]) -> int:
-    raw_count = (
-        str(
-            config.get("details_refresh_progress_every_posts")
-            or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_PROGRESS_EVERY_POSTS")
-            or ""
-        )
-        .strip()
-    )
+    raw_count = str(
+        config.get("details_refresh_progress_every_posts")
+        or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_PROGRESS_EVERY_POSTS")
+        or ""
+    ).strip()
     try:
         count = int(raw_count or INSTAGRAM_DETAIL_REFRESH_PROGRESS_EVERY_POSTS)
     except ValueError:
@@ -1482,14 +1471,11 @@ def _instagram_detail_refresh_progress_every_posts(config: Mapping[str, Any]) ->
 
 
 def _instagram_detail_refresh_progress_interval_seconds(config: Mapping[str, Any]) -> float:
-    raw_seconds = (
-        str(
-            config.get("details_refresh_progress_interval_seconds")
-            or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_PROGRESS_INTERVAL_SECONDS")
-            or ""
-        )
-        .strip()
-    )
+    raw_seconds = str(
+        config.get("details_refresh_progress_interval_seconds")
+        or os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_PROGRESS_INTERVAL_SECONDS")
+        or ""
+    ).strip()
     try:
         seconds = float(raw_seconds or INSTAGRAM_DETAIL_REFRESH_PROGRESS_INTERVAL_SECONDS)
     except ValueError:
@@ -1547,9 +1533,7 @@ def classify_instagram_detail_refresh_need(
     """Classify whether detail refresh needs an external per-post detail fetch."""
     normalized_policy = str(refresh_policy or "smart").strip().lower().replace("-", "_")
     normalized_tasks = {
-        str(task or "").strip().lower().replace("-", "_")
-        for task in (selected_tasks or [])
-        if str(task or "").strip()
+        str(task or "").strip().lower().replace("-", "_") for task in (selected_tasks or []) if str(task or "").strip()
     }
     now_utc = now_utc or _now_utc()
     stale_metadata_age = stale_metadata_age or _instagram_detail_refresh_stale_metadata_age()
@@ -1574,8 +1558,7 @@ def classify_instagram_detail_refresh_need(
         _as_text_list(row.get("media_urls")) or str(row.get("thumbnail_url") or "").strip()
     )
     permalink_metadata_required = bool(
-        normalized_tasks
-        & {"permalink_metadata", "permalink_metadata_refresh", "facebook_crosspost_refresh"}
+        normalized_tasks & {"permalink_metadata", "permalink_metadata_refresh", "facebook_crosspost_refresh"}
     )
     permalink_missing = permalink_metadata_required and not str(row.get("permalink") or row.get("url") or "").strip()
     metadata_stale = bool(require_fresh_metadata) and _instagram_detail_metadata_is_stale(
@@ -1618,6 +1601,7 @@ def classify_instagram_detail_refresh_need(
         "stale_metadata_days": max(1, int(stale_metadata_age.total_seconds() // 86400)),
     }
 
+
 def _scrape_shared_instagram_post_details_refresh(
     *,
     run_id: str | None,
@@ -1649,7 +1633,6 @@ def _scrape_shared_instagram_post_details_refresh(
         config=config,
         skip_detail_fetch=skip_detail_fetch,
     ) or (bool(config.get("details_refresh_force_detail_fetch")) and not skip_detail_fetch)
-    legacy_force_flag_requested = bool(config.get("details_refresh_force_detail_fetch"))
     legacy_inline_enrichment = _instagram_detail_refresh_legacy_inline_enrichment_enabled(
         policy=refresh_policy,
         config=config,
@@ -1664,9 +1647,7 @@ def _scrape_shared_instagram_post_details_refresh(
     with _context_manager_from_callable(account_execution, account_handle):
         auth_allowed, _auth_reason = auth_validation(config)
         scraper = (
-            build_scraper(authenticated=True, browser_account_id=account_handle)
-            if auth_allowed
-            else None
+            build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
         ) or build_scraper(browser_account_id=account_handle)
         detail_config = ScrapeConfig(
             username=account_handle,
@@ -1760,7 +1741,9 @@ def _scrape_shared_instagram_post_details_refresh(
     detail_fetch_cap_raw = (os.getenv("SOCIAL_INSTAGRAM_DETAILS_REFRESH_MAX_DETAIL_FETCHES") or "").strip()
     try:
         detail_fetch_cap = (
-            None if force_network_detail_fetch and not detail_fetch_cap_raw else max(0, int(detail_fetch_cap_raw or "150"))
+            None
+            if force_network_detail_fetch and not detail_fetch_cap_raw
+            else max(0, int(detail_fetch_cap_raw or "150"))
         )
     except ValueError:
         detail_fetch_cap = 150
@@ -1992,7 +1975,11 @@ def _scrape_shared_instagram_post_details_refresh(
                 or "missing_required_source_media" in (classification.get("reasons") or [])
                 or "missing_required_permalink_metadata" in (classification.get("reasons") or [])
             )
-            if bool(classification.get("fetch_needed")) and not parsed_post and bool(classification.get("metrics_missing")):
+            if (
+                bool(classification.get("fetch_needed"))
+                and not parsed_post
+                and bool(classification.get("metrics_missing"))
+            ):
                 if detail_fetch_skipped:
                     details_refresh_skipped_required_fields += 1
                     details_refresh_error_reasons["detail_fetch_skipped_limit_missing_required_fields"] += 1
@@ -2129,6 +2116,7 @@ def _scrape_shared_instagram_post_details_refresh(
         retrieval_meta["details_refresh_error_reasons"] = dict(details_refresh_error_reasons)
     return refreshed_rows, retrieval_meta
 
+
 def _scrape_shared_instagram_posts(
     *,
     run_id: str | None,
@@ -2176,9 +2164,7 @@ def _scrape_shared_instagram_posts(
     with _context_manager_from_callable(account_execution, account_handle):
         auth_allowed, _auth_reason = auth_validation(config)
         scraper = (
-            build_scraper(authenticated=True, browser_account_id=account_handle)
-            if auth_allowed
-            else None
+            build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
         ) or build_scraper(browser_account_id=account_handle)
         scrape_config = ScrapeConfig(
             username=account_handle,
@@ -2261,62 +2247,62 @@ def _scrape_shared_instagram_posts(
 
 
 _LOCAL_ROOM_NAMES = {
-    '_shared_instagram_catalog_graphql_page_size',
-    '_shared_instagram_catalog_delay_seconds',
-    '_upsert_instagram_post',
-    '_upsert_shared_catalog_instagram_post',
-    '_shared_catalog_instagram_post_payload',
-    '_batch_upsert_shared_catalog_instagram_posts',
-    '_build_instagram_scraper_with_auth_fallback',
-    '_build_shared_instagram_scraper',
-    '_shared_instagram_graphql_page_has_posts',
-    '_shared_instagram_graphql_candidate_scrapers',
-    '_shared_instagram_graphql_empty_page_meta',
-    '_fetch_shared_instagram_graphql_page',
-    '_shared_instagram_frontier_auth_validation',
-    '_shared_instagram_frontier_auth_state',
-    '_shared_instagram_frontier_auth_error_code',
-    '_shared_instagram_frontier_transport_preferences',
-    '_shared_instagram_posted_at_bounds',
-    '_shared_instagram_graphql_delay_seconds',
-    '_shared_instagram_account_lock_key',
-    '_shared_instagram_account_lock_max_attempts',
-    '_shared_instagram_account_lock_wait_seconds',
-    '_shared_instagram_account_execution',
-    '_fetch_shared_instagram_graphql_posts_page',
-    '_discover_instagram_cursor_partitions',
-    '_scrape_shared_instagram_posts_partitioned',
-    '_scrape_shared_instagram_post_details_refresh',
-    '_scrape_shared_instagram_posts',
+    "_shared_instagram_catalog_graphql_page_size",
+    "_shared_instagram_catalog_delay_seconds",
+    "_upsert_instagram_post",
+    "_upsert_shared_catalog_instagram_post",
+    "_shared_catalog_instagram_post_payload",
+    "_batch_upsert_shared_catalog_instagram_posts",
+    "_build_instagram_scraper_with_auth_fallback",
+    "_build_shared_instagram_scraper",
+    "_shared_instagram_graphql_page_has_posts",
+    "_shared_instagram_graphql_candidate_scrapers",
+    "_shared_instagram_graphql_empty_page_meta",
+    "_fetch_shared_instagram_graphql_page",
+    "_shared_instagram_frontier_auth_validation",
+    "_shared_instagram_frontier_auth_state",
+    "_shared_instagram_frontier_auth_error_code",
+    "_shared_instagram_frontier_transport_preferences",
+    "_shared_instagram_posted_at_bounds",
+    "_shared_instagram_graphql_delay_seconds",
+    "_shared_instagram_account_lock_key",
+    "_shared_instagram_account_lock_max_attempts",
+    "_shared_instagram_account_lock_wait_seconds",
+    "_shared_instagram_account_execution",
+    "_fetch_shared_instagram_graphql_posts_page",
+    "_discover_instagram_cursor_partitions",
+    "_scrape_shared_instagram_posts_partitioned",
+    "_scrape_shared_instagram_post_details_refresh",
+    "_scrape_shared_instagram_posts",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    '_shared_instagram_catalog_graphql_page_size',
-    '_shared_instagram_catalog_delay_seconds',
-    '_upsert_instagram_post',
-    '_upsert_shared_catalog_instagram_post',
-    '_shared_catalog_instagram_post_payload',
-    '_batch_upsert_shared_catalog_instagram_posts',
-    '_build_instagram_scraper_with_auth_fallback',
-    '_build_shared_instagram_scraper',
-    '_shared_instagram_graphql_page_has_posts',
-    '_shared_instagram_graphql_candidate_scrapers',
-    '_shared_instagram_graphql_empty_page_meta',
-    '_fetch_shared_instagram_graphql_page',
-    '_shared_instagram_frontier_auth_validation',
-    '_shared_instagram_frontier_auth_state',
-    '_shared_instagram_frontier_auth_error_code',
-    '_shared_instagram_frontier_transport_preferences',
-    '_shared_instagram_posted_at_bounds',
-    '_shared_instagram_graphql_delay_seconds',
-    '_shared_instagram_account_lock_key',
-    '_shared_instagram_account_lock_max_attempts',
-    '_shared_instagram_account_lock_wait_seconds',
-    '_shared_instagram_account_execution',
-    '_fetch_shared_instagram_graphql_posts_page',
-    '_discover_instagram_cursor_partitions',
-    '_scrape_shared_instagram_posts_partitioned',
-    '_scrape_shared_instagram_post_details_refresh',
-    '_scrape_shared_instagram_posts',
+    "_shared_instagram_catalog_graphql_page_size",
+    "_shared_instagram_catalog_delay_seconds",
+    "_upsert_instagram_post",
+    "_upsert_shared_catalog_instagram_post",
+    "_shared_catalog_instagram_post_payload",
+    "_batch_upsert_shared_catalog_instagram_posts",
+    "_build_instagram_scraper_with_auth_fallback",
+    "_build_shared_instagram_scraper",
+    "_shared_instagram_graphql_page_has_posts",
+    "_shared_instagram_graphql_candidate_scrapers",
+    "_shared_instagram_graphql_empty_page_meta",
+    "_fetch_shared_instagram_graphql_page",
+    "_shared_instagram_frontier_auth_validation",
+    "_shared_instagram_frontier_auth_state",
+    "_shared_instagram_frontier_auth_error_code",
+    "_shared_instagram_frontier_transport_preferences",
+    "_shared_instagram_posted_at_bounds",
+    "_shared_instagram_graphql_delay_seconds",
+    "_shared_instagram_account_lock_key",
+    "_shared_instagram_account_lock_max_attempts",
+    "_shared_instagram_account_lock_wait_seconds",
+    "_shared_instagram_account_execution",
+    "_fetch_shared_instagram_graphql_posts_page",
+    "_discover_instagram_cursor_partitions",
+    "_scrape_shared_instagram_posts_partitioned",
+    "_scrape_shared_instagram_post_details_refresh",
+    "_scrape_shared_instagram_posts",
 ]

@@ -73,4 +73,3 @@ class InstagramRateController:
                 self._consecutive_success = 0
             elif 200 <= status_code < 400:
                 self._consecutive_success += 1
-

@@ -49,6 +49,7 @@ def _room_callable(name: str, local_impl: Any) -> Any:
 def _default_instagram_cookie_file_path() -> Path:
     return Path(__file__).resolve().parents[2] / "scripts" / "socials" / "instagram" / "instagram_cookies.json"
 
+
 def _instagram_cookie_file_candidates() -> list[Path]:
     raw_candidates = [
         (os.getenv("SOCIAL_INSTAGRAM_COOKIES_FILE") or "").strip(),
@@ -57,9 +58,11 @@ def _instagram_cookie_file_candidates() -> list[Path]:
     ]
     return [Path(raw_path).expanduser() for raw_path in raw_candidates if str(raw_path or "").strip()]
 
+
 def _instagram_cookie_refresh_target_path() -> Path:
     candidates = _instagram_cookie_file_candidates()
     return candidates[0] if candidates else _default_instagram_cookie_file_path()
+
 
 def _instagram_auth_credentials() -> tuple[str | None, str | None]:
     username = (
@@ -74,6 +77,7 @@ def _instagram_auth_credentials() -> tuple[str | None, str | None]:
     )
     return username, password
 
+
 def _instagram_cookie_auto_refresh_enabled() -> bool:
     raw = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") or "").strip().lower()
     if raw:
@@ -81,8 +85,10 @@ def _instagram_cookie_auto_refresh_enabled() -> bool:
     username, password = _instagram_auth_credentials()
     return bool(username and password)
 
+
 def _instagram_cookie_validation_username() -> str:
     return (os.getenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME") or "").strip() or "bravotv"
+
 
 def _load_instagram_cookies_from_sources() -> dict[str, str]:
     """
@@ -130,9 +136,11 @@ def _load_instagram_cookies_from_sources() -> dict[str, str]:
         required_cookie_names_all=("csrftoken", "ds_user_id"),
     )
 
+
 def _instagram_cookie_fingerprint(cookies: Mapping[str, Any]) -> str:
     payload = json.dumps(sorted((str(key), str(value)) for key, value in cookies.items()), separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 def _instagram_cookie_structure_detail(cookies: Mapping[str, Any]) -> dict[str, Any]:
     sessionid = bool(str(cookies.get("sessionid") or "").strip())
@@ -155,6 +163,7 @@ def _instagram_cookie_structure_detail(cookies: Mapping[str, Any]) -> dict[str, 
         "missing_fields": missing_fields,
     }
 
+
 def _instagram_cookie_schema_result(cookies: Mapping[str, Any]) -> dict[str, Any]:
     detail = _instagram_cookie_structure_detail(cookies)
     missing_fields = list(detail.get("missing_fields") or [])
@@ -170,6 +179,7 @@ def _instagram_cookie_schema_result(cookies: Mapping[str, Any]) -> dict[str, Any
         "reason": "cookie_schema_invalid",
         "detail": detail,
     }
+
 
 def _instagram_cookie_validation_detail(
     *,
@@ -188,6 +198,7 @@ def _instagram_cookie_validation_detail(
             continue
         payload[key] = value
     return payload
+
 
 def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
     global _instagram_cookie_validation_cache
@@ -299,11 +310,13 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
     _instagram_cookie_validation_cache = (now, fingerprint, dict(result))
     return dict(result)
 
+
 def _validate_instagram_cookie_health(cookies: dict[str, str]) -> tuple[bool, str | None]:
     _sync_core_overrides()
     inspect_health = _room_callable("_inspect_instagram_cookie_health", _inspect_instagram_cookie_health)
     result = inspect_health(cookies)
     return bool(result.get("valid")), str(result.get("reason") or "").strip() or None
+
 
 def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str]:
     global _instagram_cookie_validation_cache, _instagram_cookie_runtime_override
@@ -349,6 +362,7 @@ def _refresh_instagram_cookies(stale_reason: str | None = None) -> dict[str, str
             logger.debug("Failed syncing Instagram auth resolver runtime override", exc_info=True)
     return refreshed
 
+
 def _ensure_instagram_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
     global _instagram_cookie_runtime_override
 
@@ -379,9 +393,11 @@ def _ensure_instagram_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
             )
         return cookies
 
+
 def _load_instagram_cookies_legacy() -> dict[str, str]:
     cookies = _load_instagram_cookies_from_sources()
     return _ensure_instagram_cookies_fresh(cookies)
+
 
 def _build_legacy_instagram_auth_session(
     *,
@@ -439,6 +455,7 @@ def _build_legacy_instagram_auth_session(
         metadata=metadata,
     )
 
+
 def _load_instagram_cookies() -> dict[str, str]:
     from trr_backend.socials.instagram import (
         auth_session_log_payload,
@@ -495,6 +512,7 @@ def _load_instagram_cookies() -> dict[str, str]:
             },
         )
     return legacy_cookies
+
 
 def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dict[str, Any]:
     _sync_core_overrides()
@@ -557,46 +575,46 @@ def get_instagram_auth_repair_signal(*, failure_lookback_hours: int = 24) -> dic
 
 
 _LOCAL_ROOM_NAMES = {
-    '_default_instagram_cookie_file_path',
-    '_instagram_cookie_file_candidates',
-    '_instagram_cookie_refresh_target_path',
-    '_instagram_auth_credentials',
-    '_instagram_cookie_auto_refresh_enabled',
-    '_instagram_cookie_validation_username',
-    '_load_instagram_cookies_from_sources',
-    '_instagram_cookie_fingerprint',
-    '_instagram_cookie_structure_detail',
-    '_instagram_cookie_schema_result',
-    '_instagram_cookie_validation_detail',
-    '_inspect_instagram_cookie_health',
-    '_validate_instagram_cookie_health',
-    '_refresh_instagram_cookies',
-    '_ensure_instagram_cookies_fresh',
-    '_load_instagram_cookies_legacy',
-    '_build_legacy_instagram_auth_session',
-    '_load_instagram_cookies',
-    'get_instagram_auth_repair_signal',
+    "_default_instagram_cookie_file_path",
+    "_instagram_cookie_file_candidates",
+    "_instagram_cookie_refresh_target_path",
+    "_instagram_auth_credentials",
+    "_instagram_cookie_auto_refresh_enabled",
+    "_instagram_cookie_validation_username",
+    "_load_instagram_cookies_from_sources",
+    "_instagram_cookie_fingerprint",
+    "_instagram_cookie_structure_detail",
+    "_instagram_cookie_schema_result",
+    "_instagram_cookie_validation_detail",
+    "_inspect_instagram_cookie_health",
+    "_validate_instagram_cookie_health",
+    "_refresh_instagram_cookies",
+    "_ensure_instagram_cookies_fresh",
+    "_load_instagram_cookies_legacy",
+    "_build_legacy_instagram_auth_session",
+    "_load_instagram_cookies",
+    "get_instagram_auth_repair_signal",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    '_default_instagram_cookie_file_path',
-    '_instagram_cookie_file_candidates',
-    '_instagram_cookie_refresh_target_path',
-    '_instagram_auth_credentials',
-    '_instagram_cookie_auto_refresh_enabled',
-    '_instagram_cookie_validation_username',
-    '_load_instagram_cookies_from_sources',
-    '_instagram_cookie_fingerprint',
-    '_instagram_cookie_structure_detail',
-    '_instagram_cookie_schema_result',
-    '_instagram_cookie_validation_detail',
-    '_inspect_instagram_cookie_health',
-    '_validate_instagram_cookie_health',
-    '_refresh_instagram_cookies',
-    '_ensure_instagram_cookies_fresh',
-    '_load_instagram_cookies_legacy',
-    '_build_legacy_instagram_auth_session',
-    '_load_instagram_cookies',
-    'get_instagram_auth_repair_signal',
+    "_default_instagram_cookie_file_path",
+    "_instagram_cookie_file_candidates",
+    "_instagram_cookie_refresh_target_path",
+    "_instagram_auth_credentials",
+    "_instagram_cookie_auto_refresh_enabled",
+    "_instagram_cookie_validation_username",
+    "_load_instagram_cookies_from_sources",
+    "_instagram_cookie_fingerprint",
+    "_instagram_cookie_structure_detail",
+    "_instagram_cookie_schema_result",
+    "_instagram_cookie_validation_detail",
+    "_inspect_instagram_cookie_health",
+    "_validate_instagram_cookie_health",
+    "_refresh_instagram_cookies",
+    "_ensure_instagram_cookies_fresh",
+    "_load_instagram_cookies_legacy",
+    "_build_legacy_instagram_auth_session",
+    "_load_instagram_cookies",
+    "get_instagram_auth_repair_signal",
 ]

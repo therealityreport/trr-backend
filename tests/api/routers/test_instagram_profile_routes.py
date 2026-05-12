@@ -109,8 +109,7 @@ def test_get_instagram_profile_comments_route_returns_comment_breakdown(monkeypa
         return_value=expected,
     ) as mocked:
         response = client.get(
-            "/api/v1/admin/socials/profiles/instagram/thetraitorsus-route-test/comments"
-            "?post_source_id=DU_oEbbgZfJ",
+            "/api/v1/admin/socials/profiles/instagram/thetraitorsus-route-test/comments?post_source_id=DU_oEbbgZfJ",
             headers={"Authorization": f"Bearer {token}"},
         )
 

@@ -96,11 +96,14 @@ def retry_with_backoff(
                         try:
                             on_retry(attempt, exc)
                         except Exception:  # noqa: BLE001 - callback best-effort
-                            logger.debug("retry_with_backoff on_retry callback failed",
-                                         exc_info=True)
-                    sleeper(exponential_backoff_delay(
-                        attempt, base_delay=base_delay, max_delay=max_delay,
-                    ))
+                            logger.debug("retry_with_backoff on_retry callback failed", exc_info=True)
+                    sleeper(
+                        exponential_backoff_delay(
+                            attempt,
+                            base_delay=base_delay,
+                            max_delay=max_delay,
+                        )
+                    )
             # Unreachable when max_attempts >= 1, but kept for type-checkers.
             assert last_exc is not None
             raise last_exc

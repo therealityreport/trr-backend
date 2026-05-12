@@ -10,9 +10,26 @@ def test_parse_args_defaults() -> None:
 
     assert args.platform == "twitter"
     assert args.account == "bravotv"
-    assert args.source_scope == "bravo"
+    assert args.source_scope == "network"
     assert args.action == "backfill"
     assert args.selected_tasks == []
+
+
+def test_parse_args_accepts_legacy_bravo_source_scope() -> None:
+    args = cli.parse_args(
+        [
+            "--platform",
+            "twitter",
+            "--account",
+            "bravotv",
+            "--source-scope",
+            "bravo",
+            "--action",
+            "backfill",
+        ]
+    )
+
+    assert args.source_scope == "bravo"
 
 
 def test_parse_args_accepts_selected_tasks() -> None:

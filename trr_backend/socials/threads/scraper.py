@@ -194,12 +194,15 @@ class _PageTokens:
 class ThreadsScraper:
     BASE_URL = "https://www.threads.com"
 
-    def __init__(self, *, cookies: dict[str, str] | None = None):
+    def __init__(self, *, cookies: dict[str, str] | None = None, proxy_url: str | None = None):
         self.cookies = cookies or {}
+        self._proxy_url = str(proxy_url or "").strip() or None
+        self._request_proxies = {"http": self._proxy_url, "https": self._proxy_url} if self._proxy_url else None
         self.session = self._create_session()
         self.last_retrieval_meta: dict[str, Any] = {}
         self.last_comment_fetch_reason: str | None = None
         self.last_comment_fetch_meta: dict[str, Any] = {}
+        self._last_replies_page_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
         self._request_count = 0
         self._last_429_at: float = 0.0
@@ -220,6 +223,7 @@ class ThreadsScraper:
             "stop_reason": getattr(self, "_last_stop_reason", None),
             "retryable": bool(getattr(self, "_last_retryable", False)),
             "complete": bool(getattr(self, "_last_complete", False)),
+            "proxy_configured": bool(getattr(self, "_proxy_url", None)),
         }
 
     def _set_runtime_state(
@@ -373,6 +377,7 @@ class ThreadsScraper:
             timeout=(10, 45),
             headers=self._headers(referer=referer, document=document),
             cookies=self.cookies if cookies_override is None else cookies_override,
+            proxies=self._request_proxies,
         )
         self._track_response_status(response.status_code)
         response.raise_for_status()
@@ -469,6 +474,7 @@ class ThreadsScraper:
             timeout=(10, 60),
             headers=headers,
             cookies=self.cookies,
+            proxies=self._request_proxies,
         )
         self._track_response_status(response.status_code)
         response.raise_for_status()
@@ -1354,6 +1360,9 @@ class ThreadsScraper:
         # Paginate replies via Instagram REST API
         comments: list[ThreadsComment] = []
         paging_token: str | None = None
+        seen_paging_tokens: set[str] = set()
+        reported_reply_count = 0
+        reply_pagination_stop_reason = "max_pages"
         page = 0
         max_pages = 50  # safety cap
 
@@ -1361,7 +1370,7 @@ class ThreadsScraper:
             page += 1
             self._rate_limit(delay_seconds, fast_mode=fast_mode)
             try:
-                batch, paging_token, has_more = self._fetch_replies_page(post_pk, paging_token=paging_token)
+                batch, paging_token, _has_more = self._fetch_replies_page(post_pk, paging_token=paging_token)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[threads] replies page %d failed for pk=%s: %s",
@@ -1370,8 +1379,14 @@ class ThreadsScraper:
                     exc,
                 )
                 self.last_comment_fetch_reason = "threads_replies_page_error"
+                reply_pagination_stop_reason = "page_error"
                 break
 
+            page_meta = dict(getattr(self, "_last_replies_page_meta", {}) or {})
+            reported_reply_count = max(
+                reported_reply_count,
+                self._normalize_count(page_meta.get("root_direct_reply_count")),
+            )
             if not fetch_replies:
                 batch = [item for item in batch if not str(item.parent_source_comment_id or "").strip()]
             comments.extend(batch)
@@ -1383,20 +1398,28 @@ class ThreadsScraper:
                 post_pk,
             )
 
-            if not has_more or not paging_token:
+            if not paging_token:
+                reply_pagination_stop_reason = "no_paging_token"
                 break
+            if paging_token in seen_paging_tokens:
+                reply_pagination_stop_reason = "duplicate_paging_token"
+                break
+            seen_paging_tokens.add(paging_token)
 
         quote_count = 0
         quote_pages = 0
         quote_reason: str | None = None
         if fetch_quotes and len(comments) < max_comments:
             quote_token: str | None = None
-            has_more_quotes = True
-            while len(comments) < max_comments and quote_pages < max_pages and has_more_quotes:
+            seen_quote_tokens: set[str] = set()
+            while len(comments) < max_comments and quote_pages < max_pages:
                 quote_pages += 1
                 self._rate_limit(delay_seconds, fast_mode=fast_mode)
                 try:
-                    batch, quote_token, has_more_quotes = self._fetch_quotes_page(post_pk, paging_token=quote_token)
+                    batch, quote_token, _has_more_quotes = self._fetch_quotes_page(
+                        post_pk,
+                        paging_token=quote_token,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(
                         "[threads] quotes page %d unavailable for pk=%s: %s",
@@ -1408,8 +1431,11 @@ class ThreadsScraper:
                     break
                 comments.extend(batch)
                 quote_count += len(batch)
-                if not has_more_quotes or not quote_token:
+                if not quote_token:
                     break
+                if quote_token in seen_quote_tokens:
+                    break
+                seen_quote_tokens.add(quote_token)
 
         # Trim to max_comments
         if len(comments) > max_comments:
@@ -1425,6 +1451,11 @@ class ThreadsScraper:
             "reply_count": reply_count,
             "quote_count": quote_count,
             "quote_fetch_reason": quote_reason,
+            "root_direct_reply_count": reported_reply_count,
+            "unavailable_reply_count": max(0, reported_reply_count - reply_count),
+            "reply_pages_fetched": page,
+            "reply_pagination_stop_reason": reply_pagination_stop_reason,
+            "reply_pages_exhausted": reply_pagination_stop_reason in {"no_paging_token", "duplicate_paging_token"},
         }
         if comments:
             if quote_count > 0:
@@ -1539,6 +1570,18 @@ class ThreadsScraper:
 
         if data.get("status") != "ok":
             raise RuntimeError(f"text_feed API error: {data.get('status')}")
+
+        root_tpa: dict[str, Any] = {}
+        try:
+            containing_items = ((data.get("containing_thread") or {}).get("thread_items")) or []
+            root_post = ((containing_items[0] if containing_items else {}).get("post")) or {}
+            root_tpa = dict(root_post.get("text_post_app_info") or {})
+        except (AttributeError, IndexError, TypeError):
+            root_tpa = {}
+        self._last_replies_page_meta = {
+            "root_direct_reply_count": self._normalize_count(root_tpa.get("direct_reply_count")),
+            "show_unavailable_replies_disclaimer": bool(data.get("show_unavailable_replies_disclaimer")),
+        }
 
         comments: list[ThreadsComment] = []
         for thread in data.get("reply_threads", []):

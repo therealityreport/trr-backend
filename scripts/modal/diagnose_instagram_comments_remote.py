@@ -14,11 +14,15 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import modal
+import modal  # noqa: E402
 
-from trr_backend.db import pg
-from trr_backend.modal_dispatch import modal_app_name, modal_environment_name, modal_social_comments_job_function_name
-from trr_backend.repositories import social_season_analytics as social_repo
+from trr_backend.db import pg  # noqa: E402
+from trr_backend.modal_dispatch import (  # noqa: E402
+    modal_app_name,
+    modal_environment_name,
+    modal_social_comments_job_function_name,
+)
+from trr_backend.repositories import social_season_analytics as social_repo  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -246,8 +250,7 @@ def main() -> int:
             latest_job = _wait_for_probe_job(job_id, wait_seconds=args.wait_seconds)
             payload["polled_job"] = latest_job
         payload["safe_runtime_metadata"] = _safe_runtime_metadata(
-            _fetcher_runtime_from_job_payload(latest_job)
-            or _fetcher_runtime_from_deployed_result(deployed_result)
+            _fetcher_runtime_from_job_payload(latest_job) or _fetcher_runtime_from_deployed_result(deployed_result)
         )
     except Exception as exc:  # noqa: BLE001
         payload["error"] = {

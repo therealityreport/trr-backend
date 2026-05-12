@@ -95,10 +95,8 @@ def instagram_facebook_crosspost_payload_from_row(
                 else None
             )
         ),
-        "post_id": str(row.get("facebook_post_id") or raw_facebook_crosspost.get("post_id") or "").strip()
-        or None,
-        "post_url": str(row.get("facebook_post_url") or raw_facebook_crosspost.get("post_url") or "").strip()
-        or None,
+        "post_id": str(row.get("facebook_post_id") or raw_facebook_crosspost.get("post_id") or "").strip() or None,
+        "post_url": str(row.get("facebook_post_url") or raw_facebook_crosspost.get("post_url") or "").strip() or None,
         "metadata": metadata,
         "social_context": social_context,
         "observed_at": _iso(row.get("facebook_crosspost_observed_at") or raw_facebook_crosspost.get("observed_at")),
@@ -202,19 +200,18 @@ def build_instagram_comment_breakdown(
         _normalize_non_negative_int(expected_child_replies) if expected_child_replies is not None else None
     )
     missing_child_replies = (
-        max(expected_child_reply_count - child_replies, 0)
-        if expected_child_reply_count is not None
-        else 0
+        max(expected_child_reply_count - child_replies, 0) if expected_child_reply_count is not None else 0
     )
     facebook = _normalize_non_negative_int(facebook_comments)
     classified_missing = _normalize_non_negative_int(classified_missing_comments)
     saved_instagram = parents + child_replies
-    missing = max(reported - saved_instagram - facebook, 0)
-    accounted = saved_instagram + facebook + missing
+    missing = max(reported - saved_instagram - facebook - classified_missing, 0)
+    accounted = saved_instagram + facebook + classified_missing + missing
+    classified_label = f"{classified_missing} classified missing comments + " if classified_missing > 0 else ""
     formula_label = (
         f"{parents} parent comments + {child_replies} child replies + "
-        f"{facebook} Facebook comments + {missing} missing comments = "
-        f"{reported} reported comments"
+        f"{facebook} Facebook comments + {classified_label}"
+        f"{missing} missing comments = {reported} reported comments"
     )
     payload: dict[str, Any] = {
         "reported_comments": reported,
@@ -231,12 +228,12 @@ def build_instagram_comment_breakdown(
         ),
         "formula_label": formula_label,
     }
+    if classified_missing > 0:
+        payload["classified_missing_comments"] = classified_missing
     if expected_child_reply_count is not None:
         payload["expected_child_replies"] = expected_child_reply_count
         payload["missing_child_replies"] = missing_child_replies
-        payload["reply_accounting_status"] = (
-            "incomplete_retryable" if missing_child_replies > 0 else "complete"
-        )
+        payload["reply_accounting_status"] = "incomplete_retryable" if missing_child_replies > 0 else "complete"
     if facebook > 0:
         observed_at = _iso(facebook_crosspost_observed_at)
         freshness = {
@@ -259,6 +256,7 @@ def build_instagram_comment_breakdown(
 def instagram_comment_completeness_from_breakdown(breakdown: Mapping[str, Any]) -> dict[str, int]:
     reported = _normalize_non_negative_int(breakdown.get("reported_comments"))
     facebook = _normalize_non_negative_int(breakdown.get("facebook_comments"))
+    classified_missing = _normalize_non_negative_int(breakdown.get("classified_missing_comments"))
     saved_instagram = _normalize_non_negative_int(breakdown.get("saved_instagram_comments"))
     missing_child_replies = _normalize_non_negative_int(breakdown.get("missing_child_replies"))
     instagram_fetchable = max(reported - facebook, 0)
@@ -268,7 +266,7 @@ def instagram_comment_completeness_from_breakdown(breakdown: Mapping[str, Any]) 
         "instagram_fetchable_comments": instagram_fetchable,
         "saved_instagram_comments": saved_instagram,
         "missing_instagram_comments": max(
-            instagram_fetchable - saved_instagram,
+            instagram_fetchable - saved_instagram - classified_missing,
             missing_child_replies,
         ),
         "missing_child_replies": missing_child_replies,

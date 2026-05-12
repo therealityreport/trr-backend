@@ -1,11 +1,15 @@
 """Quick test: does Instagram GraphQL work from Modal with fast_mode?"""
-import modal
+
 import json
 import sys
+
+import modal
+
 sys.path.insert(0, ".")
-from trr_backend.modal_jobs import app as main_app, _FUNCTION_IMAGE_BINDINGS, _secrets
+from trr_backend.modal_jobs import _FUNCTION_IMAGE_BINDINGS, _secrets
 
 app = modal.App("trr-instagram-test")
+
 
 @app.function(
     image=_FUNCTION_IMAGE_BINDINGS["run_social_job"],
@@ -13,9 +17,8 @@ app = modal.App("trr-instagram-test")
     timeout=90,
 )
 def test_instagram_graphql():
-    import os, json
-    from trr_backend.socials.instagram import InstagramScraper
     from trr_backend.socials.control_plane import _load_instagram_cookies
+    from trr_backend.socials.instagram import InstagramScraper
 
     cookies = _load_instagram_cookies()
     result = {
@@ -31,7 +34,11 @@ def test_instagram_graphql():
         "has_data": d1 is not None,
         "has_edges": bool(conn1.get("edges")),
         "edge_count": len(conn1.get("edges") or []),
-        "meta": {k: v for k, v in (getattr(pub, "last_retrieval_meta", {}) or {}).items() if k in ("error_code", "error_class", "error_status_code", "error_message", "total_posts", "transport")},
+        "meta": {
+            k: v
+            for k, v in (getattr(pub, "last_retrieval_meta", {}) or {}).items()
+            if k in ("error_code", "error_class", "error_status_code", "error_message", "total_posts", "transport")
+        },
     }
 
     # Test 2: Public scraper, fast_mode=False
@@ -42,7 +49,11 @@ def test_instagram_graphql():
         "has_data": d2 is not None,
         "has_edges": bool(conn2.get("edges")),
         "edge_count": len(conn2.get("edges") or []),
-        "meta": {k: v for k, v in (getattr(pub2, "last_retrieval_meta", {}) or {}).items() if k in ("error_code", "error_class", "error_status_code", "error_message", "total_posts", "transport")},
+        "meta": {
+            k: v
+            for k, v in (getattr(pub2, "last_retrieval_meta", {}) or {}).items()
+            if k in ("error_code", "error_class", "error_status_code", "error_message", "total_posts", "transport")
+        },
     }
 
     # Test 3: Auth scraper, fast_mode=True
@@ -54,7 +65,11 @@ def test_instagram_graphql():
             "has_data": d3 is not None,
             "has_edges": bool(conn3.get("edges")),
             "edge_count": len(conn3.get("edges") or []),
-            "meta": {k: v for k, v in (getattr(auth, "last_retrieval_meta", {}) or {}).items() if k in ("error_code", "error_class", "error_status_code", "error_message", "total_posts", "transport")},
+            "meta": {
+                k: v
+                for k, v in (getattr(auth, "last_retrieval_meta", {}) or {}).items()
+                if k in ("error_code", "error_class", "error_status_code", "error_message", "total_posts", "transport")
+            },
         }
 
     return result

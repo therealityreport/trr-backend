@@ -753,6 +753,7 @@ def test_main_queue_once_returns_nonzero_when_claiming_jobs_fails(monkeypatch) -
 def test_default_claim_batch_size_for_sequential_stages_is_single_claim() -> None:
     assert worker._default_claim_batch_size_for_stage("posts") == 1
     assert worker._default_claim_batch_size_for_stage("comments_scrapling") == 1
+    assert worker._default_claim_batch_size_for_stage("threads_posts_scrapling") == 1
     assert worker._default_claim_batch_size_for_stage("comments") == 2
 
 
@@ -844,6 +845,15 @@ def test_parse_args_accepts_shared_pipeline_stages(monkeypatch) -> None:
     args = worker.parse_args()
 
     assert args.stage == "post_classify"
+    assert args.once is True
+
+
+def test_parse_args_accepts_threads_posts_scrapling_stage(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["worker.py", "--stage", "threads_posts_scrapling", "--once"])
+
+    args = worker.parse_args()
+
+    assert args.stage == "threads_posts_scrapling"
     assert args.once is True
 
 
@@ -978,9 +988,11 @@ def test_execute_run_with_caps_stops_after_runtime_cap(monkeypatch) -> None:
     monkeypatch.setattr(
         worker.pg,
         "fetch_one",
-        lambda sql, params=None: {"id": "run-1", "status": "running", "config": {}}
-        if "from social.scrape_runs" in sql
-        else {"status": "running"},
+        lambda sql, params=None: (
+            {"id": "run-1", "status": "running", "config": {}}
+            if "from social.scrape_runs" in sql
+            else {"status": "running"}
+        ),
     )
 
     payload = worker._execute_run_with_caps(  # noqa: SLF001

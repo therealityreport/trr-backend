@@ -8,13 +8,12 @@ until that helper cluster can move without changing DB behavior.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import re
+from collections.abc import Mapping
 from typing import Any
 
 import trr_backend.socials.social_season_analytics_impl as _core
 from trr_backend.socials.instagram import catalog_ingest as _catalog_ingest
-
 
 _SAFE_COMMENT_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _COMMENT_WRITE_ID_FIELDS = frozenset({"post_id", "comment_id"})
@@ -105,8 +104,7 @@ def _apply_instagram_comment_queryable_columns(
         payload["reply_depth"] = max(0, int(reply_depth or 0))
     if _core._column_exists("social", "instagram_comments", "source_snapshot_type"):
         payload["source_snapshot_type"] = (
-            str(getattr(comment, "source_snapshot_type", "") or source_snapshot_type).strip()
-            or source_snapshot_type
+            str(getattr(comment, "source_snapshot_type", "") or source_snapshot_type).strip() or source_snapshot_type
         )
 
 
@@ -182,7 +180,11 @@ def _load_instagram_comment_write_baseline(
 ) -> dict[tuple[str, str], dict[str, Any]]:
     post_ids = sorted({str(payload.get("post_id") or "").strip() for payload in payloads if payload.get("post_id")})
     comment_ids = sorted(
-        {str(payload.get("comment_id") or "").strip() for payload in payloads if str(payload.get("comment_id") or "").strip()}
+        {
+            str(payload.get("comment_id") or "").strip()
+            for payload in payloads
+            if str(payload.get("comment_id") or "").strip()
+        }
     )
     if not post_ids or not comment_ids:
         return {}
@@ -199,17 +201,16 @@ def _load_instagram_comment_write_baseline(
         [post_ids, comment_ids],
         conn=conn,
     )
-    return {
-        (str(row.get("post_id") or "").strip(), str(row.get("comment_id") or "").strip()): row
-        for row in rows
-    }
+    return {(str(row.get("post_id") or "").strip(), str(row.get("comment_id") or "").strip()): row for row in rows}
 
 
 def _comment_payload_has_meaningful_change(payload: dict[str, Any], existing: Mapping[str, Any]) -> bool:
     for column in _comment_write_compare_columns([payload]):
         if column not in existing:
             continue
-        if _normalize_comment_compare_value(payload.get(column)) != _normalize_comment_compare_value(existing.get(column)):
+        if _normalize_comment_compare_value(payload.get(column)) != _normalize_comment_compare_value(
+            existing.get(column)
+        ):
             return True
     return False
 
@@ -629,7 +630,7 @@ def _batch_upsert_instagram_comments(
                         if persist_stats is not None:
                             persist_stats["comment_media_mirror_job_enqueue_errors"] = (
                                 int(persist_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
-                )
+                            )
         total_upserted += batch_total
         _record_comment_write_counts(persist_stats, total=batch_total, inserted=batch_inserted, changed=batch_changed)
 
@@ -682,7 +683,7 @@ def _batch_upsert_instagram_comments(
                         if persist_stats is not None:
                             persist_stats["comment_media_mirror_job_enqueue_errors"] = (
                                 int(persist_stats.get("comment_media_mirror_job_enqueue_errors") or 0) + 1
-                )
+                            )
         total_upserted += batch_total
         _record_comment_write_counts(persist_stats, total=batch_total, inserted=batch_inserted, changed=batch_changed)
 

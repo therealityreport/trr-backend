@@ -13,9 +13,7 @@ def route_inventory(router: Any) -> list[RouteRecord]:
     for route in getattr(router, "routes", []) or []:
         path = str(getattr(route, "path", "") or "")
         methods = sorted(
-            method
-            for method in (getattr(route, "methods", None) or [])
-            if method not in {"HEAD", "OPTIONS"}
+            method for method in (getattr(route, "methods", None) or []) if method not in {"HEAD", "OPTIONS"}
         )
         for method in methods:
             records.append((method, path))
@@ -29,4 +27,3 @@ def routes_matching(router: Any, prefixes: Iterable[str]) -> list[RouteRecord]:
         for record in route_inventory(router)
         if any(record[1].startswith(prefix) for prefix in normalized_prefixes)
     ]
-

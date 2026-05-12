@@ -55,8 +55,7 @@ class Crawl4aiRuntime:
 
     async def fetch_profile(self, username: str) -> ProfileInfo:
         raise NotImplementedError(
-            "Crawl4aiRuntime.fetch_profile: profile HTML fallback; verify "
-            "AsyncWebCrawler API and implement."
+            "Crawl4aiRuntime.fetch_profile: profile HTML fallback; verify AsyncWebCrawler API and implement."
         )
 
     async def fetch_posts(self, username: str, *, limit: int) -> list[Post]:

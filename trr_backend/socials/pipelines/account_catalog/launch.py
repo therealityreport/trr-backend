@@ -54,6 +54,7 @@ def _room_callable(name: str, local_impl: Any) -> Any:
         return candidate
     return local_impl
 
+
 def _catalog_comments_auth_metadata(result: Mapping[str, Any] | None) -> dict[str, Any]:
     payload = _metadata_dict(result)
     if not payload:
@@ -116,6 +117,7 @@ def _probe_instagram_posts_endpoint_for_launch(*, account_handle: str) -> dict[s
             browser_account_id=account_handle,
             caller_context=f"posts_launch_auth_probe:{account_handle}",
         )
+        cookie_fingerprint = _instagram_cookie_fingerprint(session.auth_session.cookies)[:16]
         proxy_session_key = str(session.browser_account_id or account_handle).strip().lower().lstrip("@")
         fetcher = InstagramPostsScraplingFetcher(
             cookies=session.cookies,
@@ -147,6 +149,9 @@ def _probe_instagram_posts_endpoint_for_launch(*, account_handle: str) -> dict[s
                 "doc_id_used": _metadata_dict(metadata.get("profile_posts_doc_ids")).get("used"),
                 "profile_posts_doc_ids": _metadata_dict(metadata.get("profile_posts_doc_ids")),
                 "proxy_identity": _metadata_dict(metadata.get("proxy_identity")),
+                "cookie_fingerprint": cookie_fingerprint,
+                "cookie_fingerprint_algorithm": "sha256:16",
+                "auth_source": str(session.auth_session.source or "").strip() or None,
             }
         finally:
             await fetcher.aclose()
@@ -199,6 +204,7 @@ def _ensure_instagram_posts_auth_ready_for_launch(*, account_handle: str) -> dic
         "instagram",
         headless=False,
         timeout_seconds=300,
+        account_handle=account_handle,
     )
     repair_payload = _metadata_dict(repair_result)
     if not bool(repair_payload.get("success")):
@@ -334,9 +340,7 @@ def _catalog_stage_entry(
         "status": str(status or "pending").strip().lower() or "pending",
         "selected": bool(selected),
         "blocker_reasons": [
-            str(reason or "").strip()
-            for reason in list(blocker_reasons or [])
-            if str(reason or "").strip()
+            str(reason or "").strip() for reason in list(blocker_reasons or []) if str(reason or "").strip()
         ],
     }
     if timing_ms is not None:
@@ -563,6 +567,9 @@ def start_social_account_catalog_backfill(
     details_refresh_skip_media_followups: bool | None = None,
     tiktok_comments_in_posts_stage: bool = False,
     tiktok_direct_comment_api_override: bool = False,
+    twitter_comments_in_posts_stage: bool = False,
+    selected_tasks: Sequence[Any] | None = None,
+    effective_selected_tasks: Sequence[Any] | None = None,
     launch_group_id: str | None = None,
     existing_run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -669,32 +676,41 @@ def start_social_account_catalog_backfill(
                     "pages_scanned": frontier.get("pages_scanned") or 0,
                     "last_transport": frontier.get("last_transport"),
                 }
-        result = ingest_shared_accounts(
-            platforms=[normalized_platform],
-            source_scope=source_scope,
-            accounts_override=[normalized_account],
-            date_start=normalized_date_start,
-            date_end=normalized_date_end,
-            pipeline_ingest_mode=SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
-            initiated_by=initiated_by,
-            inline_worker_id=inline_worker_id,
-            allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
-            execution_preference=normalized_execution_preference,
-            allow_ephemeral_accounts_override_sources=True,
-            resume_frontier_cursor=normalized_resume_cursor,
-            resume_frontier_snapshot=normalized_resume_snapshot,
-            catalog_action=normalized_catalog_action,
-            catalog_action_scope=normalized_catalog_action_scope,
-            social_account_post_details_only=social_account_post_details_only,
-            details_refresh_skip_detail_fetch=details_refresh_skip_detail_fetch,
-            details_refresh_force_detail_fetch=details_refresh_force_detail_fetch,
-            details_refresh_skip_media_followups=details_refresh_skip_media_followups,
-            tiktok_comments_in_posts_stage=tiktok_comments_in_posts_stage,
-            tiktok_direct_comment_api_override=tiktok_direct_comment_api_override,
-            launch_group_id=launch_group_id,
-            existing_run_id=run_id,
-            defer_initial_dispatch=not reserved_here,
-        )
+        ingest_kwargs = {
+            "platforms": [normalized_platform],
+            "source_scope": source_scope,
+            "accounts_override": [normalized_account],
+            "date_start": normalized_date_start,
+            "date_end": normalized_date_end,
+            "pipeline_ingest_mode": SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            "initiated_by": initiated_by,
+            "inline_worker_id": inline_worker_id,
+            "allow_local_dev_inline_bypass": allow_local_dev_inline_bypass,
+            "execution_preference": normalized_execution_preference,
+            "allow_ephemeral_accounts_override_sources": True,
+            "resume_frontier_cursor": normalized_resume_cursor,
+            "resume_frontier_snapshot": normalized_resume_snapshot,
+            "catalog_action": normalized_catalog_action,
+            "catalog_action_scope": normalized_catalog_action_scope,
+            "social_account_post_details_only": social_account_post_details_only,
+            "details_refresh_skip_detail_fetch": details_refresh_skip_detail_fetch,
+            "details_refresh_force_detail_fetch": details_refresh_force_detail_fetch,
+            "details_refresh_skip_media_followups": details_refresh_skip_media_followups,
+            "tiktok_comments_in_posts_stage": tiktok_comments_in_posts_stage,
+            "tiktok_direct_comment_api_override": tiktok_direct_comment_api_override,
+            "selected_tasks": selected_tasks,
+            "effective_selected_tasks": effective_selected_tasks,
+            "launch_group_id": launch_group_id,
+            "existing_run_id": run_id,
+            "defer_initial_dispatch": not reserved_here,
+        }
+        if "twitter_comments_in_posts_stage" in getattr(
+            getattr(ingest_shared_accounts, "__code__", None),
+            "co_varnames",
+            (),
+        ):
+            ingest_kwargs["twitter_comments_in_posts_stage"] = twitter_comments_in_posts_stage
+        result = ingest_shared_accounts(**ingest_kwargs)
         if run_id:
             _merge_catalog_run_config(
                 run_id=run_id,
@@ -723,6 +739,7 @@ def start_social_account_catalog_backfill(
                 error_message=str(exc),
             )
         raise
+
 
 def begin_social_account_catalog_backfill_launch(
     platform: str,
@@ -827,6 +844,7 @@ def begin_social_account_catalog_backfill_launch(
         ),
     }
 
+
 def finalize_social_account_catalog_backfill_launch(
     platform: str,
     account_handle: str,
@@ -892,6 +910,7 @@ def finalize_social_account_catalog_backfill_launch(
         )
         raise
 
+
 def launch_social_account_catalog_backfill(
     platform: str,
     account_handle: str,
@@ -951,6 +970,8 @@ def launch_social_account_catalog_backfill(
             tiktok_direct_comment_api_override=(
                 "comments" in effective_selected_tasks and _tiktok_catalog_comment_override_enabled()
             ),
+            selected_tasks=normalized_selected_tasks,
+            effective_selected_tasks=effective_selected_tasks,
             launch_group_id=launch_group_id,
             existing_run_id=existing_catalog_run_id,
         )
@@ -1065,6 +1086,11 @@ def launch_social_account_catalog_backfill(
             details_refresh_skip_detail_fetch="post_details" not in effective_selected_tasks,
             details_refresh_skip_media_followups="media" not in effective_selected_tasks,
             launch_group_id=launch_group_id,
+            twitter_comments_in_posts_stage=(
+                normalized_platform == "twitter" and "comments" in effective_selected_tasks
+            ),
+            selected_tasks=normalized_selected_tasks,
+            effective_selected_tasks=effective_selected_tasks,
             existing_run_id=existing_catalog_run_id,
         )
         catalog_launch_ms = round((time_module.perf_counter() - catalog_launch_started_at) * 1000, 1)
@@ -1079,7 +1105,11 @@ def launch_social_account_catalog_backfill(
                         selected_tasks=normalized_selected_tasks,
                         effective_selected_tasks=effective_selected_tasks,
                         detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
-                        comments_status="skipped",
+                        comments_status=(
+                            str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
+                            if normalized_platform in {"twitter", "threads"} and "comments" in effective_selected_tasks
+                            else "skipped"
+                        ),
                         media_status=(
                             str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
                             if "media" in effective_selected_tasks
@@ -1137,7 +1167,11 @@ def launch_social_account_catalog_backfill(
                 selected_tasks=normalized_selected_tasks,
                 effective_selected_tasks=effective_selected_tasks,
                 detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
-                comments_status="skipped",
+                comments_status=(
+                    str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
+                    if normalized_platform in {"twitter", "threads"} and "comments" in effective_selected_tasks
+                    else "skipped"
+                ),
                 media_status=(
                     str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
                     if "media" in effective_selected_tasks
@@ -1273,8 +1307,7 @@ def launch_social_account_catalog_backfill(
     comments_deferred_until_catalog_complete = False
     media_attachment_id = _catalog_media_attachment_id(launch_group_id) if "media" in effective_selected_tasks else None
     force_detail_fetch = (
-        "post_details" in effective_selected_tasks
-        and _instagram_catalog_backfill_force_detail_fetch_enabled()
+        "post_details" in effective_selected_tasks and _instagram_catalog_backfill_force_detail_fetch_enabled()
     )
     posts_auth_metadata: dict[str, Any] = {}
     public_posts_auth_metadata: dict[str, Any] = {}
@@ -1374,8 +1407,7 @@ def launch_social_account_catalog_backfill(
     if "comments" in effective_selected_tasks:
         comments_launch_started_at = time_module.perf_counter()
         can_start_comments_from_targets = bool(
-            normalized_platform == "instagram"
-            and _metadata_dict(target_readiness).get("can_start_comments")
+            normalized_platform == "instagram" and _metadata_dict(target_readiness).get("can_start_comments")
         )
         defer_comments_until_catalog_complete = bool(
             catalog_result is not None
@@ -1423,17 +1455,16 @@ def launch_social_account_catalog_backfill(
                 _merge_catalog_run_config(
                     run_id=catalog_run_id,
                     metadata_updates={
-                    "selected_tasks": normalized_selected_tasks,
-                    "effective_selected_tasks": effective_selected_tasks,
-                    **public_posts_auth_metadata,
-                    "deferred_comments_followup": deferred_comments_followup,
-                    "attached_followups": attached_followups,
-                    **_catalog_stage_graph_metadata(
+                        "selected_tasks": normalized_selected_tasks,
+                        "effective_selected_tasks": effective_selected_tasks,
+                        **public_posts_auth_metadata,
+                        "deferred_comments_followup": deferred_comments_followup,
+                        "attached_followups": attached_followups,
+                        **_catalog_stage_graph_metadata(
                             selected_tasks=normalized_selected_tasks,
                             effective_selected_tasks=effective_selected_tasks,
                             target_readiness=target_readiness,
-                            detail_status=str((catalog_result or {}).get("status") or "").strip().lower()
-                            or "pending",
+                            detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
                             comments_status="pending",
                             comments_blocker_reasons=comments_blocker_reasons,
                             media_status=(
@@ -1652,9 +1683,8 @@ def launch_social_account_catalog_backfill(
             selected_tasks=normalized_selected_tasks,
             effective_selected_tasks=effective_selected_tasks,
             target_readiness=target_readiness,
-            detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or (
-                "pending" if catalog_selected else "skipped"
-            ),
+            detail_status=str((catalog_result or {}).get("status") or "").strip().lower()
+            or ("pending" if catalog_selected else "skipped"),
             comments_status=str((comments_result or {}).get("status") or "").strip().lower()
             or ("pending" if "comments" in effective_selected_tasks else "skipped"),
             comments_blocker_reasons=comments_blocker_reasons,
@@ -1677,17 +1707,18 @@ def launch_social_account_catalog_backfill(
         payload.update(comments_auth_metadata)
     return payload
 
+
 _LOCAL_ROOM_NAMES = {
-    'start_social_account_catalog_backfill',
-    'begin_social_account_catalog_backfill_launch',
-    'finalize_social_account_catalog_backfill_launch',
-    'launch_social_account_catalog_backfill',
+    "start_social_account_catalog_backfill",
+    "begin_social_account_catalog_backfill_launch",
+    "finalize_social_account_catalog_backfill_launch",
+    "launch_social_account_catalog_backfill",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    'start_social_account_catalog_backfill',
-    'begin_social_account_catalog_backfill_launch',
-    'finalize_social_account_catalog_backfill_launch',
-    'launch_social_account_catalog_backfill',
+    "start_social_account_catalog_backfill",
+    "begin_social_account_catalog_backfill_launch",
+    "finalize_social_account_catalog_backfill_launch",
+    "launch_social_account_catalog_backfill",
 ]

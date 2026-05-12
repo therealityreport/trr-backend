@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
@@ -18,6 +20,7 @@ from trr_backend.socials.instagram.comments_scrapling.counts import (
     parentless_reply_ids,
 )
 from trr_backend.socials.instagram.comments_scrapling.fetcher import (
+    BROWSER_SESSION_INVALIDATED_REASON,
     InstagramCommentsFetchResult,
     InstagramCommentsScraplingFetcher,
     InstagramCommentsWarmupError,
@@ -46,6 +49,7 @@ lifecycle = _LifecycleProxy()
 
 _RUN_FATAL_COMMENTS_ERROR_CODES = {
     "instagram_comments_auth_failed",
+    "instagram_comments_browser_session_invalidated",
     "instagram_comments_warmup_auth_failed",
     "instagram_comments_warmup_no_cookies",
     "instagram_comments_warmup_transport_error",
@@ -76,16 +80,25 @@ _COMMENT_FAILURE_METADATA_MAX_ENTRIES = 200
 _RECONCILABLE_REPORTED_GAP_MAX_DEFAULT = 1
 _RECONCILABLE_REPORTED_GAP_RATIO_DEFAULT = 0.0
 _RECONCILABLE_REPORTED_GAP_REASONS = {
+    "auth_relay_fallback_recovered",
+    "auth_rendered_fallback_recovered",
+    "coauthor_auth_relay_fallback_recovered",
+    "coauthor_auth_rendered_fallback_recovered",
     "hidden_comments_unavailable_reconciled",
     "hidden_comments_unresolved",
     "reply_tail_budget_exhausted",
     "reply_tail_incomplete",
+}
+_RECONCILABLE_REPLY_ONLY_AUTH_BLOCK_REASONS = {
+    "html_challenge_or_auth_required",
+    "instagram_comments_endpoint_auth_blocked",
 }
 _COAUTHOR_STATUS_ONLY_FETCH_REASONS = {
     "comments_endpoint_status_only",
     "coauthor_comments_endpoint_empty",
 }
 _COAUTHOR_AUTH_RENDERED_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_AUTH_RENDERED_FALLBACK"
+_AUTH_RENDERED_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_AUTH_RENDERED_FALLBACK"
 _REPLY_ONLY_RETRY_REASONS = {
     "http_429",
     "reply_tail_budget_exhausted",
@@ -107,17 +120,23 @@ _TERMINAL_COVERAGE_GAP_REASONS = {
 }
 _INCOMPLETE_RETRY_STALL_ATTEMPTS_DEFAULT = 2
 _INCOMPLETE_RETRY_STALL_REASONS = {
+    *_RECONCILABLE_REPORTED_GAP_REASONS,
     "hidden_comments_unresolved",
     "hidden_comments_unavailable",
     "hidden_comments_blocked",
+    "html_challenge_or_auth_required",
     *_COAUTHOR_STATUS_ONLY_FETCH_REASONS,
     "pagination_deadline_exceeded",
+    "persisted_reply_topology_gap",
     "reply_tail_incomplete",
     "reply_tail_budget_exhausted",
+    "transport_error",
+    "transport_timeout",
 }
 _TERMINAL_MISSING_CLASSIFIED_REASON = "coverage_terminal_missing_classified"
 _PARENTLESS_REPLY_ATTACH_FAILED_REASON = "parentless_reply_attach_failed"
 _PERSISTED_REPLY_TOPOLOGY_GAP_REASON = "persisted_reply_topology_gap"
+_BROWSER_SESSION_INVALIDATED_ERROR_CODE = "instagram_comments_browser_session_invalidated"
 
 
 @dataclass(slots=True)
@@ -329,6 +348,51 @@ def _classified_missing_count(result: InstagramCommentsFetchResult) -> int:
     return total
 
 
+def _metadata_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return False
+
+
+def _metadata_indicates_browser_session_invalidated(metadata: Any, *, _depth: int = 0) -> bool:
+    if _depth > 4 or not isinstance(metadata, Mapping):
+        return False
+    for key, value in metadata.items():
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key in {"session_invalidated", "browser_session_invalidated"} and _metadata_bool(value):
+            return True
+        if (
+            normalized_key in {"reason", "fetch_reason", "stop_reason", "last_error_code", "error_code"}
+            and str(value or "").strip() == BROWSER_SESSION_INVALIDATED_REASON
+        ):
+            return True
+        if normalized_key == "text_markers" and isinstance(value, Mapping):
+            if _metadata_bool(value.get("session_invalidated")):
+                return True
+        if isinstance(value, Mapping) and _metadata_indicates_browser_session_invalidated(
+            value,
+            _depth=_depth + 1,
+        ):
+            return True
+        if isinstance(value, (list, tuple)):
+            for item in value[:8]:
+                if _metadata_indicates_browser_session_invalidated(item, _depth=_depth + 1):
+                    return True
+    return False
+
+
+def _fetch_result_indicates_browser_session_invalidated(result: Any) -> bool:
+    return str(
+        getattr(result, "fetch_reason", "") or ""
+    ).strip() == BROWSER_SESSION_INVALIDATED_REASON or _metadata_indicates_browser_session_invalidated(
+        _fetch_result_diagnostic_metadata(result)
+    )
+
+
 def _persisted_reply_gap_total(value: Any) -> int:
     try:
         return max(0, int(value or 0))
@@ -351,6 +415,8 @@ def _reply_only_fast_path_reason(
     normalized_prior_reason = str(prior_incomplete_reason or "").strip().lower()
     if normalized_prior_reason in _REPLY_ONLY_RETRY_REASONS:
         return normalized_prior_reason
+    if normalized_prior_reason == _PERSISTED_REPLY_TOPOLOGY_GAP_REASON:
+        return _PERSISTED_REPLY_TOPOLOGY_GAP_REASON
     if incomplete_fill_enabled:
         return _PERSISTED_REPLY_TOPOLOGY_GAP_REASON
     return None
@@ -513,16 +579,14 @@ def _terminal_pagination_coverage_gap_is_reconcilable(
     unresolved_gap = target_count - stored_total
     try:
         max_absolute_gap = int(
-            os.environ.get("SOCIAL_INSTAGRAM_COMMENTS_TERMINAL_GAP_MAX")
-            or _TERMINAL_COVERAGE_GAP_MAX_DEFAULT
+            os.environ.get("SOCIAL_INSTAGRAM_COMMENTS_TERMINAL_GAP_MAX") or _TERMINAL_COVERAGE_GAP_MAX_DEFAULT
         )
     except (TypeError, ValueError):
         max_absolute_gap = _TERMINAL_COVERAGE_GAP_MAX_DEFAULT
     max_absolute_gap = max(0, min(max_absolute_gap, 500))
     try:
         max_ratio = float(
-            os.environ.get("SOCIAL_INSTAGRAM_COMMENTS_TERMINAL_GAP_RATIO")
-            or _TERMINAL_COVERAGE_GAP_RATIO_DEFAULT
+            os.environ.get("SOCIAL_INSTAGRAM_COMMENTS_TERMINAL_GAP_RATIO") or _TERMINAL_COVERAGE_GAP_RATIO_DEFAULT
         )
     except (TypeError, ValueError):
         max_ratio = _TERMINAL_COVERAGE_GAP_RATIO_DEFAULT
@@ -531,6 +595,182 @@ def _terminal_pagination_coverage_gap_is_reconcilable(
     if ratio_gap < target_count * max_ratio:
         ratio_gap += 1
     return unresolved_gap <= max(max_absolute_gap, ratio_gap)
+
+
+def _reply_only_auth_blocked_coverage_gap_is_reconcilable(
+    *,
+    result: InstagramCommentsFetchResult,
+    stored_total_comments: int,
+    max_comments_per_post: int,
+    reply_only: bool = False,
+) -> bool:
+    if not result.auth_failed:
+        return False
+    if _result_parentless_reply_ids(result):
+        return False
+    reason = str(getattr(result, "fetch_reason", "") or "").strip()
+    if reason not in _RECONCILABLE_REPLY_ONLY_AUTH_BLOCK_REASONS:
+        return False
+    diagnostic_metadata = getattr(result, "diagnostic_metadata", None)
+    strategy_decision = (
+        diagnostic_metadata.get("strategy_decision") if isinstance(diagnostic_metadata, Mapping) else None
+    )
+    result_reply_only = isinstance(strategy_decision, Mapping) and bool(strategy_decision.get("reply_only"))
+    if not (reply_only or result_reply_only):
+        return False
+    reported_comment_count = _extract_reported_comment_count(result)
+    if reported_comment_count is None:
+        return False
+    target_count = reported_comment_count
+    if max_comments_per_post > 0:
+        target_count = min(target_count, max_comments_per_post)
+    stored_total = int(stored_total_comments or 0)
+    if stored_total <= 0 or stored_total >= target_count:
+        return False
+    return _reported_count_gap_is_tolerable(
+        unresolved_gap=target_count - stored_total,
+        target_count=target_count,
+    )
+
+
+def _classify_unavailable_instagram_comment_gap(
+    *,
+    conn: Any,
+    post_id: str,
+    result: InstagramCommentsFetchResult,
+    stored_total_comments: int,
+    max_comments_per_post: int,
+    run_id: str | None,
+    job_id: str | None,
+    reason: str,
+) -> int:
+    normalized_post_id = str(post_id or "").strip()
+    if not normalized_post_id:
+        return 0
+    reported_comment_count = _extract_reported_comment_count(result)
+    if reported_comment_count is None:
+        return 0
+    target_count = reported_comment_count
+    if max_comments_per_post > 0:
+        target_count = min(target_count, max_comments_per_post)
+    stored_total = max(0, int(stored_total_comments or 0))
+    if stored_total >= target_count:
+        return 0
+    normalized_reason = str(reason or "unavailable_comment_gap").strip() or "unavailable_comment_gap"
+    normalized_run_id = _uuid_or_none(run_id)
+    normalized_job_id = _uuid_or_none(job_id)
+    with pg.db_cursor(conn=conn, label="instagram_comments_classify_unavailable_gap") as cur:
+        count_row = (
+            pg.fetch_one_with_cursor(
+                cur,
+                """
+            select
+              count(*) filter (where coalesce(c.is_missing, false) = true)::int as classified_missing_comments,
+              max(p.season_id::text) as season_id,
+              max(
+                ltrim(lower(coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '')), '@')
+              ) as source_account,
+              max(coalesce(p.fb_comment_count, 0))::int as facebook_comment_count
+            from social.instagram_posts p
+            left join social.instagram_comments c
+              on c.post_id = p.id
+             and coalesce(c.source_snapshot_type, '') = 'classified_missing_comments'
+            where p.id = %s::uuid
+            group by p.id
+            """,
+                [normalized_post_id],
+            )
+            or {}
+        )
+        existing_missing = max(0, int(count_row.get("classified_missing_comments") or 0))
+        facebook_comment_count = max(0, int(count_row.get("facebook_comment_count") or 0))
+        residual = max(0, target_count - stored_total - existing_missing - facebook_comment_count)
+        if residual <= 0:
+            return 0
+        season_id = str(count_row.get("season_id") or "").strip() or None
+        source_account = str(count_row.get("source_account") or "").strip().lstrip("@") or None
+        rows = pg.fetch_all_with_cursor(
+            cur,
+            """
+            insert into social.instagram_comments (
+              comment_id,
+              post_id,
+              username,
+              text,
+              likes,
+              is_reply,
+              reply_count,
+              raw_data,
+              season_id,
+              job_id,
+              source_account,
+              is_missing,
+              missing_at,
+              first_seen_at,
+              last_seen_at,
+              last_seen_run_id,
+              source_snapshot_type,
+              status
+            )
+            select
+              concat('__missing__:', %s::text, ':', gs.i::text) as comment_id,
+              %s::uuid as post_id,
+              '__classified_missing__' as username,
+              'Classified unavailable Instagram comment' as text,
+              0 as likes,
+              false as is_reply,
+              0 as reply_count,
+              jsonb_build_object(
+                'classification_reason', %s::text,
+                'reported_comment_count', %s::int,
+                'stored_total_comments', %s::int,
+                'facebook_comment_count', %s::int,
+                'run_id', %s::text,
+                'job_id', %s::text
+              ) as raw_data,
+              %s::uuid as season_id,
+              %s::uuid as job_id,
+              %s::text as source_account,
+              true as is_missing,
+              now() as missing_at,
+              now() as first_seen_at,
+              now() as last_seen_at,
+              %s::uuid as last_seen_run_id,
+              'classified_missing_comments' as source_snapshot_type,
+              'Unavailable' as status
+            from generate_series(%s::int + 1, %s::int + %s::int) as gs(i)
+            on conflict (post_id, comment_id) do nothing
+            returning id::text
+            """,
+            [
+                normalized_post_id,
+                normalized_post_id,
+                normalized_reason,
+                target_count,
+                stored_total,
+                facebook_comment_count,
+                normalized_run_id,
+                normalized_job_id,
+                season_id,
+                normalized_job_id,
+                source_account,
+                normalized_run_id,
+                existing_missing,
+                existing_missing,
+                residual,
+            ],
+        )
+    return len(rows)
+
+
+def _uuid_or_none(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        return str(uuid.UUID(normalized))
+    except ValueError:
+        return None
 
 
 def _safe_int(value: Any) -> int | None:
@@ -778,9 +1018,7 @@ def _load_expected_comment_counts(
         return {}
     fetchable_comments_sql = getattr(repo, "_instagram_fetchable_comments_sql", None)
     reported_comments_expr = (
-        fetchable_comments_sql("p")
-        if callable(fetchable_comments_sql)
-        else repo._instagram_reported_comments_sql("p")
+        fetchable_comments_sql("p") if callable(fetchable_comments_sql) else repo._instagram_reported_comments_sql("p")
     )
     # For coauthor posts (e.g. @peacock owner / @thetraitorsus collaborator),
     # the row materialized under the collaborator's profile commonly has
@@ -885,7 +1123,15 @@ def _load_comment_target_metadata(
             coalesce(materialized_post.materialized_post_id, cp.id::text) as materialized_post_id,
             nullif(cp.source_account, '') as source_account,
             nullif(cp.source_account, '') as username,
-            nullif(coalesce(nullif(cp.owner_username, ''), nullif(cp.raw_data ->> 'ownerUsername', ''), nullif(cp.raw_data ->> 'owner_username', ''), nullif(cp.source_account, '')), '') as owner_username,
+            nullif(
+              coalesce(
+                nullif(cp.owner_username, ''),
+                nullif(cp.raw_data ->> 'ownerUsername', ''),
+                nullif(cp.raw_data ->> 'owner_username', ''),
+                nullif(cp.source_account, '')
+              ),
+              ''
+            ) as owner_username,
             coalesce(nullif(cp.collaborators, '[]'::jsonb), jsonb_build_array(m.collaborator_handle)) as collaborators,
             coalesce(
               nullif(to_jsonb(cp) -> 'collaborators_detail', '[]'::jsonb),
@@ -991,6 +1237,7 @@ def _load_comment_target_metadata(
                 or row.get("profile_match_mode") == "catalog_collaborator"
             )
         )
+        has_collaborators = bool(collaborator_handles)
         target_metadata[shortcode] = {
             "source_id": shortcode,
             "account_handle": normalized_account,
@@ -1012,6 +1259,7 @@ def _load_comment_target_metadata(
             "profile_match_mode": row.get("profile_match_mode") or "shortcode",
             "is_collaborator_post": is_collaborator_post,
             "is_collaborator": is_collaborator_post,
+            "has_collaborators": has_collaborators,
         }
     return target_metadata
 
@@ -1124,9 +1372,7 @@ def _load_persisted_replies_by_parent(
             owner_is_mentionable=(
                 bool(row.get("author_is_mentionable")) if row.get("author_is_mentionable") is not None else None
             ),
-            owner_is_private=(
-                bool(row.get("author_is_private")) if row.get("author_is_private") is not None else None
-            ),
+            owner_is_private=(bool(row.get("author_is_private")) if row.get("author_is_private") is not None else None),
             owner_latest_reel_media=_safe_int(row.get("author_latest_reel_media")),
             owner_profile_pic_id=str(row.get("author_profile_pic_id") or "") or None,
             is_hidden_by_instagram=bool((row.get("raw_data") or {}).get("is_hidden_by_instagram"))
@@ -1278,14 +1524,10 @@ def _retry_rebalance_metadata(
     auth_failed_target_source_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
     retry_targets = [
-        str(item or "").strip()
-        for item in (incomplete_target_source_ids or [])
-        if str(item or "").strip()
+        str(item or "").strip() for item in (incomplete_target_source_ids or []) if str(item or "").strip()
     ]
     retry_targets.extend(
-        str(item or "").strip()
-        for item in (auth_failed_target_source_ids or [])
-        if str(item or "").strip()
+        str(item or "").strip() for item in (auth_failed_target_source_ids or []) if str(item or "").strip()
     )
     retry_targets.extend(target_source_ids[max(0, processed_posts) :])
     remaining_targets = list(dict.fromkeys(retry_targets))
@@ -1308,11 +1550,7 @@ def _reply_checkpoint_summary(fetcher_metadata: dict[str, Any]) -> dict[str, Any
             "stop_reasons": {},
             "latest": None,
         }
-    items = [
-        item
-        for item in (checkpoint_metadata.get("items") or [])
-        if isinstance(item, dict)
-    ]
+    items = [item for item in (checkpoint_metadata.get("items") or []) if isinstance(item, dict)]
     return {
         "total_count": int(checkpoint_metadata.get("total_count") or len(items)),
         "retained_count": len(items),
@@ -1330,29 +1568,24 @@ def _top_level_checkpoint_summary(
     checkpoint_metadata = fetcher_metadata.get("top_level_checkpoint_metadata")
     runtime_items: list[dict[str, Any]] = []
     if isinstance(checkpoint_metadata, dict):
-        runtime_items = [
-            item for item in (checkpoint_metadata.get("items") or []) if isinstance(item, dict)
-        ]
+        runtime_items = [item for item in (checkpoint_metadata.get("items") or []) if isinstance(item, dict)]
     merged_by_shortcode: dict[str, dict[str, Any]] = {}
     for checkpoint in [*runtime_items, *top_level_checkpoints.values()]:
         shortcode = str(
-            checkpoint.get("target_shortcode")
-            or checkpoint.get("source_id")
-            or checkpoint.get("shortcode")
-            or ""
+            checkpoint.get("target_shortcode") or checkpoint.get("source_id") or checkpoint.get("shortcode") or ""
         ).strip()
         if shortcode:
             merged_by_shortcode[shortcode] = dict(checkpoint)
     items = list(merged_by_shortcode.values())
     return {
         "total_count": int(
-            checkpoint_metadata.get("total_count") if isinstance(checkpoint_metadata, dict) else len(items)
-            or len(items)
+            checkpoint_metadata.get("total_count")
+            if isinstance(checkpoint_metadata, dict)
+            else len(items) or len(items)
         ),
         "retained_count": len(items),
         "dropped_count": int(
-            checkpoint_metadata.get("dropped_count") if isinstance(checkpoint_metadata, dict) else 0
-            or 0
+            checkpoint_metadata.get("dropped_count") if isinstance(checkpoint_metadata, dict) else 0 or 0
         ),
         "truncated": bool(checkpoint_metadata.get("truncated")) if isinstance(checkpoint_metadata, dict) else False,
         "stop_reasons": dict(Counter(str(item.get("stop_reason") or "unknown") for item in items)),
@@ -1383,12 +1616,7 @@ def _top_level_resume_cursors_from_job(job: dict[str, Any]) -> dict[str, str]:
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        shortcode = str(
-            item.get("target_shortcode")
-            or item.get("source_id")
-            or item.get("shortcode")
-            or ""
-        ).strip()
+        shortcode = str(item.get("target_shortcode") or item.get("source_id") or item.get("shortcode") or "").strip()
         stop_reason = str(item.get("stop_reason") or "").strip()
         cursor = str(item.get("next_top_level_cursor") or "").strip()
         if not cursor and stop_reason != "pagination_repeated_cursor":
@@ -1420,12 +1648,7 @@ def _top_level_resume_cursor_params_from_job(job: dict[str, Any]) -> dict[str, s
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        shortcode = str(
-            item.get("target_shortcode")
-            or item.get("source_id")
-            or item.get("shortcode")
-            or ""
-        ).strip()
+        shortcode = str(item.get("target_shortcode") or item.get("source_id") or item.get("shortcode") or "").strip()
         if not shortcode:
             continue
         stop_reason = str(item.get("stop_reason") or "").strip()
@@ -1680,11 +1903,14 @@ def _comment_capture_metadata_from_fetch_result(result: InstagramCommentsFetchRe
 def _post_comments_audit_table_available(conn: Any) -> bool:
     try:
         with pg.db_cursor(conn=conn, label="instagram_post_comments_audit_available") as cur:
-            row = pg.fetch_one_with_cursor(
-                cur,
-                "select to_regclass('social.instagram_post_comments_audit') is not null as available",
-                [],
-            ) or {}
+            row = (
+                pg.fetch_one_with_cursor(
+                    cur,
+                    "select to_regclass('social.instagram_post_comments_audit') is not null as available",
+                    [],
+                )
+                or {}
+            )
         return bool(row.get("available"))
     except Exception as exc:  # noqa: BLE001
         logger.debug("Instagram post comments audit table probe failed: %s", exc)
@@ -1744,20 +1970,22 @@ def _insert_instagram_post_comments_audit(
         }
     )
     reported_total = _extract_reported_comment_count(result) or 0
-    reported_fb = _safe_int((target_metadata or {}).get("fb_comment_count")) or _safe_int(
-        (target_metadata or {}).get("reported_fb_comment_count")
-    ) or 0
+    reported_fb = (
+        _safe_int((target_metadata or {}).get("fb_comment_count"))
+        or _safe_int((target_metadata or {}).get("reported_fb_comment_count"))
+        or 0
+    )
     fetched_fb_crossposts = int(phase_counts.get("fb_crosspost") or 0)
     fetched_instagram_parent_count = max(0, int(fetched_parent_count or 0) - fetched_fb_crossposts)
     fetched_instagram_total_count = max(0, int(fetched_total_count or 0) - fetched_fb_crossposts)
     cursor_param = (
-        str(checkpoint.get("next_top_level_cursor_param") or checkpoint.get("last_top_level_cursor_param") or "")
-        .strip()
+        str(
+            checkpoint.get("next_top_level_cursor_param") or checkpoint.get("last_top_level_cursor_param") or ""
+        ).strip()
         or None
     )
     cursor_min_id = (
-        str(checkpoint.get("next_top_level_cursor") or checkpoint.get("last_top_level_cursor") or "").strip()
-        or None
+        str(checkpoint.get("next_top_level_cursor") or checkpoint.get("last_top_level_cursor") or "").strip() or None
     )
     params = [
         str(run_id or "").strip() or None,
@@ -1934,11 +2162,7 @@ def _incomplete_retry_has_stalled(
             target
             for target in current_targets
             if target
-            in {
-                str(item or "").strip()
-                for item in (zero_comment_incomplete_targets or [])
-                if str(item or "").strip()
-            }
+            in {str(item or "").strip() for item in (zero_comment_incomplete_targets or []) if str(item or "").strip()}
         ],
         "fetch_reasons": {target: retry_fetch_reasons.get(target) for target in current_targets},
         "prior_fetch_reasons": prior_reason_by_target,
@@ -2111,15 +2335,20 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     incomplete_fill_enabled = str(config.get("target_filter") or "").strip().lower() == "incomplete" or _config_truthy(
         config.get("incomplete_fill")
     )
-    skip_complete_retry_targets = any(
-        _config_truthy(config.get(flag))
-        for flag in (
-            "comments_retry_rebalance",
-            "comments_retry_incomplete",
-            "comments_target_gap_repair",
-            "comments_skip_complete_targets",
+    skip_complete_retry_targets = (
+        any(
+            _config_truthy(config.get(flag))
+            for flag in (
+                "comments_retry_rebalance",
+                "comments_retry_incomplete",
+                "comments_target_gap_repair",
+                "comments_skip_complete_targets",
+            )
         )
-    ) or incomplete_fill_enabled or str(job.get("status") or "").strip().lower() == "retrying" or attempt_count > 1
+        or incomplete_fill_enabled
+        or str(job.get("status") or "").strip().lower() == "retrying"
+        or attempt_count > 1
+    )
     if skip_complete_retry_targets and target_source_ids:
         try:
             incomplete_targets = repo._instagram_filter_incomplete_comment_targets(account_handle, target_source_ids)
@@ -2226,12 +2455,10 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     post_fetch_failure_circuit_limit = _safe_int(config.get("post_fetch_failure_circuit_limit")) or 3
     # Phase 1.5: mid-run warmup refresh state.
     mid_run_warmup_auth_threshold = (
-        _safe_int(config.get("comments_warmup_refresh_auth_threshold"))
-        or _DEFAULT_MID_RUN_WARMUP_AUTH_THRESHOLD
+        _safe_int(config.get("comments_warmup_refresh_auth_threshold")) or _DEFAULT_MID_RUN_WARMUP_AUTH_THRESHOLD
     )
     mid_run_warmup_every_posts = (
-        _safe_int(config.get("comments_warmup_refresh_every_posts"))
-        or _DEFAULT_MID_RUN_WARMUP_EVERY_POSTS
+        _safe_int(config.get("comments_warmup_refresh_every_posts")) or _DEFAULT_MID_RUN_WARMUP_EVERY_POSTS
     )
     posts_since_last_warmup = 0
     mid_run_warmup_count = 0
@@ -2246,6 +2473,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
     first_post_persisted_at = None
     auth_context: dict[str, Any] = {}
     comments_endpoint_probe: dict[str, Any] = {}
+    current_target_fetch: dict[str, Any] = {}
     terminal_status = str(job.get("status") or "").strip().lower() or None
     terminal_error_message: str | None = None
 
@@ -2287,6 +2515,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 },
             },
             "comments_endpoint_probe": dict(comments_endpoint_probe),
+            "current_target_fetch": dict(current_target_fetch) if current_target_fetch else None,
             "post_auth_failures": {
                 "target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
                 "fetch_reasons": dict(auth_failed_fetch_reasons),
@@ -2297,17 +2526,13 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "fetch_reasons": dict(incomplete_fetch_reasons),
                 "reason_counts": dict(Counter(incomplete_fetch_reasons.values())),
                 "zero_comment_target_source_ids": list(dict.fromkeys(zero_comment_incomplete_target_source_ids)),
-                "coauthor_status_only_target_source_ids": list(
-                    dict.fromkeys(coauthor_status_only_target_source_ids)
-                ),
+                "coauthor_status_only_target_source_ids": list(dict.fromkeys(coauthor_status_only_target_source_ids)),
                 "target_metadata": dict(post_fetch_failure_metadata_by_shortcode),
                 "circuit_limit": post_fetch_failure_circuit_limit,
             },
             "incomplete_target_source_ids": list(dict.fromkeys(incomplete_target_source_ids)),
             "incomplete_fetch_reasons": dict(incomplete_fetch_reasons),
-            "zero_comment_incomplete_target_source_ids": list(
-                dict.fromkeys(zero_comment_incomplete_target_source_ids)
-            ),
+            "zero_comment_incomplete_target_source_ids": list(dict.fromkeys(zero_comment_incomplete_target_source_ids)),
             "coauthor_status_only_target_source_ids": list(dict.fromkeys(coauthor_status_only_target_source_ids)),
             "auth_failed_target_source_ids": list(dict.fromkeys(auth_failed_target_source_ids)),
             "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
@@ -2316,6 +2541,9 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 "count": len(target_metadata_by_shortcode),
                 "collaborator_posts": sum(
                     1 for item in target_metadata_by_shortcode.values() if bool(item.get("is_collaborator_post"))
+                ),
+                "posts_with_collaborators": sum(
+                    1 for item in target_metadata_by_shortcode.values() if bool(item.get("has_collaborators"))
                 ),
             },
             "top_level_checkpoints": list(top_level_checkpoints_by_shortcode.values()),
@@ -2373,6 +2601,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         nonlocal activity, fetcher_metadata
         nonlocal consecutive_post_auth_failures, consecutive_post_fetch_failures, successful_target_fetches
         nonlocal warmup_completed_at, first_post_persisted_at, auth_context, comments_endpoint_probe
+        nonlocal current_target_fetch
         # Phase 1.5 / 1.7: scope mid-run warmup counters and per-comment failure
         # truncation flag to the outer function so progress_metadata_common()
         # reads the live values and _maybe_refresh_warmup() writes propagate.
@@ -2426,13 +2655,18 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     ) from exc
                 raise
             auth_metadata = dict(session.auth_session.metadata or {})
-            comments_auth_validation_mode = str(
-                config.get("comments_auth_validation_mode")
-                or config.get("auth_validation_mode")
-                or auth_context.get("comments_auth_validation_mode")
-                or auth_metadata.get("comments_auth_validation_mode")
+            comments_auth_validation_mode = (
+                str(
+                    config.get("comments_auth_validation_mode")
+                    or config.get("auth_validation_mode")
+                    or auth_context.get("comments_auth_validation_mode")
+                    or auth_metadata.get("comments_auth_validation_mode")
+                    or "comments_endpoint"
+                )
+                .strip()
+                .lower()
                 or "comments_endpoint"
-            ).strip().lower() or "comments_endpoint"
+            )
             auth_context["comments_auth_validation_mode"] = comments_auth_validation_mode
             auth_context["comments_profile_graphql_validation"] = comments_auth_validation_mode == "graphql_profile"
             _raise_if_cancelled(
@@ -2458,41 +2692,33 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 and asyncio.iscoroutinefunction(probe_method)
             ):
                 comments_endpoint_probe = await probe_method(target_source_ids[0], mode=comments_auth_validation_mode)
-                probe_status = str(
-                    comments_endpoint_probe.get("status") or comments_endpoint_probe.get("result") or ""
-                ).strip().lower()
+                probe_status = (
+                    str(comments_endpoint_probe.get("status") or comments_endpoint_probe.get("result") or "")
+                    .strip()
+                    .lower()
+                )
                 probe_reason = str(comments_endpoint_probe.get("reason") or "").strip()
                 if probe_status == "auth_blocked":
-                    first_target_metadata = target_metadata_by_shortcode.get(target_source_ids[0]) or {}
-                    allow_coauthor_rendered_fallback = (
-                        probe_reason == "html_challenge_or_auth_required"
-                        and _metadata_indicates_collaborator_post(first_target_metadata)
-                        and _config_env_truthy(
-                            config.get("comments_coauthor_auth_rendered_fallback"),
-                            _COAUTHOR_AUTH_RENDERED_FALLBACK_ENV,
-                            default=True,
-                        )
-                    )
-                    if allow_coauthor_rendered_fallback:
-                        comments_endpoint_probe = {
-                            **dict(comments_endpoint_probe),
-                            "advisory_continue": True,
-                            "advisory_reason": "coauthor_rendered_fallback_after_endpoint_html_challenge",
-                        }
-                        logger.warning(
-                            "Instagram comments endpoint auth validation returned HTML challenge for collaborator "
-                            "target; continuing so rendered post fallback can run. job_id=%s run_id=%s shortcode=%s",
-                            job_id,
-                            run_id,
-                            target_source_ids[0],
-                        )
-                    else:
+                    runtime_metadata = {
+                        **dict(fetcher.runtime_metadata),
+                        "comments_endpoint_probe": dict(comments_endpoint_probe),
+                    }
+                    if (
+                        probe_reason == BROWSER_SESSION_INVALIDATED_REASON
+                        or _metadata_indicates_browser_session_invalidated(comments_endpoint_probe)
+                    ):
                         raise CommentsScraplingRuntimeError(
-                            "Instagram comments endpoint auth validation failed before target processing.",
-                            error_code="instagram_comments_endpoint_auth_blocked",
+                            "Instagram comments browser session was invalidated before target processing.",
+                            error_code=_BROWSER_SESSION_INVALIDATED_ERROR_CODE,
                             retryable=False,
-                            runtime_metadata=dict(fetcher.runtime_metadata),
+                            runtime_metadata=runtime_metadata,
                         )
+                    raise CommentsScraplingRuntimeError(
+                        "Instagram comments endpoint auth validation failed before target processing.",
+                        error_code="instagram_comments_endpoint_auth_blocked",
+                        retryable=False,
+                        runtime_metadata=runtime_metadata,
+                    )
                 if probe_status == "transport_blocked":
                     comments_endpoint_probe = {
                         **dict(comments_endpoint_probe),
@@ -2595,10 +2821,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         and consecutive_post_auth_failures >= mid_run_warmup_auth_threshold
                     ):
                         await _maybe_refresh_warmup(reason="consecutive_auth_failures")
-                    elif (
-                        mid_run_warmup_every_posts > 0
-                        and posts_since_last_warmup >= mid_run_warmup_every_posts
-                    ):
+                    elif mid_run_warmup_every_posts > 0 and posts_since_last_warmup >= mid_run_warmup_every_posts:
                         await _maybe_refresh_warmup(reason="post_count_threshold")
                 if shortcode in skipped_complete_target_source_ids:
                     total_elapsed_ms = int((time.monotonic() - post_started_at) * 1000)
@@ -2705,19 +2928,86 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     fetch_kwargs["reply_resume_cursors"] = reply_resume_cursors_by_parent
                 if reply_resume_cursor_params_by_parent:
                     fetch_kwargs["reply_resume_cursor_params"] = reply_resume_cursor_params_by_parent
+                endpoint_status = (
+                    str(comments_endpoint_probe.get("status") or comments_endpoint_probe.get("result") or "")
+                    .strip()
+                    .lower()
+                )
+                endpoint_reason = str(comments_endpoint_probe.get("reason") or "").strip() or None
+                current_target_fetch = {
+                    "phase": "fetching",
+                    "shortcode": shortcode,
+                    "post_index": index,
+                    "total_posts": len(target_source_ids),
+                    "started_at": lifecycle.format_time(lifecycle.now_utc()),
+                    "expected_comment_count": expected_comment_counts_by_shortcode.get(shortcode),
+                    "max_comments_per_post": max_comments_per_post,
+                    "fetch_replies": fetch_replies,
+                    "comments_load_strategy": comments_load_strategy,
+                    "comments_session_scope": comments_session_scope,
+                    "reply_only": bool(fetch_kwargs.get("reply_only")),
+                    "auth_probe_status": endpoint_status or None,
+                    "auth_probe_reason": endpoint_reason,
+                    "fallback_expected": bool(comments_endpoint_probe.get("advisory_continue")),
+                    "fallback_reason": comments_endpoint_probe.get("advisory_reason"),
+                }
+                if isinstance(target_metadata, Mapping):
+                    current_target_fetch.update(
+                        {
+                            "owner_username": target_metadata.get("owner_username"),
+                            "caption_author": target_metadata.get("caption_author")
+                            or target_metadata.get("caption_writer")
+                            or target_metadata.get("original_author"),
+                            "collaborator_handles": list(target_metadata.get("collaborator_handles") or []),
+                            "is_collaborator_post": bool(target_metadata.get("is_collaborator_post")),
+                        }
+                    )
+                activity = {
+                    "phase": "comments_scrapling_fetching",
+                    "posts_checked": processed_posts,
+                    "matched_posts": processed_posts,
+                    "saved_posts": processed_posts,
+                    "total_posts": len(target_source_ids),
+                    "current_shortcode": shortcode,
+                    "current_post_index": index,
+                    "fallback_expected": bool(comments_endpoint_probe.get("advisory_continue")),
+                    **shard_metadata,
+                }
                 result = await fetcher.fetch_comments_for_shortcode(shortcode, **fetch_kwargs)
                 fetch_elapsed_ms = int((time.monotonic() - fetch_started_at) * 1000)
+                current_target_fetch = {
+                    **current_target_fetch,
+                    "phase": "fetched",
+                    "fetched_at": lifecycle.format_time(lifecycle.now_utc()),
+                    "fetch_elapsed_ms": fetch_elapsed_ms,
+                    "comments_fetched": len(result.comments),
+                    "observed_comment_count": _extract_observed_comment_count(result),
+                    "parent_comments_fetched": parent_comment_count(result.comments),
+                    "child_replies_fetched": child_reply_count(result.comments),
+                    "fetch_failed": bool(result.fetch_failed),
+                    "auth_failed": bool(result.auth_failed),
+                    "retryable": bool(result.retryable),
+                    "fetch_reason": result.fetch_reason,
+                }
+                activity = {
+                    "phase": "comments_scrapling_fetched",
+                    "posts_checked": processed_posts,
+                    "matched_posts": processed_posts,
+                    "saved_posts": processed_posts,
+                    "total_posts": len(target_source_ids),
+                    "current_shortcode": shortcode,
+                    "current_post_index": index,
+                    "comments_fetched": len(result.comments),
+                    "fetch_reason": result.fetch_reason,
+                    **shard_metadata,
+                }
                 top_level_checkpoint = getattr(result, "top_level_checkpoint", None)
                 if isinstance(top_level_checkpoint, dict):
                     top_level_checkpoints_by_shortcode[shortcode] = dict(top_level_checkpoint)
                 capture_metadata = _comment_capture_metadata_from_fetch_result(result)
                 comment_phase_counts.update(_counter_from_mapping(capture_metadata.get("phase_counts")))
-                comment_cursor_param_counts.update(
-                    _counter_from_mapping(capture_metadata.get("cursor_param_counts"))
-                )
-                comment_cursor_shape_counts.update(
-                    _counter_from_mapping(capture_metadata.get("cursor_shape_counts"))
-                )
+                comment_cursor_param_counts.update(_counter_from_mapping(capture_metadata.get("cursor_param_counts")))
+                comment_cursor_shape_counts.update(_counter_from_mapping(capture_metadata.get("cursor_shape_counts")))
                 capture_sample = capture_metadata.get("sample")
                 if isinstance(capture_sample, dict) and capture_sample:
                     if len(comment_capture_samples) >= 25:
@@ -2738,6 +3028,19 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     worker_id=worker_id,
                     runtime_metadata=dict(fetcher.runtime_metadata),
                 )
+                if result.auth_failed and _fetch_result_indicates_browser_session_invalidated(result):
+                    raise CommentsScraplingRuntimeError(
+                        f"Instagram comments browser session was invalidated while fetching {shortcode}.",
+                        error_code=_BROWSER_SESSION_INVALIDATED_ERROR_CODE,
+                        retryable=False,
+                        runtime_metadata={
+                            "shortcode": shortcode,
+                            "fetch_reason": result.fetch_reason,
+                            "auth_failed": True,
+                            "fetcher_runtime": dict(fetcher.runtime_metadata),
+                            "diagnostic_metadata": _fetch_result_diagnostic_metadata(result),
+                        },
+                    )
                 observed_comment_count = _extract_observed_comment_count(result)
                 fetched_parent_count = parent_comment_count(result.comments)
                 fetched_child_count = child_reply_count(result.comments)
@@ -2801,6 +3104,40 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         force=index == len(target_source_ids),
                         extra_metadata=progress_metadata_common(),
                     )
+                    if (
+                        post_auth_failure_circuit_limit > 0
+                        and consecutive_post_auth_failures >= post_auth_failure_circuit_limit
+                    ):
+                        remaining_target_source_ids = [
+                            str(item or "").strip() for item in target_source_ids[index:] if str(item or "").strip()
+                        ]
+                        auth_failed_targets = list(dict.fromkeys(auth_failed_target_source_ids))
+                        incomplete_targets = list(dict.fromkeys([*auth_failed_targets, *remaining_target_source_ids]))
+                        raise CommentsScraplingRuntimeError(
+                            "Instagram comments auth failed repeatedly while fetching target posts.",
+                            error_code="instagram_comments_auth_failed",
+                            retryable=False,
+                            runtime_metadata={
+                                "shortcode": shortcode,
+                                "fetch_reason": result.fetch_reason,
+                                "auth_failed": True,
+                                "post_auth_failure_circuit_open": True,
+                                "post_auth_failure_circuit_limit": post_auth_failure_circuit_limit,
+                                "consecutive_post_auth_failures": consecutive_post_auth_failures,
+                                "auth_failed_target_source_ids": auth_failed_targets,
+                                "auth_failed_fetch_reasons": dict(auth_failed_fetch_reasons),
+                                "incomplete_target_source_ids": incomplete_targets,
+                                "incomplete_fetch_reasons": {
+                                    target: auth_failed_fetch_reasons.get(target, "auth_failed")
+                                    for target in incomplete_targets
+                                },
+                                "remaining_target_source_ids": remaining_target_source_ids,
+                                "target_source_ids_count": len(target_source_ids),
+                                "processed_posts": processed_posts,
+                                "fetcher_runtime": dict(fetcher.runtime_metadata),
+                                "diagnostic_metadata": _fetch_result_diagnostic_metadata(result),
+                            },
+                        )
                     continue
                 consecutive_post_auth_failures = 0
                 # Phase 1.5: every successful (or non-auth-failed) post advances the
@@ -2812,9 +3149,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     normalized_fetch_reason = str(result.fetch_reason or "retryable_post_fetch_failed").strip()
                     result_metadata = _fetch_result_diagnostic_metadata(result)
                     target_metadata = target_metadata_by_shortcode.get(shortcode) or {}
-                    if normalized_incomplete_shortcode and (
-                        isinstance(result_metadata, dict) or target_metadata
-                    ):
+                    if normalized_incomplete_shortcode and (isinstance(result_metadata, dict) or target_metadata):
                         failure_metadata: dict[str, Any] = {
                             "fetch_reason": normalized_fetch_reason,
                             "target_metadata": dict(target_metadata),
@@ -2918,6 +3253,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 stored_coverage_complete = False
                 stored_coverage_reconciled_gap = False
                 stored_coverage_terminal_gap = False
+                stored_coverage_auth_blocked_gap = False
+                missing_classified = 0
                 with pg.db_connection(label="instagram-comments-scrapling-persist") as persist_conn:
                     if should_poll_cancellation(index):
                         _raise_if_cancelled(
@@ -2961,11 +3298,40 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         stored_reply_gap_total=persisted.stored_reply_gap_total,
                         max_comments_per_post=max_comments_per_post,
                     )
-                    if stored_coverage_reconciled_gap or stored_coverage_terminal_gap:
+                    stored_coverage_auth_blocked_gap = _reply_only_auth_blocked_coverage_gap_is_reconcilable(
+                        result=result,
+                        stored_total_comments=persisted.stored_total_comments,
+                        max_comments_per_post=max_comments_per_post,
+                        reply_only=bool(fetch_kwargs.get("reply_only")),
+                    )
+                    if (
+                        stored_coverage_reconciled_gap
+                        or stored_coverage_terminal_gap
+                        or stored_coverage_auth_blocked_gap
+                    ):
                         repo._reconcile_post_comment_count(
                             platform="instagram",
                             post_db_id=persisted.post_id,
                             conn=persist_conn,
+                        )
+                    if stored_coverage_reconciled_gap:
+                        missing_classification_reason = "stored_comment_coverage_reconciled_gap"
+                    elif stored_coverage_terminal_gap:
+                        missing_classification_reason = "stored_comment_coverage_terminal_gap_reconciled"
+                    elif stored_coverage_auth_blocked_gap:
+                        missing_classification_reason = str(result.fetch_reason or "html_challenge_or_auth_required")
+                    else:
+                        missing_classification_reason = None
+                    if missing_classification_reason:
+                        missing_classified = _classify_unavailable_instagram_comment_gap(
+                            conn=persist_conn,
+                            post_id=persisted.post_id,
+                            result=result,
+                            stored_total_comments=persisted.stored_total_comments,
+                            max_comments_per_post=max_comments_per_post,
+                            run_id=run_id or None,
+                            job_id=job_id,
+                            reason=missing_classification_reason,
                         )
                     _insert_instagram_post_comments_audit(
                         conn=persist_conn,
@@ -2995,26 +3361,26 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 persisted_reply_topology_complete = not _has_persisted_reply_topology_gap(
                     persisted.stored_reply_gap_total
                 )
-                effective_is_complete = persisted_reply_topology_complete and (
+                reply_topology_gate_complete = persisted_reply_topology_complete or stored_coverage_auth_blocked_gap
+                effective_is_complete = reply_topology_gate_complete and (
                     is_complete
                     or stored_coverage_complete
                     or stored_coverage_reconciled_gap
                     or stored_coverage_terminal_gap
+                    or stored_coverage_auth_blocked_gap
                 )
                 if (
                     (result.fetch_failed and result.retryable)
                     or fetched_parentless_count > 0
-                    or not persisted_reply_topology_complete
+                    or not reply_topology_gate_complete
                     or (completion_reason == "incomplete_fetch" and not result.auth_failed)
                 ) and not effective_is_complete:
                     normalized_incomplete_shortcode = str(shortcode or "").strip()
                     if fetched_parentless_count > 0:
                         normalized_fetch_reason = _PARENTLESS_REPLY_ATTACH_FAILED_REASON
                     elif result.fetch_failed and result.retryable:
-                        normalized_fetch_reason = str(
-                            result.fetch_reason or "retryable_incomplete_fetch"
-                        ).strip()
-                    elif not persisted_reply_topology_complete:
+                        normalized_fetch_reason = str(result.fetch_reason or "retryable_incomplete_fetch").strip()
+                    elif not reply_topology_gate_complete:
                         normalized_fetch_reason = _PERSISTED_REPLY_TOPOLOGY_GAP_REASON
                     elif completion_reason == "incomplete_fetch":
                         normalized_fetch_reason = str(result.fetch_reason or "hidden_comments_unresolved").strip()
@@ -3025,7 +3391,11 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                         incomplete_fetch_reasons[normalized_incomplete_shortcode] = normalized_fetch_reason
                         result_metadata = _fetch_result_diagnostic_metadata(result)
                         target_metadata = target_metadata_by_shortcode.get(shortcode) or {}
-                        if isinstance(result_metadata, dict) or target_metadata or not persisted_reply_topology_complete:
+                        if (
+                            isinstance(result_metadata, dict)
+                            or target_metadata
+                            or not persisted_reply_topology_complete
+                        ):
                             failure_metadata: dict[str, Any] = {
                                 "fetch_reason": normalized_fetch_reason,
                                 "target_metadata": dict(target_metadata),
@@ -3045,6 +3415,8 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     completion_reason = "stored_comment_coverage_reconciled_gap"
                 elif stored_coverage_terminal_gap and not is_complete:
                     completion_reason = "stored_comment_coverage_terminal_gap_reconciled"
+                elif stored_coverage_auth_blocked_gap and not is_complete:
+                    completion_reason = "stored_comment_coverage_auth_blocked_gap_reconciled"
                 elif not persisted_reply_topology_complete:
                     completion_reason = _PERSISTED_REPLY_TOPOLOGY_GAP_REASON
                 operator_status = "complete" if effective_is_complete else "incomplete_retryable"
@@ -3081,7 +3453,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             0,
                             persisted.comments_changed - persisted.comments_inserted,
                         ),
-                        "comments_marked_missing": persisted.comments_marked_missing,
+                        "comments_marked_missing": persisted.comments_marked_missing + missing_classified,
                         "fetch_reason": result.fetch_reason,
                         "stored_total_comments": persisted.stored_total_comments,
                         "stored_parent_comments": persisted.stored_parent_comments,
@@ -3114,7 +3486,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 comments_refreshed += persisted.comments_refreshed
                 comments_changed += persisted.comments_changed
                 successful_target_fetches += 1
-                comments_marked_missing += persisted.comments_marked_missing
+                comments_marked_missing += persisted.comments_marked_missing + missing_classified
                 mirror_jobs_enqueued += persisted.comment_media_mirror_jobs_enqueued
                 mirror_job_enqueue_errors += persisted.comment_media_mirror_job_enqueue_errors
                 activity = {

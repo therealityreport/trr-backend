@@ -30,6 +30,7 @@ class InstagramErrorCode(StrEnum):
     CONSENT_REQUIRED = "consent_required"
     SENTRY_BLOCK = "sentry_block"
 
+
 GRAPHQL_URL = "https://www.instagram.com/graphql/query"
 PROFILE_INFO_URL = "https://www.instagram.com/api/v1/users/web_profile_info/"
 POST_INFO_URL = "https://www.instagram.com/api/v1/media/{media_id}/info/"

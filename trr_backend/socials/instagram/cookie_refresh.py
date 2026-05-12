@@ -93,11 +93,7 @@ def read_instagram_cookie_file_metadata(cookie_file: str | Path) -> dict[str, An
         return {}
     if not isinstance(payload, dict):
         return {}
-    return {
-        str(key): value
-        for key, value in payload.items()
-        if str(key).startswith("_")
-    }
+    return {str(key): value for key, value in payload.items() if str(key).startswith("_")}
 
 
 def _read_cookie_file(cookie_file: str | Path) -> dict[str, str]:
@@ -355,15 +351,16 @@ def refresh_instagram_cookies(
         raise RuntimeError("Timed out while refreshing Instagram cookies") from exc
     finally:
         if browser is not None:
-            browser.close()
+            try:
+                browser.close()
+            except Exception as close_exc:  # noqa: BLE001
+                logger.debug("Ignoring Instagram refresh browser close failure: %s", close_exc)
 
     if validator is not None and normalized_validation_mode == "graphql_profile":
         is_valid, validation_reason = validator(cookies)
         if not is_valid:
             normalized_reason = str(validation_reason or "").strip() or "graphql_validation_failed"
-            raise RuntimeError(
-                f"Instagram login produced cookies that failed GraphQL validation ({normalized_reason})"
-            )
+            raise RuntimeError(f"Instagram login produced cookies that failed GraphQL validation ({normalized_reason})")
 
     if storage_state is None:
         raise RuntimeError("Instagram login completed without browser storage state")
@@ -405,14 +402,13 @@ def interactive_chrome_login(
         fallback_account_id=session_account_id,
     )
     skip_saved_session_reuse = (
-        (os.getenv("SOCIAL_INSTAGRAM_SKIP_SAVED_BROWSER_SESSION_REUSE") or "").strip().lower()
-        in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-    )
+        os.getenv("SOCIAL_INSTAGRAM_SKIP_SAVED_BROWSER_SESSION_REUSE") or ""
+    ).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     saved_cookies = {} if skip_saved_session_reuse else _read_cookie_file(session_paths.cookie_file_path)
     if saved_cookies.get("sessionid"):
         validation_url = (
@@ -590,8 +586,7 @@ def interactive_chrome_login(
                                         deadline = time.monotonic() + max(60, int(timeout_seconds))
                                         continue
                                     print(
-                                        "\n*** Session cookies don't work for GraphQL API — "
-                                        "please log in again. ***\n"
+                                        "\n*** Session cookies don't work for GraphQL API — please log in again. ***\n"
                                     )
                                     context.clear_cookies()
                                     page.goto(
@@ -628,9 +623,7 @@ def interactive_chrome_login(
 
 def _find_chrome_profile_dir(profile_name: str) -> Path:
     """Locate a Chrome profile directory by display name or email."""
-    chrome_base = (
-        Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
-    )
+    chrome_base = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
     for entry in chrome_base.iterdir():
         prefs_file = entry / "Preferences"
         if not prefs_file.is_file():
@@ -640,10 +633,7 @@ def _find_chrome_profile_dir(profile_name: str) -> Path:
             name = prefs.get("profile", {}).get("name", "")
             account_info = prefs.get("account_info", [])
             emails = [a.get("email", "") for a in account_info if isinstance(a, dict)]
-            if (
-                name.lower() == profile_name.lower()
-                or profile_name.lower() in [e.lower() for e in emails]
-            ):
+            if name.lower() == profile_name.lower() or profile_name.lower() in [e.lower() for e in emails]:
                 return entry
         except (json.JSONDecodeError, OSError):
             continue

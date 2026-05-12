@@ -17,9 +17,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 # Add project root to path (scripts/socials/tiktok -> project root)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -30,6 +28,18 @@ from trr_backend.socials.tiktok import (
     TikTokScrapeConfig,
     TikTokScraper,
 )
+from trr_backend.socials.tiktok.ops import (
+    emit_diagnostics_summary as _emit_diagnostics_summary,
+)
+from trr_backend.socials.tiktok.ops import (
+    parse_date,
+)
+from trr_backend.socials.tiktok.ops import (
+    proxy_label as _proxy_label,
+)
+from trr_backend.socials.tiktok.ops import (
+    write_diagnostics_json as _write_diagnostics_json,
+)
 from trr_backend.utils.env import load_env
 
 logging.basicConfig(
@@ -38,18 +48,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-def parse_date(date_str: str) -> datetime:
-    """Parse date string in YYYY-MM-DD format."""
-    return datetime.strptime(date_str, "%Y-%m-%d")
-
-
-def _proxy_label(proxy_url: str | None) -> str | None:
-    if not proxy_url:
-        return None
-    parsed = urlparse(str(proxy_url))
-    return parsed.hostname or str(proxy_url)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -112,50 +110,6 @@ Examples:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return _build_parser().parse_args(argv)
-
-
-def _emit_diagnostics_summary(
-    *,
-    target_label: str,
-    scrape_mode: str,
-    diagnostics: dict[str, object],
-) -> None:
-    endpoint_responses = diagnostics.get("endpoint_responses") if isinstance(diagnostics, dict) else {}
-    endpoint_responses = endpoint_responses if isinstance(endpoint_responses, dict) else {}
-    failure_summary = {
-        endpoint: payload.get("failure_reason")
-        for endpoint, payload in endpoint_responses.items()
-        if isinstance(payload, dict) and payload.get("failure_reason")
-    }
-
-    print("\nDiagnostics:")
-    print(f"  Target: {target_label}")
-    print(f"  Scrape mode: {scrape_mode}")
-    print(f"  HTTP client: {diagnostics.get('http_client') or 'requests'}")
-    if diagnostics.get("curl_cffi_impersonate"):
-        print(f"  Impersonate: {diagnostics.get('curl_cffi_impersonate')}")
-    print(f"  Proxy: {diagnostics.get('proxy_label') or 'none'}")
-    print(f"  Auth mode: {diagnostics.get('auth_mode') or 'without_cookies'}")
-    if diagnostics.get("risk_state"):
-        print(f"  Risk state: {diagnostics.get('risk_state')}")
-    if diagnostics.get("operator_summary"):
-        print(f"  Operator summary: {diagnostics.get('operator_summary')}")
-    if diagnostics.get("operator_action"):
-        print(f"  Operator action: {diagnostics.get('operator_action')}")
-    if diagnostics.get("triage_bucket"):
-        print(f"  Triage bucket: {diagnostics.get('triage_bucket')}")
-    if diagnostics.get("stop_reason"):
-        print(f"  Stop reason: {diagnostics.get('stop_reason')}")
-    if failure_summary:
-        print(f"  Endpoint failures: {json.dumps(failure_summary, sort_keys=True)}")
-
-
-def _write_diagnostics_json(path: str | None, diagnostics: dict[str, object]) -> None:
-    if not path:
-        return
-    target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(diagnostics, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
 
 
 def save_results(posts: list[TikTokPost], output_prefix: str):

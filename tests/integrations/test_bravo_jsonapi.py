@@ -178,12 +178,14 @@ def test_fetch_gallery_assets_keeps_bare_gallery_url_when_hash_unresolved(monkey
     monkeypatch.setattr(
         bravo_jsonapi,
         "_get_html",
-        lambda client, url: """
+        lambda client, url: (
+            """
         <div class="gallery-card">
           <img src="/sites/bravo/files/other-image.jpg" />
           <div class="js-gallery-item-id hidden">9799496</div>
         </div>
-        """,
+        """
+        ),
     )
 
     assets = bravo_jsonapi.fetch_gallery_assets(
@@ -248,12 +250,14 @@ def test_fetch_gallery_assets_resolves_portia_anchor_from_gallery_html(monkeypat
     monkeypatch.setattr(
         bravo_jsonapi,
         "_get_html",
-        lambda client, url: """
+        lambda client, url: (
+            """
         <div class="gallery-card">
           <img src="/sites/bravo/files/portia-party-01.jpg" />
           <div class="js-gallery-item-id hidden">9799496</div>
         </div>
-        """,
+        """
+        ),
     )
 
     assets = bravo_jsonapi.fetch_gallery_assets(

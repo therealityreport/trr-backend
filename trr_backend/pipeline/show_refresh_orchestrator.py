@@ -156,7 +156,9 @@ class ShowRefreshOrchestrator:
         except Exception:
             logger.exception(
                 "Failed to create sub-operations: parent_id=%s created=%d/%d",
-                self._parent_id, len(sub_ops), len(self.targets),
+                self._parent_id,
+                len(sub_ops),
+                len(self.targets),
             )
             admin_operations.update_operation_status(self._parent_id, "failed")
             raise
@@ -193,7 +195,9 @@ class ShowRefreshOrchestrator:
                     modal_dispatched += 1
                     logger.info(
                         "Dispatched sub-operation to Modal: target=%s operation_id=%s parent=%s",
-                        target, op_id, self._parent_id,
+                        target,
+                        op_id,
+                        self._parent_id,
                     )
                     continue
 
@@ -203,7 +207,9 @@ class ShowRefreshOrchestrator:
                 ensure_operation_execution(op_id, producer=producer, request_id=self.request_id)
                 logger.info(
                     "Local execution for sub-operation: target=%s operation_id=%s parent=%s",
-                    target, op_id, self._parent_id,
+                    target,
+                    op_id,
+                    self._parent_id,
                 )
             else:
                 raise RuntimeError(

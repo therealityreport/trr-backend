@@ -13859,8 +13859,9 @@ async def refresh_person_images_stream(
                         limit=request.limit_per_source,
                         progress_cb=_update_bravotv_progress,
                         cancel_requested_cb=(
-                            lambda: bool(operation_cancel_id)
-                            and admin_operations.is_cancel_requested(operation_cancel_id)
+                            lambda: (
+                                bool(operation_cancel_id) and admin_operations.is_cancel_requested(operation_cancel_id)
+                            )
                         ),
                     )
                 )

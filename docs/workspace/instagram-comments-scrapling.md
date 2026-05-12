@@ -105,8 +105,10 @@ Required only for **production** runs; local dev works with cookies alone.
 # Proxy (Decodo default; swap provider by changing _PROVIDER + _URLS)
 SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER=decodo
 SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS=            # explicit URLs bypass Decodo username shaping
-SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY=false
+SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY=true
+SOCIAL_INSTAGRAM_COMMENTS_PROXY_SHARD_SESSIONS=true
 SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS=600  # seconds; converts/clamps to whole minutes
+SOCIAL_INSTAGRAM_COMMENTS_LAUNCH_AUTH_CHECK=false        # worker validation remains enabled
 
 # Run caps (defense against runaway jobs)
 SOCIAL_INSTAGRAM_COMMENTS_MAX_POSTS_PER_RUN=50

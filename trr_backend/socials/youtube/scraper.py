@@ -41,11 +41,18 @@ def _env_int(name: str, default: int) -> int:
     return max(1, value)
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class YouTubeScrapeConfig:
     """Configuration for a YouTube scrape operation."""
 
-    channel_handle: str  # Channel handle like "bravo" (without @)
+    channel_handle: str = ""  # Channel handle like "bravo" (without @)
     keywords: list[str] = field(default_factory=list)  # Keywords to filter by (e.g., "RHOSLC", "Salt Lake City")
     date_start: datetime | None = None
     date_end: datetime | None = None
@@ -53,6 +60,9 @@ class YouTubeScrapeConfig:
     max_results: int | None = None  # None = no limit
     max_pages: int | None = None  # continuation page limit
     enforce_keyword_filter: bool = True
+    source_type: str = "account"
+    playlist_id: str | None = None
+    playlist_url: str | None = None
 
     # Performance tuning
     fast_mode: bool = False
@@ -951,6 +961,153 @@ class YouTubeScraper:
             return f"https://www.youtube.com/shorts/{video_id}"
         return f"https://www.youtube.com/watch?v={video_id}"
 
+    @staticmethod
+    def _duration_iso_from_seconds(value: Any) -> str:
+        try:
+            seconds = max(0, int(float(value or 0)))
+        except (TypeError, ValueError):
+            seconds = 0
+        return f"PT{seconds}S" if seconds > 0 else ""
+
+    @staticmethod
+    def _timestamp_from_ytdlp(payload: dict[str, Any]) -> int:
+        for key in ("timestamp", "release_timestamp", "modified_timestamp"):
+            try:
+                value = int(payload.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                return value
+        upload_date = str(payload.get("upload_date") or "").strip()
+        if re.fullmatch(r"\d{8}", upload_date):
+            try:
+                return int(datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=UTC).timestamp())
+            except ValueError:
+                return 0
+        return 0
+
+    @staticmethod
+    def _extract_video_id_from_url(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        parsed = urlparse(raw if "://" in raw else f"https://www.youtube.com/{raw.lstrip('/')}")
+        query_id = parse_qs(parsed.query).get("v", [""])[0]
+        if query_id:
+            return query_id
+        for pattern in (r"/shorts/([A-Za-z0-9_-]{6,})", r"youtu\.be/([A-Za-z0-9_-]{6,})"):
+            match = re.search(pattern, raw)
+            if match:
+                return match.group(1)
+        return ""
+
+    @staticmethod
+    def extract_playlist_id(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        if "://" in raw or raw.lower().startswith("www."):
+            parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+            query_id = parse_qs(parsed.query).get("list", [""])[0]
+            if query_id:
+                return query_id.strip()
+        direct = raw.split("?", 1)[0].split("#", 1)[0].strip()
+        if re.fullmatch(r"(?:PL|UU|LL|FL|RD|OLAK5uy_)[A-Za-z0-9_-]{8,}", direct):
+            return direct
+        match = re.search(r"(?:list=|/playlist/)([A-Za-z0-9_-]{10,})", raw)
+        return match.group(1).strip() if match else ""
+
+    @classmethod
+    def _playlist_url(cls, *, playlist_id: str | None, playlist_url: str | None) -> tuple[str, str]:
+        resolved_id = cls.extract_playlist_id(playlist_id) or cls.extract_playlist_id(playlist_url)
+        if not resolved_id:
+            return "", ""
+        raw_url = str(playlist_url or "").strip()
+        if raw_url.startswith(("http://", "https://")) and cls.extract_playlist_id(raw_url) == resolved_id:
+            return resolved_id, raw_url
+        return resolved_id, f"https://www.youtube.com/playlist?list={resolved_id}"
+
+    def _video_from_ytdlp_payload(
+        self,
+        payload: dict[str, Any],
+        config: YouTubeScrapeConfig,
+        *,
+        source_surface: str = "videos",
+        keyword_hint: str | None = None,
+    ) -> YouTubeVideo | None:
+        video_id = str(payload.get("id") or payload.get("display_id") or "").strip() or self._extract_video_id_from_url(
+            payload.get("webpage_url") or payload.get("url")
+        )
+        if not video_id:
+            return None
+        title = str(payload.get("title") or "").strip()
+        description = str(payload.get("description") or payload.get("fulltitle") or "").strip()
+        combined_text = f"{title} {description}".strip()
+        if not config.matches_keywords(combined_text):
+            return None
+
+        timestamp = self._timestamp_from_ytdlp(payload)
+        if timestamp > 0:
+            in_range = config.is_in_date_range(timestamp)
+            if in_range is None or in_range is False:
+                return None
+        date_time = datetime.fromtimestamp(timestamp, tz=UTC).strftime("%Y-%m-%d %H:%M:%S") if timestamp else ""
+        duration_seconds = _safe_int(payload.get("duration"))
+        webpage_url = str(payload.get("webpage_url") or payload.get("original_url") or payload.get("url") or "")
+        is_short = "/shorts/" in webpage_url
+        if not is_short and 0 < duration_seconds <= 60:
+            is_short = True
+        surface = "shorts" if is_short else source_surface
+        if surface not in {"videos", "shorts", "search"}:
+            surface = "shorts" if is_short else "videos"
+        thumbnail_url = str(payload.get("thumbnail") or "").strip()
+        thumbnails = payload.get("thumbnails")
+        if not thumbnail_url and isinstance(thumbnails, list) and thumbnails:
+            thumbnail_url = str((thumbnails[-1] or {}).get("url") or "").strip()
+
+        keywords_matched: list[str] = []
+        for keyword in config.keywords:
+            cleaned = str(keyword or "").strip().lower().lstrip("#")
+            if cleaned and cleaned in combined_text.lower():
+                keywords_matched.append(keyword)
+        if keyword_hint and keyword_hint not in keywords_matched:
+            keywords_matched.append(keyword_hint)
+
+        if is_short:
+            description = description or title
+            title = "" if source_surface != "search" else title
+
+        return YouTubeVideo(
+            video_id=video_id,
+            title=title,
+            description=description,
+            date_time=date_time,
+            published_at=timestamp,
+            channel_id=str(payload.get("channel_id") or "").strip(),
+            channel_title=str(payload.get("channel") or payload.get("uploader") or "").strip(),
+            duration=self._duration_iso_from_seconds(duration_seconds),
+            duration_seconds=duration_seconds,
+            views=_safe_int(payload.get("view_count")),
+            likes=_safe_int(payload.get("like_count")),
+            comments=_safe_int(payload.get("comment_count")),
+            url=self._canonical_video_url(video_id=video_id, surface=surface, renderer_url=webpage_url),
+            thumbnail_url=thumbnail_url,
+            tags=list(payload.get("tags") or []),
+            keywords_matched=keywords_matched,
+            user_avatar_url=self._normalize_channel_avatar_url(
+                payload.get("uploader_avatar")
+                or payload.get("channel_thumbnail")
+                or payload.get("channelAvatarUrl")
+                or payload.get("author_avatar_url")
+                or None
+            ),
+            is_short=is_short,
+            source_surface=surface,
+            show_id=config.show_id,
+            season_number=config.season_number,
+            person_id=config.person_id,
+        )
+
     def _parse_video_renderer(
         self,
         renderer: dict,
@@ -1697,6 +1854,172 @@ class YouTubeScraper:
         limited = [video for _, video in selected_items[:effective_limit]]
         return limited, effective_limit != requested_limit, effective_limit
 
+    def _parse_ytdlp_playlist_stdout(self, stdout: str) -> dict[str, Any]:
+        raw = str(stdout or "").strip()
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError:
+            entries: list[dict[str, Any]] = []
+            for line in raw.splitlines():
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict):
+                    entries.append(item)
+            return {"entries": entries} if entries else {}
+
+    def _scrape_playlist_via_ytdlp(
+        self,
+        config: YouTubeScrapeConfig,
+        *,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[YouTubeVideo]:
+        playlist_id, playlist_url = self._playlist_url(
+            playlist_id=config.playlist_id,
+            playlist_url=config.playlist_url,
+        )
+        if not playlist_id:
+            raise ValueError("YouTube playlist sources require a playlist id or playlist URL")
+        logger.info("Starting YouTube playlist scrape for %s", playlist_id)
+        self._last_transport = "yt-dlp"
+        self._fallback_chain = ["yt_dlp_playlist"]
+        self._last_stop_reason = None
+        self._last_retryable = False
+        self._last_complete = False
+        self._last_source_mode = "playlist"
+        if not shutil.which("yt-dlp"):
+            self.last_retrieval_meta = {
+                "retrieval_mode": "playlist_ytdlp",
+                "playlist_id": playlist_id,
+                "playlist_url": playlist_url,
+                "pages_scanned": 0,
+                "posts_checked": 0,
+                "matched_posts": 0,
+                "error_code": "youtube_ytdlp_unavailable",
+                "error_class": "YouTubeYtDlpUnavailable",
+                "retryable": True,
+            }
+            self._last_stop_reason = "ytdlp_unavailable"
+            self._last_retryable = True
+            return []
+
+        self._emit_progress(
+            progress_cb,
+            phase="scrape_playlist_ytdlp_start",
+            pages_scanned=0,
+            posts_checked=0,
+            matched_posts=0,
+        )
+        cmd = [
+            "yt-dlp",
+            "--dump-single-json",
+            "--skip-download",
+            "--ignore-errors",
+            playlist_url,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(60, int(self.YTDLP_SEARCH_TIMEOUT_SECONDS) * 3),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.last_retrieval_meta = {
+                "retrieval_mode": "playlist_ytdlp",
+                "playlist_id": playlist_id,
+                "playlist_url": playlist_url,
+                "pages_scanned": 1,
+                "posts_checked": 0,
+                "matched_posts": 0,
+                "error_code": "youtube_playlist_ytdlp_timeout",
+                "error_class": "YouTubePlaylistYtDlpTimeout",
+                "retryable": True,
+            }
+            self._last_stop_reason = "ytdlp_timeout"
+            self._last_retryable = True
+            return []
+
+        payload = self._parse_ytdlp_playlist_stdout(proc.stdout)
+        entries = payload.get("entries") if isinstance(payload, dict) else None
+        entry_list = [entry for entry in (entries or []) if isinstance(entry, dict)]
+        if not entry_list and payload.get("id"):
+            entry_list = [payload]
+
+        posts_checked = len(entry_list)
+        matched: list[YouTubeVideo] = []
+        seen_ids: set[str] = set()
+        for entry in entry_list:
+            video = self._video_from_ytdlp_payload(entry, config, source_surface="videos")
+            if not video or video.video_id in seen_ids:
+                continue
+            seen_ids.add(video.video_id)
+            matched.append(video)
+
+        self._enrich_videos_via_ytdlp(matched, delay=config.delay_seconds, fast_mode=config.fast_mode)
+        surface_cap_override_applied = False
+        effective_result_cap: int | None = None
+        if config.max_results:
+            matched, surface_cap_override_applied, effective_result_cap = self._apply_surface_guaranteed_limit(
+                matched,
+                max_results=config.max_results,
+            )
+        matched.sort(key=lambda video: int(video.published_at or 0), reverse=True)
+        playlist_title = str(payload.get("title") or payload.get("playlist_title") or "").strip() or None
+        channel_id = str(payload.get("channel_id") or payload.get("uploader_id") or "").strip() or None
+        channel_title = str(payload.get("channel") or payload.get("uploader") or "").strip() or None
+        total_posts = _safe_int(payload.get("playlist_count")) or posts_checked or len(matched)
+        self._last_stop_reason = "complete" if proc.returncode == 0 else "ytdlp_nonzero_exit"
+        self._last_retryable = proc.returncode != 0 and not matched
+        self._last_complete = proc.returncode == 0 or bool(matched)
+        self.last_retrieval_meta = {
+            "retrieval_mode": "playlist_ytdlp",
+            "playlist_id": playlist_id,
+            "playlist_url": playlist_url,
+            "playlist_title": playlist_title,
+            "pages_scanned": 1,
+            "posts_checked": posts_checked,
+            "matched_posts": len(matched),
+            "checked_renderers": posts_checked,
+            "total_posts": total_posts,
+            "first_page_count": posts_checked,
+            "first_page_counts": {
+                "videos": sum(1 for video in matched if self._video_surface(video) != "shorts"),
+                "shorts": sum(1 for video in matched if self._video_surface(video) == "shorts"),
+            },
+            "shorts_candidates_found": sum(1 for video in matched if self._video_surface(video) == "shorts"),
+            "surface_cap_override_applied": bool(surface_cap_override_applied),
+            "requested_max_results": int(config.max_results) if config.max_results is not None else None,
+            "effective_max_results": effective_result_cap,
+            "canonical_handle": playlist_id.lower(),
+            "canonical_channel_id": channel_id,
+            "resolved_channel_title": channel_title,
+            "resolved_channel_avatar_url": None,
+            "ytdlp_returncode": proc.returncode,
+        }
+        if proc.returncode != 0 and not matched:
+            self.last_retrieval_meta["error_code"] = "youtube_playlist_ytdlp_failed"
+            self.last_retrieval_meta["error_class"] = "YouTubePlaylistYtDlpFailed"
+            self.last_retrieval_meta["retryable"] = True
+            stderr = str(proc.stderr or "").strip()
+            if stderr:
+                self.last_retrieval_meta["error_message"] = stderr[-500:]
+
+        self._emit_progress(
+            progress_cb,
+            phase="scrape_complete",
+            pages_scanned=1,
+            posts_checked=posts_checked,
+            matched_posts=len(matched),
+        )
+        logger.info("Playlist scrape complete: found %d videos for %s", len(matched), playlist_id)
+        return matched
+
     def scrape(
         self,
         config: YouTubeScrapeConfig,
@@ -1715,7 +2038,16 @@ class YouTubeScraper:
         Returns:
             List of YouTubeVideo objects matching the filters.
         """
-        handle = config.channel_handle.lstrip("@")
+        playlist_id, _playlist_url = self._playlist_url(
+            playlist_id=config.playlist_id,
+            playlist_url=config.playlist_url,
+        )
+        if playlist_id or str(config.source_type or "").strip().lower() == "playlist":
+            return self._scrape_playlist_via_ytdlp(config, progress_cb=progress_cb)
+
+        handle = (config.channel_handle or "").lstrip("@")
+        if not handle:
+            raise ValueError("YouTube account scrapes require a channel handle")
         logger.info(f"Starting YouTube scrape for @{handle}")
         if config.keywords:
             logger.info(f"Filtering by keywords: {config.keywords}")

@@ -158,6 +158,88 @@ def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatc
     assert imported_sessions == []
 
 
+def test_instagram_cookie_refresh_preserves_challenge_error_when_browser_close_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    class _FakePlaywrightTimeoutError(Exception):
+        pass
+
+    class _Locator:
+        @property
+        def first(self) -> _Locator:
+            return self
+
+        def wait_for(self, **_kwargs: object) -> None:
+            return None
+
+        def fill(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def click(self, **_kwargs: object) -> None:
+            return None
+
+        def is_visible(self, **_kwargs: object) -> bool:
+            return False
+
+        def inner_text(self, **_kwargs: object) -> str:
+            return ""
+
+    class _Page:
+        url = "https://www.instagram.com/challenge/?next=https%3A%2F%2Fwww.instagram.com%2Fbravotv%2F"
+
+        def goto(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def locator(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def get_by_label(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def get_by_role(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+        def wait_for_timeout(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class _Context:
+        def new_page(self) -> _Page:
+            return _Page()
+
+        def cookies(self) -> list[dict[str, object]]:
+            return []
+
+    class _Browser:
+        def new_context(self, **_kwargs: object) -> _Context:
+            return _Context()
+
+        def close(self) -> None:
+            raise RuntimeError("Event loop is closed! Is Playwright already stopped?")
+
+    class _PlaywrightContext:
+        def __enter__(self) -> SimpleNamespace:
+            return SimpleNamespace(chromium=SimpleNamespace(launch=lambda **_kwargs: _Browser()))
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
+    sync_api_module.sync_playwright = lambda: _PlaywrightContext()
+    playwright_module = ModuleType("playwright")
+    playwright_module.sync_api = sync_api_module
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
+
+    with pytest.raises(RuntimeError, match="requires additional verification"):
+        instagram_cookie_refresh.refresh_instagram_cookies(
+            username="operator@example.com",
+            password="secret",
+            cookie_file=tmp_path / "instagram-cookies.json",
+            validation_username="bravotv",
+        )
+
+
 def test_instagram_cookie_refresh_schema_only_skips_graphql_validator(monkeypatch, tmp_path: Path) -> None:
     writes: list[tuple[Path, dict[str, str]]] = []
     imported_sessions: list[object] = []

@@ -150,4 +150,3 @@ def run_direct_instagram_catalog_backfill(options: DirectInstagramCatalogBackfil
         "elapsed_seconds": elapsed,
         "resume_cursor": cursor if cursor and page >= options.max_pages else None,
     }
-

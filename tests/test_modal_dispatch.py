@@ -122,6 +122,7 @@ def test_inspect_modal_function_call_returns_unknown_on_inspection_failure(
 
 def test_modal_social_job_function_name_for_stage_routes_three_backfill_lanes() -> None:
     assert modal_dispatch.modal_social_job_function_name_for_stage("shared_account_posts") == "run_social_posts_job"
+    assert modal_dispatch.modal_social_job_function_name_for_stage("threads_posts_scrapling") == "run_social_posts_job"
     assert modal_dispatch.modal_social_job_function_name_for_stage("media_mirror") == "run_social_media_job"
     assert modal_dispatch.modal_social_job_function_name_for_stage("comments_scrapling") == "run_social_comments_job"
 

@@ -69,18 +69,20 @@ def test_persist_calls_repository_with_default_scrape_query(
     monkeypatch.setattr(
         scrape_mod,
         "persist_standalone_twitter_search",
-        lambda tweets, **kwargs: persist_calls.append({"tweets": tweets, **kwargs})
-        or {
-            "requested": True,
-            "succeeded": True,
-            "scrape_query_label": kwargs["scrape_query_label"],
-            "scrape_run_id": "run-cli-default",
-            "tweets_upserted": len(tweets),
-            "tweet_memberships_created": len(tweets),
-            "tweet_memberships_total": len(tweets),
-            "requested_via": kwargs["requested_via"],
-            "error": None,
-        },
+        lambda tweets, **kwargs: (
+            persist_calls.append({"tweets": tweets, **kwargs})
+            or {
+                "requested": True,
+                "succeeded": True,
+                "scrape_query_label": kwargs["scrape_query_label"],
+                "scrape_run_id": "run-cli-default",
+                "tweets_upserted": len(tweets),
+                "tweet_memberships_created": len(tweets),
+                "tweet_memberships_total": len(tweets),
+                "requested_via": kwargs["requested_via"],
+                "error": None,
+            }
+        ),
     )
 
     _run(["--query", "#RHOSLC", "--start", "2026-01-01", "--end", "2026-01-11", "--persist"], monkeypatch)
@@ -102,18 +104,20 @@ def test_persist_uses_explicit_scrape_query_when_provided(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         scrape_mod,
         "persist_standalone_twitter_search",
-        lambda tweets, **kwargs: persist_calls.append(kwargs)
-        or {
-            "requested": True,
-            "succeeded": True,
-            "scrape_query_label": kwargs["scrape_query_label"],
-            "scrape_run_id": "run-cli-explicit",
-            "tweets_upserted": len(tweets),
-            "tweet_memberships_created": len(tweets),
-            "tweet_memberships_total": len(tweets),
-            "requested_via": kwargs["requested_via"],
-            "error": None,
-        },
+        lambda tweets, **kwargs: (
+            persist_calls.append(kwargs)
+            or {
+                "requested": True,
+                "succeeded": True,
+                "scrape_query_label": kwargs["scrape_query_label"],
+                "scrape_run_id": "run-cli-explicit",
+                "tweets_upserted": len(tweets),
+                "tweet_memberships_created": len(tweets),
+                "tweet_memberships_total": len(tweets),
+                "requested_via": kwargs["requested_via"],
+                "error": None,
+            }
+        ),
     )
 
     _run(
@@ -169,18 +173,20 @@ def test_persist_with_empty_results_still_records_run(
     monkeypatch.setattr(
         scrape_mod,
         "persist_standalone_twitter_search",
-        lambda tweets, **kwargs: persist_calls.append({"tweets": tweets, **kwargs})
-        or {
-            "requested": True,
-            "succeeded": True,
-            "scrape_query_label": kwargs["scrape_query_label"],
-            "scrape_run_id": "run-cli-empty",
-            "tweets_upserted": 0,
-            "tweet_memberships_created": 0,
-            "tweet_memberships_total": 0,
-            "requested_via": kwargs["requested_via"],
-            "error": None,
-        },
+        lambda tweets, **kwargs: (
+            persist_calls.append({"tweets": tweets, **kwargs})
+            or {
+                "requested": True,
+                "succeeded": True,
+                "scrape_query_label": kwargs["scrape_query_label"],
+                "scrape_run_id": "run-cli-empty",
+                "tweets_upserted": 0,
+                "tweet_memberships_created": 0,
+                "tweet_memberships_total": 0,
+                "requested_via": kwargs["requested_via"],
+                "error": None,
+            }
+        ),
     )
 
     _run(["--query", "#RHOSLC", "--start", "2026-01-01", "--end", "2026-01-11", "--persist"], monkeypatch)

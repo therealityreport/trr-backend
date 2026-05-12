@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trr_backend.socials.twitter.diagnostics import safe_runtime_metadata
 from trr_backend.socials.twitter.scraper import Tweet, TwitterScrapeConfig, TwitterScraper
 
 
@@ -70,3 +71,51 @@ def test_scrape_runtime_metadata_tracks_final_fallback_chain(monkeypatch: pytest
     assert scraper.runtime_metadata["fallback_chain"] == ["graphql", "twikit"]
     assert scraper.runtime_metadata["transport"] == "twikit"
     assert scraper.runtime_metadata["complete"] is True
+
+
+def test_playwright_partial_fallback_keeps_incomplete_runtime_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = _make_scraper()
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_search", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_scrape_syndication", lambda *_args, **_kwargs: [])
+    scraper._twikit_credentials = None  # noqa: SLF001
+
+    def _fake_playwright(**_kwargs):
+        scraper._last_playwright_search_meta = {  # noqa: SLF001
+            "page_budget": 5,
+            "payloads_captured": 6,
+            "scrolls_performed": 12,
+            "stop_reason": "playwright_payload_budget_reached",
+        }
+        return [_make_tweet("tweet-playwright")]
+
+    monkeypatch.setattr(scraper, "_fetch_search_via_playwright", _fake_playwright)
+
+    tweets = scraper.scrape(_twitter_config())
+
+    assert len(tweets) == 1
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "playwright"
+    assert scraper.last_retrieval_meta["stop_reason"] == "playwright_payload_budget_reached"
+    assert scraper.last_retrieval_meta["complete"] is False
+    assert scraper.last_retrieval_meta["playwright_payloads_captured"] == 6
+    assert scraper.runtime_metadata["transport"] == "playwright"
+    assert scraper.runtime_metadata["complete"] is False
+
+
+def test_safe_runtime_metadata_exposes_platform_owned_shape() -> None:
+    scraper = _make_scraper()
+    scraper._runtime_state.request_count = 2  # noqa: SLF001
+    scraper._runtime_state.transport = "graphql"  # noqa: SLF001
+    scraper._runtime_state.fallback_chain = ["graphql"]  # noqa: SLF001
+    scraper._runtime_state.stop_reason = "no_cursor"  # noqa: SLF001
+    scraper._runtime_state.retryable = False  # noqa: SLF001
+    scraper._runtime_state.complete = True  # noqa: SLF001
+
+    assert safe_runtime_metadata(scraper) == {
+        "request_count": 2,
+        "transport": "graphql",
+        "fallback_chain": ["graphql"],
+        "stop_reason": "no_cursor",
+        "retryable": False,
+        "complete": True,
+    }

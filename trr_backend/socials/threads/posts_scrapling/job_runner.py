@@ -94,10 +94,7 @@ def _safe_runtime_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
         if lower_key == "warmup_cookie_delta":
             safe["warmup_cookie_delta_names"] = sorted(str(name) for name in dict(value or {}).keys())
             continue
-        if (
-            any(part in lower_key for part in _SENSITIVE_KEY_PARTS)
-            and lower_key not in _SAFE_SENSITIVE_KEY_EXCEPTIONS
-        ):
+        if any(part in lower_key for part in _SENSITIVE_KEY_PARTS) and lower_key not in _SAFE_SENSITIVE_KEY_EXCEPTIONS:
             safe[f"{normalized_key}_present"] = bool(value)
             continue
         safe[normalized_key] = _safe_metadata_value(value)
@@ -340,7 +337,10 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
             if result.fetch_failed and not result.posts:
-                legacy_scraper = ThreadsScraper(cookies=session.raw_cookies)
+                legacy_scraper = ThreadsScraper(
+                    cookies=session.raw_cookies,
+                    proxy_url=proxy_config.api_proxy_url if proxy_config else None,
+                )
                 legacy_config = ThreadsScrapeConfig(
                     username=account_handle,
                     delay_seconds=0,
@@ -350,17 +350,20 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 legacy_posts = legacy_scraper.scrape(legacy_config)
                 legacy_runtime = _safe_runtime_metadata(dict(getattr(legacy_scraper, "runtime_metadata", {}) or {}))
                 legacy_runtime["fallback_to_legacy"] = True
-                fetcher_metadata = _safe_runtime_metadata({
-                    **fetcher_metadata,
-                    "legacy_runtime": legacy_runtime,
-                    "fallback_chain": list(fetcher_metadata.get("fallback_chain") or []) + ["legacy_threads_scraper"],
-                    "transport": "legacy_threads_scraper",
-                    "request_count": int(fetcher_metadata.get("request_count") or 0)
-                    + int(legacy_runtime.get("request_count") or 0),
-                    "complete": bool(legacy_runtime.get("complete")),
-                    "retryable": bool(legacy_runtime.get("retryable")),
-                    "stop_reason": legacy_runtime.get("stop_reason") or result.fetch_reason,
-                })
+                fetcher_metadata = _safe_runtime_metadata(
+                    {
+                        **fetcher_metadata,
+                        "legacy_runtime": legacy_runtime,
+                        "fallback_chain": list(fetcher_metadata.get("fallback_chain") or [])
+                        + ["legacy_threads_scraper"],
+                        "transport": "legacy_threads_scraper",
+                        "request_count": int(fetcher_metadata.get("request_count") or 0)
+                        + int(legacy_runtime.get("request_count") or 0),
+                        "complete": bool(legacy_runtime.get("complete")),
+                        "retryable": bool(legacy_runtime.get("retryable")),
+                        "stop_reason": legacy_runtime.get("stop_reason") or result.fetch_reason,
+                    }
+                )
                 stop_reason = str(fetcher_metadata.get("stop_reason") or result.fetch_reason or "").strip() or None
                 result = ThreadsPostsFetchResult(
                     posts=list(legacy_posts),

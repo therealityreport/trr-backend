@@ -58,6 +58,14 @@ def test_reply_only_fast_path_reason_requires_no_top_level_resume() -> None:
     )
     assert (
         jr._reply_only_fast_path_reason(
+            prior_incomplete_reason=jr._PERSISTED_REPLY_TOPOLOGY_GAP_REASON,
+            incomplete_fill_enabled=False,
+            resume_cursor=None,
+        )
+        == jr._PERSISTED_REPLY_TOPOLOGY_GAP_REASON
+    )
+    assert (
+        jr._reply_only_fast_path_reason(
             prior_incomplete_reason="",
             incomplete_fill_enabled=True,
             resume_cursor=None,

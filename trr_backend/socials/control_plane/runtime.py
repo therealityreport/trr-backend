@@ -56,6 +56,7 @@ def check_platform_cookie_health(*args: Any, **kwargs: Any) -> Any:
 def refresh_platform_cookies_interactive(*args: Any, **kwargs: Any) -> Any:
     return _core.refresh_platform_cookies_interactive(*args, **kwargs)
 
+
 load_facebook_cookies = _load_facebook_cookies
 load_instagram_cookies = _load_instagram_cookies
 load_threads_cookies = _load_threads_cookies

@@ -19,7 +19,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Lock, Thread
 from time import monotonic, perf_counter
 from typing import Any, Literal
@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/socials", tags=["admin-socials"])
 
 SourceScopeParam = Literal["bravo", "network", "creator", "community", "news"]
+TWITTER_CATALOG_BACKFILL_LOOKBACK_DAYS = 365
 
 
 def normalize_source_scope_param(value: str | None, *, default: str = "network") -> str:
@@ -80,6 +81,13 @@ def preserve_source_scope_param(value: str | None, *, default: str = "network") 
     if normalized in {"bravo", "network", "creator", "community", "news"}:
         return normalized
     raise ValueError(f"Unsupported source scope: {value}")
+
+
+def _twitter_catalog_backfill_default_window(now: datetime | None = None) -> tuple[datetime, datetime]:
+    end_at = now or datetime.now(tz=UTC)
+    if end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=UTC)
+    return end_at - timedelta(days=TWITTER_CATALOG_BACKFILL_LOOKBACK_DAYS), end_at
 
 
 class SourceScopedRequest(BaseModel):
@@ -528,7 +536,9 @@ def _finalize_catalog_backfill_launch_task(
                 worker_threads: list[Thread] = []
                 worker_lanes = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
                 for worker_index in range(worker_count):
-                    worker_lane = worker_lanes[worker_index] if worker_index < len(worker_lanes) else str(worker_index + 1)
+                    worker_lane = (
+                        worker_lanes[worker_index] if worker_index < len(worker_lanes) else str(worker_index + 1)
+                    )
                     worker_id = (
                         f"api-background:catalog:{normalized_platform}"
                         if worker_count == 1
@@ -541,9 +551,7 @@ def _finalize_catalog_backfill_launch_task(
                             "worker_id": worker_id,
                             "platform": normalized_platform,
                             "supported_platforms": [normalized_platform],
-                            "metadata_updates": (
-                                {"worker_lane": worker_lane.lower()} if worker_count > 1 else None
-                            ),
+                            "metadata_updates": ({"worker_lane": worker_lane.lower()} if worker_count > 1 else None),
                         },
                         name=f"catalog-inline:{normalized_platform}:{worker_index + 1}",
                         daemon=True,
@@ -552,8 +560,10 @@ def _finalize_catalog_backfill_launch_task(
                     worker_threads.append(worker_thread)
                 for worker_thread in worker_threads:
                     worker_thread.join()
-            if catalog_run_id and not comments_run_id and bool(
-                (result or {}).get("comments_deferred_until_catalog_complete")
+            if (
+                catalog_run_id
+                and not comments_run_id
+                and bool((result or {}).get("comments_deferred_until_catalog_complete"))
             ):
                 comments_run_id = _start_deferred_comments_inline_followup(
                     catalog_run_id=catalog_run_id,
@@ -635,16 +645,11 @@ def _apply_local_inline_db_worker_budget(worker_count: int) -> int:
 
 def _resolve_local_comments_inline_worker_count(*, result: Mapping[str, Any] | None) -> int:
     target_readiness = result.get("target_readiness") if isinstance(result, Mapping) else None
-    comments_preview = (
-        target_readiness.get("comments_preview")
-        if isinstance(target_readiness, Mapping)
-        else None
-    )
+    comments_preview = target_readiness.get("comments_preview") if isinstance(target_readiness, Mapping) else None
     raw_count = None
     if isinstance(comments_preview, Mapping):
-        raw_count = (
-            comments_preview.get("comments_shard_count")
-            or comments_preview.get("recommended_comments_shard_count")
+        raw_count = comments_preview.get("comments_shard_count") or comments_preview.get(
+            "recommended_comments_shard_count"
         )
     try:
         value = int(raw_count or 1)
@@ -1634,10 +1639,9 @@ def _finalize_social_account_catalog_route_response(
     run_id = str(result.get("run_id") or "").strip()
     catalog_run_id = str(result.get("catalog_run_id") or run_id or "").strip()
     comments_run_id = str(result.get("comments_run_id") or "").strip()
-    launch_resolution_pending = (
-        result.get("launch_task_resolution_pending") is True
-        or str(result.get("launch_state") or "").strip().lower() in {"pending", "finalizing"}
-    )
+    launch_resolution_pending = result.get("launch_task_resolution_pending") is True or str(
+        result.get("launch_state") or ""
+    ).strip().lower() in {"pending", "finalizing"}
     if not queue_enabled and catalog_run_id and not launch_resolution_pending:
         logger.warning(
             "Catalog route using inline fallback: platform=%s queue_enabled=%s requires_modal_executor=%s",
@@ -2153,73 +2157,15 @@ async def scrape_tiktok(
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.tiktok import TikTokScrapeConfig, TikTokScraper
+    from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
+    from trr_backend.socials.tiktok.direct_scrape import scrape_tiktok as run_tiktok_scrape
 
     logger.info(f"TikTok scrape requested by {user.get('email')} for @{request.username}")
 
-    config = TikTokScrapeConfig(
-        username=request.username,
-        hashtags=request.hashtags,
-        date_start=request.date_start,
-        date_end=request.date_end,
-        delay_seconds=request.delay_seconds,
-        max_pages=request.max_pages,
-        show_id=request.show_id,
-        season_number=request.season_number,
-        person_id=request.person_id,
-    )
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="tiktok", surface=surface, loader=_load_tiktok_cookies)
 
-    try:
-        from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
-
-        tiktok_cookies = _load_social_auth_or_503(platform="tiktok", surface="scrape", loader=_load_tiktok_cookies)
-        scraper = TikTokScraper(cookies=tiktok_cookies)
-        posts = scraper.scrape(config)
-        diagnostics = _build_tiktok_scrape_diagnostics(dict(getattr(scraper, "last_retrieval_meta", {}) or {}))
-
-        return TikTokScrapeResponse(
-            success=True,
-            username=request.username,
-            posts_found=len(posts),
-            posts=[
-                TikTokPostResponse(
-                    video_id=p.video_id,
-                    date_time=p.date_time,
-                    description=p.description,
-                    hashtags=p.hashtags,
-                    mentions=p.mentions,
-                    likes=p.likes,
-                    comments=p.comments,
-                    shares=p.shares,
-                    views=p.views,
-                    url=p.url,
-                    username=p.username,
-                    author_nickname=p.author_nickname,
-                    duration=p.duration,
-                    music_title=p.music_title,
-                    music_author=p.music_author,
-                )
-                for p in posts
-            ],
-            filters_applied={
-                "hashtags": request.hashtags,
-                "date_start": request.date_start.isoformat(),
-                "date_end": request.date_end.isoformat(),
-            },
-            diagnostics=diagnostics,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"TikTok scrape failed: {e}", exc_info=True)
-        return TikTokScrapeResponse(
-            success=False,
-            username=request.username,
-            posts_found=0,
-            posts=[],
-            filters_applied={},
-            error=str(e),
-        )
+    return TikTokScrapeResponse(**run_tiktok_scrape(request, load_cookies=_load_cookies, logger=logger))
 
 
 @router.get("/tiktok/preview/{username}")
@@ -2235,44 +2181,15 @@ async def preview_tiktok_profile(
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.tiktok import TikTokScraper
+    from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
+    from trr_backend.socials.tiktok.direct_scrape import preview_tiktok_profile as run_tiktok_preview
 
     logger.info(f"TikTok preview requested by {user.get('email')} for @{username}")
 
-    try:
-        from trr_backend.repositories.social_season_analytics import _load_tiktok_cookies
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="tiktok", surface=surface, loader=_load_tiktok_cookies)
 
-        tiktok_cookies = _load_social_auth_or_503(platform="tiktok", surface="preview", loader=_load_tiktok_cookies)
-        scraper = TikTokScraper(cookies=tiktok_cookies)
-        data = scraper.fetch_user_detail(username, delay=0)
-
-        if not data:
-            raise HTTPException(status_code=404, detail=f"Profile not found: @{username}")
-
-        user_info = data.get("userInfo", {})
-        user_data = user_info.get("user", {})
-        stats = user_info.get("stats", {})
-
-        if not user_data:
-            raise HTTPException(status_code=404, detail=f"Profile not found: @{username}")
-
-        return {
-            "username": user_data.get("uniqueId"),
-            "nickname": user_data.get("nickname"),
-            "bio": user_data.get("signature"),
-            "is_verified": user_data.get("verified", False),
-            "is_private": user_data.get("privateAccount", False),
-            "followers": stats.get("followerCount", 0),
-            "following": stats.get("followingCount", 0),
-            "likes": stats.get("heart", 0),
-            "video_count": stats.get("videoCount", 0),
-            "profile_pic_url": user_data.get("avatarLarger") or user_data.get("avatarMedium"),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"TikTok preview failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    return run_tiktok_preview(username, load_cookies=_load_cookies, logger=logger)
 
 
 # Twitter/X Models
@@ -2424,111 +2341,24 @@ async def search_twitter(
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.twitter import TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
+    from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
+    from trr_backend.socials.twitter.direct_scrape import search_twitter as run_twitter_search
 
     logger.info(f"Twitter search requested by {user.get('email')} for query: {request.query}")
 
-    config = TwitterScrapeConfig(
-        query=request.query,
-        date_start=request.date_start,
-        date_end=request.date_end,
-        include_replies=request.include_replies,
-        include_links=request.include_links,
-        delay_seconds=request.delay_seconds,
-        max_pages=request.max_pages,
-        show_id=request.show_id,
-        season_number=request.season_number,
-        person_id=request.person_id,
-    )
-
-    try:
-        from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
-
+    def _load_auth() -> tuple[Any, Any, Any]:
         twitter_cookies, twitter_bearer = _load_twitter_auth()
         twikit_creds = _load_twikit_credentials(twitter_cookies)
-        scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
-        tweets = scraper.scrape(config)
-        retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
-        complete = bool(retrieval_meta.get("complete"))
-        if request.mirror_to_s3:
-            mirror_tweet_media(tweets)
+        return twitter_cookies, twitter_bearer, twikit_creds
 
-        persist_summary: dict[str, Any] | None = None
-        if request.persist:
-            label = str(request.scrape_query or request.query).strip() or request.query
-            try:
-                persist_summary = persist_standalone_twitter_search(
-                    tweets,
-                    raw_query=request.query,
-                    normalized_search_query=config.build_search_query(),
-                    scrape_query_label=label,
-                    window_start_day=config.window_start_day(),
-                    window_end_day_exclusive=config.window_end_day_exclusive(),
-                    requested_via="api",
-                    retrieval_meta=retrieval_meta,
-                    complete=complete,
-                )
-            except Exception as upsert_err:  # noqa: BLE001
-                logger.warning(
-                    "persist_standalone_twitter_search failed for query %r: %s",
-                    label,
-                    upsert_err,
-                )
-                persist_summary = {
-                    "requested": True,
-                    "succeeded": False,
-                    "scrape_query_label": label,
-                    "scrape_run_id": None,
-                    "tweets_upserted": 0,
-                    "tweet_memberships_created": 0,
-                    "tweet_memberships_total": len(tweets),
-                    "requested_via": "api",
-                    "error": str(upsert_err),
-                }
-
-        return TwitterSearchResponse(
-            success=True,
-            query=request.query,
-            tweets_found=len(tweets),
-            tweets=[_tweet_to_response(t) for t in tweets],
-            search_query_used=config.build_search_query(),
-            filters_applied={
-                "query": request.query,
-                "date_start": request.date_start.isoformat(),
-                "date_end": request.date_end.isoformat(),
-                "window_contract": "whole_day",
-                "window_start_day": config.window_start_day(),
-                "window_end_day_inclusive": config.window_end_day_inclusive(),
-                "window_end_day_exclusive": config.window_end_day_exclusive(),
-                "include_replies": request.include_replies,
-                "include_links": request.include_links,
-            },
-            retrieval_meta=retrieval_meta,
-            complete=complete,
-            persist_summary=persist_summary,
-            scrape_run_id=(
-                str(persist_summary.get("scrape_run_id"))
-                if isinstance(persist_summary, dict) and persist_summary.get("scrape_run_id")
-                else None
-            ),
+    return TwitterSearchResponse(
+        **run_twitter_search(
+            request,
+            load_auth=_load_auth,
+            persist_search=persist_standalone_twitter_search,
+            logger=logger,
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Twitter search failed: {e}", exc_info=True)
-        return TwitterSearchResponse(
-            success=False,
-            query=request.query,
-            tweets_found=0,
-            tweets=[],
-            search_query_used=config.build_search_query(),
-            filters_applied={},
-            retrieval_meta=None,
-            complete=False,
-            persist_summary=None,
-            scrape_run_id=None,
-            error=str(e),
-        )
+    )
 
 
 @router.post("/twitter/replies", response_model=TweetRepliesResponse)
@@ -2541,42 +2371,17 @@ async def fetch_tweet_replies(
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.twitter import TwitterScraper, mirror_tweet_media
+    from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
+    from trr_backend.socials.twitter.direct_scrape import fetch_tweet_replies as run_tweet_replies
 
     logger.info(f"Twitter replies requested by {user.get('email')} for tweet: {request.tweet_id}")
 
-    try:
-        from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
-
+    def _load_auth() -> tuple[Any, Any, Any]:
         twitter_cookies, twitter_bearer = _load_twitter_auth()
         twikit_creds = _load_twikit_credentials(twitter_cookies)
-        scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
-        reply_kwargs: dict[str, Any] = {}
-        if request.search_max_pages is not None:
-            reply_kwargs["search_max_pages"] = request.search_max_pages
-        if request.twikit_max_pages is not None:
-            reply_kwargs["twikit_max_pages"] = request.twikit_max_pages
-        replies = scraper.fetch_tweet_replies(request.tweet_id, request.delay_seconds, **reply_kwargs)
-        if request.mirror_to_s3:
-            mirror_tweet_media(replies)
+        return twitter_cookies, twitter_bearer, twikit_creds
 
-        return TweetRepliesResponse(
-            success=True,
-            tweet_id=request.tweet_id,
-            replies_found=len(replies),
-            replies=[_tweet_to_response(r) for r in replies],
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Twitter replies fetch failed: {e}", exc_info=True)
-        return TweetRepliesResponse(
-            success=False,
-            tweet_id=request.tweet_id,
-            replies_found=0,
-            replies=[],
-            error=str(e),
-        )
+    return TweetRepliesResponse(**run_tweet_replies(request, load_auth=_load_auth, logger=logger))
 
 
 @router.post("/twitter/quotes", response_model=TweetQuotesResponse)
@@ -2589,46 +2394,17 @@ async def fetch_tweet_quotes(
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.twitter import TwitterScraper, mirror_tweet_media
+    from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
+    from trr_backend.socials.twitter.direct_scrape import fetch_tweet_quotes as run_tweet_quotes
 
     logger.info(f"Twitter quotes requested by {user.get('email')} for tweet: {request.tweet_id}")
 
-    try:
-        from trr_backend.repositories.social_season_analytics import _load_twikit_credentials, _load_twitter_auth
-
+    def _load_auth() -> tuple[Any, Any, Any]:
         twitter_cookies, twitter_bearer = _load_twitter_auth()
         twikit_creds = _load_twikit_credentials(twitter_cookies)
-        scraper = TwitterScraper(cookies=twitter_cookies, bearer_token=twitter_bearer, twikit_credentials=twikit_creds)
-        quotes = scraper.fetch_tweet_quotes(
-            request.tweet_id,
-            delay=request.delay_seconds,
-            max_pages=request.max_pages,
-        )
-        if request.mirror_to_s3:
-            mirror_tweet_media(quotes)
+        return twitter_cookies, twitter_bearer, twikit_creds
 
-        quote_meta = getattr(scraper, "last_quote_fetch_meta", {}) or {}
-        return TweetQuotesResponse(
-            success=True,
-            tweet_id=request.tweet_id,
-            quotes_found=len(quotes),
-            quotes=[_tweet_to_response(q) for q in quotes],
-            source_used=quote_meta.get("source_used"),
-            failure_reason=scraper.last_quote_fetch_reason or quote_meta.get("failure_reason"),
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Twitter quotes fetch failed: {e}", exc_info=True)
-        return TweetQuotesResponse(
-            success=False,
-            tweet_id=request.tweet_id,
-            quotes_found=0,
-            quotes=[],
-            source_used=None,
-            failure_reason=None,
-            error=str(e),
-        )
+    return TweetQuotesResponse(**run_tweet_quotes(request, load_auth=_load_auth, logger=logger))
 
 
 # YouTube Models
@@ -2695,66 +2471,11 @@ async def scrape_youtube(
 
     Requires admin access (allowlist only).
     """
-    from trr_backend.socials.youtube import YouTubeScrapeConfig, YouTubeScraper
+    from trr_backend.socials.youtube.direct_scrape import scrape_youtube as run_youtube_scrape
 
     logger.info(f"YouTube scrape requested by {user.get('email')} for @{request.channel_handle}")
 
-    config = YouTubeScrapeConfig(
-        channel_handle=request.channel_handle,
-        keywords=request.keywords,
-        date_start=request.date_start,
-        date_end=request.date_end,
-        delay_seconds=request.delay_seconds,
-        max_results=request.max_results,
-        show_id=request.show_id,
-        season_number=request.season_number,
-        person_id=request.person_id,
-    )
-
-    try:
-        scraper = YouTubeScraper()
-        videos = scraper.scrape(config)
-
-        return YouTubeScrapeResponse(
-            success=True,
-            channel_handle=request.channel_handle,
-            videos_found=len(videos),
-            videos=[
-                YouTubeVideoResponse(
-                    video_id=v.video_id,
-                    title=v.title,
-                    description=v.description[:500] if v.description else "",
-                    date_time=v.date_time,
-                    channel_title=v.channel_title,
-                    duration=v.duration,
-                    duration_seconds=v.duration_seconds,
-                    views=v.views,
-                    likes=v.likes,
-                    comments=v.comments,
-                    url=v.url,
-                    thumbnail_url=v.thumbnail_url,
-                    keywords_matched=v.keywords_matched,
-                )
-                for v in videos
-            ],
-            filters_applied={
-                "keywords": request.keywords,
-                "date_start": request.date_start.isoformat(),
-                "date_end": request.date_end.isoformat(),
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"YouTube scrape failed: {e}", exc_info=True)
-        return YouTubeScrapeResponse(
-            success=False,
-            channel_handle=request.channel_handle,
-            videos_found=0,
-            videos=[],
-            filters_applied={},
-            error=str(e),
-        )
+    return YouTubeScrapeResponse(**run_youtube_scrape(request, logger=logger))
 
 
 # Facebook Models / Endpoints
@@ -2915,61 +2636,14 @@ async def scrape_facebook(
     user: InternalAdminUser,
 ) -> FacebookScrapeResponse:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
-    from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
+    from trr_backend.socials.facebook.direct_scrape import scrape_facebook as run_facebook_scrape
 
     logger.info("Facebook scrape requested by %s for %s", user.get("email"), request.page_handle)
-    try:
-        scraper = FacebookScraper(
-            cookies=_load_social_auth_or_503(platform="facebook", surface="scrape", loader=_load_facebook_cookies)
-        )
-        config = FacebookScrapeConfig(
-            page_handle=request.page_handle,
-            date_start=request.date_start,
-            date_end=request.date_end,
-            delay_seconds=request.delay_seconds,
-            max_pages=request.max_pages,
-            include_feed=True,
-            include_reels=True,
-            include_photos=True,
-        )
-        posts = scraper.scrape(config)
-        lowered_hashtags = [str(tag).strip().lower().lstrip("#") for tag in request.hashtags if str(tag).strip()]
-        lowered_keywords = [str(keyword).strip().lower() for keyword in request.keywords if str(keyword).strip()]
 
-        def _matches(post: Any) -> bool:
-            text = str(getattr(post, "caption", "") or "").lower()
-            if lowered_hashtags and not any(f"#{tag}" in text for tag in lowered_hashtags):
-                return False
-            if lowered_keywords and not any(term in text for term in lowered_keywords):
-                return False
-            return True
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="facebook", surface=surface, loader=_load_facebook_cookies)
 
-        filtered = [post for post in posts if _matches(post)]
-        return FacebookScrapeResponse(
-            success=True,
-            page_handle=request.page_handle,
-            posts_found=len(filtered),
-            posts=[_facebook_post_response(post) for post in filtered],
-            filters_applied={
-                "hashtags": request.hashtags,
-                "keywords": request.keywords,
-                "date_start": request.date_start.isoformat() if request.date_start else None,
-                "date_end": request.date_end.isoformat() if request.date_end else None,
-            },
-            retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Facebook scrape failed: %s", exc, exc_info=True)
-        return FacebookScrapeResponse(
-            success=False,
-            page_handle=request.page_handle,
-            posts_found=0,
-            posts=[],
-            filters_applied={},
-            error=str(exc),
-        )
+    return FacebookScrapeResponse(**run_facebook_scrape(request, load_cookies=_load_cookies, logger=logger))
 
 
 @router.post("/facebook/search-posts", response_model=FacebookSearchPostsResponse)
@@ -2978,75 +2652,27 @@ async def search_facebook_posts(
     user: InternalAdminUser,
 ) -> FacebookSearchPostsResponse:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
-    from trr_backend.socials.facebook import FacebookScraper, FacebookSearchConfig
+    from trr_backend.socials.facebook.direct_scrape import search_facebook_posts as run_facebook_search_posts
 
     logger.info("Facebook search requested by %s for query=%s", user.get("email"), request.query)
-    try:
-        scraper = FacebookScraper(
-            cookies=_load_social_auth_or_503(platform="facebook", surface="search_posts", loader=_load_facebook_cookies)
-        )
-        config = FacebookSearchConfig(
-            search_url=request.search_url,
-            profile_url=request.profile_url,
-            query=request.query,
-            date_start=request.date_start,
-            date_end=request.date_end,
-            max_posts=request.max_posts,
-            include_share_details=request.include_share_details,
-            include_comments=request.include_comments,
-            max_comments=request.max_comments,
-            max_shares=request.max_shares,
-            allow_cross_platform_media_fallback=request.allow_cross_platform_media_fallback,
-            delay_seconds=request.delay_seconds,
-        )
-        posts = scraper.search_posts(config)
-        return FacebookSearchPostsResponse(
-            success=True,
-            query=request.query,
-            posts_found=len(posts),
-            posts=[_facebook_post_response(post) for post in posts],
-            retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Facebook search failed: %s", exc, exc_info=True)
-        return FacebookSearchPostsResponse(
-            success=False,
-            query=request.query,
-            posts_found=0,
-            posts=[],
-            retrieval_meta=None,
-            error=str(exc),
-        )
+
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="facebook", surface=surface, loader=_load_facebook_cookies)
+
+    return FacebookSearchPostsResponse(**run_facebook_search_posts(request, load_cookies=_load_cookies, logger=logger))
 
 
 @router.get("/facebook/preview/{page_handle}")
 async def preview_facebook_page(page_handle: str, user: InternalAdminUser) -> dict:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
-    from trr_backend.socials.facebook import FacebookScrapeConfig, FacebookScraper
+    from trr_backend.socials.facebook.direct_scrape import preview_facebook_page as run_facebook_preview
 
     logger.info("Facebook preview requested by %s for %s", user.get("email"), page_handle)
-    try:
-        scraper = FacebookScraper(
-            cookies=_load_social_auth_or_503(platform="facebook", surface="preview", loader=_load_facebook_cookies)
-        )
-        posts = scraper.scrape(FacebookScrapeConfig(page_handle=page_handle, max_pages=1))
-        latest = posts[0] if posts else None
-        return {
-            "page_handle": page_handle,
-            "posts_discovered": len(posts),
-            "latest_post": {
-                "post_id": getattr(latest, "post_id", None) if latest else None,
-                "post_type": getattr(latest, "post_type", None) if latest else None,
-                "url": getattr(latest, "url", None) if latest else None,
-                "caption": getattr(latest, "caption", None) if latest else None,
-            },
-            "retrieval_meta": dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Facebook preview failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="facebook", surface=surface, loader=_load_facebook_cookies)
+
+    return run_facebook_preview(page_handle, load_cookies=_load_cookies, logger=logger)
 
 
 class FacebookPostScrapeRequest(BaseModel):
@@ -3086,49 +2712,14 @@ async def scrape_facebook_post(
     user: InternalAdminUser,
 ) -> FacebookPostScrapeResponse:
     from trr_backend.repositories.social_season_analytics import _load_facebook_cookies
-    from trr_backend.socials.facebook import FacebookScraper
+    from trr_backend.socials.facebook.direct_scrape import scrape_facebook_post as run_facebook_post_scrape
 
     logger.info("Facebook post scrape requested by %s for %s", user.get("email"), request.post_url)
-    try:
-        scraper = FacebookScraper(
-            cookies=_load_social_auth_or_503(platform="facebook", surface="scrape_post", loader=_load_facebook_cookies)
-        )
-        post, comments = scraper.scrape_post(
-            request.post_url,
-            fetch_comment_list=request.fetch_comments,
-            max_comments=request.max_comments,
-            fetch_share_list=request.fetch_shares,
-            max_shares=request.max_shares,
-            allow_cross_platform_media_fallback=request.allow_cross_platform_media_fallback,
-        )
-        if post is None:
-            return FacebookPostScrapeResponse(success=False, error="Failed to fetch post")
 
-        post_resp = _facebook_post_response(post)
-        comment_resps = [
-            FacebookCommentResponse(
-                comment_id=c.comment_id,
-                username=c.username,
-                text=c.text,
-                likes=c.likes,
-                created_at=c.created_at,
-                is_reply=c.is_reply,
-                reply_count=c.reply_count,
-            )
-            for c in comments
-        ]
-        return FacebookPostScrapeResponse(
-            success=True,
-            post=post_resp,
-            comments=comment_resps,
-            comments_found=len(comment_resps),
-            shares_found=len(getattr(post, "share_details", []) or []),
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Facebook post scrape failed: %s", exc, exc_info=True)
-        return FacebookPostScrapeResponse(success=False, error=str(exc))
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="facebook", surface=surface, loader=_load_facebook_cookies)
+
+    return FacebookPostScrapeResponse(**run_facebook_post_scrape(request, load_cookies=_load_cookies, logger=logger))
 
 
 # Threads Models / Endpoints
@@ -3175,105 +2766,27 @@ async def scrape_threads(
     user: InternalAdminUser,
 ) -> ThreadsScrapeResponse:
     from trr_backend.repositories.social_season_analytics import _load_threads_cookies
-    from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
+    from trr_backend.socials.threads.direct_scrape import scrape_threads as run_threads_scrape
 
     logger.info("Threads scrape requested by %s for @%s", user.get("email"), request.username)
-    try:
-        scraper = ThreadsScraper(
-            cookies=_load_social_auth_or_503(platform="threads", surface="scrape", loader=_load_threads_cookies)
-        )
-        config = ThreadsScrapeConfig(
-            username=request.username,
-            date_start=request.date_start,
-            date_end=request.date_end,
-            delay_seconds=request.delay_seconds,
-            max_pages=request.max_pages,
-        )
-        posts = scraper.scrape(config)
-        lowered_hashtags = [str(tag).strip().lower().lstrip("#") for tag in request.hashtags if str(tag).strip()]
-        lowered_keywords = [str(keyword).strip().lower() for keyword in request.keywords if str(keyword).strip()]
 
-        def _matches(post: Any) -> bool:
-            text = str(getattr(post, "text", "") or "").lower()
-            if lowered_hashtags and not any(f"#{tag}" in text for tag in lowered_hashtags):
-                return False
-            if lowered_keywords and not any(term in text for term in lowered_keywords):
-                return False
-            return True
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="threads", surface=surface, loader=_load_threads_cookies)
 
-        filtered = [post for post in posts if _matches(post)]
-        return ThreadsScrapeResponse(
-            success=True,
-            username=request.username,
-            posts_found=len(filtered),
-            posts=[
-                ThreadsPostResponse(
-                    post_id=str(getattr(post, "post_id", "") or ""),
-                    username=str(getattr(post, "username", "") or ""),
-                    text=str(getattr(post, "text", "") or ""),
-                    likes=int(getattr(post, "likes", 0) or 0),
-                    replies=int(getattr(post, "replies", 0) or 0),
-                    reposts=int(getattr(post, "reposts", 0) or 0),
-                    quotes=int(getattr(post, "quotes", 0) or 0),
-                    views=int(getattr(post, "views", 0) or 0),
-                    url=str(getattr(post, "url", "") or ""),
-                    thumbnail_url=str(getattr(post, "thumbnail_url", "") or "") or None,
-                    media_urls=[str(url) for url in (getattr(post, "media_urls", []) or []) if str(url)],
-                    posted_at=(
-                        datetime.fromtimestamp(int(post.posted_at), tz=UTC).isoformat()
-                        if post.posted_at is not None
-                        else None
-                    ),
-                )
-                for post in filtered
-            ],
-            filters_applied={
-                "hashtags": request.hashtags,
-                "keywords": request.keywords,
-                "date_start": request.date_start.isoformat() if request.date_start else None,
-                "date_end": request.date_end.isoformat() if request.date_end else None,
-            },
-            retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Threads scrape failed: %s", exc, exc_info=True)
-        return ThreadsScrapeResponse(
-            success=False,
-            username=request.username,
-            posts_found=0,
-            posts=[],
-            filters_applied={},
-            error=str(exc),
-        )
+    return ThreadsScrapeResponse(**run_threads_scrape(request, load_cookies=_load_cookies, logger=logger))
 
 
 @router.get("/threads/preview/{username}")
 async def preview_threads_profile(username: str, user: InternalAdminUser) -> dict:
     from trr_backend.repositories.social_season_analytics import _load_threads_cookies
-    from trr_backend.socials.threads import ThreadsScrapeConfig, ThreadsScraper
+    from trr_backend.socials.threads.direct_scrape import preview_threads_profile as run_threads_preview
 
     logger.info("Threads preview requested by %s for @%s", user.get("email"), username)
-    try:
-        scraper = ThreadsScraper(
-            cookies=_load_social_auth_or_503(platform="threads", surface="preview", loader=_load_threads_cookies)
-        )
-        posts = scraper.scrape(ThreadsScrapeConfig(username=username, max_pages=1))
-        latest = posts[0] if posts else None
-        return {
-            "username": username,
-            "posts_discovered": len(posts),
-            "latest_post": {
-                "post_id": getattr(latest, "post_id", None) if latest else None,
-                "url": getattr(latest, "url", None) if latest else None,
-                "text": getattr(latest, "text", None) if latest else None,
-            },
-            "retrieval_meta": dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Threads preview failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    def _load_cookies(surface: str) -> Any:
+        return _load_social_auth_or_503(platform="threads", surface=surface, loader=_load_threads_cookies)
+
+    return run_threads_preview(username, load_cookies=_load_cookies, logger=logger)
 
 
 # ---------------------------------------------------------------------------
@@ -3512,6 +3025,7 @@ class SocialAccountCommentsScrapeRequest(SourceScopedRequest):
     max_comments_per_post: int | None = Field(default=None, ge=1, le=1000000)
     refresh_policy: Literal["stale_or_missing", "all_saved_posts"] = Field(default="stale_or_missing")
     target_filter: Literal["incomplete"] | None = Field(default=None)
+    comments_load_strategy: Literal["cursor_api", "single_session_load_all"] = Field(default="cursor_api")
     allow_inline_dev_fallback: bool = Field(default=False)
     dry_run: bool = Field(default=False)
 
@@ -5065,6 +4579,7 @@ async def post_social_account_comments_scrape_route(
                 max_posts=payload.max_posts,
                 refresh_policy=payload.refresh_policy,
                 target_filter=payload.target_filter,
+                comments_load_strategy=payload.comments_load_strategy,
             )
         except SocialIngestValidationError as exc:
             raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
@@ -5088,6 +4603,7 @@ async def post_social_account_comments_scrape_route(
             max_comments_per_post=payload.max_comments_per_post,
             refresh_policy=payload.refresh_policy,
             target_filter=payload.target_filter,
+            comments_load_strategy=payload.comments_load_strategy,
             initiated_by=(user or {}).get("email"),
             inline_worker_id=None if queue_enabled else f"api-background:comments:{platform}",
             allow_local_dev_inline_bypass=used_inline_fallback,
@@ -5395,13 +4911,16 @@ def get_social_account_catalog_run_progress_route(
         account_handle=account_handle,
         extra=(str(run_id), recent_log_limit, "fast" if fast else "full"),
     )
-    loader = lambda: social_profile_reads.get_catalog_run_progress(
-        platform=platform,
-        account_handle=account_handle,
-        run_id=str(run_id),
-        recent_log_limit=recent_log_limit,
-        fast=fast,
-    )
+
+    def loader() -> dict[str, Any]:
+        return social_profile_reads.get_catalog_run_progress(
+            platform=platform,
+            account_handle=account_handle,
+            run_id=str(run_id),
+            recent_log_limit=recent_log_limit,
+            fast=fast,
+        )
+
     try:
         return _resolve_account_profile_singleflight(
             cache_key,
@@ -5784,13 +5303,16 @@ async def post_social_account_catalog_backfill_route(
     requires_modal_executor = bool(execution_state["requires_modal_executor"])
 
     try:
-        date_start = payload.date_start if payload.backfill_scope == "bounded_window" else None
-        date_end = payload.date_end if payload.backfill_scope == "bounded_window" else None
+        normalized_platform = str(platform or "").strip().lower()
+        if normalized_platform == "twitter" and payload.backfill_scope == "full_history":
+            date_start, date_end = _twitter_catalog_backfill_default_window()
+        else:
+            date_start = payload.date_start if payload.backfill_scope == "bounded_window" else None
+            date_end = payload.date_end if payload.backfill_scope == "bounded_window" else None
         date_start, date_end = _normalize_catalog_backfill_window(
             date_start=date_start,
             date_end=date_end,
         )
-        normalized_platform = str(platform or "").strip().lower()
         request_selected_tasks = payload.selected_tasks
         if request_selected_tasks is None:
             request_selected_tasks = (
@@ -5799,8 +5321,8 @@ async def post_social_account_catalog_backfill_route(
                 else _normalize_social_account_catalog_backfill_selected_tasks(None)
             )
         normalized_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(request_selected_tasks)
-        use_async_instagram_kickoff = str(platform or "").strip().lower() == "instagram"
-        if use_async_instagram_kickoff:
+        use_async_catalog_kickoff = queue_enabled or (used_inline_fallback and normalized_platform == "instagram")
+        if use_async_catalog_kickoff:
             result = await run_in_threadpool(
                 begin_social_account_catalog_backfill_launch,
                 platform=platform,
@@ -6211,32 +5733,135 @@ class CookieRefreshRequest(BaseModel):
     timeout_seconds: int = Field(default=180, ge=30, le=600)
 
 
+def _env_truthy_default(name: str, *, default: bool) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
+def _instagram_comments_auth_probe_allows_rendered_fallback(
+    *,
+    status: str,
+    reason: str | None,
+) -> bool:
+    del status, reason
+    return False
+
+
 @router.get("/profiles/{platform}/{account_handle}/cookies/health")
 def get_cookie_health_route(
     platform: str,
     account_handle: str,
     force: bool = Query(default=False, description="Bypass validation cache"),
     posts_auth: bool = Query(default=False, description="Include Instagram Modal posts endpoint auth probe"),
+    comments_auth: bool = Query(default=False, description="Include Instagram Modal comments endpoint auth probe"),
     user: InternalAdminUser = None,
 ) -> dict[str, Any]:
     from trr_backend.repositories.social_season_analytics import (
         check_platform_cookie_health,
+        probe_modal_instagram_comments_auth_health,
         probe_modal_instagram_posts_auth_health,
     )
 
     health = check_platform_cookie_health(platform, force=force)
+    auth_probe_blocked = False
+    auth_probe_reason: str | None = None
+    local_cookie_fingerprint = str(health.get("cookie_fingerprint") or "").strip() or None
     if posts_auth and str(platform or "").strip().lower() == "instagram":
         posts_probe = probe_modal_instagram_posts_auth_health(account_handle)
+        posts_cookie_fingerprint = str(posts_probe.get("cookie_fingerprint") or "").strip() or None
+        posts_status = (
+            str(posts_probe.get("status") or posts_probe.get("result") or ("valid" if posts_probe.get("ready") else ""))
+            .strip()
+            .lower()
+        )
+        posts_reason = str(posts_probe.get("reason") or "").strip() or None
+        posts_category = (
+            "ready"
+            if bool(posts_probe.get("ready")) or posts_status == "valid"
+            else "transport"
+            if posts_status == "transport_blocked"
+            else "auth"
+            if posts_status == "auth_blocked"
+            else "fetch"
+            if posts_status == "fetch_blocked"
+            else "unknown"
+        )
         health = {
             **health,
             "posts_auth_health": {
                 "platform": "instagram",
                 "account_handle": str(posts_probe.get("account_handle") or account_handle).strip() or account_handle,
                 "ready": bool(posts_probe.get("ready")),
-                "reason": str(posts_probe.get("reason") or "").strip() or None,
+                "status": posts_status or None,
+                "category": posts_category,
+                "reason": posts_reason,
                 "execution_backend": str(posts_probe.get("execution_backend") or "modal").strip().lower() or "modal",
+                "cookie_fingerprint": posts_cookie_fingerprint,
+                "cookie_fingerprint_match": (
+                    local_cookie_fingerprint == posts_cookie_fingerprint
+                    if local_cookie_fingerprint and posts_cookie_fingerprint
+                    else None
+                ),
             },
             "posts_auth_probe": posts_probe,
+        }
+        if posts_category == "auth":
+            auth_probe_blocked = True
+            auth_probe_reason = posts_reason or "posts_auth_blocked"
+    if comments_auth and str(platform or "").strip().lower() == "instagram":
+        comments_probe = probe_modal_instagram_comments_auth_health(account_handle)
+        comments_cookie_fingerprint = str(comments_probe.get("cookie_fingerprint") or "").strip() or None
+        comments_status = (
+            str(
+                comments_probe.get("status")
+                or comments_probe.get("result")
+                or ("valid" if comments_probe.get("ready") else "")
+            )
+            .strip()
+            .lower()
+        )
+        comments_reason = str(comments_probe.get("reason") or "").strip() or None
+        comments_category = (
+            "ready"
+            if bool(comments_probe.get("ready")) or comments_status == "valid"
+            else "transport"
+            if comments_status == "transport_blocked"
+            else "auth"
+            if comments_status == "auth_blocked"
+            else "fetch"
+            if comments_status == "fetch_blocked"
+            else "unknown"
+        )
+        comments_auth_health = {
+            "platform": "instagram",
+            "account_handle": str(comments_probe.get("account_handle") or account_handle).strip() or account_handle,
+            "shortcode": str(comments_probe.get("shortcode") or "").strip() or None,
+            "ready": bool(comments_probe.get("ready")),
+            "status": comments_status or None,
+            "category": comments_category,
+            "reason": comments_reason,
+            "execution_backend": str(comments_probe.get("execution_backend") or "modal").strip().lower() or "modal",
+        }
+        if comments_cookie_fingerprint:
+            comments_auth_health["cookie_fingerprint"] = comments_cookie_fingerprint
+        if local_cookie_fingerprint and comments_cookie_fingerprint:
+            comments_auth_health["cookie_fingerprint_match"] = local_cookie_fingerprint == comments_cookie_fingerprint
+        health = {
+            **health,
+            "comments_auth_health": comments_auth_health,
+            "comments_auth_probe": comments_probe,
+        }
+        if comments_category == "auth":
+            auth_probe_blocked = True
+            auth_probe_reason = comments_reason or "comments_auth_blocked"
+    if auth_probe_blocked:
+        health = {
+            **health,
+            "healthy": False,
+            "reason": auth_probe_reason,
+            "auth_surface_blocked": True,
         }
     return health
 
@@ -6278,6 +5903,7 @@ def post_cookie_refresh_route(
         platform,
         headless=payload.headless,
         timeout_seconds=payload.timeout_seconds,
+        account_handle=account_handle,
     )
     if not result.get("success") and result.get("reason") == "refresh_already_in_progress":
         raise HTTPException(
@@ -6432,9 +6058,7 @@ def get_shared_ingest_runs(
 ) -> list[dict[str, Any]]:
     from trr_backend.repositories.social_season_analytics import list_shared_runs
 
-    canonical_source_scope = (
-        normalize_source_scope_param(source_scope) if source_scope is not None else None
-    )
+    canonical_source_scope = normalize_source_scope_param(source_scope) if source_scope is not None else None
     return list_shared_runs(limit=limit, status=status, source_scope=canonical_source_scope, run_id=run_id)
 
 

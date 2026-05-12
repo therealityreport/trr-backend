@@ -375,9 +375,7 @@ def build_bidirectional_probe_metadata(
     path is wired into job execution.
     """
     flag_enabled = (
-        _env_truthy("SOCIAL_INSTAGRAM_POSTS_BIDIRECTIONAL_WALK_ENABLED", False)
-        if enabled is None
-        else bool(enabled)
+        _env_truthy("SOCIAL_INSTAGRAM_POSTS_BIDIRECTIONAL_WALK_ENABLED", False) if enabled is None else bool(enabled)
     )
     forward_ids = [_post_identity(post) for post in forward_posts if isinstance(post, dict)]
     reverse_ids = [_post_identity(post) for post in reverse_posts if isinstance(post, dict)]
@@ -1023,9 +1021,7 @@ class InstagramPostsScraplingFetcher:
         )
         if not isinstance(connection, dict) or not connection:
             reason = str(
-                metadata.get("error_code")
-                or metadata.get("request_error_code")
-                or "requests_fallback_no_connection"
+                metadata.get("error_code") or metadata.get("request_error_code") or "requests_fallback_no_connection"
             ).strip()
             auth_failed = reason in {
                 "forbidden",
@@ -1280,9 +1276,7 @@ class InstagramPostsScraplingFetcher:
             fetch_failed=True,
             auth_failed=auth_failed,
             fetch_reason=(
-                "pagination_doc_id_stale"
-                if stale_empty_seen
-                else fetch_reason or "graphql_no_doc_id_succeeded"
+                "pagination_doc_id_stale" if stale_empty_seen else fetch_reason or "graphql_no_doc_id_succeeded"
             ),
             request_count=self._request_count,
             retryable=retryable,

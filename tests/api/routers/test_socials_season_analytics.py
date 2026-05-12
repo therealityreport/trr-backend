@@ -268,7 +268,9 @@ def test_get_shared_account_sources(client: TestClient, monkeypatch: pytest.Monk
         ],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.get_shared_account_sources", return_value=expected) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.get_shared_account_sources", return_value=expected
+    ) as mocked:
         response = client.get(
             "/api/v1/admin/socials/shared/sources?source_scope=bravo&include_inactive=true",
             headers={"Authorization": f"Bearer {token}"},
@@ -1145,9 +1147,11 @@ def test_queue_catalog_backfill_finalize_task_starts_inline_fallback_runs(
     monkeypatch.setattr("trr_backend.repositories.social_season_analytics.is_queue_enabled", lambda: False)
     monkeypatch.setattr(
         "trr_backend.repositories.social_season_analytics.execute_run_with_inline_worker_registration",
-        lambda run_id, **kwargs: executed.append({"run_id": run_id, **kwargs})
-        or (done.set() if len(executed) >= 4 else None)
-        or {"run_id": run_id},
+        lambda run_id, **kwargs: (
+            executed.append({"run_id": run_id, **kwargs})
+            or (done.set() if len(executed) >= 4 else None)
+            or {"run_id": run_id}
+        ),
     )
     monkeypatch.setattr(socials_router, "_clear_account_profile_caches", lambda: None)
 
@@ -1243,6 +1247,45 @@ def test_post_social_account_catalog_backfill_ignores_date_bounds_for_full_histo
     assert mocked_finalize.call_args.kwargs["date_end"] is None
 
 
+def test_post_social_account_catalog_backfill_twitter_full_history_uses_past_year_window(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    fixed_end = datetime(2026, 5, 12, 12, 0, tzinfo=UTC)
+    fixed_start = fixed_end - timedelta(days=365)
+
+    with (
+        patch("api.routers.socials._twitter_catalog_backfill_default_window", return_value=(fixed_start, fixed_end)),
+        patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True),
+        patch(
+            "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
+            return_value=None,
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
+            return_value={
+                "run_id": "catalog-run-twitter-window",
+                "status": "queued",
+                "ingest_mode": "shared_account_catalog_backfill",
+            },
+        ) as mocked_begin,
+        patch("api.routers.socials._queue_catalog_backfill_finalize_task", return_value=None) as mocked_finalize,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/twitter/bravotv/catalog/backfill",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"backfill_scope": "full_history"},
+        )
+
+    assert response.status_code == 200
+    assert mocked_begin.call_args.kwargs["date_start"] == fixed_start
+    assert mocked_begin.call_args.kwargs["date_end"] == fixed_end
+    assert mocked_finalize.call_args.kwargs["date_start"] == fixed_start
+    assert mocked_finalize.call_args.kwargs["date_end"] == fixed_end
+
+
 def test_post_social_account_catalog_backfill_forwards_bounded_window_dates(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1334,21 +1377,26 @@ def test_post_social_account_catalog_backfill_tiktok(client: TestClient, monkeyp
             return_value=None,
         ) as worker_guard:
             with patch(
-                "trr_backend.repositories.social_season_analytics.launch_social_account_catalog_backfill",
+                "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
                 return_value=expected,
-            ) as mocked:
-                response = client.post(
-                    "/api/v1/admin/socials/profiles/tiktok/bravotv/catalog/backfill",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"backfill_scope": "full_history"},
-                )
+            ) as mocked_begin:
+                with patch(
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
+                    return_value=None,
+                ) as mocked_finalize:
+                    response = client.post(
+                        "/api/v1/admin/socials/profiles/tiktok/bravotv/catalog/backfill",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"backfill_scope": "full_history"},
+                    )
 
     assert response.status_code == 200
     assert response.json()["run_id"] == "catalog-run-tt-1"
     worker_guard.assert_called_once_with(required_execution_backend="modal", platform="tiktok")
-    assert mocked.call_args.kwargs["platform"] == "tiktok"
-    assert mocked.call_args.kwargs["account_handle"] == "bravotv"
-    assert mocked.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_begin.call_args.kwargs["platform"] == "tiktok"
+    assert mocked_begin.call_args.kwargs["account_handle"] == "bravotv"
+    assert mocked_begin.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
+    assert mocked_finalize.call_args.kwargs["selected_tasks"] == ["post_details", "comments", "media"]
 
 
 def test_post_social_account_catalog_remediate_drift_cancels_and_requeues(
@@ -1440,24 +1488,30 @@ def test_post_social_account_catalog_backfill_additional_supported_platforms(
             return_value=None,
         ) as worker_guard:
             with patch(
-                "trr_backend.repositories.social_season_analytics.launch_social_account_catalog_backfill",
+                "trr_backend.repositories.social_season_analytics.begin_social_account_catalog_backfill_launch",
                 return_value={
                     "run_id": run_id,
                     "status": "queued",
                     "ingest_mode": "shared_account_catalog_backfill",
                 },
-            ) as mocked:
-                response = client.post(
-                    f"/api/v1/admin/socials/profiles/{platform}/{handle}/catalog/backfill",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"backfill_scope": "full_history"},
-                )
+            ) as mocked_begin:
+                with patch(
+                    "api.routers.socials._queue_catalog_backfill_finalize_task",
+                    return_value=None,
+                ) as mocked_finalize:
+                    response = client.post(
+                        f"/api/v1/admin/socials/profiles/{platform}/{handle}/catalog/backfill",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"backfill_scope": "full_history"},
+                    )
 
     assert response.status_code == 200
     assert response.json()["run_id"] == run_id
     worker_guard.assert_called_once_with(required_execution_backend="modal", platform=platform)
-    assert mocked.call_args.kwargs["platform"] == platform
-    assert mocked.call_args.kwargs["account_handle"] == handle
+    assert mocked_begin.call_args.kwargs["platform"] == platform
+    assert mocked_begin.call_args.kwargs["account_handle"] == handle
+    assert mocked_finalize.call_args.kwargs["platform"] == platform
+    assert mocked_finalize.call_args.kwargs["account_handle"] == handle
 
 
 def test_post_social_account_catalog_backfill_requires_modal_executor(
@@ -2192,6 +2246,77 @@ def test_post_social_account_catalog_repair_auth_route_for_tiktok_cookie_refresh
     assert mocked_execute.called
 
 
+def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "trr_backend.repositories.social_season_analytics.check_platform_cookie_health",
+            return_value={
+                "platform": "instagram",
+                "required": True,
+                "healthy": True,
+                "reason": None,
+                "refresh_supported": True,
+                "refresh_available": True,
+                "refresh_action": "instagram_auth_repair",
+                "refresh_label": "Repair Instagram Auth",
+                "source_kind": "default_file",
+                "source_path": "/tmp/instagram_cookies.json",
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_posts_auth_health",
+            return_value={
+                "platform": "instagram",
+                "account_handle": "thetraitorsus",
+                "ready": True,
+                "status": "valid",
+                "result": "valid",
+                "execution_backend": "modal",
+            },
+        ),
+        patch(
+            "trr_backend.repositories.social_season_analytics.probe_modal_instagram_comments_auth_health",
+            return_value={
+                "platform": "instagram",
+                "account_handle": "thetraitorsus",
+                "shortcode": "DSfwXnYAaEs",
+                "ready": False,
+                "status": "auth_blocked",
+                "result": "auth_blocked",
+                "reason": "html_challenge_or_auth_required",
+                "execution_backend": "modal",
+            },
+        ),
+    ):
+        response = client.get(
+            "/api/v1/admin/socials/profiles/instagram/thetraitorsus/cookies/health?posts_auth=true&comments_auth=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["healthy"] is False
+    assert body["reason"] == "html_challenge_or_auth_required"
+    assert body["auth_surface_blocked"] is True
+    assert body["posts_auth_health"]["ready"] is True
+    assert body["comments_auth_health"] == {
+        "platform": "instagram",
+        "account_handle": "thetraitorsus",
+        "shortcode": "DSfwXnYAaEs",
+        "ready": False,
+        "status": "auth_blocked",
+        "category": "auth",
+        "reason": "html_challenge_or_auth_required",
+        "execution_backend": "modal",
+    }
+
+
 def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_summary(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -2494,7 +2619,7 @@ def test_post_social_account_catalog_run_cancel(client: TestClient, monkeypatch:
         response = client.post(
             f"/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/{run_id}/cancel",
             headers={"Authorization": f"Bearer {token}"},
-    )
+        )
 
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
@@ -2899,7 +3024,9 @@ def test_get_shared_review_queue(client: TestClient, monkeypatch: pytest.MonkeyP
         ],
     }
 
-    with patch("trr_backend.repositories.social_season_analytics.list_shared_review_queue", return_value=expected) as mocked:
+    with patch(
+        "trr_backend.repositories.social_season_analytics.list_shared_review_queue", return_value=expected
+    ) as mocked:
         response = client.get(
             "/api/v1/admin/socials/shared/review-queue?source_scope=bravo&review_status=open&limit=10",
             headers={"Authorization": f"Bearer {token}"},
@@ -5205,6 +5332,7 @@ def test_post_social_account_comments_scrape_accepts_all_saved_posts_profile_syn
     assert scrape_mock.call_args.kwargs["max_posts"] is None
     assert scrape_mock.call_args.kwargs["max_comments_per_post"] is None
     assert scrape_mock.call_args.kwargs["refresh_policy"] == "all_saved_posts"
+    assert scrape_mock.call_args.kwargs["comments_load_strategy"] == "cursor_api"
     assert scrape_mock.call_args.kwargs["dispatch_immediately"] is True
 
 
@@ -5335,6 +5463,53 @@ def test_post_social_account_comments_scrape_forwards_incomplete_target_filter(
     assert scrape_mock.call_args.kwargs["target_filter"] == "incomplete"
 
 
+def test_post_social_account_comments_scrape_forwards_comments_load_strategy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            return_value={
+                "queue_enabled": False,
+                "used_inline_fallback": False,
+                "requires_modal_executor": False,
+            },
+        ),
+        patch("api.routers.socials._start_runs_in_background", return_value=None),
+        patch(
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
+            return_value={
+                "run_id": "comments-run-1",
+                "status": "pending",
+                "comments_load_strategy": "single_session_load_all",
+                "comments_session_scope": "profile_single_worker",
+            },
+        ) as scrape_mock,
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "mode": "profile",
+                "source_scope": "bravo",
+                "refresh_policy": "stale_or_missing",
+                "comments_load_strategy": "single_session_load_all",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "comments-run-1"
+    assert body["comments_load_strategy"] == "single_session_load_all"
+    assert body["comments_session_scope"] == "profile_single_worker"
+    scrape_mock.assert_called_once()
+    assert scrape_mock.call_args.kwargs["comments_load_strategy"] == "single_session_load_all"
+
+
 def test_post_social_account_comments_scrape_dry_run_returns_preview_without_launch(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -5408,6 +5583,7 @@ def test_post_social_account_comments_scrape_dry_run_returns_preview_without_lau
     assert body["debug"]["target_plan_strategy"] == "bounded_profile_preview"
     preview_mock.assert_called_once()
     assert preview_mock.call_args.kwargs["refresh_policy"] == "all_saved_posts"
+    assert preview_mock.call_args.kwargs["comments_load_strategy"] == "cursor_api"
 
 
 def test_post_social_account_comments_scrape_dry_run_forwards_incomplete_target_filter(
@@ -5472,6 +5648,78 @@ def test_post_social_account_comments_scrape_dry_run_forwards_incomplete_target_
     assert body["target_source_ids_count"] == 3
     preview_mock.assert_called_once()
     assert preview_mock.call_args.kwargs["target_filter"] == "incomplete"
+
+
+def test_post_social_account_comments_scrape_dry_run_forwards_comments_load_strategy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+
+    with (
+        patch(
+            "trr_backend.socials.pipelines.comments.instagram.preview_social_account_comments_scrape",
+            return_value={
+                "dry_run": True,
+                "platform": "instagram",
+                "account_handle": "bravotv",
+                "mode": "profile",
+                "target_source_ids_count": 431,
+                "comments_load_strategy": "single_session_load_all",
+                "comments_session_scope": "profile_single_worker",
+                "comments_internal_pagination": "cursor_preserved",
+                "comments_sharding_forced_single_session": True,
+                "comments_shard_count": 1,
+                "effective_comments_shard_count": 1,
+                "recommended_comments_shard_count": 8,
+                "single_session_enabled": True,
+                "strategy_warnings": [
+                    {
+                        "code": "INSTAGRAM_COMMENTS_SINGLE_SESSION_FORCES_ONE_SHARD",
+                        "message": "single_session_load_all runs profile comment scrapes in one comments shard.",
+                    }
+                ],
+                "sample_target_source_ids": ["C123"],
+                "refresh_policy": "all_saved_posts",
+                "target_priority": "gap_first",
+                "timing": {"target_preview_ms": 12.5, "total_ms": 12.6},
+                "preview_cache": {"enabled": True, "hit": False, "age_seconds": None, "ttl_seconds": 60},
+                "cache": {"enabled": True, "hit": False, "age_seconds": None, "ttl_seconds": 60},
+                "debug": {"target_plan_strategy": "bounded_profile_preview"},
+            },
+        ) as preview_mock,
+        patch(
+            "trr_backend.socials.pipelines.comments.instagram.start_social_account_comments_scrape",
+            side_effect=AssertionError("dry run should not launch a scrape"),
+        ),
+        patch(
+            "api.routers.socials._resolve_social_account_comments_route_execution",
+            side_effect=AssertionError("dry run should not resolve queue execution"),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/admin/socials/profiles/instagram/bravotv/comments/scrape?dry_run=true",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "mode": "profile",
+                "source_scope": "bravo",
+                "refresh_policy": "all_saved_posts",
+                "comments_load_strategy": "single_session_load_all",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["comments_load_strategy"] == "single_session_load_all"
+    assert body["comments_session_scope"] == "profile_single_worker"
+    assert body["comments_shard_count"] == 1
+    assert body["effective_comments_shard_count"] == 1
+    assert body["recommended_comments_shard_count"] == 8
+    assert body["comments_sharding_forced_single_session"] is True
+    assert body["strategy_warnings"][0]["code"] == "INSTAGRAM_COMMENTS_SINGLE_SESSION_FORCES_ONE_SHARD"
+    preview_mock.assert_called_once()
+    assert preview_mock.call_args.kwargs["comments_load_strategy"] == "single_session_load_all"
 
 
 def test_post_social_account_comments_scrape_queue_dispatches_in_background(

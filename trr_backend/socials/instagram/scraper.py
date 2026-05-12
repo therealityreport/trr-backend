@@ -3733,7 +3733,9 @@ class InstagramScraper:
             else _first_present("comment_index", "commentIndex", "ranked_index", "rankedIndex", "index")
         )
         raw_cursor_payload = _first_present("cursor_payload", "cursorPayload")
-        parsed_cursor_payload = _compact_cursor_payload(raw_cursor_payload if isinstance(raw_cursor_payload, Mapping) else None)
+        parsed_cursor_payload = _compact_cursor_payload(
+            raw_cursor_payload if isinstance(raw_cursor_payload, Mapping) else None
+        )
         parsed_cursor_payload.update(_compact_cursor_payload(cursor_payload))
         row_cursor_values = {
             "next_min_id": _first_present("next_min_id", "nextMinId"),

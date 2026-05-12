@@ -108,11 +108,7 @@ def build_pressure_snapshot(
     min_age_minutes: int = 15,
     allowed_lock_keys: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> dict[str, Any]:
-    stale_sessions = (
-        find_stale_advisory_sessions(min_age_minutes, allowed_lock_keys)
-        if allowed_lock_keys
-        else []
-    )
+    stale_sessions = find_stale_advisory_sessions(min_age_minutes, allowed_lock_keys) if allowed_lock_keys else []
     social_job_counts = _fetch_social_job_counts()
     social_jobs = _fetch_open_social_jobs()
     return {

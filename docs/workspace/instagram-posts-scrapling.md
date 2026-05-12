@@ -53,9 +53,9 @@ The posts Scrapling lane and comments Scrapling lane are concrete worker paths. 
 | Var | Purpose | Notes |
 |---|---|---|
 | `SOCIAL_INSTAGRAM_COOKIES_JSON` or `SOCIAL_INSTAGRAM_COOKIES_FILE` | Session cookies | `auth_resolver` accepts either |
-| `DECODO_USERNAME` / `DECODO_PASSWORD` / `DECODO_GATEWAY` | Proxy creds | Optional; no-proxy in local dev |
+| `DECODO_USERNAME` / `DECODO_PASSWORD` / `DECODO_GATEWAY` | Proxy creds | Optional; only used when `SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER=decodo` |
 | `SOCIAL_INSTAGRAM_POSTS_PROXY_URLS` | Explicit proxy list | Takes precedence over DECODO |
-| `SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER` | Override provider | Default: `decodo` |
+| `SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER` | Override provider | Default: `none`; set `decodo` explicitly to use Decodo |
 | `SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY` | Pin one Decodo session across warmup + GraphQL | Default: `false` |
 | `SOCIAL_INSTAGRAM_POSTS_PROXY_SESSION_TTL_SECONDS` | Sticky-session lifetime for generated Decodo usernames | Default: `600` |
 | `SOCIAL_INSTAGRAM_POSTS_HEADLESS` | Browser headless toggle | Default: `true` |

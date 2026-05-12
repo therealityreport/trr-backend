@@ -208,6 +208,7 @@ def get_week_live_health_snapshot(
         "updated_at": _iso(now_utc),
     }
 
+
 def get_analytics(
     season_id: str,
     *,
@@ -948,6 +949,7 @@ def get_analytics(
     _set_cached_analytics(cache_key, response)
     return response
 
+
 def get_comments_coverage(
     season_id: str,
     *,
@@ -1094,6 +1096,7 @@ def get_comments_coverage(
             last_refresh_reason=None,
         ),
     }
+
 
 def get_mirror_coverage(
     season_id: str,
@@ -1307,6 +1310,7 @@ def get_mirror_coverage(
         ),
     }
 
+
 def get_week_detail(
     season_id: str,
     *,
@@ -1499,9 +1503,11 @@ def get_week_detail(
                 upserted_count=int(comments_stats.get("saved_comments") or 0),
                 stale_posts_count=int(comments_stats.get("stale_posts_count") or 0),
                 failure_reason=(
-                    post_failure_reasons.get("comment_failure_reason") or _platform_failure_reason(platform, "comment_gap")
+                    post_failure_reasons.get("comment_failure_reason")
+                    or _platform_failure_reason(platform, "comment_gap")
                     if int(comments_stats.get("stale_posts_count") or 0) > 0
-                    or int(comments_stats.get("saved_comments") or 0) < int(comments_stats.get("reported_comments") or 0)
+                    or int(comments_stats.get("saved_comments") or 0)
+                    < int(comments_stats.get("reported_comments") or 0)
                     else None
                 ),
                 attempted=int(comments_stats.get("posts_scanned") or 0) > 0,
@@ -1511,12 +1517,15 @@ def get_week_detail(
                 + int(comment_media_stats.get("items_scanned") or 0),
                 mirrored_count=int(mirror_stats.get("mirrored_count") or 0)
                 + int(comment_media_stats.get("mirrored_count") or 0),
-                failed_count=int(mirror_stats.get("failed_count") or 0) + int(comment_media_stats.get("failed_count") or 0),
+                failed_count=int(mirror_stats.get("failed_count") or 0)
+                + int(comment_media_stats.get("failed_count") or 0),
                 pending_count=int(mirror_stats.get("pending_count") or 0)
                 + int(comment_media_stats.get("pending_count") or 0),
                 partial_count=int(mirror_stats.get("partial_count") or 0),
                 last_job_id=_extract_last_platform_job_id(platform_posts if isinstance(platform_posts, list) else []),
-                attempted=(int(mirror_stats.get("posts_scanned") or 0) + int(comment_media_stats.get("items_scanned") or 0))
+                attempted=(
+                    int(mirror_stats.get("posts_scanned") or 0) + int(comment_media_stats.get("items_scanned") or 0)
+                )
                 > 0,
                 failure_reason=post_failure_reasons.get("media_failure_reason")
                 or _derive_media_failure_reason(
@@ -1638,6 +1647,7 @@ def get_week_detail(
             "status_deferred": not include_status,
         },
     }
+
 
 def get_week_detail_summary_fast(
     season_id: str,
@@ -1765,6 +1775,7 @@ def get_week_detail_summary_fast(
         },
     }
 
+
 def get_week_detail_summary(
     season_id: str,
     *,
@@ -1809,6 +1820,7 @@ def get_week_detail_summary(
         "totals": _normalize_week_totals_payload(payload.get("totals")),
         "meta": payload.get("meta") or {},
     }
+
 
 def get_tiktok_overview(
     season_id: str,
@@ -1989,6 +2001,7 @@ def get_tiktok_overview(
         },
     }
 
+
 def get_tiktok_cast_members(
     season_id: str,
     *,
@@ -2041,6 +2054,7 @@ def get_tiktok_cast_members(
             for row in rows
         ],
     }
+
 
 def get_tiktok_hashtags(
     season_id: str,
@@ -2096,6 +2110,7 @@ def get_tiktok_hashtags(
             for row in rows
         ],
     }
+
 
 def get_tiktok_sounds(
     season_id: str,
@@ -2206,6 +2221,7 @@ def get_tiktok_sounds(
             }
         )
     return {"season_id": season_id, "sounds": sounds}
+
 
 def get_tiktok_content_health(
     season_id: str,
@@ -2352,6 +2368,7 @@ def get_tiktok_content_health(
         "posts": posts[:safe_limit],
     }
 
+
 def get_tiktok_sound_detail(season_id: str, *, sound_id: str) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_sound_id = _normalize_tiktok_sound_id(sound_id)
@@ -2407,6 +2424,7 @@ def get_tiktok_sound_detail(season_id: str, *, sound_id: str) -> dict[str, Any]:
         ),
     }
 
+
 def get_tiktok_sound_posts(
     season_id: str,
     *,
@@ -2459,6 +2477,7 @@ def get_tiktok_sound_posts(
         ],
     }
 
+
 def get_tiktok_post_detail(season_id: str, *, post_id: str) -> dict[str, Any]:
     _sync_core_overrides()
     payload = _room_callable("get_post_comments", get_post_comments)(season_id, platform="tiktok", source_id=post_id)
@@ -2489,6 +2508,7 @@ def get_tiktok_post_detail(season_id: str, *, post_id: str) -> dict[str, Any]:
         for row in cast_rows
     ]
     return payload
+
 
 def get_tiktok_sentiment_trends(
     season_id: str,
@@ -2547,6 +2567,7 @@ def get_tiktok_sentiment_trends(
             }
         )
     return {"season_id": season_id, "timeline": timeline}
+
 
 def get_post_comments(
     season_id: str,
@@ -3434,6 +3455,7 @@ def get_post_comments(
 
     raise ValueError(f"Unsupported platform: {platform}")
 
+
 def build_csv(snapshot: dict[str, Any]) -> str:
     _sync_core_overrides()
     rows = snapshot.get("rows") or []
@@ -3505,6 +3527,7 @@ def build_csv(snapshot: dict[str, Any]) -> str:
         writer.writerow(["benchmark", "previous_week_index", prev.get("week_index")])
         writer.writerow(["benchmark", "trailing_window_size", trailing.get("window_size")])
     return output.getvalue()
+
 
 def build_pdf(snapshot: dict[str, Any]) -> bytes:
     _sync_core_overrides()
@@ -3791,54 +3814,56 @@ def build_pdf(snapshot: dict[str, Any]) -> bytes:
     doc.build(story)
     return buffer.getvalue()
 
+
 def pdf_filename(show_id: str, season_number: int, generated_at: datetime | None = None) -> str:
     _sync_core_overrides()
     ts = (generated_at or _now_utc()).strftime("%Y%m%d")
     return f"social_report_{show_id}_s{season_number}_{ts}.pdf"
 
+
 _LOCAL_ROOM_NAMES = {
-    'get_week_live_health_snapshot',
-    'get_analytics',
-    'get_comments_coverage',
-    'get_mirror_coverage',
-    'get_week_detail',
-    'get_week_detail_summary_fast',
-    'get_week_detail_summary',
-    'get_tiktok_overview',
-    'get_tiktok_cast_members',
-    'get_tiktok_hashtags',
-    'get_tiktok_sounds',
-    'get_tiktok_content_health',
-    'get_tiktok_sound_detail',
-    'get_tiktok_sound_posts',
-    'get_tiktok_post_detail',
-    'get_tiktok_sentiment_trends',
-    'get_post_comments',
-    'build_csv',
-    'build_pdf',
-    'pdf_filename',
+    "get_week_live_health_snapshot",
+    "get_analytics",
+    "get_comments_coverage",
+    "get_mirror_coverage",
+    "get_week_detail",
+    "get_week_detail_summary_fast",
+    "get_week_detail_summary",
+    "get_tiktok_overview",
+    "get_tiktok_cast_members",
+    "get_tiktok_hashtags",
+    "get_tiktok_sounds",
+    "get_tiktok_content_health",
+    "get_tiktok_sound_detail",
+    "get_tiktok_sound_posts",
+    "get_tiktok_post_detail",
+    "get_tiktok_sentiment_trends",
+    "get_post_comments",
+    "build_csv",
+    "build_pdf",
+    "pdf_filename",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    'get_week_live_health_snapshot',
-    'get_analytics',
-    'get_comments_coverage',
-    'get_mirror_coverage',
-    'get_week_detail',
-    'get_week_detail_summary_fast',
-    'get_week_detail_summary',
-    'get_tiktok_overview',
-    'get_tiktok_cast_members',
-    'get_tiktok_hashtags',
-    'get_tiktok_sounds',
-    'get_tiktok_content_health',
-    'get_tiktok_sound_detail',
-    'get_tiktok_sound_posts',
-    'get_tiktok_post_detail',
-    'get_tiktok_sentiment_trends',
-    'get_post_comments',
-    'build_csv',
-    'build_pdf',
-    'pdf_filename',
+    "get_week_live_health_snapshot",
+    "get_analytics",
+    "get_comments_coverage",
+    "get_mirror_coverage",
+    "get_week_detail",
+    "get_week_detail_summary_fast",
+    "get_week_detail_summary",
+    "get_tiktok_overview",
+    "get_tiktok_cast_members",
+    "get_tiktok_hashtags",
+    "get_tiktok_sounds",
+    "get_tiktok_content_health",
+    "get_tiktok_sound_detail",
+    "get_tiktok_sound_posts",
+    "get_tiktok_post_detail",
+    "get_tiktok_sentiment_trends",
+    "get_post_comments",
+    "build_csv",
+    "build_pdf",
+    "pdf_filename",
 ]

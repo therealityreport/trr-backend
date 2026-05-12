@@ -25,8 +25,7 @@ from trr_backend.socials.instagram.request_client import (
 # ---------- Bug #5: 401 is not retryable ----------
 
 
-def _fake_response(status_code: int, *, headers: dict[str, str] | None = None,
-                   text: str = "") -> SimpleNamespace:
+def _fake_response(status_code: int, *, headers: dict[str, str] | None = None, text: str = "") -> SimpleNamespace:
     return SimpleNamespace(
         status_code=status_code,
         headers=headers or {"content-type": "text/html"},
@@ -77,8 +76,7 @@ def test_bug7_skip_validation_returns_passing_tuple() -> None:
         cookies, session_account_id=None, require_validation=False
     )
     assert validated is True, (
-        "Bug #7: when validation is skipped, the cookies should be treated as "
-        "passing (True), not as invalid (False)"
+        "Bug #7: when validation is skipped, the cookies should be treated as passing (True), not as invalid (False)"
     )
     assert reason == "validation_skipped"
     assert category == "validation_skipped"
@@ -88,8 +86,9 @@ def test_bug7_skip_validation_returns_passing_tuple() -> None:
 # ---------- Bug #8: identity_pool does not mutate in filter predicate ----------
 
 
-def _make_identity(session_id: str, *, age: float = 0.0, retired: bool = False,
-                   max_age: float = 100.0) -> InstagramScraperIdentity:
+def _make_identity(
+    session_id: str, *, age: float = 0.0, retired: bool = False, max_age: float = 100.0
+) -> InstagramScraperIdentity:
     return InstagramScraperIdentity(
         session_id=session_id,
         generation=1,

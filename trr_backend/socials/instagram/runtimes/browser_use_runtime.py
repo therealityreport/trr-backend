@@ -74,14 +74,12 @@ class BrowserUseRuntime:
     # Steady-state methods: intentionally unsupported.
     async def fetch_profile(self, username: str) -> ProfileInfo:
         raise RuntimeUnsupported(
-            "BrowserUseRuntime is auth-recovery only; profile fetching must "
-            "route through Scrapling/Crawlee/crawl4ai."
+            "BrowserUseRuntime is auth-recovery only; profile fetching must route through Scrapling/Crawlee/crawl4ai."
         )
 
     async def fetch_posts(self, username: str, *, limit: int) -> list[Post]:
         raise RuntimeUnsupported(
-            "BrowserUseRuntime is auth-recovery only; post fetching must "
-            "route through Scrapling/Crawlee/crawl4ai."
+            "BrowserUseRuntime is auth-recovery only; post fetching must route through Scrapling/Crawlee/crawl4ai."
         )
 
     async def fetch_post_detail(self, shortcode: str) -> PostDetail:

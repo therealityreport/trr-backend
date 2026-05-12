@@ -55,9 +55,7 @@ class CrawleeRuntime:
         payload = await asyncio.to_thread(scraper.fetch_profile_info, username)
         user = (payload or {}).get("data", {}).get("user") or {}
         if not user:
-            raise RuntimeUnsupported(
-                f"CrawleeRuntime returned empty profile payload for {username}"
-            )
+            raise RuntimeUnsupported(f"CrawleeRuntime returned empty profile payload for {username}")
         return ProfileInfo(
             username=str(user.get("username") or username),
             user_id=str(user.get("id") or ""),
@@ -65,9 +63,7 @@ class CrawleeRuntime:
             biography=(user.get("biography") or None),
             follower_count=_safe_int(user.get("edge_followed_by", {}).get("count")),
             following_count=_safe_int(user.get("edge_follow", {}).get("count")),
-            post_count=_safe_int(
-                user.get("edge_owner_to_timeline_media", {}).get("count")
-            ),
+            post_count=_safe_int(user.get("edge_owner_to_timeline_media", {}).get("count")),
             is_private=bool(user.get("is_private")),
             is_verified=bool(user.get("is_verified")),
         )
@@ -75,11 +71,7 @@ class CrawleeRuntime:
     async def fetch_posts(self, username: str, *, limit: int) -> list[Post]:
         scraper = self._ensure_scraper()
         payload = await asyncio.to_thread(scraper.fetch_posts_graphql, username)
-        connection = (
-            (payload or {})
-            .get("data", {})
-            .get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
-        )
+        connection = (payload or {}).get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
         edges = (connection.get("edges") or [])[:limit]
         posts: list[Post] = []
         for edge in edges:

@@ -122,13 +122,14 @@ def _catalog_posts_runtime_additive_payload(
     run_id: str,
     run_config: Mapping[str, Any],
     job_rows: Sequence[Mapping[str, Any]],
+    fast: bool = False,
 ) -> dict[str, Any]:
     if _normalize_social_account_profile_platform(platform) != "instagram":
         return {}
 
     pagination_state = (
         run_config.get("pagination_state")
-        if isinstance(run_config.get("pagination_state"), dict)
+        if fast or isinstance(run_config.get("pagination_state"), dict)
         else latest_instagram_profile_pagination_state(
             account_handle=account_handle,
             source_scope=str(run_config.get("source_scope") or "network"),
@@ -254,6 +255,7 @@ def _build_catalog_terminal_progress_payload(
     platform: str,
     account_handle: str,
     recent_log_limit: int,
+    fast: bool = False,
 ) -> dict[str, Any]:
     payload = _build_terminal_catalog_run_progress_payload(
         run_row=run_row,
@@ -278,6 +280,7 @@ def _build_catalog_terminal_progress_payload(
             run_id=run_id,
             run_config=run_config,
             job_rows=job_rows,
+            fast=fast,
         )
     )
     payload["launch_group_id"] = str(run_config.get("launch_group_id") or "").strip() or None
@@ -323,7 +326,9 @@ def _build_catalog_terminal_progress_payload(
         payload["repair_status"] = repair_status
         payload["repairable_reason"] = repairable_reason
         payload["auto_resume_pending"] = bool(run_config.get(_RUN_AUTH_REPAIR_AUTO_RESUME_PENDING_KEY))
-        payload["resume_stage"] = str(run_config.get(_RUN_AUTH_REPAIR_RESUME_STAGE_KEY) or "").strip().lower() or "posts"
+        payload["resume_stage"] = (
+            str(run_config.get(_RUN_AUTH_REPAIR_RESUME_STAGE_KEY) or "").strip().lower() or "posts"
+        )
         payload["repair_environment"] = repair_environment
         diagnostics = _metadata_dict(payload.get("run_diagnostics"))
         payload["run_diagnostics"] = {
@@ -467,6 +472,7 @@ def get_social_account_catalog_run_progress(
                     platform=normalized_platform,
                     account_handle=normalized_account,
                     recent_log_limit=safe_recent_log_limit,
+                    fast=fast,
                 )
             raise ValueError("run_not_found")
 
@@ -479,6 +485,7 @@ def get_social_account_catalog_run_progress(
             platform=normalized_platform,
             account_handle=normalized_account,
             recent_log_limit=safe_recent_log_limit,
+            fast=True,
         )
 
     repaired_run_config = _repair_finalizing_catalog_launch_after_jobs(
@@ -548,6 +555,7 @@ def get_social_account_catalog_run_progress(
             platform=normalized_platform,
             account_handle=normalized_account,
             recent_log_limit=safe_recent_log_limit,
+            fast=False,
         )
 
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
@@ -935,11 +943,12 @@ def get_social_account_catalog_run_progress(
     }
     return payload
 
+
 _LOCAL_ROOM_NAMES = {
-    'get_social_account_catalog_run_progress',
+    "get_social_account_catalog_run_progress",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    'get_social_account_catalog_run_progress',
+    "get_social_account_catalog_run_progress",
 ]

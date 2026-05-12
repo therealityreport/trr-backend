@@ -923,8 +923,7 @@ def _extract_repost_count(node: dict[str, Any]) -> int | None:
 
 def _detect_comment_sample_keys(node: dict[str, Any]) -> list[str]:
     normalized_keys = {
-        sample.raw_data.get("_inline_sample_source_key")
-        for sample in _extract_inline_comment_samples(node)
+        sample.raw_data.get("_inline_sample_source_key") for sample in _extract_inline_comment_samples(node)
     }
     keys = [key for key in _COMMENT_SAMPLE_KEYS if key in node and key not in normalized_keys]
     comments_edge = node.get("edge_media_to_comment")

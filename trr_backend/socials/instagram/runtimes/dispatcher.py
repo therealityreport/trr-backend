@@ -59,8 +59,7 @@ class InstagramRuntimeDispatcher:
                 try:
                     self._cache[name] = factory()
                 except Exception:  # noqa: BLE001 - construction best-effort
-                    logger.warning("instagram runtime %s failed to construct", name,
-                                   exc_info=True)
+                    logger.warning("instagram runtime %s failed to construct", name, exc_info=True)
                     continue
             runtime = self._cache[name]
             health = runtime.healthcheck()
@@ -78,9 +77,7 @@ class InstagramRuntimeDispatcher:
             except RuntimeUnsupported as exc:
                 last_unsupported = exc
                 continue
-        raise RuntimeUnsupported(
-            f"no runtime supports fetch_profile({username!r}): {last_unsupported}"
-        )
+        raise RuntimeUnsupported(f"no runtime supports fetch_profile({username!r}): {last_unsupported}")
 
     async def fetch_posts(self, username: str, *, limit: int) -> list[Post]:
         last_unsupported: RuntimeUnsupported | None = None
@@ -90,9 +87,7 @@ class InstagramRuntimeDispatcher:
             except RuntimeUnsupported as exc:
                 last_unsupported = exc
                 continue
-        raise RuntimeUnsupported(
-            f"no runtime supports fetch_posts({username!r}, limit={limit}): {last_unsupported}"
-        )
+        raise RuntimeUnsupported(f"no runtime supports fetch_posts({username!r}, limit={limit}): {last_unsupported}")
 
     async def fetch_post_detail(self, shortcode: str) -> PostDetail:
         last_unsupported: RuntimeUnsupported | None = None
@@ -102,6 +97,4 @@ class InstagramRuntimeDispatcher:
             except RuntimeUnsupported as exc:
                 last_unsupported = exc
                 continue
-        raise RuntimeUnsupported(
-            f"no runtime supports fetch_post_detail({shortcode!r}): {last_unsupported}"
-        )
+        raise RuntimeUnsupported(f"no runtime supports fetch_post_detail({shortcode!r}): {last_unsupported}")

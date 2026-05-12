@@ -5,8 +5,8 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-from scripts.socials.verify_shared_account_catalog import parse_args
 from scripts.socials import verify_shared_account_catalog as cli
+from scripts.socials.verify_shared_account_catalog import parse_args
 
 
 def test_parse_args_defaults() -> None:

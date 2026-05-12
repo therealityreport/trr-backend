@@ -77,9 +77,7 @@ def _upgrade_profile_avatar_url_variant(value: Any) -> str | None:
     host = str(parsed.netloc or "").lower()
     if host and ("fbcdn.net" in host or "facebook.com" in host):
         query_items = [
-            (key, item)
-            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
-            if key.lower() != "stp"
+            (key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "stp"
         ]
         upgraded = urlunparse(
             (parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(query_items), parsed.fragment)

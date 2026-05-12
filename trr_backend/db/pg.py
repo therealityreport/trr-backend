@@ -285,8 +285,10 @@ def _is_transient_transport_error(error: Exception) -> bool:
         "connection reset by peer",
         "connection refused",
         "connection timed out",
+        "could not receive data from server",
         "maxclientsinsessionmode",
         "max clients reached - in session mode",
+        "no route to host",
         "connection pool is closed",
         "pool is closed",
         "terminating connection due to administrator command",
@@ -1053,6 +1055,7 @@ def _get_connection_with_retry(
 @contextmanager
 def db_connection(*, label: str = "write", pool_name: str = "default"):
     pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name=pool_name)
+    discard_connection = False
     try:
         # Pin search_path for the duration of this transaction so pooled connections
         # cannot inherit a prior caller's SET search_path. psycopg2 starts the
@@ -1069,16 +1072,22 @@ def db_connection(*, label: str = "write", pool_name: str = "default"):
                 checkout_id,
                 error,
             )
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        discard_connection = _is_transient_transport_error(error) or isinstance(error, TimeoutError)
+        if not discard_connection:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        should_close = _is_connection_closed(conn) or not _ensure_connection_idle(
-            conn,
-            label=label,
-            phase="return",
+        should_close = (
+            discard_connection
+            or _is_connection_closed(conn)
+            or not _ensure_connection_idle(
+                conn,
+                label=label,
+                phase="return",
+            )
         )
         if should_close:
             try:
@@ -1101,6 +1110,7 @@ def db_read_connection(*, label: str = "read", pool_name: str = "default"):
     pool, conn, checkout_id = _get_connection_with_retry(label=label, pool_name=pool_name)
     previous_autocommit = getattr(conn, "autocommit", False)
     autocommit_restore_failed = False
+    discard_connection = False
     try:
         if not previous_autocommit:
             conn.autocommit = True
@@ -1113,10 +1123,11 @@ def db_read_connection(*, label: str = "read", pool_name: str = "default"):
                 checkout_id,
                 error,
             )
+        discard_connection = _is_transient_transport_error(error) or isinstance(error, TimeoutError)
         raise
     finally:
         try:
-            if not previous_autocommit and not _is_connection_closed(conn):
+            if not discard_connection and not previous_autocommit and not _is_connection_closed(conn):
                 conn.autocommit = previous_autocommit
         except Exception as error:
             autocommit_restore_failed = True
@@ -1128,9 +1139,10 @@ def db_read_connection(*, label: str = "read", pool_name: str = "default"):
             else:
                 logger.exception("[db-pool] autocommit_restore_failed label=%s", label)
         should_close = (
-            autocommit_restore_failed
+            discard_connection
+            or autocommit_restore_failed
             or _is_connection_closed(conn)
-            or not _ensure_connection_idle(conn, label=label, phase="read-return")
+            or (not discard_connection and not _ensure_connection_idle(conn, label=label, phase="read-return"))
         )
         if should_close:
             try:

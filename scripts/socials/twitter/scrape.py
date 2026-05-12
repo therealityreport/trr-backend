@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
+from trr_backend.socials.twitter.ops import persist_cli_search
 from trr_backend.utils.env import load_env
 
 logging.basicConfig(
@@ -338,7 +339,12 @@ Examples:
         _print_root_tweet_summary(root_summary, tweet_id)
 
         tweets = (
-            scraper.fetch_tweet_replies(tweet_id, args.delay)
+            scraper.fetch_tweet_replies(
+                tweet_id,
+                args.delay,
+                search_max_pages=args.max_pages or 20,
+                twikit_max_pages=args.max_pages or 5,
+            )
             if args.replies
             else scraper.fetch_tweet_quotes(tweet_id, args.delay, max_pages=args.max_pages or 5)
         )
@@ -441,22 +447,18 @@ Examples:
             _print_mirror_summary(tweets)
 
     if args.persist:
-        label = str(args.scrape_query or args.query).strip() or args.query
-        persist_summary = persist_standalone_twitter_search(
+        persist_summary = persist_cli_search(
             tweets,
             raw_query=args.query,
-            normalized_search_query=config.build_search_query(),
-            scrape_query_label=label,
-            window_start_day=config.window_start_day(),
-            window_end_day_exclusive=config.window_end_day_exclusive(),
-            requested_via="cli",
+            config=config,
             retrieval_meta=dict(getattr(scraper, "last_retrieval_meta", {}) or {}),
-            complete=bool(getattr(scraper, "last_retrieval_meta", {}).get("complete")),
+            persist_search=persist_standalone_twitter_search,
+            scrape_query_label=args.scrape_query,
         )
         _print_persist_summary(persist_summary)
         logger.info(
             "Persisted Twitter search run with scrape_query=%r and run_id=%r",
-            label,
+            persist_summary.get("scrape_query_label"),
             persist_summary.get("scrape_run_id"),
         )
 
