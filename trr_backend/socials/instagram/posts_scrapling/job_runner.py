@@ -146,9 +146,7 @@ def _posts_proxy_session_key(
     browser_account_id: str | None,
 ) -> str:
     account = (
-        _normalize_proxy_session_part(account_handle)
-        or _normalize_proxy_session_part(browser_account_id)
-        or "unknown"
+        _normalize_proxy_session_part(account_handle) or _normalize_proxy_session_part(browser_account_id) or "unknown"
     )
     normalized_stage = _normalize_proxy_session_part(stage) or "posts_scrapling"
 
@@ -341,9 +339,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         bidirectional_reverse_error = reverse_stop_reason
                         break
 
-                    page_ids = {
-                        identity for post in result.posts if (identity := _posts_node_identity(post))
-                    }
+                    page_ids = {identity for post in result.posts if (identity := _posts_node_identity(post))}
                     overlap = bool(page_ids & forward_seen_post_ids)
                     if result.posts:
                         persisted = persist_instagram_posts(

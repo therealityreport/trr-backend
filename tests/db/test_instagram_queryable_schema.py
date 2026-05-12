@@ -5,10 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = REPO_ROOT / "supabase/migrations/20260428145222_instagram_queryable_profile_schema.sql"
-COMMENT_PHASE_MIGRATION = (
-    REPO_ROOT
-    / "supabase/migrations/20260505173000_instagram_comment_api_phase_metadata.sql"
-)
+COMMENT_PHASE_MIGRATION = REPO_ROOT / "supabase/migrations/20260505173000_instagram_comment_api_phase_metadata.sql"
 
 
 def _read_sql() -> str:

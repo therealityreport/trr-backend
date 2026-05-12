@@ -149,3 +149,47 @@ def test_load_comment_target_metadata_uses_catalog_collaborator_fallback(
     assert metadata["profile_match_mode"] == "catalog_collaborator"
     assert metadata["is_collaborator_post"] is True
     assert metadata["is_collaborator"] is True
+    assert metadata["has_collaborators"] is True
+
+
+def test_load_comment_target_metadata_marks_authored_posts_with_collaborators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+
+    def fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "shortcode": "DTRdpWtjbz5",
+                "materialized_post_id": "post-1",
+                "source_account": "thetraitorsus",
+                "username": "thetraitorsus",
+                "owner_username": "thetraitorsus",
+                "collaborators": [
+                    {"username": "johnnygweir"},
+                    {"username": "nbcsports"},
+                    {"username": "taralipinski"},
+                ],
+                "collaborators_detail": [],
+                "media_type": "video",
+                "product_type": "clips",
+                "profile_source_surface": "materialized",
+                "profile_match_mode": "profile_source_account",
+                "catalog_collaborator_handle": None,
+            }
+        ]
+
+    monkeypatch.setattr(jr.pg, "fetch_all", fake_fetch_all)
+
+    metadata_by_shortcode = jr._load_comment_target_metadata(
+        account_handle="@thetraitorsus",
+        target_source_ids=["DTRdpWtjbz5"],
+    )
+
+    metadata = metadata_by_shortcode["DTRdpWtjbz5"]
+    assert metadata["original_author"] == "thetraitorsus"
+    assert metadata["collaborator_handles"] == ["johnnygweir", "nbcsports", "taralipinski"]
+    assert metadata["is_collaborator_post"] is False
+    assert metadata["is_collaborator"] is False
+    assert metadata["has_collaborators"] is True
+    assert _target_metadata_indicates_coauthor(metadata) is True

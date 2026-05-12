@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-SUPPORTED_SOURCE_SCOPES = ("bravo", "creator", "community")
+SUPPORTED_SOURCE_SCOPES = ("network", "news", "creator", "community", "bravo")
 SUPPORTED_ACTIONS = ("backfill", "sync_recent", "sync_newer", "fill_missing_posts", "fill_missing_photos")
 SUPPORTED_SELECTED_TASKS = ("post_details", "comments", "media")
 LOCAL_SCRIPT_LABEL = "local-script:local_catalog_action.py"
@@ -31,7 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--account", required=True, help="Social handle, for example bravotv")
     parser.add_argument(
         "--source-scope",
-        default="bravo",
+        default="network",
         choices=SUPPORTED_SOURCE_SCOPES,
         help="Shared account source scope",
     )

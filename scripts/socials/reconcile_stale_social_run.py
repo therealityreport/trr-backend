@@ -287,8 +287,7 @@ def execute_run_cleanup(run_id: str) -> CleanupPlan:
                 when %s in ('completed', 'failed') then coalesce(completed_at, now())
                 else completed_at
               end,
-              summary = coalesce(summary, '{}'::jsonb) || %s::jsonb,
-              updated_at = now()
+              summary = coalesce(summary, '{}'::jsonb) || %s::jsonb
             where id::text = %s
             """,
             [

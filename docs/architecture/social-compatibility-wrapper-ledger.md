@@ -38,6 +38,7 @@ Current extraction status:
 | `_scrape_shared_twitter_posts()` in `trr_backend.socials.social_season_analytics_impl` | `trr_backend.socials.twitter.posts_catalog` | Shared-account catalog orchestration still enters through the legacy monolith wrapper. | Direct callers use `trr_backend.socials.twitter.posts_catalog.scrape_shared_twitter_posts`, and wrapper delegation tests are the only remaining wrapper references. | `rg -n "_scrape_shared_twitter_posts|twitter\\.posts_catalog" trr_backend api tests scripts`; Twitter posts catalog tests. | Twitter/X posts catalog |
 | `_scrape_shared_facebook_posts()` in `trr_backend.socials.social_season_analytics_impl` | `trr_backend.socials.facebook.posts_catalog` | Shared-account catalog orchestration still enters through the legacy monolith wrapper. | Direct callers use `trr_backend.socials.facebook.posts_catalog.scrape_shared_facebook_posts`, and wrapper delegation tests are the only remaining wrapper references. | `rg -n "_scrape_shared_facebook_posts|facebook\\.posts_catalog" trr_backend api tests scripts`; Facebook posts catalog tests. | Facebook posts catalog |
 | `_scrape_shared_threads_posts()` in `trr_backend.socials.social_season_analytics_impl` | `trr_backend.socials.threads.posts_catalog` | Shared-account catalog orchestration still enters through the legacy monolith wrapper; this is separate from the `threads_posts_scrapling` claimed-job lane. | Direct callers use `trr_backend.socials.threads.posts_catalog.scrape_shared_threads_posts`, and wrapper delegation tests are the only remaining wrapper references. | `rg -n "_scrape_shared_threads_posts|threads\\.posts_catalog" trr_backend api tests scripts`; Threads posts catalog tests. | Threads posts catalog |
+| `_scrape_shared_youtube_posts()` in `trr_backend.socials.social_season_analytics_impl` | `trr_backend.socials.youtube.posts_catalog` | Shared-account catalog orchestration still enters through the legacy monolith wrapper. This is separate from direct `/youtube/scrape` behavior and script-visible comment/download helpers. | Direct callers use `trr_backend.socials.youtube.posts_catalog.scrape_shared_youtube_posts`, and wrapper diagnostics/delegation tests are the only remaining wrapper references. | `rg -n "_scrape_shared_youtube_posts|youtube\\.posts_catalog" trr_backend api tests scripts`; YouTube catalog diagnostics tests. | YouTube posts catalog |
 
 ## Wrapper Issue List
 
@@ -45,7 +46,7 @@ Current extraction status:
 - `instagram.comments_control`: cannot be deleted until tests and any comments-auth callers patch `pipelines.comments.instagram` directly.
 - `instagram.posts_control`: cannot be deleted until posts-scrapling launch helpers move behind a clearer posts Module and legacy-core `_LOCAL_ROOM_FUNCTIONS` bridges are removed.
 - `account_catalog.*`: cannot be deleted while `control_plane/dispatch.py` or `social_season_analytics_impl.py` imports compatibility submodules for launch, progress, or profile reads.
-- `_scrape_shared_twitter_posts`, `_scrape_shared_facebook_posts`, and `_scrape_shared_threads_posts`: cannot be deleted until shared-account catalog callers move to the platform-local posts catalog Modules. Twitter/X and Facebook should not grow claimed-job lanes as part of this cleanup.
+- `_scrape_shared_twitter_posts`, `_scrape_shared_facebook_posts`, `_scrape_shared_threads_posts`, and `_scrape_shared_youtube_posts`: cannot be deleted until shared-account catalog callers move to the platform-local posts catalog Modules. Twitter/X and Facebook should not grow claimed-job lanes as part of this cleanup.
 
 ## Current Wrapper Evidence
 
@@ -53,6 +54,7 @@ Run from `TRR-Backend`:
 
 ```bash
 rg -n "comments_control|posts_control|account_catalog\\.catalog_launch|account_catalog\\.catalog_progress|account_catalog\\.profile_reads|repositories import social_season_analytics|repositories\\.social_season_analytics" trr_backend api tests scripts
+rg -n "_scrape_shared_twitter_posts|_scrape_shared_facebook_posts|_scrape_shared_threads_posts|_scrape_shared_youtube_posts|twitter\\.posts_catalog|facebook\\.posts_catalog|threads\\.posts_catalog|youtube\\.posts_catalog" trr_backend api tests scripts
 ```
 
 Expected result for this pass: non-empty output. The wrapper ledger remains open until that command is empty for a wrapper group or only points at the deletion test proving the wrapper is absent.

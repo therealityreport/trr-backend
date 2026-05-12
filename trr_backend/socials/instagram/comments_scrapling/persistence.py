@@ -142,8 +142,7 @@ def _load_persisted_instagram_reply_topology(
     reply_parent_match = "reply.parent_comment_id = parent.id"
     if has_parent_external_id:
         reply_parent_match = (
-            "(reply.parent_comment_id = parent.id "
-            "or nullif(reply.parent_comment_external_id, '') = parent.comment_id)"
+            "(reply.parent_comment_id = parent.id or nullif(reply.parent_comment_external_id, '') = parent.comment_id)"
         )
     expected_child_count_expr = (
         "greatest(coalesce(parent.reply_count, 0), coalesce(parent.child_comment_count, 0))"
@@ -191,8 +190,9 @@ def _load_persisted_instagram_reply_topology(
           left join reply_counts on reply_counts.id = parent.id
         )
         """
-    totals = pg.fetch_one(
-        f"""
+    totals = (
+        pg.fetch_one(
+            f"""
         {base_ctes}
         select
           count(*)::int as stored_parent_comments,
@@ -202,9 +202,11 @@ def _load_persisted_instagram_reply_topology(
           count(*) filter (where missing_reply_count > 0)::int as stored_reply_gap_parent_count
         from parent_gaps
         """,
-        [normalized_post_id, normalized_post_id],
-        conn=conn,
-    ) or {}
+            [normalized_post_id, normalized_post_id],
+            conn=conn,
+        )
+        or {}
+    )
     samples = pg.fetch_all(
         f"""
         {base_ctes}
@@ -511,7 +513,9 @@ def _persist_without_season_context(
             "raw_data": (
                 raw_data_for_write(comment_obj)
                 if callable(raw_data_for_write)
-                else comment_obj.to_dict() if hasattr(comment_obj, "to_dict") else {}
+                else comment_obj.to_dict()
+                if hasattr(comment_obj, "to_dict")
+                else {}
             ),
             "season_id": None,
             "source_account": account_handle,
@@ -549,13 +553,9 @@ def _persist_without_season_context(
             )
         # Phase 2: write Apify-source owner-metadata columns when present.
         if has_comment_url:
-            payload["comment_url"] = (
-                str(getattr(comment_obj, "comment_url", "") or "").strip() or None
-            )
+            payload["comment_url"] = str(getattr(comment_obj, "comment_url", "") or "").strip() or None
         if has_author_fbid_v2:
-            payload["author_fbid_v2"] = (
-                str(getattr(comment_obj, "owner_fbid_v2", "") or "").strip() or None
-            )
+            payload["author_fbid_v2"] = str(getattr(comment_obj, "owner_fbid_v2", "") or "").strip() or None
         if has_author_is_mentionable:
             payload["author_is_mentionable"] = getattr(comment_obj, "owner_is_mentionable", None)
         if has_author_is_private:
@@ -601,11 +601,7 @@ def _persist_without_season_context(
         preserve_ranked = getattr(repo, "_preserve_existing_ranked_instagram_comment_values", None)
         if callable(preserve_ranked) and write_baseline:
             preserve_ranked(batch, write_baseline)
-        batch_changed = (
-            count_new_or_changed(batch, write_baseline)
-            if callable(count_new_or_changed)
-            else None
-        )
+        batch_changed = count_new_or_changed(batch, write_baseline) if callable(count_new_or_changed) else None
         rows = (
             repo._pg_upsert_many(
                 "instagram_comments",

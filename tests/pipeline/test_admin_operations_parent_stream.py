@@ -19,21 +19,26 @@ def _decode_sse_payload(chunk: str) -> tuple[str, dict]:
 
 
 def test_finalize_sub_operation_keeps_parent_running_while_sibling_active() -> None:
-    with patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_operation",
-        return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "show_core"},
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "aggregate_parent_status",
-        return_value="running",
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "update_operation_status",
-    ) as update_status, patch.object(
-        admin_ops_pipeline.admin_operations,
-        "append_operation_event",
-    ) as append_event:
+    with (
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_operation",
+            return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "show_core"},
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "aggregate_parent_status",
+            return_value="running",
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "update_operation_status",
+        ) as update_status,
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "append_operation_event",
+        ) as append_event,
+    ):
         result = admin_ops_pipeline.finalize_sub_operation("child-1", "failed")
 
     assert result == "running"
@@ -42,28 +47,34 @@ def test_finalize_sub_operation_keeps_parent_running_while_sibling_active() -> N
 
 
 def test_finalize_sub_operation_marks_parent_failed_after_all_children_finish() -> None:
-    with patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_operation",
-        return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "show_core"},
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "aggregate_parent_status",
-        return_value="failed",
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_sub_operations",
-        return_value=[
-            {"refresh_target": "show_core", "status": "failed"},
-            {"refresh_target": "links", "status": "completed"},
-        ],
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "update_operation_status",
-    ) as update_status, patch.object(
-        admin_ops_pipeline.admin_operations,
-        "append_operation_event",
-    ) as append_event:
+    with (
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_operation",
+            return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "show_core"},
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "aggregate_parent_status",
+            return_value="failed",
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_sub_operations",
+            return_value=[
+                {"refresh_target": "show_core", "status": "failed"},
+                {"refresh_target": "links", "status": "completed"},
+            ],
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "update_operation_status",
+        ) as update_status,
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "append_operation_event",
+        ) as append_event,
+    ):
         result = admin_ops_pipeline.finalize_sub_operation("child-1", "failed")
 
     assert result == "failed"
@@ -78,14 +89,17 @@ def test_finalize_sub_operation_marks_parent_failed_after_all_children_finish() 
 
 
 def test_wait_for_sub_operation_dependencies_treats_missing_dependencies_as_satisfied() -> None:
-    with patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_operation",
-        return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "links"},
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_sub_operations",
-        return_value=[],
+    with (
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_operation",
+            return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "links"},
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_sub_operations",
+            return_value=[],
+        ),
     ):
         result = admin_ops_pipeline.wait_for_sub_operation_dependencies(
             "child-1",
@@ -97,14 +111,17 @@ def test_wait_for_sub_operation_dependencies_treats_missing_dependencies_as_sati
 
 
 def test_wait_for_sub_operation_dependencies_returns_false_when_dependency_fails() -> None:
-    with patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_operation",
-        return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "links"},
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_sub_operations",
-        return_value=[{"refresh_target": "show_core", "status": "failed"}],
+    with (
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_operation",
+            return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "links"},
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_sub_operations",
+            return_value=[{"refresh_target": "show_core", "status": "failed"}],
+        ),
     ):
         result = admin_ops_pipeline.wait_for_sub_operation_dependencies(
             "child-1",
@@ -116,14 +133,17 @@ def test_wait_for_sub_operation_dependencies_returns_false_when_dependency_fails
 
 
 def test_wait_for_sub_operation_dependencies_returns_true_when_dependencies_complete() -> None:
-    with patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_operation",
-        return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "links"},
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "get_sub_operations",
-        return_value=[{"refresh_target": "show_core", "status": "completed"}],
+    with (
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_operation",
+            return_value={"id": "child-1", "parent_operation_id": "parent-1", "refresh_target": "links"},
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "get_sub_operations",
+            return_value=[{"refresh_target": "show_core", "status": "completed"}],
+        ),
     ):
         result = admin_ops_pipeline.wait_for_sub_operation_dependencies(
             "child-1",
@@ -178,14 +198,17 @@ def test_parent_operation_stream_generator_keeps_stream_open_until_all_children_
 
     monkeypatch.setattr(admin_ops_pipeline.asyncio, "sleep", _noop_sleep)
 
-    with patch.object(
-        admin_ops_pipeline.admin_operations,
-        "stream_sub_operation_events_after_seq",
-        side_effect=stream_batches,
-    ), patch.object(
-        admin_ops_pipeline.admin_operations,
-        "aggregate_parent_status",
-        side_effect=aggregate_statuses,
+    with (
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "stream_sub_operation_events_after_seq",
+            side_effect=stream_batches,
+        ),
+        patch.object(
+            admin_ops_pipeline.admin_operations,
+            "aggregate_parent_status",
+            side_effect=aggregate_statuses,
+        ),
     ):
         chunks = asyncio.run(_collect())
 

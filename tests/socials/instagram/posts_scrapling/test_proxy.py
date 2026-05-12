@@ -28,6 +28,7 @@ def test_select_posts_proxy_explicit_url(monkeypatch):
 def test_select_posts_proxy_decodo(monkeypatch):
     """DECODO credentials → dict-based browser proxy + URL-encoded API proxy."""
     monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", "decodo")
     monkeypatch.setenv("DECODO_USERNAME", "user1")
     monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
@@ -44,9 +45,22 @@ def test_select_posts_proxy_decodo(monkeypatch):
     assert result.session_mode == "rotating"
 
 
+def test_select_posts_proxy_ignores_decodo_credentials_without_provider(monkeypatch):
+    """Decodo creds alone should not move the posts warmup onto a proxy."""
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", raising=False)
+    monkeypatch.setenv("DECODO_USERNAME", "user1")
+    monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    from trr_backend.socials.instagram.posts_scrapling.proxy import select_posts_proxy
+
+    assert select_posts_proxy() is None
+
+
 def test_select_posts_proxy_decodo_sticky_session(monkeypatch):
     """Sticky session env should scope both browser and http transports to one proxy identity."""
     monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", "decodo")
     monkeypatch.setenv("DECODO_USERNAME", "user1")
     monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
@@ -156,6 +170,7 @@ def test_resolve_posts_scrapling_session(monkeypatch):
     mock_auth = MagicMock()
     mock_auth.cookies = {"sessionid": "abc123", "csrftoken": "xyz"}
     mock_auth.browser_account_id = "test_account"
+    mock_auth.session_account_id = "test_account"
 
     monkeypatch.setattr(
         "trr_backend.socials.instagram.posts_scrapling.session.resolve_instagram_auth_session",

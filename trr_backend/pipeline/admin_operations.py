@@ -940,10 +940,7 @@ def finalize_sub_operation(operation_id: str, status: str) -> str | None:
 
         # Emit parent-level terminal event
         children = admin_operations.get_sub_operations(parent_id)
-        summary = {
-            c.get("refresh_target", "unknown"): c.get("status", "unknown")
-            for c in children
-        }
+        summary = {c.get("refresh_target", "unknown"): c.get("status", "unknown") for c in children}
         admin_operations.append_operation_event(
             parent_id,
             event_type="complete" if parent_status == "completed" else "error",
@@ -955,7 +952,9 @@ def finalize_sub_operation(operation_id: str, status: str) -> str | None:
         )
         logger.info(
             "Parent operation finalized: parent_id=%s status=%s summary=%s",
-            parent_id, parent_status, summary,
+            parent_id,
+            parent_status,
+            summary,
         )
 
     return parent_status
@@ -989,11 +988,7 @@ def wait_for_sub_operation_dependencies(
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         siblings = admin_operations.get_sub_operations(parent_id)
-        dep_statuses = {
-            s["refresh_target"]: s["status"]
-            for s in siblings
-            if s.get("refresh_target") in deps
-        }
+        dep_statuses = {s["refresh_target"]: s["status"] for s in siblings if s.get("refresh_target") in deps}
 
         # All deps completed → proceed
         if all(st == "completed" for st in dep_statuses.values()):
@@ -1003,7 +998,8 @@ def wait_for_sub_operation_dependencies(
         if any(st in ("failed", "cancelled") for st in dep_statuses.values()):
             logger.warning(
                 "Sub-operation dependency failed: operation_id=%s target=%s failed_deps=%s",
-                operation_id, target,
+                operation_id,
+                target,
                 [t for t, s in dep_statuses.items() if s in ("failed", "cancelled")],
             )
             return False
@@ -1023,6 +1019,8 @@ def wait_for_sub_operation_dependencies(
 
     logger.error(
         "Sub-operation dependency wait timed out: operation_id=%s target=%s timeout=%s",
-        operation_id, target, timeout_seconds,
+        operation_id,
+        target,
+        timeout_seconds,
     )
     return False

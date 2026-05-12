@@ -56,8 +56,8 @@ def build_social_ingest_health_dot(status_payload: dict[str, Any]) -> dict[str, 
 
 
 def _build_live_status_payload_uncached() -> dict[str, Any]:
-    from trr_backend.repositories import admin_operations as admin_operations_repo
     import trr_backend.socials.social_season_analytics_impl as social_core
+    from trr_backend.repositories import admin_operations as admin_operations_repo
 
     try:
         queue_status = social_core.get_queue_status(

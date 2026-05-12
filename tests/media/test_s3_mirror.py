@@ -1170,7 +1170,7 @@ def test_mirror_url_to_s3_falls_back_to_ytdlp_for_twitter_video(monkeypatch: pyt
         batch_path = cmd[cmd.index("--batch-file") + 1]
         batch_paths.append(batch_path)
         assert os.path.exists(batch_path) is True
-        with open(batch_path, "r", encoding="utf-8") as handle:
+        with open(batch_path, encoding="utf-8") as handle:
             assert handle.read().strip() == tweet_url
         return fake_proc
 
@@ -1260,7 +1260,7 @@ def test_mirror_url_to_s3_accepts_ytdlp_retry_when_object_already_exists(monkeyp
 
     def _fake_subprocess_run(cmd, **kwargs):  # noqa: ANN001, ARG005
         batch_path = cmd[cmd.index("--batch-file") + 1]
-        with open(batch_path, "r", encoding="utf-8") as handle:
+        with open(batch_path, encoding="utf-8") as handle:
             assert handle.read().strip() == tweet_url
         return fake_proc
 

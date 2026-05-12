@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts._workspace_runtime_env import apply_workspace_runtime_env
+from scripts._workspace_runtime_env import apply_workspace_runtime_env  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

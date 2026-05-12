@@ -159,6 +159,8 @@ _SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = (
 )
 _SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ("yt-dlp",)
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
+    "TRR_DB_POOL_MINCONN": "1",
+    "TRR_DB_POOL_MAXCONN": "4",
     "TRR_JOB_PLANE_MODE": "remote",
     "TRR_LONG_JOB_ENFORCE_REMOTE": "1",
     "TRR_REMOTE_EXECUTOR": "modal",
@@ -502,6 +504,35 @@ def probe_instagram_posts_auth(account_handle: str) -> dict[str, object]:
     payload.update(
         {
             "platform": "instagram",
+            "ready": status == "valid",
+            "execution_backend": "modal",
+        }
+    )
+    return payload
+
+
+@app.function(
+    name=str(os.getenv("TRR_MODAL_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION") or "probe_instagram_comments_auth").strip()
+    or "probe_instagram_comments_auth",
+    image=_FUNCTION_IMAGE_BINDINGS["run_social_comments_job"],
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+)
+def probe_instagram_comments_auth(account_handle: str, shortcode: str) -> dict[str, object]:
+    from trr_backend.socials.pipelines.comments.instagram import _probe_instagram_comments_endpoint_for_launch
+
+    payload = dict(
+        _probe_instagram_comments_endpoint_for_launch(
+            account_handle=account_handle,
+            shortcode=shortcode,
+        )
+    )
+    status = str(payload.get("status") or payload.get("result") or "").strip().lower()
+    payload.update(
+        {
+            "platform": "instagram",
+            "account_handle": account_handle,
             "ready": status == "valid",
             "execution_backend": "modal",
         }

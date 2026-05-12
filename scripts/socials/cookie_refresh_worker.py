@@ -77,8 +77,10 @@ def run_worker(
     elif cookie_age_days is not None and cookie_age_days >= max(1, int(max_cookie_age_days)):
         trigger_reason_codes.append("cookie_age_exceeded")
 
-    needs_repair = bool(repair_signal.get("needs_repair")) or ("cookie_age_exceeded" in trigger_reason_codes) or (
-        "cookie_age_unknown" in trigger_reason_codes
+    needs_repair = (
+        bool(repair_signal.get("needs_repair"))
+        or ("cookie_age_exceeded" in trigger_reason_codes)
+        or ("cookie_age_unknown" in trigger_reason_codes)
     )
 
     payload: dict[str, Any] = {

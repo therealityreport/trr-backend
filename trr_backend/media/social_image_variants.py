@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from PIL import Image, ImageOps
 
@@ -117,7 +118,9 @@ def generate_social_cover_display_variants(
             for fmt in ("webp", "jpeg"):
                 encoded, content_type, ext = _encode_image(variant_image, fmt)
                 manifest_key = f"{base_key}_{fmt}"
-                storage_key = f"{prefix}/{safe_hash}/{manifest_key}.{ext}" if prefix else f"{safe_hash}/{manifest_key}.{ext}"
+                storage_key = (
+                    f"{prefix}/{safe_hash}/{manifest_key}.{ext}" if prefix else f"{safe_hash}/{manifest_key}.{ext}"
+                )
                 s3_client.put_object(
                     Bucket=bucket,
                     Key=storage_key,

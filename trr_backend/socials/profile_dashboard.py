@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any
 
 from trr_backend.socials.pipelines.account_catalog.progress import get_social_account_catalog_run_progress

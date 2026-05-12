@@ -7,7 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-
 REQUIRED_COLUMNS = {
     "workload",
     "owner",
@@ -163,12 +162,21 @@ def validate(args: argparse.Namespace) -> list[str]:
             if not row.get("drop_sql_if_approved", "").startswith("DROP INDEX CONCURRENTLY IF EXISTS"):
                 errors.append(prefix + "approved drop SQL must use DROP INDEX CONCURRENTLY IF EXISTS")
             if idx_scan == 0 and not stats_sufficient and "owner_canary_risk_accepted" not in notes:
-                errors.append(prefix + "zero-scan approval requires 7-day stats window or owner_canary_risk_accepted note")
+                errors.append(
+                    prefix + "zero-scan approval requires 7-day stats window or owner_canary_risk_accepted note"
+                )
 
         if status == "excluded" and approved:
-            if not {"integrity_replacement_proof", "replacement_verified"} & labels and "explicit_integrity_proof" not in notes:
+            if (
+                not {"integrity_replacement_proof", "replacement_verified"} & labels
+                and "explicit_integrity_proof" not in notes
+            ):
                 errors.append(prefix + "excluded rows cannot be approved without explicit replacement/integrity proof")
-        if status == "defer:idx_scan_nonzero" and decision not in {"keep_because_nonzero_usage", "keep_current_index", "replace_with_better_index"}:
+        if status == "defer:idx_scan_nonzero" and decision not in {
+            "keep_because_nonzero_usage",
+            "keep_current_index",
+            "replace_with_better_index",
+        }:
             if "nonzero_exception_evidence" not in notes:
                 errors.append(prefix + "nonzero-usage row has unsupported decision without exception evidence")
         if status == "defer:idx_scan_nonzero" and approved and "nonzero_exception_evidence" not in notes:

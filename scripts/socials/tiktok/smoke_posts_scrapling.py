@@ -18,6 +18,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+# Add project root to path (scripts/socials/tiktok -> project root)
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
+from trr_backend.socials.tiktok.ops import run_posts_scrapling_smoke
 
 
 def main() -> int:
@@ -26,50 +32,14 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=1, help="Max API pages to fetch")
     args = parser.parse_args()
 
-    from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as repo
-    from trr_backend.socials.tiktok.posts_scrapling.job_runner import (
-        run_tiktok_posts_scrapling_job,
-    )
-
-    account = args.account.strip().lower().lstrip("@")
-    run_config = {
-        "platform": "tiktok",
-        "stage": repo.TIKTOK_POSTS_SCRAPLING_STAGE,
-        "account": account,
-    }
-    # scrape_runs.status check constraint allows only:
-    # queued | running | completed | failed | cancelled
-    # For manual smoke tests we use 'queued' to seed the row, then the runner
-    # updates it to 'running' when it claims work and 'completed'/'failed' at the end.
-    run_id = repo._create_run(
-        None,
-        source_scope="bravo",
-        initiated_by="manual_smoke",
-        config=run_config,
-        status="queued",
-    )
-    job_id = repo._create_job(
-        None,
-        run_id=run_id,
-        platform="tiktok",
-        source_scope="bravo",
-        job_type="posts",
-        stage=repo.TIKTOK_POSTS_SCRAPLING_STAGE,
-        config={
-            **run_config,
-            "max_pages": args.max_pages,
-        },
-        initiated_by="manual_smoke",
-        status="queued",
-    )
-    job = pg.fetch_one("select * from social.scrape_jobs where id = %s::uuid", [job_id])
-    if not job:
-        print(f"ERROR: job {job_id} not found in social.scrape_jobs", file=sys.stderr)
+    result = run_posts_scrapling_smoke(account=args.account, max_pages=args.max_pages)
+    run_id = result.get("run_id")
+    job_id = result.get("job_id")
+    if result.get("status") == "missing_job":
+        print(f"ERROR: {result.get('error_message')}", file=sys.stderr)
         return 1
 
     print(f"Created run={run_id}, job={job_id}. Running...")
-    result = run_tiktok_posts_scrapling_job(job)
     status = result.get("status", "unknown")
     items = result.get("items_found")
     print(f"Status: {status}")

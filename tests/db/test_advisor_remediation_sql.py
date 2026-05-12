@@ -3,12 +3,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SECURITY_MIGRATION = REPO_ROOT / "supabase/migrations/20260428110000_security_hotfix_public_migrations_rpc_exec.sql"
 RLS_MIGRATION = REPO_ROOT / "supabase/migrations/20260428111000_advisor_rls_policy_cleanup.sql"
 EXTERNAL_ID_CONFLICTS_PK_MIGRATION = (
     REPO_ROOT / "supabase/migrations/20260428112000_advisor_external_id_conflicts_primary_key.sql"
+)
+SECURITY_FOLLOWUP_MIGRATION = (
+    REPO_ROOT / "supabase/migrations/20260511195828_supabase_security_advisor_default_deny_and_search_path.sql"
 )
 FLASHBACK_GAMEPLAY_REMOVAL_MIGRATION = (
     REPO_ROOT / "supabase/migrations/20260428113000_remove_flashback_gameplay_write_path.sql"
@@ -193,6 +195,29 @@ def test_external_id_conflicts_primary_key_migration_adds_defaulted_surrogate_ke
     assert "add constraint external_id_conflicts_pkey primary key (id)" in sql
     assert "grant " not in sql
     assert "drop index" not in sql
+
+
+def test_security_followup_is_default_deny_and_search_path_only() -> None:
+    sql = _read(SECURITY_FOLLOWUP_MIGRATION).lower()
+
+    assert "n.nspname in ('admin', 'core', 'firebase_surveys', 'public', 'social')" in sql
+    assert "'auth'" not in sql
+    assert "'storage'" not in sql
+    assert "'realtime'" not in sql
+    assert "as restrictive for all to public using (false) with check (false)" in sql
+    assert "alter function %i.%i(%s) set search_path = core, public, pg_temp" in sql
+    assert "alter function %i.%i(%s) set search_path = social, core, public, pg_temp" in sql
+    assert "alter function %i.%i(%s) set search_path = public, pg_temp" in sql
+
+    for forbidden in (
+        " grant ",
+        " revoke ",
+        " disable row level security",
+        " drop table",
+        " drop index",
+        " alter extension",
+    ):
+        assert forbidden not in sql
 
 
 def test_flashback_gameplay_removal_drops_only_disabled_write_path() -> None:

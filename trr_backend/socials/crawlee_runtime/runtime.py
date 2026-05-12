@@ -193,15 +193,11 @@ def _run_coroutine(coro: Any, *, join_timeout_seconds: float | None = None) -> A
             except Exception:  # noqa: BLE001
                 pass
         thread.join(timeout=1.0)
-        raise TimeoutError(
-            f"Crawlee runtime coroutine exceeded join timeout ({effective_join_timeout_seconds}s)"
-        )
+        raise TimeoutError(f"Crawlee runtime coroutine exceeded join timeout ({effective_join_timeout_seconds}s)")
     if "error" in payload:
         raise payload["error"]
     if payload.get("cancelled"):
-        raise TimeoutError(
-            f"Crawlee runtime coroutine exceeded join timeout ({effective_join_timeout_seconds}s)"
-        )
+        raise TimeoutError(f"Crawlee runtime coroutine exceeded join timeout ({effective_join_timeout_seconds}s)")
     return payload.get("result")
 
 

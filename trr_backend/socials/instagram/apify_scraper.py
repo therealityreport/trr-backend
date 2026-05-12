@@ -35,9 +35,7 @@ def _get_apify_client():
 
     token = os.environ.get("APIFY_API_TOKEN", "").strip()
     if not token:
-        raise RuntimeError(
-            "APIFY_API_TOKEN is not set. Add it to .env to use the Apify backfill."
-        )
+        raise RuntimeError("APIFY_API_TOKEN is not set. Add it to .env to use the Apify backfill.")
     return ApifyClient(token)
 
 
@@ -152,31 +150,37 @@ def normalize_apify_post(raw: dict[str, Any]) -> dict[str, Any]:
     # Latest comments
     latest_comments = []
     for comment in raw.get("latestComments") or []:
-        latest_comments.append({
-            "id": comment.get("id"),
-            "text": comment.get("text", ""),
-            "username": comment.get("ownerUsername", ""),
-            "timestamp": comment.get("timestamp"),
-            "likes_count": comment.get("likesCount", 0),
-            "replies_count": comment.get("repliesCount", 0),
-        })
+        latest_comments.append(
+            {
+                "id": comment.get("id"),
+                "text": comment.get("text", ""),
+                "username": comment.get("ownerUsername", ""),
+                "timestamp": comment.get("timestamp"),
+                "likes_count": comment.get("likesCount", 0),
+                "replies_count": comment.get("repliesCount", 0),
+            }
+        )
 
     # Tagged users
     tagged_users = []
     for tagged in raw.get("taggedUsers") or []:
-        tagged_users.append({
-            "username": tagged.get("username", ""),
-            "full_name": tagged.get("full_name", ""),
-            "is_verified": tagged.get("is_verified", False),
-        })
+        tagged_users.append(
+            {
+                "username": tagged.get("username", ""),
+                "full_name": tagged.get("full_name", ""),
+                "is_verified": tagged.get("is_verified", False),
+            }
+        )
 
     # Co-author producers
     coauthors = []
     for coauthor in raw.get("coauthorProducers") or []:
-        coauthors.append({
-            "username": coauthor.get("username", ""),
-            "is_verified": coauthor.get("is_verified", False),
-        })
+        coauthors.append(
+            {
+                "username": coauthor.get("username", ""),
+                "is_verified": coauthor.get("is_verified", False),
+            }
+        )
 
     return {
         "source": "apify",

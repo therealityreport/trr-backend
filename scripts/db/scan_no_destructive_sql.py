@@ -6,7 +6,6 @@ import re
 import sys
 from pathlib import Path
 
-
 DESTRUCTIVE_SQL_RE = re.compile(r"\b(?:DROP|CREATE)\s+INDEX(?:\s+CONCURRENTLY)?\b", re.IGNORECASE)
 DEFAULT_REVIEW_FILES = {
     "docs/workspace/unused-index-decision-matrix-2026-04-28.md",

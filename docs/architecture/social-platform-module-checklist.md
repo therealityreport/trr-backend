@@ -22,6 +22,9 @@ schema, route, payload, stage, worker-lane, or persisted-row changes.
 
 ## TikTok Posts Current Review Points
 
+- Direct admin scrape/preview ownership lives in
+  `trr_backend/socials/tiktok/direct_scrape.py`. That Module is distinct from
+  `posts_scrapling/` and must not import `trr_backend.repositories.social_season_analytics`.
 - `trr_backend/socials/tiktok/jobs.py` owns the `tiktok_posts_scrapling` claimed-job handler registration.
 - `trr_backend/socials/tiktok/posts_scrapling/session.py`, `proxy.py`, `fetcher.py`, `persistence.py`, and `job_runner.py` already form the expected posts lane shape.
 - `scripts/socials/tiktok/smoke_posts_scrapling.py` is the operator smoke script; it still imports legacy repository helpers to seed runs/jobs.
@@ -67,6 +70,19 @@ may add platform-local batch adapters only after those parity checks pass.
 
 ## Threads, Twitter/X, And Facebook Current Review Points
 
+- Direct admin scrape/preview/search ownership lives in platform
+  `direct_scrape.py` Modules:
+  - `trr_backend/socials/twitter/direct_scrape.py` for Twitter/X search,
+    replies, quotes, media mirror flags, retrieval metadata, and standalone
+    persistence summary shaping.
+  - `trr_backend/socials/facebook/direct_scrape.py` for Facebook page scrape,
+    search-posts, preview, scrape-post, comments/shares flags, engagement DTO
+    shaping, and auth readiness boundaries.
+  - `trr_backend/socials/threads/direct_scrape.py` for Threads direct scrape
+    and preview.
+- Direct scrape Modules are route-facing platform Interfaces. They may accept
+  auth loader callbacks from the router, but they must not import
+  `trr_backend.repositories.social_season_analytics`.
 - Threads has two separate Modules: `trr_backend/socials/threads/posts_scrapling/`
   for the claimed-job lifecycle lane and `trr_backend/socials/threads/posts_catalog/`
   for shared-account catalog orchestration. Do not merge their Interfaces.
@@ -82,6 +98,53 @@ may add platform-local batch adapters only after those parity checks pass.
 - Catalog metadata golden fixtures live under
   `tests/fixtures/socials/run_metadata/*_catalog_metadata_golden.json`; update
   them when intentionally changing stable retrieval metadata field names.
+
+## YouTube Current Review Points
+
+- Direct admin scrape ownership lives in
+  `trr_backend/socials/youtube/direct_scrape.py`.
+- Keep `trr_backend/socials/youtube/api_client.py`,
+  `trr_backend/socials/youtube/crawlee_adapter.py`, and
+  `trr_backend/socials/youtube/media_resolver.py` as distinct platform
+  adapters. Do not force a Scrapling-shaped abstraction onto YouTube.
+- YouTube comment behavior is preservation-only where already route-visible or
+  script-visible. Do not add a new route, payload, scrape stage, worker lane, or
+  persistence contract as part of this cleanup.
+
+## Current Direct Scrape Dependency Map
+
+The main integrator owns `api/routers/socials/__init__.py`, this checklist, and
+`social-compatibility-wrapper-ledger.md`. Platform workers own only their
+platform Module and focused tests.
+
+| Platform | Direct route surface | Platform owner | Separate lanes/wrappers | Focused tests |
+| --- | --- | --- | --- | --- |
+| TikTok | `/tiktok/scrape`, `/tiktok/preview/{username}` | `trr_backend/socials/tiktok/direct_scrape.py` | `posts_scrapling/` remains the claimed-job posts lane; comments ingestion remains blocked. | `tests/api/routers/test_socials_tiktok_preview.py`, `tests/api/routers/test_socials_tiktok_scrape.py`, `tests/socials/tiktok/` |
+| Twitter/X | `/twitter/search`, `/twitter/replies`, `/twitter/quotes` | `trr_backend/socials/twitter/direct_scrape.py` | `posts_catalog/` owns shared-account catalog; no Twitter/X worker lane in this cleanup. | `tests/api/routers/test_socials_twitter_admin_routes.py`, `tests/api/routers/test_twitter_persist_endpoint.py`, `tests/socials/test_twitter_*`, `tests/socials/twitter/` |
+| Facebook | `/facebook/scrape`, `/facebook/search-posts`, `/facebook/preview/{page_handle}`, `/facebook/scrape-post` | `trr_backend/socials/facebook/direct_scrape.py` | `posts_catalog/` owns shared-account catalog; no Facebook worker lane in this cleanup. | `tests/api/routers/test_socials_facebook.py`, `tests/socials/test_facebook_*`, `tests/socials/facebook/` |
+| Threads | `/threads/scrape`, `/threads/preview/{username}` | `trr_backend/socials/threads/direct_scrape.py` | `posts_catalog/` and `posts_scrapling/` stay separate from direct scrape. | `tests/socials/test_threads_scraper.py`, `tests/socials/threads/` |
+| YouTube | `/youtube/scrape` | `trr_backend/socials/youtube/direct_scrape.py` | `posts_catalog/` owns shared-account catalog diagnostics; API/Crawlee/media adapters stay distinct. | `tests/socials/youtube/`, `tests/repositories/test_youtube_catalog_backfill_diagnostics.py` |
+
+## Operator Script Adapter Boundaries
+
+Current status: reusable script behavior has a platform-local owner when the
+current call graph proves reuse.
+
+- TikTok reusable diagnostics and posts-Scrapling smoke execution live in
+  `trr_backend/socials/tiktok/ops.py`. `scripts/socials/tiktok/scrape.py` and
+  `scripts/socials/tiktok/smoke_posts_scrapling.py` remain CLI/output adapters.
+- Twitter/X CLI search persistence handoff lives in
+  `trr_backend/socials/twitter/ops.py`. The script still owns argument parsing,
+  auth loading, preview printing, and CSV/JSON output.
+- YouTube ad hoc download directory resolution and `yt-dlp` download execution
+  live in `trr_backend/socials/youtube/ops.py`; the scrape script keeps only
+  route-visible scrape/comment CLI behavior and output formatting.
+- `scripts/socials/run_rhoslc_threads_full_refresh.py` remains a one-off RHOSLC
+  remediation workflow. Current `rg` evidence shows no tests or second operator
+  path reusing it, so no permanent `threads/ops.py` API was created.
+- `scripts/socials/cleanup_youtube_false_positives.py` remains a remediation
+  workflow. It was not absorbed into `youtube/ops.py` because current reuse is
+  limited to the script itself.
 
 ## Twitter/Facebook/Threads Batch-Upsert Checklist
 

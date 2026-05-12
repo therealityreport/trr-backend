@@ -8,9 +8,9 @@ def test_apply_workspace_runtime_env_maps_workspace_values(tmp_path) -> None:
     workspace_root = tmp_path
     (workspace_root / ".logs" / "workspace").mkdir(parents=True)
     (workspace_root / ".logs" / "workspace" / "pids.env").write_text(
-        'WORKSPACE_TRR_JOB_PLANE_MODE=remote\n'
-        'WORKSPACE_TRR_REMOTE_EXECUTOR=modal\n'
-        'WORKSPACE_TRR_MODAL_ENABLED=1\n'
+        "WORKSPACE_TRR_JOB_PLANE_MODE=remote\n"
+        "WORKSPACE_TRR_REMOTE_EXECUTOR=modal\n"
+        "WORKSPACE_TRR_MODAL_ENABLED=1\n"
         'WORKSPACE_TRR_MODAL_APP_NAME="trr-backend-jobs"\n'
         "WORKSPACE_TRR_MODAL_SOCIAL_JOB_FUNCTION=run_social_job\n",
         encoding="utf-8",

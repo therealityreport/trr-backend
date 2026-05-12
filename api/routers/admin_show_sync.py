@@ -3757,6 +3757,7 @@ def refresh_show_stream(
             continue
 
         if target == "credits_pipeline":
+            operation_id_header = str(request.headers.get("x-trr-admin-operation-id") or "").strip() or None
             steps.extend(
                 [
                     (
@@ -3793,10 +3794,7 @@ def refresh_show_stream(
                     (
                         "credits_pipeline",
                         "bio_sync",
-                        lambda sid=show_id_str,
-                        local_db=db,
-                        local_admin=admin,
-                        operation_id=(str(request.headers.get("x-trr-admin-operation-id") or "").strip() or None): (
+                        lambda sid=show_id_str, local_db=db, local_admin=admin, operation_id=operation_id_header: (
                             lambda result_and_members: (
                                 credits_pipeline_context.update({"members": result_and_members[1]}),
                                 result_and_members[0],
@@ -3832,20 +3830,18 @@ def refresh_show_stream(
                     (
                         "credits_pipeline",
                         "media_ingest",
-                        lambda sid=show_id_str,
-                        row=show_row,
-                        local_db=db,
-                        local_admin=admin,
-                        operation_id=(
-                            str(request.headers.get("x-trr-admin-operation-id") or "").strip() or None
-                        ): _run_media_ingest_phase(
-                            show_id_str=sid,
-                            show_row=row,
-                            db=local_db,
-                            admin_user=local_admin,
-                            operation_id=operation_id,
-                            members=credits_pipeline_context.get("members"),
-                            progress_callback=lambda current, total, message: _set_live_script_output(message),
+                        (
+                            lambda sid=show_id_str, row=show_row, local_db=db, local_admin=admin, operation_id=operation_id_header: (  # noqa: E501
+                                _run_media_ingest_phase(
+                                    show_id_str=sid,
+                                    show_row=row,
+                                    db=local_db,
+                                    admin_user=local_admin,
+                                    operation_id=operation_id,
+                                    members=credits_pipeline_context.get("members"),
+                                    progress_callback=lambda current, total, message: _set_live_script_output(message),
+                                )
+                            )
                         ),
                         "media",
                         "mixed",

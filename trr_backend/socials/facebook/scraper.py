@@ -614,7 +614,8 @@ class FacebookScraper:
             context = self._shared_skip_cookies_context if skip_cookies else self._shared_context
             if context is not None:
                 return self._fetch_page_in_context(
-                    context, url,
+                    context,
+                    url,
                     delay_seconds=delay_seconds,
                     wait_for_spa=wait_for_spa,
                 )
@@ -636,7 +637,8 @@ class FacebookScraper:
             else:
                 browser, context = self._new_playwright_context(playwright, referer=referer)
             html_text = self._fetch_page_in_context(
-                context, url,
+                context,
+                url,
                 delay_seconds=delay_seconds,
                 wait_for_spa=wait_for_spa,
             )

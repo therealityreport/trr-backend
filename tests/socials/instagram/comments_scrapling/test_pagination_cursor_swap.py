@@ -58,8 +58,8 @@ def test_extract_top_level_page_returns_alt_cursor_when_both_directions_present(
         next_min_id="42",
         next_max_id="99",
     )
-    rows, has_more, primary_cursor, primary_param, alt_cursor, alt_param = (
-        comments_fetcher._extract_top_level_page(payload, response)
+    rows, has_more, primary_cursor, primary_param, alt_cursor, alt_param = comments_fetcher._extract_top_level_page(
+        payload, response
     )
     assert rows == []
     assert has_more is True
@@ -78,8 +78,8 @@ def test_extract_top_level_page_no_alt_when_only_one_cursor_present():
         next_min_id="42",
         next_max_id=None,
     )
-    rows, has_more, primary_cursor, primary_param, alt_cursor, alt_param = (
-        comments_fetcher._extract_top_level_page(payload, response)
+    rows, has_more, primary_cursor, primary_param, alt_cursor, alt_param = comments_fetcher._extract_top_level_page(
+        payload, response
     )
     assert has_more is True
     assert primary_cursor == "42"
@@ -94,8 +94,8 @@ def test_extract_top_level_page_handles_no_more_pages():
         has_more_comments=False,
         has_more_headload_comments=False,
     )
-    rows, has_more, primary_cursor, primary_param, alt_cursor, alt_param = (
-        comments_fetcher._extract_top_level_page(payload, response)
+    rows, has_more, primary_cursor, primary_param, alt_cursor, alt_param = comments_fetcher._extract_top_level_page(
+        payload, response
     )
     assert has_more is False
     assert primary_cursor is None
@@ -214,9 +214,7 @@ def test_extract_reply_page_returns_alt_cursor_when_both_directions_present():
         next_min="m1",
         next_max="m9",
     )
-    rows, primary_cursor, primary_param, alt_cursor, alt_param = (
-        comments_fetcher._extract_reply_page(payload, response)
-    )
+    rows, primary_cursor, primary_param, alt_cursor, alt_param = comments_fetcher._extract_reply_page(payload, response)
     assert rows == []
     assert primary_cursor == "m1"
     assert primary_param == "min_id"
@@ -232,9 +230,7 @@ def test_extract_reply_page_no_alt_when_single_direction():
         next_min=None,
         next_max="m9",
     )
-    rows, primary_cursor, primary_param, alt_cursor, alt_param = (
-        comments_fetcher._extract_reply_page(payload, response)
-    )
+    rows, primary_cursor, primary_param, alt_cursor, alt_param = comments_fetcher._extract_reply_page(payload, response)
     assert primary_cursor == "m9"
     assert primary_param == "max_id"
     assert alt_cursor is None

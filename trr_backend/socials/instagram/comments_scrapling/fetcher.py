@@ -83,12 +83,16 @@ _COMMENT_RATE_LIMIT_COOLDOWN_MULTIPLIER_DEFAULT = 2.0
 _REPLY_CHECKPOINT_MAX_ITEMS_DEFAULT = 25
 _REPLY_CHECKPOINT_STRING_MAX_LENGTH = 256
 _CHALLENGE_RESPONSE_SAMPLE_MAX = 12
+_TRANSPORT_FAILURE_SAMPLE_MAX = 12
 _BROWSER_API_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_BROWSER_API_FALLBACK"
 _BROWSER_API_FALLBACK_ON_429_ENV = "SOCIAL_INSTAGRAM_COMMENTS_BROWSER_API_FALLBACK_ON_429"
 _BROWSER_API_FALLBACK_ON_429_ATTEMPT_ENV = "SOCIAL_INSTAGRAM_COMMENTS_BROWSER_API_FALLBACK_ON_429_ATTEMPT"
-_COMMENTS_ENDPOINT_PROBE_TIMEOUT_SECONDS_DEFAULT = 20.0
+_COMMENTS_ENDPOINT_PROBE_TIMEOUT_SECONDS_DEFAULT = 60.0
 _REVEAL_HIDDEN_COMMENTS_ENV = "SOCIAL_INSTAGRAM_COMMENTS_REVEAL_HIDDEN"
 _REVEAL_HIDDEN_COMMENTS_WITHOUT_EXPECTED_ENV = "SOCIAL_INSTAGRAM_COMMENTS_REVEAL_HIDDEN_WITHOUT_EXPECTED"
+_AUTH_RENDERED_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_AUTH_RENDERED_FALLBACK"
+_AUTH_RELAY_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_AUTH_RELAY_FALLBACK"
+_RENDERED_REPLY_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_RENDERED_REPLY_FALLBACK"
 _COAUTHOR_AUTH_RENDERED_FALLBACK_ENV = "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_AUTH_RENDERED_FALLBACK"
 _WARMUP_COOKIE_ONLY_ON_AUTH_ENV = "SOCIAL_INSTAGRAM_COMMENTS_WARMUP_COOKIE_ONLY_ON_AUTH"
 _HIDDEN_COMMENTS_CLICK_LIMIT_DEFAULT = 4
@@ -96,7 +100,8 @@ _HIDDEN_UNAVAILABLE_GAP_MAX_DEFAULT = 1
 _HIDDEN_UNAVAILABLE_GAP_RATIO_DEFAULT = 0.0
 _COAUTHOR_STATUS_ONLY_CLICK_LIMIT_DEFAULT = 8
 _COAUTHOR_STATUS_ONLY_SCROLL_LIMIT_DEFAULT = 8
-_COAUTHOR_RENDERED_FALLBACK_VERSION = "2026-05-05.coauthor-rendered-dom-v2"
+_COAUTHOR_RENDERED_FALLBACK_VERSION = "2026-05-06.coauthor-rendered-dom-v3"
+BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 _COMMENTS_LOAD_STRATEGY_CURSOR_API = "cursor_api"
 _COMMENTS_LOAD_STRATEGY_SINGLE_SESSION_LOAD_ALL = "single_session_load_all"
 _COMMENTS_LOAD_STRATEGIES = frozenset(
@@ -126,6 +131,7 @@ _POST_CHILD_COMMENTS_GRAPHQL_DOC_ATTEMPTS = (
 )
 _POST_CHILD_COMMENTS_GRAPHQL_PAGE_SIZE = 12
 _POST_CHILD_COMMENTS_GRAPHQL_MAX_PAGES = 10
+_POST_CHILD_COMMENTS_GRAPHQL_ZERO_COUNT_PROBE_LIMIT = 20
 _GRAPHQL_COAUTHOR_SOURCE_SNAPSHOT_TYPE = "graphql_coauthor_preview_comments"
 _RELAY_COAUTHOR_SOURCE_SNAPSHOT_TYPE = "graphql_coauthor_relay_comments"
 _TERMINAL_MISSING_CLASSIFIED_REASON = "coverage_terminal_missing_classified"
@@ -143,6 +149,7 @@ _POST_COMMENTS_CONTAINER_QUERY_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def normalize_comments_load_strategy(value: Any) -> str:
     normalized = str(value or _COMMENTS_LOAD_STRATEGY_CURSOR_API).strip().lower()
@@ -472,6 +479,7 @@ def _compact_rendered_dom_snapshot_diagnostics(value: Any) -> dict[str, Any]:
         "candidateProfileAnchors",
         "reservedProfileAnchors",
         "rowTextMismatchAnchors",
+        "permalinkFallbackRows",
         "longRowAnchors",
         "emptyRowAnchors",
         "clickedControls",
@@ -480,11 +488,7 @@ def _compact_rendered_dom_snapshot_diagnostics(value: Any) -> dict[str, Any]:
         "error",
         "errorStack",
     }
-    compact: dict[str, Any] = {
-        key: value.get(key)
-        for key in allowed_scalar_keys
-        if value.get(key) is not None
-    }
+    compact: dict[str, Any] = {key: value.get(key) for key in allowed_scalar_keys if value.get(key) is not None}
     samples = value.get("rowTextSamples")
     if isinstance(samples, list):
         compact["rowTextSamples"] = [str(sample)[:180] for sample in samples[:3]]
@@ -588,9 +592,7 @@ def _extract_rendered_dom_snapshot_comments(
 
     valid_rows: list[Mapping[str, Any]] = [row for row in rows if isinstance(row, Mapping)]
     row_left_values = [
-        left
-        for left in (_coerce_rendered_dom_row_left(row) for row in valid_rows)
-        if left is not None and left > 50
+        left for left in (_coerce_rendered_dom_row_left(row) for row in valid_rows) if left is not None and left > 50
     ]
     base_left = min(row_left_values) if row_left_values else None
     reply_indent_threshold = 20
@@ -804,7 +806,7 @@ def _graphql_comment_to_instagram_comment(
         "child"
         if is_reply or parent_comment_id
         else str(phase or first_present("phase", "comment_phase", "commentPhase", "source_phase") or "").strip()
-        or None
+        or "parent"
     )
     child_comment_count = _safe_non_negative_int(
         first_present("child_comment_count", "childCommentCount", "repliesCount", "reply_count", "replies_count")
@@ -829,9 +831,7 @@ def _graphql_comment_to_instagram_comment(
         replies=replies,
         owner_full_name=str(owner.get("full_name") or owner.get("fullName") or "").strip() or None,
         owner_profile_pic_url=str(owner.get("profile_pic_url") or owner.get("profilePicUrl") or "").strip() or None,
-        owner_profile_pic_url_hd=str(
-            owner.get("profile_pic_url_hd") or owner.get("profilePicUrlHd") or ""
-        ).strip()
+        owner_profile_pic_url_hd=str(owner.get("profile_pic_url_hd") or owner.get("profilePicUrlHd") or "").strip()
         or None,
         owner_is_verified=bool(owner.get("is_verified")) if "is_verified" in owner else None,
         post_shortcode=normalized_shortcode,
@@ -990,11 +990,7 @@ def _extract_graphql_connection_comments(
     source_snapshot_type: str = _RELAY_COAUTHOR_SOURCE_SNAPSHOT_TYPE,
 ) -> tuple[list[InstagramComment], dict[str, Any]]:
     data = payload.get("data")
-    connection = (
-        data.get("xdt_api__v1__media__media_id__comments__connection")
-        if isinstance(data, Mapping)
-        else None
-    )
+    connection = data.get("xdt_api__v1__media__media_id__comments__connection") if isinstance(data, Mapping) else None
     if not isinstance(connection, Mapping):
         return [], {"payload_shape": _payload_shape(payload), "connection_found": False}
 
@@ -1457,9 +1453,19 @@ def _target_metadata_indicates_coauthor(target_metadata: Mapping[str, Any] | Non
             return True
     if source_account and selected_profile and source_account != selected_profile:
         return True
-    if source_account and owner_username and owner_username != source_account and source_account in collaborator_handles:
+    if (
+        source_account
+        and owner_username
+        and owner_username != source_account
+        and source_account in collaborator_handles
+    ):
         return True
-    if profile_for_match and post_username and post_username != profile_for_match and profile_for_match in collaborator_handles:
+    if (
+        profile_for_match
+        and post_username
+        and post_username != profile_for_match
+        and profile_for_match in collaborator_handles
+    ):
         return True
     return bool(profile_for_match and profile_for_match in collaborator_handles and (owner_username or post_username))
 
@@ -1470,6 +1476,8 @@ def _status_only_fetch_reason(target_metadata: Mapping[str, Any] | None) -> str:
         if _target_metadata_indicates_coauthor(target_metadata)
         else "comments_endpoint_status_only"
     )
+
+
 _REPLY_PAGINATION_KEYS = frozenset(
     {
         "has_more_tail_child_comments",
@@ -1889,7 +1897,97 @@ def _status_only_missing_classification(
 
 def _auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
-    return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login"))
+    return any(token in normalized for token in ("login", "checkpoint", "challenge", "accounts/login")) or (
+        _browser_session_invalidated_text(normalized)
+    )
+
+
+def _browser_session_invalidated_text(text: str) -> bool:
+    normalized = html_lib.unescape(str(text or ""))
+    normalized = normalized.replace("\u2018", "'").replace("\u2019", "'")
+    normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "your browser session has been invalidated",
+            "your browser session was invalidated",
+            "session has been invalidated",
+            "session was invalidated",
+            "session invalidated",
+            "browser session invalidated",
+            "this browser session has expired",
+            "this browser session is invalid",
+            "your session is invalid",
+            "session is invalid",
+            "session expired",
+            "session has expired",
+            "this session has expired",
+            "this session is invalid",
+            "your instagram session has expired",
+            "your instagram session is invalid",
+            "please log back in",
+            "please log in again",
+            "please login again",
+            "log in again to continue",
+            "login again to continue",
+            "you must log in again",
+            "you need to log in again",
+            "you've been logged out",
+            "you have been logged out",
+            "you were logged out",
+            "you've been logged out of instagram",
+            "you have been logged out of instagram",
+            "you were logged out of instagram",
+            "we logged you out",
+            "we've logged you out",
+            "we had to log you out",
+            "for your security, we've logged you out",
+            "for your security we logged you out",
+            "logged out of your account",
+            "logged out from your account",
+        )
+    )
+
+
+def _metadata_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "y"}
+    return False
+
+
+def _diagnostic_indicates_browser_session_invalidated(metadata: Any, *, _depth: int = 0) -> bool:
+    if _depth > 4:
+        return False
+    if not isinstance(metadata, Mapping):
+        return False
+    for key, value in metadata.items():
+        normalized_key = str(key or "").strip().casefold()
+        if normalized_key in {"session_invalidated", "browser_session_invalidated"} and _metadata_bool(value):
+            return True
+        if (
+            normalized_key in {"reason", "fetch_reason", "stop_reason", "last_error_code", "error_code"}
+            and str(value or "").strip() == BROWSER_SESSION_INVALIDATED_REASON
+        ):
+            return True
+        if normalized_key == "text_markers" and isinstance(value, Mapping):
+            if _metadata_bool(value.get("session_invalidated")):
+                return True
+        if isinstance(value, Mapping) and _diagnostic_indicates_browser_session_invalidated(
+            value,
+            _depth=_depth + 1,
+        ):
+            return True
+        if isinstance(value, (list, tuple)):
+            for item in value[:8]:
+                if _diagnostic_indicates_browser_session_invalidated(item, _depth=_depth + 1):
+                    return True
+    return False
 
 
 def _safe_url_path(url: Any) -> str | None:
@@ -1994,6 +2092,7 @@ def _challenge_text_markers(text: str) -> dict[str, bool]:
         "lsd_token": '"lsd"' in normalized or '"lsd",[]' in normalized,
         "jazoest": "jazoest" in normalized,
         "fb_dtsg": "fb_dtsg" in normalized,
+        "session_invalidated": _browser_session_invalidated_text(normalized),
     }
 
 
@@ -2201,6 +2300,8 @@ def _document_auth_failure_text(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     if not normalized:
         return False
+    if _browser_session_invalidated_text(normalized):
+        return True
     return any(
         token in normalized
         for token in (
@@ -2442,6 +2543,8 @@ class InstagramCommentsScraplingFetcher:
         self._lane_diagnostics: dict[str, dict[str, Any]] = {}
         self._challenge_response_samples: list[dict[str, Any]] = []
         self._challenge_response_total_count = 0
+        self._transport_failure_samples: list[dict[str, Any]] = []
+        self._transport_failure_total_count = 0
         self._top_level_checkpoints: list[dict[str, Any]] = []
         self._top_level_checkpoint_total_count = 0
         self._top_level_checkpoint_dropped_count = 0
@@ -2535,6 +2638,12 @@ class InstagramCommentsScraplingFetcher:
                 "max_items": _CHALLENGE_RESPONSE_SAMPLE_MAX,
                 "truncated": self._challenge_response_total_count > len(self._challenge_response_samples),
             },
+            "transport_failures": {
+                "samples": list(self._transport_failure_samples),
+                "total_count": self._transport_failure_total_count,
+                "max_items": _TRANSPORT_FAILURE_SAMPLE_MAX,
+                "truncated": self._transport_failure_total_count > len(self._transport_failure_samples),
+            },
             "hidden_comments": {
                 "render_attempts": self._hidden_comments_render_attempts,
                 "rendered_comments": self._hidden_comments_rendered_comments,
@@ -2602,7 +2711,17 @@ class InstagramCommentsScraplingFetcher:
             payload: Any | None = None,
             attempt_count: int | None = None,
             media_id: str | None = None,
+            diagnostic_metadata: Mapping[str, Any] | None = None,
         ) -> dict[str, Any]:
+            response_status = payload.get("status") if isinstance(payload, dict) else None
+            response_message = (
+                payload.get("message") or payload.get("error_message") if isinstance(payload, dict) else None
+            )
+            session_invalidated = (
+                reason == BROWSER_SESSION_INVALIDATED_REASON
+                or _browser_session_invalidated_text(f"{response_status or ''} {response_message or ''}")
+                or _diagnostic_indicates_browser_session_invalidated(diagnostic_metadata)
+            )
             metadata = {
                 "mode": normalized_mode,
                 "shortcode": normalized_shortcode or None,
@@ -2610,6 +2729,7 @@ class InstagramCommentsScraplingFetcher:
                 "status": status,
                 "result": status,
                 "reason": reason,
+                "session_invalidated": session_invalidated,
                 "retryable": bool(retryable),
                 "status_code": status_code,
                 "attempt_count": attempt_count,
@@ -2620,8 +2740,8 @@ class InstagramCommentsScraplingFetcher:
                 "checked_at": datetime.now(UTC).isoformat(),
             }
             if isinstance(payload, dict):
-                metadata["response_status"] = payload.get("status")
-                metadata["response_message"] = payload.get("message") or payload.get("error_message")
+                metadata["response_status"] = response_status
+                metadata["response_message"] = response_message
             self._comments_auth_validation = {key: value for key, value in metadata.items() if value is not None}
             return dict(self._comments_auth_validation)
 
@@ -2657,15 +2777,14 @@ class InstagramCommentsScraplingFetcher:
         reason = str(decoded.get("reason") or "").strip() or None
         diagnostic_metadata = decoded.get("diagnostic_metadata")
         diagnostic_status_code = (
-            diagnostic_metadata.get("status_code")
-            if isinstance(diagnostic_metadata, Mapping)
-            else None
+            diagnostic_metadata.get("status_code") if isinstance(diagnostic_metadata, Mapping) else None
         )
         auth_blocked = bool(decoded.get("auth_failed")) or reason in {
             "redirect_to_login",
             "redirect_to_checkpoint",
             "redirect_to_homepage",
             "html_challenge_or_auth_required",
+            BROWSER_SESSION_INVALIDATED_REASON,
             "checkpoint_required",
             "challenge_required",
             "login_required",
@@ -2702,6 +2821,7 @@ class InstagramCommentsScraplingFetcher:
                 status_code=diagnostic_status_code,
                 payload=payload,
                 attempt_count=int(decoded.get("attempt_count") or 1),
+                diagnostic_metadata=diagnostic_metadata if isinstance(diagnostic_metadata, Mapping) else None,
             )
         return finish(
             "transport_blocked",
@@ -2718,6 +2838,7 @@ class InstagramCommentsScraplingFetcher:
         solve challenges, and bridge cookies into the httpx client."""
         warmup_account = str(self._browser_account_id or "").strip().lower().lstrip("@")
         warmup_url = f"https://www.instagram.com/{warmup_account}/" if warmup_account else "https://www.instagram.com/"
+
         async def continue_with_existing_cookies() -> bool:
             if not _env_truthy("SOCIAL_INSTAGRAM_COMMENTS_WARMUP_COOKIE_ONLY_ON_TRANSPORT", True):
                 return False
@@ -2882,6 +3003,7 @@ class InstagramCommentsScraplingFetcher:
         fetch_failed = False
         auth_failed = False
         fetch_reason: str | None = None
+        browser_session_invalidated_detected = False
         retryable = False
         reply_checkpoints: list[dict[str, Any]] = []
         reply_resume_cursors_by_parent = {
@@ -3032,6 +3154,10 @@ class InstagramCommentsScraplingFetcher:
                 "merged_comments": flattened_comment_count(result.comments),
                 "top_level_comments": parent_comment_count(result.comments),
                 "child_replies": child_reply_count(result.comments),
+                "session_invalidated": (
+                    result.fetch_reason == BROWSER_SESSION_INVALIDATED_REASON
+                    or _diagnostic_indicates_browser_session_invalidated(result.diagnostic_metadata)
+                ),
                 "memory_guardrail": {
                     "max_in_memory_rows": max_in_memory_rows,
                     "current_rows": flattened_comment_count(result.comments),
@@ -3084,6 +3210,16 @@ class InstagramCommentsScraplingFetcher:
             page_fetch_failed = bool(response.get("failed"))
             page_auth_failed = bool(response.get("auth_failed"))
             page_retryable = bool(response.get("retryable"))
+            page_diagnostic_metadata = (
+                response.get("diagnostic_metadata") if isinstance(response.get("diagnostic_metadata"), dict) else None
+            )
+            page_session_invalidated = (
+                page_fetch_reason == BROWSER_SESSION_INVALIDATED_REASON
+                or _diagnostic_indicates_browser_session_invalidated(page_diagnostic_metadata)
+            )
+            if page_session_invalidated:
+                browser_session_invalidated_detected = True
+                fetch_reason = BROWSER_SESSION_INVALIDATED_REASON
             fetch_failed = fetch_failed or page_fetch_failed
             auth_failed = auth_failed or page_auth_failed
             retryable = retryable or page_retryable
@@ -3103,6 +3239,7 @@ class InstagramCommentsScraplingFetcher:
                         observed_comment_count=flattened_comment_count(comments),
                         expected_comment_count=expected_comments,
                         pages_seen=pages_seen,
+                        diagnostic_metadata=page_diagnostic_metadata,
                     )
                 break
             pages_seen += 1
@@ -3185,17 +3322,14 @@ class InstagramCommentsScraplingFetcher:
                     )
                     if graphql_merged_count:
                         logger.info(
-                            "Merged %d GraphQL preview coauthor Instagram comment(s) "
-                            "for status-only shortcode=%s",
+                            "Merged %d GraphQL preview coauthor Instagram comment(s) for status-only shortcode=%s",
                             graphql_merged_count,
                             shortcode,
                         )
                     target_count = _expected_target_count(expected_comments, max_comments)
                     rendered_comments: list[InstagramComment] = []
                     rendered_merged_count = 0
-                    should_try_rendered = (
-                        target_count is None or flattened_comment_count(comments) < target_count
-                    )
+                    should_try_rendered = target_count is None or flattened_comment_count(comments) < target_count
                     if should_try_rendered:
                         rendered_comments = await self._fetch_rendered_coauthor_comments_for_status_only(
                             shortcode,
@@ -3392,6 +3526,14 @@ class InstagramCommentsScraplingFetcher:
                     fetch_failed = fetch_failed or replies_result.fetch_failed
                     auth_failed = auth_failed or replies_result.auth_failed
                     retryable = retryable or replies_result.retryable
+                    if (
+                        replies_result.fetch_reason == BROWSER_SESSION_INVALIDATED_REASON
+                        or _diagnostic_indicates_browser_session_invalidated(
+                            getattr(replies_result, "diagnostic_metadata", None)
+                        )
+                    ):
+                        browser_session_invalidated_detected = True
+                        fetch_reason = BROWSER_SESSION_INVALIDATED_REASON
                     if replies_result.fetch_reason and not fetch_reason:
                         fetch_reason = replies_result.fetch_reason
                     if (
@@ -3473,9 +3615,13 @@ class InstagramCommentsScraplingFetcher:
                             "fb_comments_seen": len(fb_crosspost_rows),
                         },
                     )
-            elif max_comments > 0 and comments_fetched >= max_comments and _payload_has_more_fb_crosspost_comments(
-                payload,
-                response,
+            elif (
+                max_comments > 0
+                and comments_fetched >= max_comments
+                and _payload_has_more_fb_crosspost_comments(
+                    payload,
+                    response,
+                )
             ):
                 fb_crosspost_pagination_incomplete = True
                 self._record_lane_diagnostic(
@@ -3562,8 +3708,7 @@ class InstagramCommentsScraplingFetcher:
                 # has been tried (alt unavailable), preserve the legacy retryable
                 # behavior so the next attempt has a chance to see different cursors.
                 both_directions_attempted = (
-                    "min_id" in cursor_directions_attempted
-                    and "max_id" in cursor_directions_attempted
+                    "min_id" in cursor_directions_attempted and "max_id" in cursor_directions_attempted
                 )
                 if both_directions_attempted:
                     retryable = retryable and not has_gap
@@ -3656,28 +3801,105 @@ class InstagramCommentsScraplingFetcher:
                 reply_tail_deadline=reply_tail_deadline,
             )
             reply_checkpoints.extend(
-                item
-                for item in residual_child_metadata.get("reply_checkpoints", [])
-                if isinstance(item, dict)
+                item for item in residual_child_metadata.get("reply_checkpoints", []) if isinstance(item, dict)
             )
             fetch_failed = fetch_failed or bool(residual_child_metadata.get("fetch_failed"))
             auth_failed = auth_failed or bool(residual_child_metadata.get("auth_failed"))
             retryable = retryable or bool(residual_child_metadata.get("retryable"))
+            if residual_child_metadata.get(
+                "fetch_reason"
+            ) == BROWSER_SESSION_INVALIDATED_REASON or _diagnostic_indicates_browser_session_invalidated(
+                residual_child_metadata
+            ):
+                browser_session_invalidated_detected = True
+                fetch_reason = BROWSER_SESSION_INVALIDATED_REASON
             if residual_child_metadata.get("fetch_reason") and not fetch_reason:
                 fetch_reason = str(residual_child_metadata.get("fetch_reason"))
+
+        if (
+            auth_failed
+            and not reply_only
+            and not single_session_load_all
+            and fetch_reason != BROWSER_SESSION_INVALIDATED_REASON
+            and not browser_session_invalidated_detected
+            and _env_truthy(_AUTH_RELAY_FALLBACK_ENV, True)
+            and (
+                not comments
+                or _has_expected_gap(
+                    expected_comment_count=expected_comments,
+                    max_comments=max_comments,
+                    current_comment_count=flattened_comment_count(comments),
+                )
+            )
+        ):
+            relay_comments, relay_metadata = await self._fetch_public_relay_coauthor_comments_for_status_only(
+                shortcode,
+                post_url,
+                media_id=media_id,
+                expected_comment_count=expected_comments,
+                max_comments=max_comments,
+            )
+            relay_merged_count = _merge_unique_comments(
+                comments,
+                relay_comments,
+                max_comments=max_comments,
+            )
+            relay_recovered_reason = (
+                "coauthor_auth_relay_fallback_recovered"
+                if _target_metadata_indicates_coauthor(target_metadata)
+                else "auth_relay_fallback_recovered"
+            )
+            relay_empty_reason = (
+                "coauthor_auth_relay_fallback_empty"
+                if _target_metadata_indicates_coauthor(target_metadata)
+                else "auth_relay_fallback_empty"
+            )
+            self._record_lane_diagnostic(
+                "relay",
+                shortcode=shortcode,
+                reason=relay_recovered_reason if relay_merged_count else relay_empty_reason,
+                count=flattened_comment_count(relay_comments),
+                metadata={
+                    "merged_comments": relay_merged_count,
+                    "api_fetch_reason": fetch_reason,
+                    "relay_fallback": dict(relay_metadata),
+                },
+            )
+            if relay_merged_count:
+                target_count = _expected_target_count(expected_comments, max_comments)
+                auth_failed = False
+                fetch_reason = relay_recovered_reason
+                if target_count is None or flattened_comment_count(comments) >= target_count:
+                    fetch_failed = False
+                    retryable = False
+                else:
+                    fetch_failed = True
+                    retryable = False
 
         if (
             auth_failed
             and not comments
             and not reply_only
             and not single_session_load_all
-            and _target_metadata_indicates_coauthor(target_metadata)
-            and _env_truthy(_COAUTHOR_AUTH_RENDERED_FALLBACK_ENV, True)
+            and fetch_reason != BROWSER_SESSION_INVALIDATED_REASON
+            and not browser_session_invalidated_detected
+            and (
+                _env_truthy(_AUTH_RENDERED_FALLBACK_ENV, True)
+                or (
+                    _target_metadata_indicates_coauthor(target_metadata)
+                    and _env_truthy(_COAUTHOR_AUTH_RENDERED_FALLBACK_ENV, True)
+                )
+            )
         ):
             rendered_comments = await self._fetch_rendered_coauthor_comments_for_status_only(
                 shortcode,
                 post_url,
                 target_metadata=target_metadata,
+                source_snapshot_type=(
+                    "rendered_coauthor_comments"
+                    if _target_metadata_indicates_coauthor(target_metadata)
+                    else "rendered_auth_fallback_comments"
+                ),
             )
             rendered_merged_count = _merge_unique_comments(
                 comments,
@@ -3685,14 +3907,20 @@ class InstagramCommentsScraplingFetcher:
                 max_comments=max_comments,
             )
             self._coauthor_status_only_merged += rendered_merged_count
+            fallback_reason = (
+                "coauthor_auth_rendered_fallback_recovered"
+                if _target_metadata_indicates_coauthor(target_metadata)
+                else "auth_rendered_fallback_recovered"
+            )
+            empty_fallback_reason = (
+                "coauthor_auth_rendered_fallback_empty"
+                if _target_metadata_indicates_coauthor(target_metadata)
+                else "auth_rendered_fallback_empty"
+            )
             self._record_lane_diagnostic(
                 "rendered",
                 shortcode=shortcode,
-                reason=(
-                    "coauthor_auth_rendered_fallback_recovered"
-                    if rendered_merged_count
-                    else "coauthor_auth_rendered_fallback_empty"
-                ),
+                reason=(fallback_reason if rendered_merged_count else empty_fallback_reason),
                 count=len(rendered_comments),
                 metadata={
                     "merged_comments": rendered_merged_count,
@@ -3701,13 +3929,11 @@ class InstagramCommentsScraplingFetcher:
                 },
             )
             target_count = _expected_target_count(expected_comments, max_comments)
-            if rendered_merged_count and (
-                target_count is None or flattened_comment_count(comments) >= target_count
-            ):
+            if rendered_merged_count and (target_count is None or flattened_comment_count(comments) >= target_count):
                 auth_failed = False
                 fetch_failed = False
                 retryable = False
-                fetch_reason = "coauthor_auth_rendered_fallback_recovered"
+                fetch_reason = fallback_reason
 
         should_reveal_hidden_comments = self._should_reveal_hidden_comments(
             expected_comment_count=expected_comments,
@@ -3740,8 +3966,10 @@ class InstagramCommentsScraplingFetcher:
             }:
                 target_count = _expected_target_count(expected_comments, max_comments)
                 current_flattened_count = flattened_comment_count(comments)
-                if target_count is not None and current_flattened_count >= target_count and not missing_reply_count(
-                    comments
+                if (
+                    target_count is not None
+                    and current_flattened_count >= target_count
+                    and not missing_reply_count(comments)
                 ):
                     fetch_failed = False
                     retryable = False
@@ -3756,9 +3984,7 @@ class InstagramCommentsScraplingFetcher:
             and not auth_failed
             and not single_session_memory_guardrail_reached
         ):
-            has_gap_after_api = (
-                target_count is not None and flattened_comment_count(comments) < target_count
-            )
+            has_gap_after_api = target_count is not None and flattened_comment_count(comments) < target_count
             if status_only_endpoint_detected:
                 single_session_render_trigger = fetch_reason or "comments_endpoint_status_only"
             elif fetch_reason in {
@@ -3852,9 +4078,7 @@ class InstagramCommentsScraplingFetcher:
                     retryable = True
                     if not fetch_reason:
                         fetch_reason = (
-                            "reply_tail_incomplete"
-                            if current_missing_reply_count > 0
-                            else "hidden_comments_unresolved"
+                            "reply_tail_incomplete" if current_missing_reply_count > 0 else "hidden_comments_unresolved"
                         )
 
         if fb_crosspost_pagination_incomplete:
@@ -3953,6 +4177,7 @@ class InstagramCommentsScraplingFetcher:
             "top_level_comments": parent_comment_count(comments),
             "child_replies": child_reply_count(comments),
             "challenge_stop": bool(auth_failed),
+            "session_invalidated": bool(browser_session_invalidated_detected),
             "memory_guardrail": current_memory_guardrail_metadata(),
         }
         if single_session_rendered_metadata:
@@ -4077,11 +4302,7 @@ class InstagramCommentsScraplingFetcher:
                 retryable = retryable or replies_result.retryable
                 if replies_result.fetch_reason and not fetch_reason:
                     fetch_reason = replies_result.fetch_reason
-                if (
-                    replies_result.fetch_failed
-                    and replies_result.retryable
-                    and not replies_result.reply_checkpoints
-                ):
+                if replies_result.fetch_failed and replies_result.retryable and not replies_result.reply_checkpoints:
                     checkpoint = self._record_reply_checkpoint(
                         shortcode=shortcode,
                         media_id=media_id,
@@ -4112,7 +4333,9 @@ class InstagramCommentsScraplingFetcher:
                 fetch_failed = False
                 retryable = False
                 fetch_reason = _TERMINAL_MISSING_CLASSIFIED_REASON
-                reported_count = expected_comment_count or (flattened_comment_count(comments) + unresolved_missing_replies)
+                reported_count = expected_comment_count or (
+                    flattened_comment_count(comments) + unresolved_missing_replies
+                )
                 diagnostic_metadata = {
                     "classified_missing_comments": unresolved_missing_replies,
                     "missing_reason_counts": {
@@ -4274,11 +4497,7 @@ class InstagramCommentsScraplingFetcher:
             metadata["retryable"] = bool(metadata.get("retryable")) or replies_result.retryable
             if replies_result.fetch_reason and not metadata.get("fetch_reason"):
                 metadata["fetch_reason"] = replies_result.fetch_reason
-            if (
-                replies_result.fetch_failed
-                and replies_result.retryable
-                and not replies_result.reply_checkpoints
-            ):
+            if replies_result.fetch_failed and replies_result.retryable and not replies_result.reply_checkpoints:
                 checkpoint = self._record_reply_checkpoint(
                     shortcode=shortcode,
                     media_id=media_id,
@@ -5282,8 +5501,7 @@ class InstagramCommentsScraplingFetcher:
 
         def mode_attempt_summaries() -> list[dict[str, Any]]:
             return [
-                {key: value for key, value in attempt.items() if key != "mode_attempts"}
-                for attempt in mode_attempts
+                {key: value for key, value in attempt.items() if key != "mode_attempts"} for attempt in mode_attempts
             ]
 
         mode_attempts: list[dict[str, Any]] = []
@@ -5397,14 +5615,23 @@ class InstagramCommentsScraplingFetcher:
             minimum=1,
             maximum=500,
         )
+        zero_count_probe_limit = _resolve_positive_int_env(
+            "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_ZERO_COUNT_PROBE_LIMIT",
+            _POST_CHILD_COMMENTS_GRAPHQL_ZERO_COUNT_PROBE_LIMIT,
+            minimum=1,
+            maximum=500,
+        )
         metadata: dict[str, Any] = {
             "attempted": True,
             "page_size": page_size,
             "max_pages": max_pages,
             "parent_limit": parent_limit,
+            "zero_count_probe_limit": zero_count_probe_limit,
+            "zero_count_parent_probes": 0,
             "parent_attempts": 0,
             "parent_attempt_ids": [],
             "parents_with_replies": 0,
+            "parents_skipped_without_reply_gap": 0,
             "fetched_replies": 0,
             "merged_replies": 0,
             "pages": [],
@@ -5421,6 +5648,19 @@ class InstagramCommentsScraplingFetcher:
             parent_comment_id = str(parent.comment_id or "").strip()
             if not parent_comment_id:
                 continue
+            try:
+                expected_replies = max(0, int(getattr(parent, "reply_count", 0) or 0))
+            except (TypeError, ValueError):
+                expected_replies = 0
+            observed_replies = reply_count_observed(parent)
+            if expected_replies > 0 and expected_replies <= observed_replies:
+                metadata["parents_skipped_without_reply_gap"] += 1
+                continue
+            if expected_replies <= 0:
+                if metadata["zero_count_parent_probes"] >= zero_count_probe_limit:
+                    metadata["parents_skipped_without_reply_gap"] += 1
+                    continue
+                metadata["zero_count_parent_probes"] += 1
             metadata["parent_attempts"] += 1
             if len(metadata["parent_attempt_ids"]) < _STATUS_ONLY_METADATA_MAX_ITEMS:
                 metadata["parent_attempt_ids"].append(parent_comment_id)
@@ -5428,10 +5668,10 @@ class InstagramCommentsScraplingFetcher:
                 "child",
                 shortcode=shortcode,
                 reason="coauthor_status_only_child_relay",
-                count=reply_count_observed(parent),
+                count=observed_replies,
                 metadata={
                     "parent_comment_id": parent_comment_id,
-                    "reported_reply_count": getattr(parent, "reply_count", None),
+                    "reported_reply_count": expected_replies,
                 },
             )
             for friendly_name, doc_id in attempts:
@@ -5553,6 +5793,7 @@ class InstagramCommentsScraplingFetcher:
         post_url: str,
         *,
         target_metadata: Mapping[str, Any] | None = None,
+        source_snapshot_type: str = "rendered_coauthor_comments",
     ) -> list[InstagramComment]:
         click_limit = _resolve_positive_int_env(
             "SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_STATUS_ONLY_CLICK_LIMIT",
@@ -5668,9 +5909,7 @@ class InstagramCommentsScraplingFetcher:
                     try:
                         await page.wait_for_timeout(1_200)
                     except Exception:  # noqa: BLE001
-                        await page.evaluate(
-                            "async () => await new Promise((resolve) => setTimeout(resolve, 1200))"
-                        )
+                        await page.evaluate("async () => await new Promise((resolve) => setTimeout(resolve, 1200))")
                 except Exception as exc:  # noqa: BLE001
                     metadata["navigation_error"] = f"{exc.__class__.__name__}: {exc}"
             try:
@@ -5701,6 +5940,7 @@ class InstagramCommentsScraplingFetcher:
                     candidateProfileAnchors: 0,
                     reservedProfileAnchors: 0,
                     rowTextMismatchAnchors: 0,
+                    permalinkFallbackRows: 0,
                     longRowAnchors: 0,
                     emptyRowAnchors: 0,
                     clickedControls: 0,
@@ -5801,6 +6041,47 @@ class InstagramCommentsScraplingFetcher:
                       }
                       return collected;
                     };
+                    const collectPermalinkRows = () => {
+                      const collected = [];
+                      const seen = new Set();
+                      for (const commentLink of Array.from(document.querySelectorAll('a[href*="/c/"]'))) {
+                        const commentHref = commentLink.getAttribute("href") || "";
+                        const commentMatch = commentHref.match(/\\/c\\/(\\d+)/);
+                        if (!commentMatch) continue;
+                        let row = commentLink;
+                        for (let depth = 0; depth < 10 && row.parentElement; depth += 1) {
+                          row = row.parentElement;
+                          const candidateText = clean(row.innerText || row.textContent || "");
+                          if (candidateText.includes("Reply") && candidateText.length < 1200) break;
+                        }
+                        const rowText = clean(row.innerText || row.textContent || "");
+                        if (!rowText || rowText.length >= 1200 || !rowText.includes("Reply")) continue;
+                        const usernameMatch = rowText.match(/^([A-Za-z0-9._]{1,30})\b/);
+                        const username = String(usernameMatch?.[1] || "").toLowerCase();
+                        if (!username || reserved.has(username)) continue;
+                        const key = `${username}:${commentMatch[1]}:${rowText}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        const rowRect = row.getBoundingClientRect();
+                        const anchorRect = commentLink.getBoundingClientRect();
+                        if (diagnostics.rowTextSamples.length < 3) {
+                          diagnostics.rowTextSamples.push(rowText.slice(0, 180));
+                        }
+                        collected.push({
+                          username,
+                          rowText: rowText.slice(0, 1200),
+                          href: `/${username}/`,
+                          commentId: commentMatch[1],
+                          commentHref: commentHref || null,
+                          left: Math.round(rowRect.left || 0),
+                          top: Math.round(rowRect.top || 0),
+                          anchorLeft: Math.round(anchorRect.left || 0),
+                          profilePicUrl: null,
+                        });
+                      }
+                      diagnostics.permalinkFallbackRows = collected.length;
+                      return collected;
+                    };
                     const getScrollTarget = () => {
                       const candidates = Array.from(document.querySelectorAll("*"))
                         .filter((element) => {
@@ -5861,6 +6142,9 @@ class InstagramCommentsScraplingFetcher:
                       await sleep(700);
                     }
                     rows = collectRows();
+                    if (!rows.length && diagnostics.initialCommentPermalinks > 0) {
+                      rows = collectPermalinkRows();
+                    }
                     diagnostics.rowsCollected = rows.length;
                   } catch (error) {
                     diagnostics.error = String(error?.message || error);
@@ -5940,7 +6224,7 @@ class InstagramCommentsScraplingFetcher:
                 shortcode=shortcode,
                 post_url=post_url,
                 ignored_usernames=ignored_usernames,
-                source_snapshot_type="rendered_coauthor_comments",
+                source_snapshot_type=source_snapshot_type,
                 is_hidden_by_instagram=False,
             )
             permalink_comments = _extract_rendered_permalink_comments(
@@ -5948,7 +6232,7 @@ class InstagramCommentsScraplingFetcher:
                 shortcode=shortcode,
                 post_url=post_url,
                 ignored_usernames=ignored_usernames,
-                source_snapshot_type="rendered_coauthor_comments",
+                source_snapshot_type=source_snapshot_type,
                 is_hidden_by_instagram=False,
             )
             comments = dom_comments or permalink_comments
@@ -6030,7 +6314,9 @@ class InstagramCommentsScraplingFetcher:
         fetch_failed = False
         auth_failed = False
         fetch_reason: str | None = None
+        browser_session_invalidated_detected = False
         retryable = False
+        diagnostic_metadata: dict[str, Any] = {}
         pages_seen = 0
         seen_cursors: set[str] = set()
         # Phase A5 follow-up: track which directions have been attempted on this
@@ -6080,6 +6366,17 @@ class InstagramCommentsScraplingFetcher:
             fetch_failed = bool(response.get("failed"))
             auth_failed = bool(response.get("auth_failed"))
             retryable = retryable or bool(response.get("retryable"))
+            response_diagnostic_metadata = (
+                response.get("diagnostic_metadata") if isinstance(response.get("diagnostic_metadata"), dict) else None
+            )
+            if fetch_reason == BROWSER_SESSION_INVALIDATED_REASON or _diagnostic_indicates_browser_session_invalidated(
+                response_diagnostic_metadata
+            ):
+                browser_session_invalidated_detected = True
+                fetch_reason = BROWSER_SESSION_INVALIDATED_REASON
+                diagnostic_metadata["session_invalidated"] = True
+                if isinstance(response_diagnostic_metadata, dict):
+                    diagnostic_metadata["challenge_response"] = dict(response_diagnostic_metadata)
             if fetch_failed or not isinstance(payload, (dict, list)):
                 break
             pages_seen += 1
@@ -6170,8 +6467,7 @@ class InstagramCommentsScraplingFetcher:
                 # alt was never available, preserve legacy retryable behavior
                 # so the next attempt can see different IG state.
                 both_directions_attempted = (
-                    "min_id" in cursor_directions_attempted
-                    and "max_id" in cursor_directions_attempted
+                    "min_id" in cursor_directions_attempted and "max_id" in cursor_directions_attempted
                 )
                 if both_directions_attempted:
                     retryable = retryable and not has_gap
@@ -6208,6 +6504,37 @@ class InstagramCommentsScraplingFetcher:
             cursor = next_cursor
             cursor_param_name = next_cursor_param_name
 
+        if (
+            auth_failed
+            and fetch_reason != BROWSER_SESSION_INVALIDATED_REASON
+            and not browser_session_invalidated_detected
+            and _env_truthy(_RENDERED_REPLY_FALLBACK_ENV, True)
+        ):
+            rendered_replies = await self._fetch_rendered_replies_for_parent_comment(
+                shortcode=shortcode,
+                post_url=post_url,
+                parent_comment_id=comment_id,
+                expected_reply_count=expected_reply_count,
+            )
+            if rendered_replies:
+                replies = merge_comment_replies(
+                    replies,
+                    rendered_replies,
+                    parent_comment_id=comment_id,
+                )
+                observed_reply_total = len(
+                    merge_comment_replies(
+                        preview_replies,
+                        replies,
+                        parent_comment_id=comment_id,
+                    )
+                )
+                recovered = expected_reply_count is None or observed_reply_total >= expected_reply_count
+                fetch_failed = not recovered
+                auth_failed = False
+                retryable = not recovered
+                fetch_reason = "rendered_reply_fallback_recovered" if recovered else "rendered_reply_fallback_partial"
+
         reply_checkpoints: list[dict[str, Any]] = []
         if fetch_failed and retryable:
             observed_reply_total = len(
@@ -6243,7 +6570,55 @@ class InstagramCommentsScraplingFetcher:
             request_count=self._request_count,
             retryable=retryable,
             reply_checkpoints=reply_checkpoints,
+            diagnostic_metadata=diagnostic_metadata,
         )
+
+    async def _fetch_rendered_replies_for_parent_comment(
+        self,
+        *,
+        shortcode: str,
+        post_url: str,
+        parent_comment_id: str,
+        expected_reply_count: int | None = None,
+    ) -> list[InstagramComment]:
+        parent_id = str(parent_comment_id or "").strip()
+        if not parent_id:
+            return []
+        comment_url = f"{str(post_url or '').rstrip('/')}/c/{parent_id}/"
+        rendered_comments = await self._fetch_rendered_coauthor_comments_for_status_only(
+            shortcode,
+            comment_url,
+            source_snapshot_type="rendered_reply_fallback_comments",
+        )
+        replies: list[InstagramComment] = []
+        for comment in rendered_comments:
+            comment_id = str(getattr(comment, "comment_id", "") or "").strip()
+            if comment_id == parent_id:
+                replies.extend(list(getattr(comment, "replies", []) or []))
+                continue
+            if (
+                bool(getattr(comment, "is_reply", False))
+                and str(getattr(comment, "parent_comment_id", "") or "").strip() == parent_id
+            ):
+                replies.append(comment)
+        normalized_replies: list[InstagramComment] = []
+        for reply in replies:
+            reply.parent_comment_id = parent_id
+            reply.is_reply = True
+            reply.reply_depth = max(1, int(getattr(reply, "reply_depth", 0) or 1))
+            normalized_replies.append(reply)
+        self._record_lane_diagnostic(
+            "rendered_reply",
+            shortcode=shortcode,
+            reason="rendered_reply_fallback",
+            count=len(normalized_replies),
+            metadata={
+                "parent_comment_id": parent_id,
+                "expected_reply_count": expected_reply_count,
+                "comment_url": comment_url,
+            },
+        )
+        return normalized_replies
 
     # -------------------------------------------------------------------
     # Cookie bridge
@@ -6485,9 +6860,7 @@ class InstagramCommentsScraplingFetcher:
             lane_metadata["last_count"] = self._non_negative_int(count)
         if metadata:
             lane_metadata["last_metadata"] = {
-                str(key): value
-                for key, value in dict(metadata).items()
-                if value is not None
+                str(key): value for key, value in dict(metadata).items() if value is not None
             }
 
     def _record_retry_reason(self, reason: str | None) -> None:
@@ -6512,6 +6885,24 @@ class InstagramCommentsScraplingFetcher:
         headers = getattr(response, "headers", None) or {}
         text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:16] if text else None
         payload_keys = sorted(str(key)[:48] for key in payload.keys())[:16] if isinstance(payload, Mapping) else []
+        payload_status = self._compact_checkpoint_text(payload.get("status")) if isinstance(payload, Mapping) else None
+        payload_message = (
+            self._compact_checkpoint_text(payload.get("message") or payload.get("error_message"))
+            if isinstance(payload, Mapping)
+            else None
+        )
+        session_invalidated = _browser_session_invalidated_text(
+            " ".join(
+                str(value or "")
+                for value in (
+                    reason,
+                    text,
+                    location,
+                    payload_status,
+                    payload_message,
+                )
+            )
+        )
         metadata: dict[str, Any] = {
             "reason": str(reason or "").strip()[:96],
             "transport": str(transport or "unknown").strip()[:48],
@@ -6527,19 +6918,44 @@ class InstagramCommentsScraplingFetcher:
             "text_length": len(text) if text else 0,
             "text_sha256_16": text_hash,
             "text_markers": _challenge_text_markers(text),
+            "session_invalidated": session_invalidated,
             "payload_keys": payload_keys,
-            "payload_status": self._compact_checkpoint_text(payload.get("status")) if isinstance(payload, Mapping) else None,
-            "payload_message": self._compact_checkpoint_text(
-                payload.get("message") or payload.get("error_message")
-            )
-            if isinstance(payload, Mapping)
-            else None,
+            "payload_status": payload_status,
+            "payload_message": payload_message,
         }
         compact = {str(key): value for key, value in metadata.items() if value not in (None, [], {})}
         self._challenge_response_total_count += 1
         if len(self._challenge_response_samples) < _CHALLENGE_RESPONSE_SAMPLE_MAX:
             self._challenge_response_samples.append(compact)
         self._record_lane_diagnostic("challenge_response", reason=reason, metadata=compact)
+        return compact
+
+    def _record_transport_failure(
+        self,
+        exc: BaseException,
+        *,
+        reason: str,
+        transport: str,
+        attempt: int,
+        request_url: str | None = None,
+        referer: str | None = None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "reason": str(reason or "").strip()[:96],
+            "transport": str(transport or "unknown").strip()[:48],
+            "attempt": self._non_negative_int(attempt),
+            "exception_class": exc.__class__.__name__,
+            "exception_message": self._compact_checkpoint_text(exc),
+            "request_path": _safe_url_path(request_url),
+            "referer_path": _safe_url_path(referer),
+            "proxy_fingerprint": self._selected_proxy_fingerprint,
+            "proxy_session_mode": self._proxy_session_mode,
+        }
+        compact = {str(key): value for key, value in metadata.items() if value not in (None, [], {})}
+        self._transport_failure_total_count += 1
+        if len(self._transport_failure_samples) < _TRANSPORT_FAILURE_SAMPLE_MAX:
+            self._transport_failure_samples.append(compact)
+        self._record_lane_diagnostic("transport_failure", reason=reason, metadata=compact)
         return compact
 
     def _decode_json_response_result(
@@ -6552,7 +6968,8 @@ class InstagramCommentsScraplingFetcher:
     ) -> dict[str, Any]:
         status_code = _status_code(response)
         text = _response_text(response)
-        auth_failed = status_code in {401, 403} or _auth_failure_text(text)
+        browser_session_invalidated = _browser_session_invalidated_text(text)
+        auth_failed = status_code in {401, 403} or _auth_failure_text(text) or browser_session_invalidated
 
         if 300 <= status_code < 400:
             location = _safe_location(response)
@@ -6563,21 +6980,25 @@ class InstagramCommentsScraplingFetcher:
                 if ("/challenge" in location or "/checkpoint" in location)
                 else "redirect_to_homepage"
             )
+            browser_home_redirect = reason == "redirect_to_homepage" and str(transport or "").strip() == "browser_api"
+            result_reason = BROWSER_SESSION_INVALIDATED_REASON if browser_home_redirect else reason
             auth_redirect = any(token in location for token in ("login", "challenge", "checkpoint"))
             diagnostic_metadata = None
             if auth_redirect or reason == "redirect_to_homepage":
                 diagnostic_metadata = self._record_challenge_response(
                     response,
-                    reason=reason,
+                    reason=result_reason,
                     transport=transport,
                     attempt=attempt,
                     request_url=request_url,
                     location=location,
                 )
+                if browser_home_redirect:
+                    diagnostic_metadata["session_invalidated"] = True
             return {
                 "failed": True,
                 "auth_failed": auth_redirect or reason == "redirect_to_homepage",
-                "reason": reason,
+                "reason": result_reason,
                 "retryable": False,
                 "payload": None,
                 "attempt_count": attempt,
@@ -6597,17 +7018,20 @@ class InstagramCommentsScraplingFetcher:
         if status_code >= 400:
             diagnostic_metadata = None
             if auth_failed:
+                reason = BROWSER_SESSION_INVALIDATED_REASON if browser_session_invalidated else f"http_{status_code}"
                 diagnostic_metadata = self._record_challenge_response(
                     response,
-                    reason=f"http_{status_code}",
+                    reason=reason,
                     transport=transport,
                     attempt=attempt,
                     request_url=request_url,
                 )
+            else:
+                reason = f"http_{status_code}"
             return {
                 "failed": True,
                 "auth_failed": auth_failed,
-                "reason": f"http_{status_code}",
+                "reason": reason,
                 "retryable": False,
                 "payload": None,
                 "attempt_count": attempt,
@@ -6615,9 +7039,12 @@ class InstagramCommentsScraplingFetcher:
             }
 
         if text and text.lstrip().startswith("<"):
+            reason = (
+                BROWSER_SESSION_INVALIDATED_REASON if browser_session_invalidated else "html_challenge_or_auth_required"
+            )
             diagnostic_metadata = self._record_challenge_response(
                 response,
-                reason="html_challenge_or_auth_required",
+                reason=reason,
                 transport=transport,
                 attempt=attempt,
                 request_url=request_url,
@@ -6625,7 +7052,7 @@ class InstagramCommentsScraplingFetcher:
             return {
                 "failed": True,
                 "auth_failed": auth_failed or _auth_failure_text(text),
-                "reason": "html_challenge_or_auth_required",
+                "reason": reason,
                 "retryable": False,
                 "payload": None,
                 "attempt_count": attempt,
@@ -6651,15 +7078,21 @@ class InstagramCommentsScraplingFetcher:
             status_value = str(payload.get("status") or "").strip().lower()
             message = str(payload.get("message") or payload.get("error_message") or "").strip().lower()
             if status_value and status_value != "ok":
-                auth_status = auth_failed or any(
-                    token in f"{status_value} {message}"
-                    for token in ("login", "checkpoint", "challenge", "unauthorized")
+                payload_session_invalidated = _browser_session_invalidated_text(f"{status_value} {message}")
+                auth_status = (
+                    auth_failed
+                    or any(
+                        token in f"{status_value} {message}"
+                        for token in ("login", "checkpoint", "challenge", "unauthorized")
+                    )
+                    or payload_session_invalidated
                 )
+                reason = BROWSER_SESSION_INVALIDATED_REASON if payload_session_invalidated else status_value
                 diagnostic_metadata = None
                 if auth_status:
                     diagnostic_metadata = self._record_challenge_response(
                         response,
-                        reason=status_value or "api_status_fail",
+                        reason=reason or "api_status_fail",
                         transport=transport,
                         attempt=attempt,
                         request_url=request_url,
@@ -6668,7 +7101,7 @@ class InstagramCommentsScraplingFetcher:
                 return {
                     "failed": True,
                     "auth_failed": auth_status,
-                    "reason": status_value or "api_status_fail",
+                    "reason": reason or "api_status_fail",
                     "retryable": False,
                     "payload": payload,
                     "attempt_count": attempt,
@@ -6854,6 +7287,14 @@ class InstagramCommentsScraplingFetcher:
                     raise
                 last_transient_reason = _transport_failure_reason(exc)
                 self._record_retry_reason(last_transient_reason)
+                diagnostic_metadata = self._record_transport_failure(
+                    exc,
+                    reason=last_transient_reason,
+                    transport="httpx",
+                    attempt=attempt,
+                    request_url=request_url,
+                    referer=referer,
+                )
                 if attempt > retry_limit:
                     return {
                         "failed": True,
@@ -6862,6 +7303,7 @@ class InstagramCommentsScraplingFetcher:
                         "retryable": True,
                         "payload": None,
                         "attempt_count": attempt,
+                        "diagnostic_metadata": diagnostic_metadata,
                     }
                 try:
                     await self._rebuild_http_client()
@@ -6901,10 +7343,7 @@ class InstagramCommentsScraplingFetcher:
                         homepage_redirect_recovery_attempted = True
                         if await self._recover_homepage_redirect(referer=referer):
                             continue
-                    if (
-                        not browser_api_fallback_attempted
-                        and _env_truthy(_BROWSER_API_FALLBACK_ENV, True)
-                    ):
+                    if not browser_api_fallback_attempted and _env_truthy(_BROWSER_API_FALLBACK_ENV, True):
                         browser_api_fallback_attempted = True
                         self._record_retry_reason("browser_api_fallback")
                         try:
@@ -6923,6 +7362,14 @@ class InstagramCommentsScraplingFetcher:
                                 raise
                             reason = _transport_failure_reason(exc)
                             self._record_retry_reason(reason)
+                            diagnostic_metadata = self._record_transport_failure(
+                                exc,
+                                reason=reason,
+                                transport="browser_api",
+                                attempt=attempt,
+                                request_url=request_url,
+                                referer=referer,
+                            )
                             return {
                                 "failed": True,
                                 "auth_failed": False,
@@ -6930,6 +7377,7 @@ class InstagramCommentsScraplingFetcher:
                                 "retryable": True,
                                 "payload": None,
                                 "attempt_count": attempt,
+                                "diagnostic_metadata": diagnostic_metadata,
                             }
                         browser_result = self._decode_json_response_result(
                             browser_response,
@@ -6938,8 +7386,7 @@ class InstagramCommentsScraplingFetcher:
                             request_url=request_url,
                         )
                         if not (
-                            browser_result.get("failed")
-                            and browser_result.get("reason") == "redirect_to_homepage"
+                            browser_result.get("failed") and browser_result.get("reason") == "redirect_to_homepage"
                         ):
                             return browser_result
                     auth_redirect = True
@@ -7010,7 +7457,16 @@ class InstagramCommentsScraplingFetcher:
                     except Exception as exc:  # noqa: BLE001
                         if not _warmup_transport_failure(exc):
                             raise
-                        self._record_retry_reason(_transport_failure_reason(exc))
+                        reason = _transport_failure_reason(exc)
+                        self._record_retry_reason(reason)
+                        self._record_transport_failure(
+                            exc,
+                            reason=reason,
+                            transport="browser_api",
+                            attempt=attempt,
+                            request_url=request_url,
+                            referer=referer,
+                        )
                     else:
                         browser_result = self._decode_json_response_result(
                             browser_response,
@@ -7018,10 +7474,7 @@ class InstagramCommentsScraplingFetcher:
                             transport="browser_api",
                             request_url=request_url,
                         )
-                        if not (
-                            browser_result.get("failed")
-                            and browser_result.get("reason") == "http_429"
-                        ):
+                        if not (browser_result.get("failed") and browser_result.get("reason") == "http_429"):
                             return browser_result
                 retry_after = self._retry_after_seconds(response)
                 sleep_seconds = _transient_backoff_seconds(
@@ -7055,6 +7508,7 @@ class InstagramCommentsScraplingFetcher:
             if text and text.lstrip().startswith("<"):
                 if (
                     not browser_api_fallback_attempted
+                    and not _browser_session_invalidated_text(text)
                     and _env_truthy(_BROWSER_API_FALLBACK_ENV, True)
                 ):
                     browser_api_fallback_attempted = True
@@ -7075,6 +7529,14 @@ class InstagramCommentsScraplingFetcher:
                             raise
                         reason = _transport_failure_reason(exc)
                         self._record_retry_reason(reason)
+                        diagnostic_metadata = self._record_transport_failure(
+                            exc,
+                            reason=reason,
+                            transport="browser_api",
+                            attempt=attempt,
+                            request_url=request_url,
+                            referer=referer,
+                        )
                         return {
                             "failed": True,
                             "auth_failed": False,
@@ -7082,6 +7544,7 @@ class InstagramCommentsScraplingFetcher:
                             "retryable": True,
                             "payload": None,
                             "attempt_count": attempt,
+                            "diagnostic_metadata": diagnostic_metadata,
                         }
                     browser_result = self._decode_json_response_result(
                         browser_response,

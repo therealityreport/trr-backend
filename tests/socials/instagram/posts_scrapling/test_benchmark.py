@@ -86,9 +86,7 @@ def test_run_metadata_diff_reports_request_timing_and_flag_changes() -> None:
     assert diff["request_counts"]["doc_id_attempts"]["delta"] == -6
     assert diff["request_counts"]["detail_fetch_attempts"]["delta"] == -99
     assert diff["timing"]["posts_per_second"]["delta"] == 33
-    assert diff["feature_flags"]["changed"] == {
-        "per_ip_pacing_enabled": {"before": False, "after": True}
-    }
+    assert diff["feature_flags"]["changed"] == {"per_ip_pacing_enabled": {"before": False, "after": True}}
     assert diff["timing"]["phase_durations_ms"]["warmup"]["delta"] == -6800
     assert diff["warmup_pool"]["after"]["hit"] is True
     assert diff["bidirectional_probe"]["after"]["passed"] is True

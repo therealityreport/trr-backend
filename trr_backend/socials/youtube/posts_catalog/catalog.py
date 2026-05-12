@@ -13,7 +13,7 @@ import shutil
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from trr_backend.socials.youtube.api_client import YouTubeDataApiClient
 from trr_backend.socials.youtube.scraper import YouTubeScrapeConfig, YouTubeScraper
@@ -51,6 +51,92 @@ def _normalize_account_handle(value: Any) -> str:
     candidate = candidate.strip().lstrip("@")
     candidate = candidate.split("?")[0].split("#")[0].split("/")[0].strip().lower()
     return candidate
+
+
+def _extract_youtube_playlist_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "://" in raw or raw.lower().startswith("www."):
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        query_id = parse_qs(parsed.query).get("list", [""])[0]
+        if query_id:
+            return query_id.strip()
+    direct = raw.split("?", 1)[0].split("#", 1)[0].strip()
+    if re.fullmatch(r"(?:PL|UU|LL|FL|RD|OLAK5uy_)[A-Za-z0-9_-]{8,}", direct):
+        return direct
+    match = re.search(r"(?:list=|/playlist/)([A-Za-z0-9_-]{10,})", raw)
+    return match.group(1).strip() if match else ""
+
+
+def _youtube_playlist_url(playlist_id: str, playlist_url: Any = None) -> str:
+    raw = str(playlist_url or "").strip()
+    if raw.startswith(("http://", "https://")) and _extract_youtube_playlist_id(raw) == playlist_id:
+        return raw
+    return f"https://www.youtube.com/playlist?list={playlist_id}"
+
+
+def _source_metadata(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for key in ("source_metadata", "shared_source_metadata", "metadata"):
+        value = (config or {}).get(key) if config else None
+        if isinstance(value, Mapping):
+            merged.update(dict(value))
+    return merged
+
+
+def _youtube_source_config(account_handle: str, config: Mapping[str, Any] | None) -> dict[str, Any]:
+    metadata = _source_metadata(config)
+    source_type = (
+        str(
+            metadata.get("source_type")
+            or metadata.get("youtube_source_type")
+            or (config or {}).get("source_type")
+            or (config or {}).get("youtube_source_type")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    playlist_id = ""
+    for candidate in (
+        (config or {}).get("playlist_id"),
+        (config or {}).get("source_external_id"),
+        metadata.get("playlist_id"),
+        metadata.get("source_external_id"),
+        (config or {}).get("playlist_url"),
+        (config or {}).get("source_url"),
+        metadata.get("playlist_url"),
+        metadata.get("source_url"),
+        account_handle if source_type == "playlist" else "",
+    ):
+        playlist_id = _extract_youtube_playlist_id(candidate)
+        if playlist_id:
+            break
+    if playlist_id:
+        return {
+            "source_type": "playlist",
+            "playlist_id": playlist_id,
+            "playlist_url": _youtube_playlist_url(
+                playlist_id,
+                (config or {}).get("playlist_url")
+                or (config or {}).get("source_url")
+                or metadata.get("playlist_url")
+                or metadata.get("source_url"),
+            ),
+            "canonical_handle": _normalize_account_handle(
+                metadata.get("account_handle") or (config or {}).get("account") or playlist_id
+            )
+            or playlist_id.lower(),
+            "source_metadata": metadata,
+        }
+    return {
+        "source_type": "account",
+        "playlist_id": None,
+        "playlist_url": None,
+        "canonical_handle": _normalize_account_handle(account_handle) or account_handle,
+        "source_metadata": metadata,
+    }
 
 
 def _platform_profile_url_for_handle(platform: str, handle: Any) -> str | None:
@@ -294,16 +380,22 @@ def scrape_shared_youtube_posts(
     deps = dependencies or YouTubePostsCatalogDependencies()
     scraper = deps.scraper_factory()
     youtube_api = deps.api_client_factory()
+    source_config = _youtube_source_config(account_handle, config)
     scrape_config = deps.scrape_config_factory(
-        channel_handle=account_handle,
+        channel_handle=account_handle if source_config["source_type"] == "account" else "",
         keywords=[],
         date_start=deps.coerce_dt(config.get("date_start")),
         date_end=deps.coerce_dt(config.get("date_end")),
         delay_seconds=0.35,
         max_results=deps.shared_stage_post_limit(config),
         enforce_keyword_filter=False,
+        source_type=source_config["source_type"],
+        playlist_id=source_config["playlist_id"],
+        playlist_url=source_config["playlist_url"],
     )
-    api_identity = _resolve_channel_identity(youtube_api, account_handle)
+    api_identity = (
+        _resolve_channel_identity(youtube_api, account_handle) if source_config["source_type"] == "account" else None
+    )
     posts = list(scraper.scrape(scrape_config, progress_cb=progress_cb))
 
     ytdlp_available = bool(deps.ytdlp_available())
@@ -320,6 +412,7 @@ def scrape_shared_youtube_posts(
         deps.normalize_account_handle(
             retrieval_meta.get("canonical_handle")
             or deps.metadata_dict(api_identity).get("canonical_handle")
+            or source_config["canonical_handle"]
             or account_handle
         )
         or account_handle
@@ -329,7 +422,8 @@ def scrape_shared_youtube_posts(
         {
             "username": canonical_handle,
             "display_name": str(
-                retrieval_meta.get("resolved_channel_title")
+                retrieval_meta.get("playlist_title")
+                or retrieval_meta.get("resolved_channel_title")
                 or _first_non_empty_attr(posts, "channel_title")
                 or ""
             ).strip()
@@ -340,7 +434,11 @@ def scrape_shared_youtube_posts(
                     _first_non_empty_attr(posts, "user_avatar_url"),
                 ]
             ),
-            "profile_url": deps.platform_profile_url_for_handle("youtube", canonical_handle),
+            "profile_url": (
+                source_config["playlist_url"]
+                if source_config["source_type"] == "playlist"
+                else deps.platform_profile_url_for_handle("youtube", canonical_handle)
+            ),
             "channel_id": str(
                 retrieval_meta.get("canonical_channel_id") or _first_non_empty_attr(posts, "channel_id") or ""
             ).strip()

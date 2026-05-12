@@ -258,10 +258,10 @@ def test_account_socialblade_read_route_uses_platform_handle_lookup(monkeypatch:
     def fake_get_growth_data(person_id, handle: str, *, platform: str = "instagram"):
         captured.update({"person_id": person_id, "handle": handle, "platform": platform})
         return {
-          "username": "bravotv",
-          "account_handle": "bravotv",
-          "platform": "facebook",
-          "scraped_at": "2026-04-08T12:00:00Z",
+            "username": "bravotv",
+            "account_handle": "bravotv",
+            "platform": "facebook",
+            "scraped_at": "2026-04-08T12:00:00Z",
         }
 
     monkeypatch.setattr(repository_module, "get_growth_data", fake_get_growth_data)

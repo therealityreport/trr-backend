@@ -15,7 +15,9 @@ def _iso_days_ago(days: int) -> str:
 
 def test_run_worker_skips_when_cookies_are_fresh_and_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "load_env", lambda: None)
-    monkeypatch.setattr(cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json"))
+    monkeypatch.setattr(
+        cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json")
+    )
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",
@@ -41,7 +43,9 @@ def test_run_worker_skips_when_cookies_are_fresh_and_healthy(monkeypatch: pytest
 
 def test_run_worker_repairs_when_recent_unauthorized_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "load_env", lambda: None)
-    monkeypatch.setattr(cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json"))
+    monkeypatch.setattr(
+        cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json")
+    )
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",
@@ -72,7 +76,9 @@ def test_run_worker_repairs_when_recent_unauthorized_exists(monkeypatch: pytest.
 
 def test_run_worker_repairs_when_cookie_age_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "load_env", lambda: None)
-    monkeypatch.setattr(cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json"))
+    monkeypatch.setattr(
+        cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json")
+    )
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",
@@ -103,7 +109,9 @@ def test_run_worker_repairs_when_cookie_age_is_stale(monkeypatch: pytest.MonkeyP
 
 def test_run_worker_returns_failed_payload_when_repair_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "load_env", lambda: None)
-    monkeypatch.setattr(cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json"))
+    monkeypatch.setattr(
+        cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json")
+    )
     monkeypatch.setattr(
         cli.instagram_cookie_refresh,
         "read_instagram_cookie_file_metadata",

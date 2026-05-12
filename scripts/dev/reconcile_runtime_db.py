@@ -15,8 +15,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts._db_url import resolve_direct_db_url
-from trr_backend.db.preflight import DatabasePreflightError, assert_core_schema_exists_sql, assert_migration_safe
+from scripts._db_url import resolve_direct_db_url  # noqa: E402
+from trr_backend.db.preflight import (  # noqa: E402
+    DatabasePreflightError,
+    assert_core_schema_exists_sql,
+    assert_migration_safe,
+)
 
 RUNBOOK_PATH = "TRR-Backend/docs/runbooks/supabase_migration_history_repair.md"
 MIGRATIONS_DIR = REPO_ROOT / "supabase" / "migrations"
@@ -214,7 +218,8 @@ def reconcile_runtime_db() -> dict[str, Any]:
     if not (os.getenv("TRR_DB_DIRECT_URL") or os.getenv("TRR_DB_SESSION_URL") or os.getenv("TRR_DB_URL") or "").strip():
         return blocked_result(
             "missing_runtime_db_url",
-            "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in TRR-APP/apps/web/.env.local or export one before running make dev.",
+            "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in TRR-APP/apps/web/.env.local "
+            "or export one before running make dev.",
             local_versions=local_versions,
         )
     try:
@@ -226,7 +231,8 @@ def reconcile_runtime_db() -> dict[str, Any]:
         if "No database URL configured" in str(exc):
             return blocked_result(
                 "missing_runtime_db_url",
-                "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in TRR-APP/apps/web/.env.local or export one before running make dev.",
+                "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in TRR-APP/apps/web/.env.local "
+                "or export one before running make dev.",
                 local_versions=local_versions,
             )
         return blocked_result(
@@ -270,7 +276,8 @@ def reconcile_runtime_db() -> dict[str, Any]:
     if not is_contiguous_suffix(local_versions, pending_local):
         return blocked_result(
             "pending_not_suffix",
-            "Local pending migrations are not a contiguous suffix of backend-owned supabase/migrations; review before startup applies anything.",
+            "Local pending migrations are not a contiguous suffix of backend-owned supabase/migrations; review before "
+            "startup applies anything.",
             **base,
         )
     not_allowlisted = [version for version in pending_local if version not in allowlist]

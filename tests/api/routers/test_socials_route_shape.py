@@ -35,11 +35,7 @@ def _admin_socials_route_shape(router: Any) -> list[RouteShapeRecord]:
     for route in getattr(router, "routes", []) or []:
         if not isinstance(route, APIRoute):
             continue
-        methods = sorted(
-            method
-            for method in (route.methods or [])
-            if method not in {"HEAD", "OPTIONS"}
-        )
+        methods = sorted(method for method in (route.methods or []) if method not in {"HEAD", "OPTIONS"})
         for method in methods:
             records.append(
                 {

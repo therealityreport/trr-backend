@@ -88,18 +88,20 @@ def test_persist_true_calls_upsert(client: TestClient, monkeypatch: pytest.Monke
     monkeypatch.setattr(
         socials_router,
         "persist_standalone_twitter_search",
-        lambda tweets, **kwargs: persist_calls.append({"tweets": tweets, **kwargs})
-        or {
-            "requested": True,
-            "succeeded": True,
-            "scrape_query_label": kwargs["scrape_query_label"],
-            "scrape_run_id": "run-1",
-            "tweets_upserted": len(tweets),
-            "tweet_memberships_created": len(tweets),
-            "tweet_memberships_total": len(tweets),
-            "requested_via": kwargs["requested_via"],
-            "error": None,
-        },
+        lambda tweets, **kwargs: (
+            persist_calls.append({"tweets": tweets, **kwargs})
+            or {
+                "requested": True,
+                "succeeded": True,
+                "scrape_query_label": kwargs["scrape_query_label"],
+                "scrape_run_id": "run-1",
+                "tweets_upserted": len(tweets),
+                "tweet_memberships_created": len(tweets),
+                "tweet_memberships_total": len(tweets),
+                "requested_via": kwargs["requested_via"],
+                "error": None,
+            }
+        ),
     )
 
     resp = client.post(
@@ -137,18 +139,20 @@ def test_persist_true_uses_explicit_scrape_query(client: TestClient, monkeypatch
     monkeypatch.setattr(
         socials_router,
         "persist_standalone_twitter_search",
-        lambda tweets, **kwargs: persist_calls.append(kwargs)
-        or {
-            "requested": True,
-            "succeeded": True,
-            "scrape_query_label": kwargs["scrape_query_label"],
-            "scrape_run_id": "run-explicit",
-            "tweets_upserted": len(tweets),
-            "tweet_memberships_created": len(tweets),
-            "tweet_memberships_total": len(tweets),
-            "requested_via": kwargs["requested_via"],
-            "error": None,
-        },
+        lambda tweets, **kwargs: (
+            persist_calls.append(kwargs)
+            or {
+                "requested": True,
+                "succeeded": True,
+                "scrape_query_label": kwargs["scrape_query_label"],
+                "scrape_run_id": "run-explicit",
+                "tweets_upserted": len(tweets),
+                "tweet_memberships_created": len(tweets),
+                "tweet_memberships_total": len(tweets),
+                "requested_via": kwargs["requested_via"],
+                "error": None,
+            }
+        ),
     )
 
     resp = client.post(
@@ -181,18 +185,20 @@ def test_persist_defaults_scrape_query_to_query_value(client: TestClient, monkey
     monkeypatch.setattr(
         socials_router,
         "persist_standalone_twitter_search",
-        lambda tweets, **kwargs: persist_calls.append(kwargs)
-        or {
-            "requested": True,
-            "succeeded": True,
-            "scrape_query_label": kwargs["scrape_query_label"],
-            "scrape_run_id": "run-default",
-            "tweets_upserted": len(tweets),
-            "tweet_memberships_created": len(tweets),
-            "tweet_memberships_total": len(tweets),
-            "requested_via": kwargs["requested_via"],
-            "error": None,
-        },
+        lambda tweets, **kwargs: (
+            persist_calls.append(kwargs)
+            or {
+                "requested": True,
+                "succeeded": True,
+                "scrape_query_label": kwargs["scrape_query_label"],
+                "scrape_run_id": "run-default",
+                "tweets_upserted": len(tweets),
+                "tweet_memberships_created": len(tweets),
+                "tweet_memberships_total": len(tweets),
+                "requested_via": kwargs["requested_via"],
+                "error": None,
+            }
+        ),
     )
 
     resp = client.post(
@@ -251,18 +257,20 @@ def test_persist_true_still_records_empty_results(client: TestClient, monkeypatc
     monkeypatch.setattr(
         socials_router,
         "persist_standalone_twitter_search",
-        lambda tweets, **kwargs: persist_calls.append({"tweets": tweets, **kwargs})
-        or {
-            "requested": True,
-            "succeeded": True,
-            "scrape_query_label": kwargs["scrape_query_label"],
-            "scrape_run_id": "run-empty",
-            "tweets_upserted": 0,
-            "tweet_memberships_created": 0,
-            "tweet_memberships_total": 0,
-            "requested_via": kwargs["requested_via"],
-            "error": None,
-        },
+        lambda tweets, **kwargs: (
+            persist_calls.append({"tweets": tweets, **kwargs})
+            or {
+                "requested": True,
+                "succeeded": True,
+                "scrape_query_label": kwargs["scrape_query_label"],
+                "scrape_run_id": "run-empty",
+                "tweets_upserted": 0,
+                "tweet_memberships_created": 0,
+                "tweet_memberships_total": 0,
+                "requested_via": kwargs["requested_via"],
+                "error": None,
+            }
+        ),
     )
 
     resp = client.post(

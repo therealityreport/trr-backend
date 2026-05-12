@@ -116,7 +116,8 @@ def describe_supabase_jwt_context() -> list[str]:
     if not unique_project_refs:
         warnings.append(
             "Unable to derive a Supabase project ref from SUPABASE_PROJECT_REF, "
-            "TRR_CORE_SUPABASE_URL, SUPABASE_URL, TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, TRR_DB_URL, or TRR_DB_FALLBACK_URL.",
+            "TRR_CORE_SUPABASE_URL, SUPABASE_URL, TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, TRR_DB_URL, "
+            "or TRR_DB_FALLBACK_URL.",
         )
     elif len(unique_project_refs) > 1:
         rendered = ", ".join(f"{source}={ref}" for source, ref in sorted(project_ref_candidates.items()))

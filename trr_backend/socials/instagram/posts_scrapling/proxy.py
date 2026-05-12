@@ -5,6 +5,8 @@ Public API:
 
 Mirrors comments_scrapling/proxy.py with posts-lane env vars.
 SOCIAL_INSTAGRAM_POSTS_PROXY_URLS takes precedence over DECODO credentials.
+Decodo is opt-in via SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER=decodo; credentials
+alone must not silently move authenticated browser warmup onto a proxy.
 """
 
 from __future__ import annotations
@@ -212,8 +214,8 @@ def select_posts_proxy(*, session_key: str | None = None, page_index: int | None
         else:
             selected_url = _explicit_proxy_url_for_session(explicit_urls, session_key)
             session_mode = "explicit_sharded" if len(explicit_urls) > 1 and session_key else "explicit"
-        rotator = _build_proxy_rotator(list(explicit_urls)) if len(explicit_urls) > 1 else _build_proxy_rotator(
-            selected_url
+        rotator = (
+            _build_proxy_rotator(list(explicit_urls)) if len(explicit_urls) > 1 else _build_proxy_rotator(selected_url)
         )
         return PostsProxyConfig(
             browser_proxy=selected_url,
@@ -225,9 +227,10 @@ def select_posts_proxy(*, session_key: str | None = None, page_index: int | None
             rotation_index=rotation_index,
         )
 
-    # 2. DECODO credentials.
+    # 2. Explicit Decodo provider. Credentials alone are not enough because a
+    # stale residential proxy can make healthy auth cookies look blocked.
     provider = str(os.getenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER") or "").strip().lower()
-    if provider in {"", "decodo", "smartproxy"}:
+    if provider in {"decodo", "smartproxy"}:
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds

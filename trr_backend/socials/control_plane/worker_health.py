@@ -474,6 +474,7 @@ def assert_worker_available_when_queue_enabled(*args: Any, **kwargs: Any) -> dic
         message = "No healthy social ingest workers are reporting heartbeats."
     raise _core.SocialWorkerUnavailableError(message, worker_health=health)
 
+
 __all__ = [
     "assert_worker_available_when_queue_enabled",
     "get_queue_status",

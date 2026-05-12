@@ -72,7 +72,7 @@ def test_launch_instagram_backfill_bootstraps_when_catalog_rows_exist_but_materi
         monkeypatch.setattr(
             social_repo,
             "start_social_account_comments_scrape",
-            lambda *_args, **_kwargs: (comments_calls.append({}) or {"run_id": "comments-run-1", "status": "queued"}),
+            lambda *_args, **_kwargs: comments_calls.append({}) or {"run_id": "comments-run-1", "status": "queued"},
         )
         monkeypatch.setattr(
             social_repo,
@@ -88,8 +88,7 @@ def test_launch_instagram_backfill_bootstraps_when_catalog_rows_exist_but_materi
             social_repo,
             "_merge_catalog_run_config_with_conn",
             lambda **kwargs: (
-                merged_updates.append(kwargs["metadata_updates"])
-                or {"config": kwargs["metadata_updates"]}
+                merged_updates.append(kwargs["metadata_updates"]) or {"config": kwargs["metadata_updates"]}
             ),
         )
         monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))

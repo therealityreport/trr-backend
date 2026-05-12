@@ -4,7 +4,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 CHECK_POLICY = WORKSPACE_ROOT / "scripts" / "check-policy.sh"
 

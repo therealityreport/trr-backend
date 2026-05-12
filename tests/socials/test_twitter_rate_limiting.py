@@ -7,10 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trr_backend.socials.twitter.diagnostics import safe_retrieval_metadata
 from trr_backend.socials.twitter.scraper import (
     Tweet,
     TwitterScrapeConfig,
     TwitterScraper,
+    _is_search_timeline_response_url,
     classify_twitter_search_complete,
 )
 
@@ -161,6 +163,49 @@ def test_classify_twitter_search_complete(stop_reason, retryable, error_code, ex
     )
 
 
+def test_safe_retrieval_metadata_keeps_route_fields_and_redacts_auth_values():
+    shaped = safe_retrieval_metadata(
+        {
+            "retrieval_mode": "graphql",
+            "posts_checked": 10,
+            "fallback_attempts": [{"transport": "graphql", "bearer_token": "secret-token"}],
+            "cookies": {"auth_token": "secret-cookie"},
+            "session": "secret-session",
+        }
+    )
+
+    assert shaped == {
+        "retrieval_mode": "graphql",
+        "posts_checked": 10,
+        "fallback_attempts": [{"transport": "graphql", "bearer_token": "[redacted]"}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://x.com/i/api/graphql/abc123/SearchTimeline?variables=%7B%7D",
+            True,
+        ),
+        (
+            "https://x.com/i/api/graphql/abc123/SearchTimeline/",
+            True,
+        ),
+        (
+            "https://x.com/i/api/graphql/abc123/TweetDetail?variables=%7B%7D",
+            False,
+        ),
+        (
+            "https://x.com/search?q=from%3Athetraitorsus",
+            False,
+        ),
+    ],
+)
+def test_search_timeline_response_url_detection_handles_graphql_shapes(url: str, expected: bool) -> None:
+    assert _is_search_timeline_response_url(url) is expected
+
+
 def _make_tweet(tweet_id: str = "tweet-1") -> Tweet:
     return Tweet(
         tweet_id=tweet_id,
@@ -218,6 +263,44 @@ def test_scrape_marks_exhausted_fallback_chain_as_retryable(monkeypatch: pytest.
     assert scraper.last_retrieval_meta["retryable"] is True
     assert scraper.last_retrieval_meta["twikit_failure_reason"] == "twikit_request_error"
     assert scraper.last_retrieval_meta["playwright_failure_reason"] == "playwright_error"
+
+
+def test_scrape_treats_empty_playwright_window_as_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = _make_scraper()
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_fetch_search", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_last_graphql_status_code", 500)
+    monkeypatch.setattr(scraper, "_scrape_via_twikit", lambda _config: [])
+    monkeypatch.setattr(scraper, "_scrape_syndication", lambda *_args, **_kwargs: [])
+
+    def _fake_playwright(**_kwargs):
+        scraper._last_playwright_search_error = "playwright_no_tweet_entries"  # noqa: SLF001
+        scraper._last_playwright_search_meta = {  # noqa: SLF001
+            "stop_reason": "playwright_no_tweet_entries",
+            "payloads_captured": 1,
+            "scrolls_performed": 10,
+            "page_budget": 10,
+        }
+        return []
+
+    monkeypatch.setattr(scraper, "_fetch_search_via_playwright", _fake_playwright)
+    scraper._twikit_credentials = {"auth_token": "a", "ct0": "b"}  # noqa: SLF001
+
+    tweets = scraper.scrape(
+        TwitterScrapeConfig(
+            query="from:bravotv",
+            date_start=datetime(2025, 5, 12, tzinfo=UTC),
+            date_end=datetime(2025, 5, 22, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=1,
+        )
+    )
+
+    assert tweets == []
+    assert scraper.last_retrieval_meta["stop_reason"] == "playwright_no_tweet_entries"
+    assert scraper.last_retrieval_meta["error_code"] is None
+    assert scraper.last_retrieval_meta["retryable"] is False
+    assert scraper.last_retrieval_meta["complete"] is True
 
 
 def test_scrape_emits_progress_for_successful_twikit_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

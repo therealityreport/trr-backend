@@ -12,7 +12,6 @@ from trr_backend.pipeline.show_refresh_orchestrator import (
     execution_waves,
 )
 
-
 # ---------------------------------------------------------------------------
 # TARGET_DEPENDENCY_GRAPH structure tests
 # ---------------------------------------------------------------------------
@@ -189,9 +188,7 @@ class TestShowRefreshOrchestratorDispatchWave:
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=True)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=True)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.dispatch_admin_operation", return_value=True)
-    def test_dispatch_wave_sends_to_modal_when_enabled(
-        self, mock_dispatch, mock_supports, mock_remote
-    ):
+    def test_dispatch_wave_sends_to_modal_when_enabled(self, mock_dispatch, mock_supports, mock_remote):
         orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core", "links"])
         orch._parent_id = "1"
         sub_ops = [_make_sub_op("show_core", 10), _make_sub_op("links", 11)]
@@ -204,9 +201,7 @@ class TestShowRefreshOrchestratorDispatchWave:
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=False)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=True)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.ensure_operation_execution")
-    def test_dispatch_wave_falls_back_to_local_when_modal_disabled(
-        self, mock_ensure, mock_supports, mock_remote
-    ):
+    def test_dispatch_wave_falls_back_to_local_when_modal_disabled(self, mock_ensure, mock_supports, mock_remote):
         orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core"])
         orch._parent_id = "1"
         orch.request_id = "req-abc"
@@ -221,9 +216,7 @@ class TestShowRefreshOrchestratorDispatchWave:
 
     @patch("trr_backend.pipeline.show_refresh_orchestrator.is_remote_job_plane_enabled", return_value=False)
     @patch("trr_backend.pipeline.show_refresh_orchestrator.supports_admin_operation", return_value=False)
-    def test_dispatch_wave_raises_when_no_producer_and_no_modal(
-        self, mock_supports, mock_remote
-    ):
+    def test_dispatch_wave_raises_when_no_producer_and_no_modal(self, mock_supports, mock_remote):
         orch = ShowRefreshOrchestrator(show_id=42, targets=["show_core"])
         orch._parent_id = "1"
         sub_ops = [_make_sub_op("show_core", 10)]

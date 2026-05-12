@@ -67,7 +67,9 @@ def _internal_admin_secret_matches(request: Request) -> bool:
 def _raw_internal_admin_fallback_matches(request: Request) -> bool:
     if not _env_flag_strict("TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK", False):
         return False
-    logger.warning("[auth] raw-secret-fallback engaged; dev-only flag TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK is enabled")
+    logger.warning(
+        "[auth] raw-secret-fallback engaged; dev-only flag TRR_INTERNAL_ADMIN_ALLOW_RAW_SECRET_FALLBACK is enabled"
+    )
     return _internal_admin_secret_matches(request)
 
 

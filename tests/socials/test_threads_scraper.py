@@ -8,11 +8,25 @@ import requests
 
 from trr_backend.socials.threads.scraper import (
     _THREADS_POST_VIEW_COUNT_DOC_ID,
+    ThreadsComment,
     ThreadsPost,
     ThreadsScrapeConfig,
     ThreadsScraper,
     _PageTokens,
 )
+
+
+class _FakeResponse:
+    status_code = 200
+    text = "<html></html>"
+
+    @staticmethod
+    def json() -> dict[str, Any]:
+        return {"data": {"mediaData": {"edges": [], "page_info": {"has_next_page": False}}}}
+
+    @staticmethod
+    def raise_for_status() -> None:
+        return None
 
 
 def _graphql_edge(*, impression_count: int | None = None) -> dict[str, Any]:
@@ -42,6 +56,75 @@ def _graphql_edge(*, impression_count: int | None = None) -> dict[str, Any]:
             ]
         }
     }
+
+
+def test_threads_scraper_uses_configured_proxy_for_document_and_graphql_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = ThreadsScraper(cookies={"csrftoken": "token"}, proxy_url="http://user:pass@proxy.test:8080")
+    captured: dict[str, Any] = {}
+
+    def _fake_get(*_args: Any, **kwargs: Any) -> _FakeResponse:
+        captured["get_proxies"] = kwargs.get("proxies")
+        return _FakeResponse()
+
+    def _fake_post(*_args: Any, **kwargs: Any) -> _FakeResponse:
+        captured["post_proxies"] = kwargs.get("proxies")
+        return _FakeResponse()
+
+    monkeypatch.setattr(scraper.session, "get", _fake_get)
+    monkeypatch.setattr(scraper.session, "post", _fake_post)
+
+    scraper._fetch_html("https://www.threads.com/@bravotv", delay_seconds=0)  # noqa: SLF001
+    scraper._graphql_query(  # noqa: SLF001
+        tokens=_PageTokens(fb_dtsg="fb-dtsg", lsd="lsd", jazoest="26474", user_id="123"),
+        doc_id="doc",
+        variables={},
+        friendly_name="BarcelonaProfileThreadsTabDirectQuery",
+        delay_seconds=0,
+    )
+
+    expected = {
+        "http": "http://user:pass@proxy.test:8080",
+        "https": "http://user:pass@proxy.test:8080",
+    }
+    assert captured["get_proxies"] == expected
+    assert captured["post_proxies"] == expected
+    assert scraper.runtime_metadata["proxy_configured"] is True
+
+
+def test_threads_fetch_comments_continues_when_token_exists_but_has_more_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = ThreadsScraper(cookies={"sessionid": "cookie", "csrftoken": "token"})
+    paging_tokens: list[str | None] = []
+
+    monkeypatch.setattr(scraper, "_resolve_post_pk", lambda *_args, **_kwargs: "1234567890123456789")
+
+    def _fake_fetch_replies_page(
+        _post_pk: str,
+        *,
+        paging_token: str | None = None,
+    ) -> tuple[list[ThreadsComment], str | None, bool]:
+        paging_tokens.append(paging_token)
+        scraper._last_replies_page_meta = {"root_direct_reply_count": 3}  # noqa: SLF001
+        if paging_token is None:
+            return (
+                [ThreadsComment(comment_id="reply-1", username="one", text="one")],
+                "next-token",
+                False,
+            )
+        return ([ThreadsComment(comment_id="reply-2", username="two", text="two")], None, False)
+
+    monkeypatch.setattr(scraper, "_fetch_replies_page", _fake_fetch_replies_page)
+
+    comments = scraper.fetch_comments("https://www.threads.com/@bravowwhl/post/DUCpTSVAPrR", max_comments=10)
+
+    assert [comment.comment_id for comment in comments] == ["reply-1", "reply-2"]
+    assert paging_tokens == [None, "next-token"]
+    assert scraper.last_comment_fetch_reason == "threads_replies_ok"
+    assert scraper.last_comment_fetch_meta["root_direct_reply_count"] == 3
+    assert scraper.last_comment_fetch_meta["unavailable_reply_count"] == 1
 
 
 def test_threads_fetch_post_view_count_reads_impression_count(monkeypatch: pytest.MonkeyPatch) -> None:

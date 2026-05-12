@@ -237,7 +237,10 @@ def get_queue_status(
                           j.started_at,
                           j.heartbeat_at,
                           nullif(coalesce(j.metadata->'dispatch'->>'dispatch_backend', ''), '') as dispatch_backend,
-                          nullif(coalesce(j.config->>'required_execution_backend', ''), '') as required_execution_backend
+                          nullif(
+                            coalesce(j.config->>'required_execution_backend', ''),
+                            ''
+                          ) as required_execution_backend
                         from social.scrape_jobs j
                         where j.status = 'running'
                         order by coalesce(j.heartbeat_at, j.started_at, j.created_at) desc, j.created_at desc
@@ -275,7 +278,9 @@ def get_queue_status(
                 "last_error_class" if features.get("has_queue_fields") else "null::text as last_error_class"
             )
 
-            with repo.pg.db_connection(label="queue-status:recent-failures", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+            with repo.pg.db_connection(
+                label="queue-status:recent-failures", pool_name=SOCIAL_CONTROL_POOL_NAME
+            ) as conn:
                 with repo.pg.db_cursor(conn=conn) as cur:
                     cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
                     recent_failures = repo.pg.fetch_all_with_cursor(
@@ -361,7 +366,9 @@ def get_queue_status(
             errors.append(f"queue_dispatch_blocked_query_failed: {exc}")
 
         try:
-            with repo.pg.db_connection(label="queue-status:dispatch-health", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+            with repo.pg.db_connection(
+                label="queue-status:dispatch-health", pool_name=SOCIAL_CONTROL_POOL_NAME
+            ) as conn:
                 with repo.pg.db_cursor(conn=conn) as cur:
                     cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
                     dispatch_rows = repo.pg.fetch_all_with_cursor(
@@ -392,11 +399,15 @@ def get_queue_status(
 
     if safe_include_runs_summary and not safe_summary_only:
         try:
-            with repo.pg.db_connection(label="queue-status:runs-relation-check", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+            with repo.pg.db_connection(
+                label="queue-status:runs-relation-check", pool_name=SOCIAL_CONTROL_POOL_NAME
+            ) as conn:
                 scrape_runs_exists = repo._relation_exists("social.scrape_runs", conn=conn)
             if scrape_runs_exists:
                 run_failure_not_dismissed_sql = repo._run_failure_not_dismissed_sql("r")
-                with repo.pg.db_connection(label="queue-status:runs-summary", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+                with repo.pg.db_connection(
+                    label="queue-status:runs-summary", pool_name=SOCIAL_CONTROL_POOL_NAME
+                ) as conn:
                     with repo.pg.db_cursor(conn=conn) as cur:
                         cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
                         run_rows = repo.pg.fetch_all_with_cursor(

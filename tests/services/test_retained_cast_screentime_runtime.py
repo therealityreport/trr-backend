@@ -79,8 +79,9 @@ def test_run_screentime_analysis_persists_retained_outputs_and_finalizes(monkeyp
     monkeypatch.setattr(
         runtime.cast_screentime,
         "update_run",
-        lambda run_id, payload: update_calls.append({"run_id": run_id, "payload": payload})
-        or {"id": run_id, **payload},
+        lambda run_id, payload: (
+            update_calls.append({"run_id": run_id, "payload": payload}) or {"id": run_id, **payload}
+        ),
     )
     monkeypatch.setattr(
         runtime,
@@ -163,8 +164,10 @@ def test_generate_segment_clip_persists_backend_generated_clip(monkeypatch) -> N
     monkeypatch.setattr(
         runtime.cast_screentime,
         "upsert_cast_screentime_evidence",
-        lambda run_id, evidence_items: persisted_evidence.append(evidence_items)
-        or [{**evidence_items[0], "created_at": "2026-04-03T00:00:00+00:00"}],
+        lambda run_id, evidence_items: (
+            persisted_evidence.append(evidence_items)
+            or [{**evidence_items[0], "created_at": "2026-04-03T00:00:00+00:00"}]
+        ),
     )
 
     result = runtime.generate_segment_clip(

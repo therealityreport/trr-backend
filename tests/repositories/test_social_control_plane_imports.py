@@ -101,6 +101,13 @@ POSTS_CATALOG_MODULES = (
         "scrape_shared_youtube_posts",
     ),
 )
+DIRECT_SCRAPE_MODULES = (
+    ("tiktok", "trr_backend.socials.tiktok.direct_scrape"),
+    ("twitter", "trr_backend.socials.twitter.direct_scrape"),
+    ("facebook", "trr_backend.socials.facebook.direct_scrape"),
+    ("threads", "trr_backend.socials.threads.direct_scrape"),
+    ("youtube", "trr_backend.socials.youtube.direct_scrape"),
+)
 LIFECYCLE_HELPER_NAMES = (
     "_new_job_progress_state",
     "_touch_job_heartbeat",
@@ -315,6 +322,39 @@ def test_posts_catalog_modules_import_before_legacy_compatibility_path() -> None
         assert result.returncode == 0, f"{label}: {result.stderr}"
 
 
+def test_direct_scrape_modules_import_without_legacy_repository_path() -> None:
+    backend_root = Path(__file__).resolve().parents[2]
+    for label, module_name in DIRECT_SCRAPE_MODULES:
+        code = "\n".join(
+            [
+                "import importlib",
+                "import sys",
+                f"module = importlib.import_module('{module_name}')",
+                "assert module.__name__",
+                "assert 'trr_backend.repositories.social_season_analytics' not in sys.modules",
+                (
+                    "assert not any(name.startswith('trr_backend.socials.threads.posts_scrapling') "
+                    "for name in sys.modules)"
+                    if label == "threads"
+                    else "pass"
+                ),
+            ]
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=backend_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+
+        module_path = SOCIALS_DIR / label / "direct_scrape.py"
+        source = module_path.read_text()
+        assert "trr_backend.repositories.social_season_analytics" not in source, label
+
+
 def test_control_plane_does_not_import_legacy_compatibility_path() -> None:
     files_with_legacy_imports: set[str] = set()
     for path in CONTROL_PLANE_DIR.glob("*.py"):
@@ -446,23 +486,15 @@ def test_control_plane_reexports_shared_account_surface() -> None:
         catalog_progress.get_social_account_catalog_run_progress
         is account_catalog_progress.get_social_account_catalog_run_progress
     )
-    assert (
-        control_plane.get_social_account_profile_summary
-        is account_profile_common.get_social_account_profile_summary
-    )
+    assert control_plane.get_social_account_profile_summary is account_profile_common.get_social_account_profile_summary
     assert control_plane.get_social_account_profile_posts is account_profile_common.get_social_account_profile_posts
     assert (
-        control_plane.get_social_account_profile_comments
-        is account_profile_common.get_social_account_profile_comments
+        control_plane.get_social_account_profile_comments is account_profile_common.get_social_account_profile_comments
     )
-    assert (
-        profile_reads.get_social_account_profile_summary
-        is account_profile_common.get_social_account_profile_summary
-    )
+    assert profile_reads.get_social_account_profile_summary is account_profile_common.get_social_account_profile_summary
     assert profile_reads.get_social_account_profile_posts is account_profile_common.get_social_account_profile_posts
     assert (
-        profile_reads.get_social_account_profile_comments
-        is account_profile_common.get_social_account_profile_comments
+        profile_reads.get_social_account_profile_comments is account_profile_common.get_social_account_profile_comments
     )
     assert control_plane.get_social_account_catalog_verification is legacy_repo.get_social_account_catalog_verification
     assert (
@@ -537,14 +569,10 @@ def test_account_profile_package_routing_bridges() -> None:
         account_profile_instagram.get_social_account_profile_comments
         is account_profile_common.get_social_account_profile_comments
     )
-    assert (
-        profile_reads.get_social_account_profile_summary
-        is account_profile_common.get_social_account_profile_summary
-    )
+    assert profile_reads.get_social_account_profile_summary is account_profile_common.get_social_account_profile_summary
     assert profile_reads.get_social_account_profile_posts is account_profile_common.get_social_account_profile_posts
     assert (
-        profile_reads.get_social_account_profile_comments
-        is account_profile_common.get_social_account_profile_comments
+        profile_reads.get_social_account_profile_comments is account_profile_common.get_social_account_profile_comments
     )
 
 

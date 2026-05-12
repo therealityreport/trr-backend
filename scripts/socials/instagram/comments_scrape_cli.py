@@ -18,7 +18,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from trr_backend.utils.env import load_env
+from trr_backend.utils.env import load_env  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

@@ -55,6 +55,7 @@ def _instagram_profile_scraper(config: Mapping[str, Any], *, account_handle: str
         browser_account_id=str(config.get("browser_account_id") or account_handle),
     )
 
+
 def _run_instagram_profile_snapshot_stage(
     *,
     run_id: str,
@@ -107,6 +108,7 @@ def _run_instagram_profile_snapshot_stage(
         },
     )
 
+
 def _instagram_following_rows_from_payload(
     payload: Mapping[str, Any],
     *,
@@ -132,6 +134,7 @@ def _instagram_following_rows_from_payload(
     next_cursor = str(payload.get("next_max_id") or payload.get("next_cursor") or "").strip() or None
     has_more = bool(payload.get("has_more") or payload.get("big_list") or next_cursor)
     return rows, next_cursor, has_more
+
 
 def _fetch_instagram_following_rows(
     *,
@@ -199,6 +202,7 @@ def _fetch_instagram_following_rows(
         "max_relationships": max_relationships,
     }
 
+
 def _run_instagram_profile_following_stage(
     *,
     run_id: str,
@@ -247,6 +251,7 @@ def _run_instagram_profile_following_stage(
     )
     return 0, 0, metadata
 
+
 def _instagram_profile_tables_ready(*, conn: Any | None = None) -> bool:
     try:
         return all(
@@ -260,11 +265,13 @@ def _instagram_profile_tables_ready(*, conn: Any | None = None) -> bool:
         logger.debug("[instagram] Profile queryable tables are not ready", exc_info=True)
         return False
 
+
 def _normalize_instagram_profile_source_scope(source_scope: Any) -> str:
     try:
         return normalize_source_scope(source_scope)
     except ValueError as exc:
         raise ValueError(f"Unsupported Instagram profile source_scope: {source_scope}") from exc
+
 
 def _instagram_profile_fetch_one(
     sql: str,
@@ -278,6 +285,7 @@ def _instagram_profile_fetch_one(
     with pg.db_cursor(conn=conn, label=label) as cur:
         return pg.fetch_one_with_cursor(cur, sql, list(params))
 
+
 def _instagram_profile_fetch_all(
     sql: str,
     params: Sequence[Any],
@@ -290,6 +298,7 @@ def _instagram_profile_fetch_all(
     with pg.db_cursor(conn=conn, label=label) as cur:
         return pg.fetch_all_with_cursor(cur, sql, list(params))
 
+
 def _instagram_profile_execute_one(
     sql: str,
     params: Sequence[Any],
@@ -299,6 +308,7 @@ def _instagram_profile_execute_one(
 ) -> dict[str, Any] | None:
     return _instagram_profile_fetch_one(sql, params, conn=conn, label=label)
 
+
 def _instagram_profile_execute(
     sql: str,
     params: Sequence[Any],
@@ -306,6 +316,7 @@ def _instagram_profile_execute(
     conn: Any | None = None,
 ) -> None:
     pg.execute(sql, list(params), conn=conn)
+
 
 def _instagram_profile_parse_about_timestamp(about_raw: Mapping[str, Any], *keys: str) -> datetime | None:
     for key in keys:
@@ -320,12 +331,14 @@ def _instagram_profile_parse_about_timestamp(about_raw: Mapping[str, Any], *keys
                 return parsed
     return None
 
+
 def _instagram_profile_domain(url: Any) -> str | None:
     parsed = urlparse(str(url or "").strip())
     host = parsed.netloc.lower()
     if host.startswith("www."):
         host = host[4:]
     return host or None
+
 
 def _instagram_profile_normalized_url(url: Any) -> str | None:
     raw = str(url or "").strip()
@@ -336,6 +349,7 @@ def _instagram_profile_normalized_url(url: Any) -> str | None:
         return raw
     path = parsed.path.rstrip("/") or "/"
     return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, "", parsed.query, ""))
+
 
 def _instagram_profile_merge_rows(*, keep_id: str, discard_id: str, conn: Any | None) -> None:
     if keep_id == discard_id:
@@ -399,6 +413,7 @@ def _instagram_profile_merge_rows(*, keep_id: str, discard_id: str, conn: Any | 
     for sql, params in statements:
         _instagram_profile_execute(sql, params, conn=conn)
 
+
 def _instagram_profile_existing_row(
     *,
     profile_id: str | None,
@@ -443,6 +458,7 @@ def _instagram_profile_existing_row(
         return by_profile_id
     return by_profile_id or by_username
 
+
 def _sync_instagram_profile_external_links(
     *,
     profile_row_id: str,
@@ -485,6 +501,7 @@ def _sync_instagram_profile_external_links(
         )
         rows.append(payload)
     return rows
+
 
 def persist_instagram_profile_snapshot(
     profile_payload: Mapping[str, Any],
@@ -621,6 +638,7 @@ def persist_instagram_profile_snapshot(
         )
     return dict(row or {})
 
+
 def _instagram_profile_row_for_username(
     account_handle: str,
     *,
@@ -644,6 +662,7 @@ def _instagram_profile_row_for_username(
         conn=conn,
         label="instagram_profile_row_for_username",
     )
+
 
 def persist_instagram_profile_relationships(
     relationship_payloads: Mapping[str, Any] | Sequence[Mapping[str, Any]],
@@ -780,6 +799,7 @@ def persist_instagram_profile_relationships(
         "page_info": result.page_info,
     }
 
+
 def _instagram_profile_response(row: Mapping[str, Any], links: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     username = str(row.get("username") or row.get("normalized_username") or "").strip()
     profile_id = str(row.get("profile_id") or "").strip() or None
@@ -835,6 +855,7 @@ def _instagram_profile_response(row: Mapping[str, Any], links: Sequence[Mapping[
         "last_seen_at": _iso(_coerce_dt(row.get("last_seen_at"))),
     }
 
+
 def get_instagram_profile_detail(
     account_handle: str,
     *,
@@ -865,6 +886,7 @@ def get_instagram_profile_detail(
         label="instagram_profile_detail_links",
     )
     return {"profile": _instagram_profile_response(row, links)}
+
 
 def get_instagram_profile_relationships(
     account_handle: str,
@@ -966,54 +988,54 @@ def get_instagram_profile_relationships(
 
 
 _LOCAL_ROOM_NAMES = {
-    '_instagram_profile_scraper',
-    '_run_instagram_profile_snapshot_stage',
-    '_instagram_following_rows_from_payload',
-    '_fetch_instagram_following_rows',
-    '_run_instagram_profile_following_stage',
-    '_instagram_profile_tables_ready',
-    '_normalize_instagram_profile_source_scope',
-    '_instagram_profile_fetch_one',
-    '_instagram_profile_fetch_all',
-    '_instagram_profile_execute_one',
-    '_instagram_profile_execute',
-    '_instagram_profile_parse_about_timestamp',
-    '_instagram_profile_domain',
-    '_instagram_profile_normalized_url',
-    '_instagram_profile_merge_rows',
-    '_instagram_profile_existing_row',
-    '_sync_instagram_profile_external_links',
-    'persist_instagram_profile_snapshot',
-    '_instagram_profile_row_for_username',
-    'persist_instagram_profile_relationships',
-    '_instagram_profile_response',
-    'get_instagram_profile_detail',
-    'get_instagram_profile_relationships',
+    "_instagram_profile_scraper",
+    "_run_instagram_profile_snapshot_stage",
+    "_instagram_following_rows_from_payload",
+    "_fetch_instagram_following_rows",
+    "_run_instagram_profile_following_stage",
+    "_instagram_profile_tables_ready",
+    "_normalize_instagram_profile_source_scope",
+    "_instagram_profile_fetch_one",
+    "_instagram_profile_fetch_all",
+    "_instagram_profile_execute_one",
+    "_instagram_profile_execute",
+    "_instagram_profile_parse_about_timestamp",
+    "_instagram_profile_domain",
+    "_instagram_profile_normalized_url",
+    "_instagram_profile_merge_rows",
+    "_instagram_profile_existing_row",
+    "_sync_instagram_profile_external_links",
+    "persist_instagram_profile_snapshot",
+    "_instagram_profile_row_for_username",
+    "persist_instagram_profile_relationships",
+    "_instagram_profile_response",
+    "get_instagram_profile_detail",
+    "get_instagram_profile_relationships",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    '_instagram_profile_scraper',
-    '_run_instagram_profile_snapshot_stage',
-    '_instagram_following_rows_from_payload',
-    '_fetch_instagram_following_rows',
-    '_run_instagram_profile_following_stage',
-    '_instagram_profile_tables_ready',
-    '_normalize_instagram_profile_source_scope',
-    '_instagram_profile_fetch_one',
-    '_instagram_profile_fetch_all',
-    '_instagram_profile_execute_one',
-    '_instagram_profile_execute',
-    '_instagram_profile_parse_about_timestamp',
-    '_instagram_profile_domain',
-    '_instagram_profile_normalized_url',
-    '_instagram_profile_merge_rows',
-    '_instagram_profile_existing_row',
-    '_sync_instagram_profile_external_links',
-    'persist_instagram_profile_snapshot',
-    '_instagram_profile_row_for_username',
-    'persist_instagram_profile_relationships',
-    '_instagram_profile_response',
-    'get_instagram_profile_detail',
-    'get_instagram_profile_relationships',
+    "_instagram_profile_scraper",
+    "_run_instagram_profile_snapshot_stage",
+    "_instagram_following_rows_from_payload",
+    "_fetch_instagram_following_rows",
+    "_run_instagram_profile_following_stage",
+    "_instagram_profile_tables_ready",
+    "_normalize_instagram_profile_source_scope",
+    "_instagram_profile_fetch_one",
+    "_instagram_profile_fetch_all",
+    "_instagram_profile_execute_one",
+    "_instagram_profile_execute",
+    "_instagram_profile_parse_about_timestamp",
+    "_instagram_profile_domain",
+    "_instagram_profile_normalized_url",
+    "_instagram_profile_merge_rows",
+    "_instagram_profile_existing_row",
+    "_sync_instagram_profile_external_links",
+    "persist_instagram_profile_snapshot",
+    "_instagram_profile_row_for_username",
+    "persist_instagram_profile_relationships",
+    "_instagram_profile_response",
+    "get_instagram_profile_detail",
+    "get_instagram_profile_relationships",
 ]

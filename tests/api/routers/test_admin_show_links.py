@@ -755,14 +755,17 @@ def test_discover_show_links_uses_cached_directory_when_canonical_page_is_cloudf
                                             ):
                                                 with patch(
                                                     "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
-                                                    side_effect=lambda candidate_url, **kwargs: {
-                                                        "community_domain": "real-housewives.fandom.com",
-                                                        "page_title": "The Real Housewives of Salt Lake City",
-                                                        "page_slug": "The_Real_Housewives_of_Salt_Lake_City",
-                                                        "page_url": canonical_url,
-                                                    }
-                                                    if candidate_url and "real-housewives.fandom.com" in candidate_url
-                                                    else None,
+                                                    side_effect=lambda candidate_url, **kwargs: (
+                                                        {
+                                                            "community_domain": "real-housewives.fandom.com",
+                                                            "page_title": "The Real Housewives of Salt Lake City",
+                                                            "page_slug": "The_Real_Housewives_of_Salt_Lake_City",
+                                                            "page_url": canonical_url,
+                                                        }
+                                                        if candidate_url
+                                                        and "real-housewives.fandom.com" in candidate_url
+                                                        else None
+                                                    ),
                                                 ):
                                                     links = _discover_show_links(show_id)
 
@@ -2812,11 +2815,11 @@ def test_discover_people_links_adds_featured_image_metadata_for_fandom_pages() -
                 ):
                     with patch(
                         "api.routers.admin_show_links._build_person_page_link_metadata",
-                        side_effect=lambda url, *, kind: {
-                            "featured_image_url": "https://cdn.example.com/lisa-barlow.jpg"
-                        }
-                        if kind == "fandom"
-                        else {},
+                        side_effect=lambda url, *, kind: (
+                            {"featured_image_url": "https://cdn.example.com/lisa-barlow.jpg"}
+                            if kind == "fandom"
+                            else {}
+                        ),
                     ) as build_metadata:
                         with patch("api.routers.admin_show_links.search_real_housewives_wiki", return_value=None):
                             with patch("api.routers.admin_show_links.search_allowlisted_fandom_wikis", return_value=[]):
@@ -3349,9 +3352,9 @@ def test_discover_people_links_discovers_fandom_profiles_across_show_fandom_doma
                     ):
                         with patch(
                             "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, kind, expected_name=None, **kwargs: url
-                            if kind == "fandom"
-                            else None,
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind == "fandom" else None
+                            ),
                         ):
                             links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -3399,9 +3402,9 @@ def test_discover_people_links_uses_direct_fandom_domain_profile_urls_when_searc
                     with patch("api.routers.admin_show_links.search_fandom_community_wiki_candidates", return_value=[]):
                         with patch(
                             "api.routers.admin_show_links._validated_person_knowledge_url",
-                            side_effect=lambda url, kind, expected_name=None, **kwargs: url
-                            if kind == "fandom"
-                            else None,
+                            side_effect=lambda url, kind, expected_name=None, **kwargs: (
+                                url if kind == "fandom" else None
+                            ),
                         ):
                             links = _discover_people_links(show_id, show_fandom_seed_urls=show_fandom_urls)
 
@@ -4145,14 +4148,16 @@ def test_discover_season_links_uses_cached_page_directory_when_fandom_page_is_cl
                                     ):
                                         with patch(
                                             "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
-                                            side_effect=lambda candidate_url, **kwargs: {
-                                                "community_domain": "real-housewives.fandom.com",
-                                                "page_title": "The Real Housewives of Salt Lake City - Season 1",
-                                                "page_slug": "The_Real_Housewives_of_Salt_Lake_City_-_Season_1",
-                                                "page_url": cached_url,
-                                            }
-                                            if candidate_url and "real-housewives.fandom.com" in candidate_url
-                                            else None,
+                                            side_effect=lambda candidate_url, **kwargs: (
+                                                {
+                                                    "community_domain": "real-housewives.fandom.com",
+                                                    "page_title": "The Real Housewives of Salt Lake City - Season 1",
+                                                    "page_slug": "The_Real_Housewives_of_Salt_Lake_City_-_Season_1",
+                                                    "page_url": cached_url,
+                                                }
+                                                if candidate_url and "real-housewives.fandom.com" in candidate_url
+                                                else None
+                                            ),
                                         ):
                                             links = _discover_season_links(
                                                 show_id,
@@ -4337,14 +4342,16 @@ def test_discover_people_links_uses_cached_page_directory_when_fandom_page_is_cl
                                     ):
                                         with patch(
                                             "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
-                                            side_effect=lambda candidate_url, **kwargs: {
-                                                "community_domain": "real-housewives.fandom.com",
-                                                "page_title": "Lisa Barlow",
-                                                "page_slug": "Lisa_Barlow",
-                                                "page_url": preferred_url,
-                                            }
-                                            if candidate_url and "real-housewives.fandom.com" in candidate_url
-                                            else None,
+                                            side_effect=lambda candidate_url, **kwargs: (
+                                                {
+                                                    "community_domain": "real-housewives.fandom.com",
+                                                    "page_title": "Lisa Barlow",
+                                                    "page_slug": "Lisa_Barlow",
+                                                    "page_url": preferred_url,
+                                                }
+                                                if candidate_url and "real-housewives.fandom.com" in candidate_url
+                                                else None
+                                            ),
                                         ):
                                             links = _discover_people_links(
                                                 show_id,
@@ -5476,22 +5483,24 @@ def test_cleanup_invalid_show_knowledge_links_keeps_cached_canonical_fandom_page
                     ):
                         with patch(
                             "api.routers.admin_show_links._get_cached_fandom_page_directory_entry",
-                            side_effect=lambda candidate_url, **kwargs: {
-                                "community_domain": "real-housewives.fandom.com",
-                                "page_title": (
-                                    "The Real Housewives of Salt Lake City"
-                                    if candidate_url == show_url
-                                    else "The Real Housewives of Salt Lake City - Season 1"
-                                ),
-                                "page_slug": (
-                                    "The_Real_Housewives_of_Salt_Lake_City"
-                                    if candidate_url == show_url
-                                    else "The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
-                                ),
-                                "page_url": candidate_url,
-                            }
-                            if candidate_url and "real-housewives.fandom.com" in candidate_url
-                            else None,
+                            side_effect=lambda candidate_url, **kwargs: (
+                                {
+                                    "community_domain": "real-housewives.fandom.com",
+                                    "page_title": (
+                                        "The Real Housewives of Salt Lake City"
+                                        if candidate_url == show_url
+                                        else "The Real Housewives of Salt Lake City - Season 1"
+                                    ),
+                                    "page_slug": (
+                                        "The_Real_Housewives_of_Salt_Lake_City"
+                                        if candidate_url == show_url
+                                        else "The_Real_Housewives_of_Salt_Lake_City_-_Season_1"
+                                    ),
+                                    "page_url": candidate_url,
+                                }
+                                if candidate_url and "real-housewives.fandom.com" in candidate_url
+                                else None
+                            ),
                         ):
                             with patch(
                                 "api.routers.admin_show_links.pg.db_connection",

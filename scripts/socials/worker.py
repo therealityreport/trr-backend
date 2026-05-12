@@ -236,7 +236,12 @@ def _resolve_optional_positive_float(
 def _default_claim_batch_size_for_stage(stage: str | None) -> int:
     # Queue claims mark jobs running up front; batching post claims creates false
     # stale-heartbeat jobs for the later entries while one worker processes the first.
-    return 1 if (stage or "").strip().lower() in {"posts", "shared_account_posts", "comments_scrapling"} else 2
+    return (
+        1
+        if (stage or "").strip().lower()
+        in {"posts", "shared_account_posts", "comments_scrapling", "threads_posts_scrapling"}
+        else 2
+    )
 
 
 def _claim_stage_candidates(stage: str | None) -> tuple[str | None, ...]:
@@ -257,20 +262,21 @@ def _resolve_tandem_stage_groups(
     media_workers: int,
 ) -> list[tuple[str, str, int]]:
     normalized_platform = (platform or "").strip().lower() or None
-    run_row = pg.fetch_one(
-        """
+    run_row = (
+        pg.fetch_one(
+            """
         select config
         from social.scrape_runs
         where id = %s::uuid
         limit 1
         """,
-        [run_id],
-    ) or {}
+            [run_id],
+        )
+        or {}
+    )
     run_config = _metadata_dict(run_row.get("config"))
     run_platforms = [
-        str(item or "").strip().lower()
-        for item in list(run_config.get("platforms") or [])
-        if str(item or "").strip()
+        str(item or "").strip().lower() for item in list(run_config.get("platforms") or []) if str(item or "").strip()
     ]
     effective_platform = normalized_platform or (run_platforms[0] if len(run_platforms) == 1 else None)
     pipeline_ingest_mode = str(run_config.get("pipeline_ingest_mode") or "").strip().lower()
@@ -501,9 +507,7 @@ def _apply_post_persist_truthfulness_diagnostics(job: dict[str, object]) -> tupl
     updated_metadata["persist_counters"] = persist_counters
 
     silent_drop_detected = (
-        str(job.get("status") or "").strip().lower() == "completed"
-        and posts_checked > 0
-        and posts_upserted == 0
+        str(job.get("status") or "").strip().lower() == "completed" and posts_checked > 0 and posts_upserted == 0
     )
     diagnostics["post_persist_truthfulness"] = {
         "posts_checked": posts_checked,
@@ -565,9 +569,7 @@ def _single_target_catalog_progress_for_run(run_id: str, run_result: dict[str, o
     ):
         return None
     platforms = [
-        str(item or "").strip().lower()
-        for item in list(config.get("platforms") or [])
-        if str(item or "").strip()
+        str(item or "").strip().lower() for item in list(config.get("platforms") or []) if str(item or "").strip()
     ]
     accounts = [
         str(item or "").strip().lstrip("@").lower()
@@ -625,6 +627,7 @@ def parse_args() -> argparse.Namespace:
             "posts",
             "comments",
             "comments_scrapling",
+            "threads_posts_scrapling",
             "media_mirror",
             "comment_media_mirror",
             "shared_account_discovery",
@@ -893,7 +896,7 @@ def main() -> int:
                     "Recovered %d stale running job(s) before executing run_id=%s",
                     len(stale_jobs),
                     args.run_id,
-            )
+                )
             if args.tandem:
                 posts_workers = max(0, int(args.posts_workers))
                 comments_workers = max(0, int(args.comments_workers))

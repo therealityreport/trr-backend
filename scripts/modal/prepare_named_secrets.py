@@ -21,6 +21,8 @@ CANONICAL_DB_ENV = "TRR_DB_URL"
 RETIRED_DB_ENV_NAMES = ("SUPABASE_DB_URL", "DATABASE_URL")
 REMOTE_RUNTIME_EXCLUDED_ENV_NAMES = ("TRR_DB_DIRECT_URL",)
 CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
+    "TRR_DB_POOL_MINCONN": "1",
+    "TRR_DB_POOL_MAXCONN": "4",
     "TRR_JOB_PLANE_MODE": "remote",
     "TRR_LONG_JOB_ENFORCE_REMOTE": "1",
     "TRR_REMOTE_EXECUTOR": "modal",
@@ -179,10 +181,10 @@ def _materialize_file_backed_social_auth(
 ) -> dict[str, str]:
     rendered = dict(social_values)
     for file_env_key, inline_env_key in FILE_BACKED_SOCIAL_AUTH_ENV_MAP.items():
-        if (rendered.get(inline_env_key) or "").strip():
-            continue
         file_path = (source_values.get(file_env_key) or "").strip()
         if not file_path:
+            if (rendered.get(inline_env_key) or "").strip():
+                continue
             continue
         resolved_path = _resolve_env_file_path(file_path)
         if not resolved_path.is_file():

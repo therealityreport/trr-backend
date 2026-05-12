@@ -42,7 +42,10 @@ class ThreadsPostsScraplingFetcher:
         self._raw_cookies = dict(raw_cookies or {})
         self._proxy_config = proxy_config
         self._fast_mode = bool(fast_mode)
-        self._scraper = ThreadsScraper(cookies=self._raw_cookies)
+        self._scraper = ThreadsScraper(
+            cookies=self._raw_cookies,
+            proxy_url=proxy_config.api_proxy_url if proxy_config else None,
+        )
         self._warmed_profile_html: str | None = None
         self._profile_url: str | None = None
         self._last_transport = "requests"
@@ -123,6 +126,7 @@ class ThreadsPostsScraplingFetcher:
         )
 
         if tokens and tokens.user_id:
+
             def _graphql_fetch() -> list[ThreadsPost] | None:
                 return self._scraper._scrape_via_graphql(  # noqa: SLF001
                     config,

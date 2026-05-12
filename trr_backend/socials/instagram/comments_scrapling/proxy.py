@@ -153,8 +153,8 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
         # rotate across IPs during warmup, while keeping browser_proxy and
         # api_proxy_url pinned to the deterministic per-shard selection so
         # api-side requests stay on a stable session.
-        rotator = _build_proxy_rotator(list(explicit_urls)) if len(explicit_urls) > 1 else _build_proxy_rotator(
-            selected_url
+        rotator = (
+            _build_proxy_rotator(list(explicit_urls)) if len(explicit_urls) > 1 else _build_proxy_rotator(selected_url)
         )
         return CommentsProxyConfig(
             browser_proxy=selected_url,
@@ -170,9 +170,12 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds
+            force_rotating_proxy = env_truthy("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", True)
             sticky_username, session_mode = apply_decodo_session_affinity(
                 username,
-                use_sticky_proxy=env_truthy("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", False),
+                use_sticky_proxy=(
+                    False if force_rotating_proxy else env_truthy("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", False)
+                ),
                 session_ttl_seconds=resolve_positive_int_env(
                     "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS",
                     600,

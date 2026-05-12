@@ -681,9 +681,7 @@ def test_execute_cleanup_cancelling_job_sets_cancelling_status_but_zero_active_c
     run_update_params = fake_pg.writes[-1][1]
     assert run_update_params[0] == 0
     assert run_update_params[4] == "cancelling"
-    assert json.loads(run_update_params[3]) == {
-        "posts": {"total": 1, "completed": 0, "failed": 0, "active": 0}
-    }
+    assert json.loads(run_update_params[3]) == {"posts": {"total": 1, "completed": 0, "failed": 0, "active": 0}}
     summary_payload = json.loads(run_update_params[-2])
     assert summary_payload["active_jobs"] == 0
     assert summary_payload["cancelling_jobs"] == 1

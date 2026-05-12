@@ -85,7 +85,9 @@ def test_reconcile_runtime_db_blocks_when_core_schema_missing(monkeypatch: pytes
     monkeypatch.setattr(cli, "read_local_versions", lambda: ["20260422094500"])
     monkeypatch.setattr(cli, "assert_migration_safe", lambda require_core_schema=True: None)
     monkeypatch.setattr(cli, "resolve_direct_runtime_db_url", lambda: "postgresql://direct")
-    monkeypatch.setattr(cli, "read_remote_versions", lambda _db_url: (_ for _ in ()).throw(DatabasePreflightError("missing core")))
+    monkeypatch.setattr(
+        cli, "read_remote_versions", lambda _db_url: (_ for _ in ()).throw(DatabasePreflightError("missing core"))
+    )
 
     result = cli.reconcile_runtime_db()
 

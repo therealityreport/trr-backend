@@ -473,8 +473,9 @@ def get_repost_coverage(
 ) -> dict[str, Any]:
     """Return total Instagram posts, repost-populated posts, and populated percent."""
 
-    row = _fetch_one_readonly(
-        """
+    row = (
+        _fetch_one_readonly(
+            """
         select
           count(*)::int as total_instagram_posts,
           count(*) filter (where media_repost_count is not null)::int as posts_with_media_repost_count,
@@ -487,11 +488,13 @@ def get_repost_coverage(
           end as percent_populated
         from social.instagram_posts
         """,
-        [],
-        conn=conn,
-        pool_name=pool_name,
-        statement_timeout_ms=statement_timeout_ms,
-    ) or {}
+            [],
+            conn=conn,
+            pool_name=pool_name,
+            statement_timeout_ms=statement_timeout_ms,
+        )
+        or {}
+    )
     total = _safe_int(row.get("total_instagram_posts"))
     populated = _safe_int(row.get("posts_with_media_repost_count"))
     percent = _safe_float_or_none(row.get("percent_populated"))
@@ -598,8 +601,9 @@ def get_thin_source_repost_gaps(
     """Return bounded samples for comments-header-like rows missing repost metadata."""
 
     safe_limit = _safe_sample_limit(sample_limit)
-    count_row = _fetch_one_readonly(
-        f"""
+    count_row = (
+        _fetch_one_readonly(
+            f"""
         with classified as (
           select media_repost_count, {SOURCE_SHAPE_SQL_CASE} as source_shape
           from social.instagram_posts p
@@ -609,11 +613,13 @@ def get_thin_source_repost_gaps(
         where source_shape = 'comments-header-like'
           and media_repost_count is null
         """,
-        [],
-        conn=conn,
-        pool_name=pool_name,
-        statement_timeout_ms=statement_timeout_ms,
-    ) or {}
+            [],
+            conn=conn,
+            pool_name=pool_name,
+            statement_timeout_ms=statement_timeout_ms,
+        )
+        or {}
+    )
     sample_rows = (
         _fetch_all_readonly(
             f"""

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import MutableMapping
 from pathlib import Path
-from typing import MutableMapping
 
 WORKSPACE_TO_RUNTIME_ENV = {
     "WORKSPACE_TRR_JOB_PLANE_MODE": "TRR_JOB_PLANE_MODE",

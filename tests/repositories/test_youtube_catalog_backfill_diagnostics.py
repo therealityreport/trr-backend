@@ -5,9 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-YOUTUBE_FIXTURE_PATH = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "socials" / "youtube" / "catalog_pages.json"
-)
+YOUTUBE_FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "socials" / "youtube" / "catalog_pages.json"
 
 
 def _load_youtube_catalog_fixture(name: str) -> dict[str, Any]:

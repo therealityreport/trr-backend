@@ -20,9 +20,6 @@ import argparse
 import csv
 import json
 import logging
-import os
-import shutil
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +33,13 @@ from trr_backend.socials.youtube import (
     YouTubeScraper,
     YouTubeVideo,
 )
+from trr_backend.socials.youtube.ops import (
+    default_download_root as default_download_root,
+)
+from trr_backend.socials.youtube.ops import (
+    download_videos,
+    resolve_download_dir,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,23 +47,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-
-def default_download_root() -> Path:
-    """Return a cache-like root outside the repo for ad hoc media downloads."""
-    override = str(os.getenv("TRR_WORKSPACE_CACHE_ROOT") or "").strip()
-    if override:
-        return Path(override).expanduser() / "youtube-downloads"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Caches" / "TRR" / "youtube-downloads"
-    return Path.home() / ".cache" / "trr" / "youtube-downloads"
-
-
-def resolve_download_dir(download_dir: str | None, channel_handle: str) -> Path:
-    """Resolve the target download directory for yt-dlp media exports."""
-    if download_dir:
-        return Path(download_dir).expanduser().resolve()
-    return default_download_root() / channel_handle
 
 
 def parse_date(date_str: str) -> datetime:
@@ -178,63 +165,6 @@ def save_comments(comments: list[YouTubeComment], output_prefix: str, video_id: 
         writer.writeheader()
         writer.writerows(rows)
     logger.info(f"Saved {len(rows)} comments to {csv_file}")
-
-
-def download_videos(videos: list[YouTubeVideo], output_dir: Path):
-    """Download videos/shorts at best available quality using yt-dlp."""
-    if not shutil.which("yt-dlp"):
-        logger.error("yt-dlp is not installed. Install with: pip install yt-dlp")
-        return
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    succeeded = 0
-    failed = 0
-
-    for i, video in enumerate(videos, 1):
-        label = "Short" if video.is_short else "Video"
-        title_preview = video.title[:50] + "..." if len(video.title) > 50 else video.title
-        print(f"\n[{i}/{len(videos)}] Downloading {label}: {title_preview}")
-
-        url = video.url
-        output_template = str(output_dir / "%(id)s.%(ext)s")
-
-        cmd = [
-            "yt-dlp",
-            "--format",
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
-            "--merge-output-format",
-            "mp4",
-            "--output",
-            output_template,
-            "--no-playlist",
-            "--write-thumbnail",
-            "--convert-thumbnails",
-            "jpg",
-            "--no-overwrites",
-            url,
-        ]
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=False,
-            )
-            if proc.returncode == 0:
-                succeeded += 1
-                logger.info(f"  Downloaded: {video.video_id}")
-            else:
-                failed += 1
-                error_msg = (proc.stderr or proc.stdout or "").strip()[:200]
-                logger.error(f"  Failed to download {video.video_id}: {error_msg}")
-        except subprocess.TimeoutExpired:
-            failed += 1
-            logger.error(f"  Download timed out for {video.video_id}")
-
-    print(f"\nDownload complete: {succeeded} succeeded, {failed} failed")
-    print(f"Files saved to: {output_dir}")
 
 
 def main():

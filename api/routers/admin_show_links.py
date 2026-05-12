@@ -1580,10 +1580,7 @@ def _matches_fandom_season_show_anchor(candidate_values: set[str], *, anchor_tit
         return False
     normalized_candidates = {
         normalized
-        for normalized in (
-            _normalize_fandom_season_show_identity(value)
-            for value in candidate_values
-        )
+        for normalized in (_normalize_fandom_season_show_identity(value) for value in candidate_values)
         if normalized
     }
     for candidate in normalized_candidates:
@@ -6670,12 +6667,16 @@ def _scan_invalid_show_knowledge_links(show_id: str) -> dict[str, Any]:
                 ):
                     continue
                 season_number = _extract_season_number_from_text(url)
-                if entity_type == "season" and season_number and _is_valid_cached_fandom_season_page(
-                    cached_entry,
-                    candidate_url=url,
-                    season_number=season_number,
-                    show_name=show_name,
-                    show_seed_urls=None,
+                if (
+                    entity_type == "season"
+                    and season_number
+                    and _is_valid_cached_fandom_season_page(
+                        cached_entry,
+                        candidate_url=url,
+                        season_number=season_number,
+                        show_name=show_name,
+                        show_seed_urls=None,
+                    )
                 ):
                     continue
                 invalid_rows.append({**row, "reason": "fandom_missing_or_invalid"})

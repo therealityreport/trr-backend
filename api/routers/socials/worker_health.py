@@ -14,4 +14,3 @@ ROUTE_PREFIXES = (
 
 def surface_routes(router: Any) -> list[RouteRecord]:
     return routes_matching(router, ROUTE_PREFIXES)
-

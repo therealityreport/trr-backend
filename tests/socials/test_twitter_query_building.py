@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from trr_backend.socials.twitter.scraper import TwitterScrapeConfig, normalize_twitter_search_window
+from trr_backend.socials.twitter.query import build_twitter_search_query, normalize_twitter_search_window
+from trr_backend.socials.twitter.scraper import TwitterScrapeConfig
 
 DATE_START = datetime(2026, 1, 1)
 DATE_END = datetime(2026, 1, 11)
@@ -28,6 +29,11 @@ def test_mention_passthrough():
 def test_plain_text_wrapped():
     q = _config("RHOSLC").build_search_query()
     assert '"RHOSLC" OR #RHOSLC' in q
+
+
+def test_route_independent_query_helper_matches_config_method():
+    config = _config("RHOSLC")
+    assert build_twitter_search_query(config.query, config.date_start, config.date_end) == config.build_search_query()
 
 
 def test_advanced_passthrough():

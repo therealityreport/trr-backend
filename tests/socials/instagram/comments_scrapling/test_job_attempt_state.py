@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsFetchResult
 from trr_backend.socials.instagram.comments_scrapling import job_runner as jr
+from trr_backend.socials.instagram.comments_scrapling.fetcher import InstagramCommentsFetchResult
 from trr_backend.socials.instagram.scraper import InstagramComment
 
 
@@ -88,9 +88,7 @@ def test_comment_capture_metadata_derives_phase_counts_from_comment_tree():
     parent.phase = "ranked"  # type: ignore[attr-defined]
     parent.is_ranked = True  # type: ignore[attr-defined]
 
-    metadata = jr._comment_capture_metadata_from_fetch_result(
-        InstagramCommentsFetchResult(comments=[parent])
-    )
+    metadata = jr._comment_capture_metadata_from_fetch_result(InstagramCommentsFetchResult(comments=[parent]))
 
     assert metadata["phase_counts"] == {"ranked": 1, "child": 1}
 

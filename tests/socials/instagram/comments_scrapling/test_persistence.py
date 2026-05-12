@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 
-from trr_backend.socials.instagram.comments_scrapling import persistence
-from trr_backend.socials.instagram import persistence as instagram_persistence
-from trr_backend.socials.instagram.scraper import InstagramComment
 from trr_backend.socials import social_season_analytics_impl as social_repo
+from trr_backend.socials.instagram import persistence as instagram_persistence
+from trr_backend.socials.instagram.comments_scrapling import persistence
+from trr_backend.socials.instagram.scraper import InstagramComment
 
 
 def _comment(
@@ -70,16 +70,18 @@ def test_no_season_persistence_preserves_media_and_reply_metadata() -> None:
         ]
 
     fake_repo = SimpleNamespace(
-        _column_exists=lambda _schema, _table, column: column
-        in {
-            "media_urls",
-            "hosted_media_urls",
-            "media_mirror_status",
-            "media_mirror_error",
-            "parent_comment_external_id",
-            "reply_depth",
-            "source_snapshot_type",
-        },
+        _column_exists=lambda _schema, _table, column: (
+            column
+            in {
+                "media_urls",
+                "hosted_media_urls",
+                "media_mirror_status",
+                "media_mirror_error",
+                "parent_comment_external_id",
+                "reply_depth",
+                "source_snapshot_type",
+            }
+        ),
         _comment_lifecycle_supported=lambda table: table == "instagram_comments",
         _flatten_instagram_comment_tree=_flatten,
         _new_comment_persist_stats=lambda: {},
@@ -146,8 +148,9 @@ def test_load_persisted_reply_topology_counts_saved_reply_gaps(monkeypatch: pyte
     conn = object()
     queries: list[str] = []
     fake_repo = SimpleNamespace(
-        _column_exists=lambda _schema, _table, column, *, conn=None: column
-        in {"parent_comment_external_id", "child_comment_count"}
+        _column_exists=lambda _schema, _table, column, *, conn=None: (
+            column in {"parent_comment_external_id", "child_comment_count"}
+        )
     )
 
     def fake_fetch_one(sql: str, params: list[str], *, conn: object | None = None) -> dict[str, Any]:

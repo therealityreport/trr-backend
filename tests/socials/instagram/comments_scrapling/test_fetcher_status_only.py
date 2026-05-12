@@ -20,6 +20,7 @@ from trr_backend.socials.instagram.comments_scrapling.fetcher import (
     _extract_graphql_preview_comments,
     _extract_rendered_dom_snapshot_comments,
     _extract_rendered_permalink_comments,
+    _target_metadata_indicates_coauthor,
 )
 from trr_backend.socials.instagram.scraper import InstagramComment
 
@@ -237,9 +238,7 @@ def test_coauthor_status_only_rendered_partial_classifies_terminal_missing_comme
     assert result.fetch_failed is False
     assert result.retryable is False
     assert result.fetch_reason == "coverage_terminal_missing_classified"
-    assert result.diagnostic_metadata["missing_reason_counts"] == {
-        "instagram_not_served_after_all_lanes": 1
-    }
+    assert result.diagnostic_metadata["missing_reason_counts"] == {"instagram_not_served_after_all_lanes": 1}
     assert result.diagnostic_metadata["formula_label"] == (
         "1 parent comments + 1 child replies + 0 Facebook comments + 1 missing comments = 3 reported comments"
     )
@@ -369,6 +368,54 @@ def test_is_collaborator_post_boolean_alone_triggers_coauthor_classification() -
     fetcher._fetch_rendered_comments_after_revealing_hidden.assert_not_awaited()
 
 
+def test_has_collaborators_boolean_triggers_coauthor_classification_for_authored_post() -> None:
+    fetcher = _build_fetcher()
+    fetcher._fetch_json_response = AsyncMock(
+        return_value={
+            "payload": {"status": "ok"},
+            "failed": False,
+            "auth_failed": False,
+            "reason": None,
+            "retryable": False,
+        }
+    )
+    fetcher._fetch_rendered_comments_after_revealing_hidden = AsyncMock(return_value=[])
+    fetcher._fetch_graphql_coauthor_comments_for_status_only = AsyncMock(
+        return_value=([], {"reason": "graphql_preview_empty"})
+    )
+    fetcher._fetch_rendered_coauthor_comments_for_status_only = AsyncMock(return_value=[])
+
+    result = asyncio.run(
+        fetcher.fetch_comments_for_shortcode(
+            "DTRdpWtjbz5",
+            max_comments=0,
+            fetch_replies=False,
+            expected_comment_count=5,
+            target_metadata={
+                "source_account": "thetraitorsus",
+                "owner_username": "thetraitorsus",
+                "collaborator_handles": ["johnnygweir", "nbcsports"],
+                "is_collaborator_post": False,
+                "has_collaborators": True,
+            },
+        )
+    )
+
+    assert result.fetch_reason == "coauthor_comments_endpoint_empty"
+    assert result.diagnostic_metadata["is_coauthor_context"] is True
+    assert _target_metadata_indicates_coauthor(
+        {
+            "source_account": "thetraitorsus",
+            "owner_username": "thetraitorsus",
+            "collaborator_handles": ["johnnygweir", "nbcsports"],
+            "has_collaborators": True,
+        }
+    )
+    fetcher._fetch_graphql_coauthor_comments_for_status_only.assert_awaited_once()
+    fetcher._fetch_rendered_coauthor_comments_for_status_only.assert_awaited_once()
+    fetcher._fetch_rendered_comments_after_revealing_hidden.assert_not_awaited()
+
+
 def test_extract_graphql_preview_comments_from_post_action_payload() -> None:
     payload = {
         "data": {
@@ -481,9 +528,7 @@ def test_rendered_dom_snapshot_comments_attach_indented_replies() -> None:
         ]
     }
     html = (
-        '<html><script id="trr-rendered-comments-json" type="application/json">'
-        f"{json.dumps(payload)}"
-        "</script></html>"
+        f'<html><script id="trr-rendered-comments-json" type="application/json">{json.dumps(payload)}</script></html>'
     )
 
     comments = _extract_rendered_dom_snapshot_comments(
@@ -503,6 +548,37 @@ def test_rendered_dom_snapshot_comments_attach_indented_replies() -> None:
     assert comments[0].replies[0].is_reply is True
     assert comments[0].replies[0].parent_comment_id == comments[0].comment_id
     assert comments[1].username == "jennjin3"
+
+
+def test_rendered_dom_snapshot_comments_preserve_permalink_fallback_ids() -> None:
+    payload = {
+        "rows": [
+            {
+                "username": "msjeepgirl",
+                "rowText": "msjeepgirl 11w Love Johnny and Tara! 2 likes Reply",
+                "commentId": "17900000000000001",
+                "commentHref": "/p/DT1ht84DYB4/c/17900000000000001/",
+                "left": 100,
+            }
+        ]
+    }
+    html = (
+        f'<html><script id="trr-rendered-comments-json" type="application/json">{json.dumps(payload)}</script></html>'
+    )
+
+    comments = _extract_rendered_dom_snapshot_comments(
+        html,
+        shortcode="DT1ht84DYB4",
+        post_url="https://www.instagram.com/p/DT1ht84DYB4/",
+        ignored_usernames=["thetraitorsus", "nbcolympics"],
+    )
+
+    assert len(comments) == 1
+    assert comments[0].comment_id == "17900000000000001"
+    assert comments[0].comment_url == "https://www.instagram.com/p/DT1ht84DYB4/c/17900000000000001/"
+    assert comments[0].username == "msjeepgirl"
+    assert comments[0].text == "Love Johnny and Tara!"
+    assert comments[0].likes == 2
 
 
 def test_extract_graphql_relay_parent_comments_preserves_child_count() -> None:
@@ -537,6 +613,7 @@ def test_extract_graphql_relay_parent_comments_preserves_child_count() -> None:
     assert comments[0].username == "bracketology.tv"
     assert comments[0].reply_count == 1
     assert comments[0].likes == 4
+    assert comments[0].phase == "parent"
     assert metadata["top_level_count"] == 1
     assert metadata["flattened_count"] == 1
 
@@ -576,6 +653,7 @@ def test_extract_graphql_child_connection_comments_marks_replies() -> None:
     assert comments[0].parent_comment_id == "18346102966234863"
     assert comments[0].reply_depth == 1
     assert comments[0].source_snapshot_type == "graphql_coauthor_relay_comments"
+    assert comments[0].phase == "child"
     assert metadata["reply_count"] == 1
 
 
@@ -666,9 +744,7 @@ def test_coauthor_status_only_du_shape_classifies_terminal_missing_comments() ->
     assert result.fetch_failed is False
     assert result.retryable is False
     assert result.fetch_reason == "coverage_terminal_missing_classified"
-    assert result.diagnostic_metadata["missing_reason_counts"] == {
-        "instagram_not_served_after_all_lanes": 5
-    }
+    assert result.diagnostic_metadata["missing_reason_counts"] == {"instagram_not_served_after_all_lanes": 5}
     assert result.diagnostic_metadata["formula_label"] == (
         "104 parent comments + 40 child replies + 0 Facebook comments + 5 missing comments = 149 reported comments"
     )
@@ -720,6 +796,46 @@ def test_public_relay_child_hydration_probes_zero_count_parent() -> None:
     assert metadata["merged_replies"] == 1
     assert parent.reply_count == 1
     assert parent.replies[0].username == "champagne.roast"
+
+
+def test_public_relay_child_hydration_caps_zero_count_parent_probes(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_COAUTHOR_GRAPHQL_CHILD_ZERO_COUNT_PROBE_LIMIT", "1")
+    fetcher = _build_fetcher()
+    fetcher._pace_api_requests = AsyncMock(return_value=True)
+    parents = [
+        _comment("parent-1", username="alpha", reply_count=0),
+        _comment("parent-2", username="beta", reply_count=0),
+    ]
+    payload = {
+        "data": {
+            "xdt_api__v1__media__media_id__comments__parent_comment_id__child_comments__connection": {
+                "edges": [],
+                "page_info": {"has_next_page": False, "end_cursor": None},
+            }
+        }
+    }
+    public_client = MagicMock()
+    public_client.post = AsyncMock(return_value=httpx.Response(200, json=payload))
+
+    metadata = asyncio.run(
+        fetcher._fetch_public_relay_child_comments_for_status_only(
+            public_client=public_client,
+            shortcode="DVPmpFkgfzS",
+            post_url="https://www.instagram.com/p/DVPmpFkgfzS/",
+            media_id="123",
+            comments=parents,
+            graphql_headers={},
+            common_body={},
+            target_count=2,
+            max_comments=0,
+        )
+    )
+
+    assert metadata["zero_count_probe_limit"] == 1
+    assert metadata["zero_count_parent_probes"] == 1
+    assert metadata["parent_attempts"] == 1
+    assert metadata["parents_skipped_without_reply_gap"] == 1
+    public_client.post.assert_awaited_once()
 
 
 def test_coauthor_relay_prefers_authenticated_session_for_parent_comments() -> None:

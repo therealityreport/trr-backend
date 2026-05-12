@@ -56,6 +56,7 @@ def _social_account_posts_scrapling_start_lock_key(platform: str, account_handle
         16,
     ) % (2**31)
 
+
 def get_active_social_account_posts_scrapling_run(platform: str, account_handle: str) -> dict[str, Any] | None:
     """Return an active (queued/running) posts_scrapling run for this account, if any."""
     _sync_core_overrides()
@@ -78,6 +79,7 @@ def get_active_social_account_posts_scrapling_run(platform: str, account_handle:
         [normalized_platform, normalized_account, expected_stage],
     )
     return row
+
 
 def start_instagram_posts_scrapling_scrape(
     *,
@@ -207,14 +209,14 @@ def start_instagram_posts_scrapling_scrape(
 
 
 _LOCAL_ROOM_NAMES = {
-    '_social_account_posts_scrapling_start_lock_key',
-    'get_active_social_account_posts_scrapling_run',
-    'start_instagram_posts_scrapling_scrape',
+    "_social_account_posts_scrapling_start_lock_key",
+    "get_active_social_account_posts_scrapling_run",
+    "start_instagram_posts_scrapling_scrape",
 }
 _LOCAL_ROOM_FUNCTIONS = {_name: globals()[_name] for _name in _LOCAL_ROOM_NAMES}
 _CORE_ROOM_WRAPPERS = {_name: getattr(_core, _name, None) for _name in _LOCAL_ROOM_NAMES}
 __all__ = [
-    '_social_account_posts_scrapling_start_lock_key',
-    'get_active_social_account_posts_scrapling_run',
-    'start_instagram_posts_scrapling_scrape',
+    "_social_account_posts_scrapling_start_lock_key",
+    "get_active_social_account_posts_scrapling_run",
+    "start_instagram_posts_scrapling_scrape",
 ]

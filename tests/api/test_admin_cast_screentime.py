@@ -939,24 +939,26 @@ def test_get_video_asset_resolves_legacy_screenalytics_id(monkeypatch):
     monkeypatch.setattr(
         repo,
         "resolve_video_asset",
-        lambda video_asset_id: {
-            "id": canonical_id,
-            "legacy_screenalytics_video_asset_id": legacy_id,
-            "show_id": str(uuid4()),
-            "season_id": str(uuid4()),
-            "episode_id": None,
-            "source_url": "s3://test-bucket/source/videos/demo/original.mp4",
-            "source_json": {"object_key": "source/videos/demo/original.mp4"},
-            "metadata": {"legacy_bridge": {"source_table": "screenalytics.video_assets"}},
-            "duration_seconds": 42.5,
-            "video_class": "promo",
-            "promo_subtype": "trailer",
-            "media_type": "trailer",
-            "media_kind": None,
-            "source_import_type": "external_url_import",
-        }
-        if video_asset_id == legacy_id
-        else None,
+        lambda video_asset_id: (
+            {
+                "id": canonical_id,
+                "legacy_screenalytics_video_asset_id": legacy_id,
+                "show_id": str(uuid4()),
+                "season_id": str(uuid4()),
+                "episode_id": None,
+                "source_url": "s3://test-bucket/source/videos/demo/original.mp4",
+                "source_json": {"object_key": "source/videos/demo/original.mp4"},
+                "metadata": {"legacy_bridge": {"source_table": "screenalytics.video_assets"}},
+                "duration_seconds": 42.5,
+                "video_class": "promo",
+                "promo_subtype": "trailer",
+                "media_type": "trailer",
+                "media_kind": None,
+                "source_import_type": "external_url_import",
+            }
+            if video_asset_id == legacy_id
+            else None
+        ),
     )
 
     client = TestClient(app)
@@ -978,24 +980,26 @@ def test_create_run_accepts_legacy_screenalytics_asset_id(monkeypatch):
     monkeypatch.setattr(
         repo,
         "resolve_video_asset",
-        lambda video_asset_id: {
-            "id": canonical_id,
-            "legacy_screenalytics_video_asset_id": legacy_id,
-            "show_id": show_id,
-            "season_id": season_id,
-            "episode_id": None,
-            "source_url": "s3://test-bucket/source/videos/demo/original.mp4",
-            "source_json": {"object_key": "source/videos/demo/original.mp4"},
-            "metadata": {"legacy_bridge": {"source_table": "screenalytics.video_assets"}},
-            "duration_seconds": 42.5,
-            "video_class": "promo",
-            "promo_subtype": "trailer",
-            "media_type": "trailer",
-            "media_kind": None,
-            "source_import_type": "external_url_import",
-        }
-        if video_asset_id == legacy_id
-        else None,
+        lambda video_asset_id: (
+            {
+                "id": canonical_id,
+                "legacy_screenalytics_video_asset_id": legacy_id,
+                "show_id": show_id,
+                "season_id": season_id,
+                "episode_id": None,
+                "source_url": "s3://test-bucket/source/videos/demo/original.mp4",
+                "source_json": {"object_key": "source/videos/demo/original.mp4"},
+                "metadata": {"legacy_bridge": {"source_table": "screenalytics.video_assets"}},
+                "duration_seconds": 42.5,
+                "video_class": "promo",
+                "promo_subtype": "trailer",
+                "media_type": "trailer",
+                "media_kind": None,
+                "source_import_type": "external_url_import",
+            }
+            if video_asset_id == legacy_id
+            else None
+        ),
     )
     monkeypatch.setattr(repo, "get_video_asset_upload_session_status", lambda _video_asset_id: None)
 

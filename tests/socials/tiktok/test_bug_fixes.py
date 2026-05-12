@@ -32,9 +32,7 @@ class _CollectingSleeper:
 
 
 def _make_client(factor: float = 1.5, retries: int = 5) -> _TikTokHttpClientBase:
-    return _TikTokHttpClientBase(
-        config=_ClientConfig(retry_total=retries, backoff_factor=factor)
-    )
+    return _TikTokHttpClientBase(config=_ClientConfig(retry_total=retries, backoff_factor=factor))
 
 
 def test_bug1_backoff_is_exponential_not_linear() -> None:
@@ -56,8 +54,7 @@ def test_bug1_backoff_is_exponential_not_linear() -> None:
     expected_bounds = [(1.125, 1.875), (2.25, 3.75), (4.5, 7.5), (9.0, 15.0)]
     for delay, (lo, hi) in zip(sleeper.calls, expected_bounds, strict=True):
         assert lo <= delay <= hi, (
-            f"backoff delay {delay} outside expected range [{lo}, {hi}] - "
-            f"regression to linear backoff?"
+            f"backoff delay {delay} outside expected range [{lo}, {hi}] - regression to linear backoff?"
         )
 
 
@@ -155,12 +152,8 @@ def test_bug4_scraper_hoists_context_for_teardown() -> None:
 
     source = inspect.getsource(tt_scraper)
     # Both hoist declarations must precede the try/with playwright block.
-    assert "context: Any | None = None" in source, (
-        "context should be hoisted to outer scope for finally-block access"
-    )
-    assert "context.close()" in source, (
-        "finally block must explicitly close the Playwright context"
-    )
+    assert "context: Any | None = None" in source, "context should be hoisted to outer scope for finally-block access"
+    assert "context.close()" in source, "finally block must explicitly close the Playwright context"
 
 
 if __name__ == "__main__":

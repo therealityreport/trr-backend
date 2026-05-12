@@ -52,12 +52,10 @@ def test_build_remote_getty_session_returns_disabled_metadata_when_unconfigured(
 
 def test_classify_getty_transport_failure_maps_stable_reason_codes() -> None:
     assert (
-        getty_transport.classify_getty_transport_failure({"termination_reason": "challenge_page"})
-        == "challenge_page"
+        getty_transport.classify_getty_transport_failure({"termination_reason": "challenge_page"}) == "challenge_page"
     )
     assert (
-        getty_transport.classify_getty_transport_failure({"pagination_rewrite_detected": True})
-        == "pagination_rewrite"
+        getty_transport.classify_getty_transport_failure({"pagination_rewrite_detected": True}) == "pagination_rewrite"
     )
     assert (
         getty_transport.classify_getty_transport_failure(
@@ -69,10 +67,13 @@ def test_classify_getty_transport_failure_maps_stable_reason_codes() -> None:
         )
         == "zero_results_block_indicators"
     )
-    assert getty_transport.classify_getty_transport_failure(
-        {
-            "termination_reason": "natural_exhaustion",
-            "fetched_candidates_total": 0,
-            "site_image_total": 0,
-        }
-    ) is None
+    assert (
+        getty_transport.classify_getty_transport_failure(
+            {
+                "termination_reason": "natural_exhaustion",
+                "fetched_candidates_total": 0,
+                "site_image_total": 0,
+            }
+        )
+        is None
+    )

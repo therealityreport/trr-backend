@@ -132,7 +132,9 @@ def main() -> int:
                 hosted_media_urls=hosted_media_urls,
                 source_media_urls=source_media_urls,
             )
-            status = str(manifest.get("display_variants_status") or display_payload.get("display_thumbnail_status") or "unknown")
+            status = str(
+                manifest.get("display_variants_status") or display_payload.get("display_thumbnail_status") or "unknown"
+            )
             counters.status_counts[status] += 1
 
             originals = manifest.get("originals") if isinstance(manifest, dict) else None
@@ -150,7 +152,9 @@ def main() -> int:
                 _record_sample(counters, "partial_failed_variants", post_id, sample_size=args.sample_size)
             if args.cdn_smoke:
                 urls = [str(display_payload.get("display_thumbnail_url") or "").strip()]
-                urls.extend(str(entry.get("url") or "").strip() for entry in variants.values() if isinstance(entry, dict))
+                urls.extend(
+                    str(entry.get("url") or "").strip() for entry in variants.values() if isinstance(entry, dict)
+                )
                 for url in {url for url in urls if url}:
                     if not _is_cdn_accessible(url, timeout=float(args.cdn_timeout)):
                         counters.cdn_inaccessible_variants += 1

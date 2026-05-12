@@ -84,6 +84,34 @@ class TestRequestTimeoutMiddleware:
         response = client.get("/api/v1/admin/socials/profiles/tiktok/bravotv/posts?comments_only=true")
         assert response.status_code == 200
 
+    def test_social_cookie_refresh_endpoint_exempt(self):
+        """Interactive social auth repair can exceed the generic backend wall clock before opening Chrome."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.post("/api/v1/admin/socials/profiles/instagram/bravotv/cookies/refresh")
+        async def cookie_refresh_endpoint():
+            await asyncio.sleep(1)  # Would timeout if not exempt
+            return {"success": True}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/admin/socials/profiles/instagram/bravotv/cookies/refresh")
+        assert response.status_code == 200
+        assert response.json() == {"success": True}
+
+    def test_social_catalog_repair_auth_endpoint_exempt(self):
+        """Catalog auth repair schedules long-running browser/deploy work after request acceptance."""
+        app = _make_app(timeout_seconds=0.1)
+
+        @app.post("/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/run-123/repair-auth")
+        async def repair_auth_endpoint():
+            await asyncio.sleep(1)  # Would timeout if not exempt
+            return {"status": "accepted"}
+
+        client = TestClient(app)
+        response = client.post("/api/v1/admin/socials/profiles/instagram/bravotv/catalog/runs/run-123/repair-auth")
+        assert response.status_code == 200
+        assert response.json() == {"status": "accepted"}
+
     def test_unknown_stream_endpoint_not_exempt(self):
         """Arbitrary /stream paths should not bypass the timeout."""
         app = _make_app(timeout_seconds=0.1)
