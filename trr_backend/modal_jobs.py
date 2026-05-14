@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import socket
@@ -95,6 +96,7 @@ def _load_modal_module():
 
 
 modal = _load_modal_module()
+logger = logging.getLogger(__name__)
 
 _BACKEND_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _APP_NAME = str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() or "trr-backend-jobs"
@@ -102,7 +104,11 @@ _TIMEZONE = str(os.getenv("TRR_MODAL_TIMEZONE") or "America/New_York").strip() o
 _API_FUNCTION_NAME = str(os.getenv("TRR_MODAL_API_FUNCTION") or "serve_backend_api").strip() or "serve_backend_api"
 _API_LABEL = str(os.getenv("TRR_MODAL_API_LABEL") or "trr-backend-api").strip() or "trr-backend-api"
 _API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1")))
-_SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "64")))
+_SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "5")))
+_SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
+    1,
+    int(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT", "10")),
+)
 _SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "4")))
 _ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "1")))
 _ADMIN_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_ADMIN_OPERATION_CONCURRENCY_LIMIT", "8")))
@@ -160,7 +166,18 @@ _SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = (
 _SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ("yt-dlp",)
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_DB_POOL_MINCONN": "1",
-    "TRR_DB_POOL_MAXCONN": "4",
+    "TRR_DB_POOL_MAXCONN": "1",
+    "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN": "1",
+    "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN": "1",
+    "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN": "1",
+    "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN": "1",
+    "TRR_SOCIAL_PROGRESS_DB_POOL_MINCONN": "1",
+    "TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN": "1",
+    "TRR_HEALTH_DB_POOL_MINCONN": "1",
+    "TRR_HEALTH_DB_POOL_MAXCONN": "1",
+    "TRR_DB_POOL_CLOSE_AFTER_RETURN": "1",
+    "TRR_DB_POOL_ACQUIRE_ATTEMPTS": "30",
+    "TRR_DB_POOL_ACQUIRE_SLEEP_MS": "200",
     "TRR_JOB_PLANE_MODE": "remote",
     "TRR_LONG_JOB_ENFORCE_REMOTE": "1",
     "TRR_REMOTE_EXECUTOR": "modal",
@@ -180,6 +197,23 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
+    "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "5",
+    "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "10",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "16",
+    "SOCIAL_WORKER_POOL_COMMENTS": "2",
+    "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
+    "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "5",
+    "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "3",
+    "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "10",
+    "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
+    "SOCIAL_MIRROR_PLATFORM_CAP": "10",
+    "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "6",
+    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "2",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "2",
+    "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "file_lock",
+    "SOCIAL_THREADS_POSTS_PROXY_PROVIDER": "decodo",
+    "SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS": "180",
+    "SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING": "false",
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",
     "SOCIAL_QUEUE_ENABLED": "true",
 }
@@ -225,6 +259,7 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "run_social_media_job": _browser_image,
     "run_social_comments_job": _browser_image,
     "run_socialblade_scrape": _browser_image,
+    "heartbeat_remote_executors": _browser_image,
     "run_admin_vision": _vision_image,
 }
 
@@ -558,13 +593,21 @@ def _execute_social_job(job_id: str, *, worker_prefix: str) -> dict[str, object]
     from trr_backend.socials.control_plane import claim_and_process_social_job
 
     worker_id = f"{worker_prefix}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    result = claim_and_process_social_job(job_id=job_id, worker_id=worker_id)
-    return {
-        "job_id": job_id,
-        "claimed": bool(result.get("claimed")),
-        "worker_id": worker_id,
-        "job": result.get("job"),
-    }
+    try:
+        result = claim_and_process_social_job(job_id=job_id, worker_id=worker_id)
+        return {
+            "job_id": job_id,
+            "claimed": bool(result.get("claimed")),
+            "worker_id": worker_id,
+            "job": result.get("job"),
+        }
+    finally:
+        try:
+            from trr_backend.db import pg
+
+            pg.close_pool()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to close DB pools after Modal social job: job_id=%s", job_id)
 
 
 @app.function(
@@ -587,7 +630,7 @@ def run_social_posts_job(job_id: str) -> dict[str, object]:
     secrets=_secrets,
     retries=0,
     timeout=2 * 60 * 60,
-    max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+    max_containers=_SOCIAL_MEDIA_CONCURRENCY_LIMIT,
 )
 def run_social_media_job(job_id: str) -> dict[str, object]:
     return _execute_social_job(job_id, worker_prefix="modal:social-media")
@@ -631,6 +674,7 @@ def sweep_social_dispatch_queue() -> dict[str, object]:
 
 
 @app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["heartbeat_remote_executors"],
     secrets=_secrets,
     retries=0,
     timeout=10 * 60,
@@ -712,25 +756,45 @@ def run_admin_vision(payload: dict[str, object], batch: bool = False) -> dict[st
     image=_FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"],
     secrets=_secrets,
     retries=0,
-    timeout=5 * 60,
+    timeout=10 * 60,
 )
 def run_socialblade_scrape(
     handle: str,
     person_id: str | None = None,
     source: str = "person_page",
     force: bool = False,
+    platform: str = "instagram",
+    scrape_following: bool = True,
+    source_scope: str = "network",
 ) -> dict[str, object]:
     from trr_backend.socials.socialblade.auth import load_socialblade_cookies_from_sources
     from trr_backend.socials.socialblade.scraper import scrape_socialblade
-    from trr_backend.socials.socialblade.service import refresh_and_persist_socialblade
+    from trr_backend.socials.socialblade.service import (
+        normalize_socialblade_source_scope,
+        refresh_and_persist_socialblade,
+        sanitize_socialblade_platform,
+        scrape_socialblade_then_following,
+    )
 
+    normalized_platform = sanitize_socialblade_platform(platform)
+    normalized_source_scope = normalize_socialblade_source_scope(source_scope)
     cookies = load_socialblade_cookies_from_sources()
-    if person_id:
-        return refresh_and_persist_socialblade(
-            person_id=person_id,
-            handle=handle,
-            scraper=lambda safe_handle: scrape_socialblade(safe_handle, cookies),
+
+    def _scrape_with_following_sidecar(safe_handle: str) -> dict[str, object]:
+        return scrape_socialblade_then_following(
+            lambda normalized_handle: scrape_socialblade(normalized_handle, cookies, platform=normalized_platform),
+            handle=safe_handle,
+            platform=normalized_platform,
             source=source,
-            force=force,
+            source_scope=normalized_source_scope,
+            enabled=scrape_following,
         )
-    return scrape_socialblade(handle, cookies)
+
+    return refresh_and_persist_socialblade(
+        person_id=person_id,
+        handle=handle,
+        scraper=_scrape_with_following_sidecar,
+        source=source,
+        force=force,
+        platform=normalized_platform,
+    )

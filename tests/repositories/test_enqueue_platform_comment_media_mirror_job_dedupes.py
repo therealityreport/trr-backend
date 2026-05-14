@@ -37,6 +37,7 @@ def test_enqueue_platform_comment_media_mirror_job_is_global_across_runs_for_sam
     monkeypatch.setattr(social_repo, "_platform_comment_media_needs_mirror", lambda _platform, _row: True)
     monkeypatch.setattr(social_repo, "_update_platform_comment_media_mirror_fields", lambda **_kwargs: None)
     monkeypatch.setattr(social_repo, "_increment_run_counters_on_job_create", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_run_allows_followup_job_enqueue", lambda _run_id, **_kwargs: True)
     monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
 
     context = social_repo.SeasonContext(  # noqa: SLF001
@@ -79,3 +80,40 @@ def test_enqueue_platform_comment_media_mirror_job_is_global_across_runs_for_sam
     assert len({job_id for job_id in created_ids if job_id}) == 1
     assert any("nullif(config->>'comment_db_id', '')" in sql for sql in seen_insert_sql)
     assert any("concat(config->>'post_id', ':', config->>'comment_id')" in sql for sql in seen_insert_sql)
+
+
+def test_enqueue_platform_comment_media_mirror_job_skips_cancelled_parent_run(monkeypatch) -> None:
+    monkeypatch.setattr(social_repo, "_column_exists", lambda _schema, _table, column: column == "media_urls")
+    monkeypatch.setattr(social_repo, "_platform_comment_media_needs_mirror", lambda _platform, _row: True)
+    monkeypatch.setattr(social_repo, "_run_allows_followup_job_enqueue", lambda _run_id, **_kwargs: False)
+    monkeypatch.setattr(
+        social_repo,
+        "_insert_job_with_conflict_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not enqueue")),
+    )
+
+    context = social_repo.SeasonContext(  # noqa: SLF001
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+
+    assert (
+        social_repo._enqueue_platform_comment_media_mirror_job(  # noqa: SLF001
+            context,
+            platform="instagram",
+            run_id="11111111-1111-1111-1111-111111111111",
+            source_scope="bravo",
+            account="bravotv",
+            comment_row={
+                "id": "",
+                "comment_id": "comment-1",
+                "post_id": "post-1",
+                "media_urls": ["https://cdn.example.com/comment.jpg"],
+            },
+            parent_job_id=None,
+        )
+        is None
+    )

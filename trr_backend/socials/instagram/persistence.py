@@ -395,16 +395,17 @@ def _upsert_instagram_comment_tree(
         _record_comment_write_counts(persist_stats, total=1, inserted=inserted, changed=changed_count)
     if row and media_urls and enable_media_followups:
         try:
-            mirror_job_id = _core._enqueue_platform_comment_media_mirror_job(
-                context,
-                platform="instagram",
-                run_id=run_id,
-                source_scope=source_scope,
-                account=account,
-                comment_row={**payload, **row},
-                parent_job_id=job_id,
-                conn=conn,
-            )
+            with _core._SavepointScope(conn=conn, prefix="instagram_comment_media_mirror", index=1):
+                mirror_job_id = _core._enqueue_platform_comment_media_mirror_job(
+                    context,
+                    platform="instagram",
+                    run_id=run_id,
+                    source_scope=source_scope,
+                    account=account,
+                    comment_row={**payload, **row},
+                    parent_job_id=job_id,
+                    conn=conn,
+                )
             if mirror_job_id and persist_stats is not None:
                 persist_stats["comment_media_mirror_jobs_enqueued"] = (
                     int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
@@ -603,7 +604,7 @@ def _batch_upsert_instagram_comments(
             include_inserted_flag=True,
         )
         batch_total, batch_inserted = _upsert_write_counts(rows)
-        for row in rows:
+        for row_index, row in enumerate(rows, start=1):
             db_id = str(row.get("id") or "")
             ext_id = str(row.get("comment_id") or "")
             if db_id and ext_id:
@@ -612,16 +613,21 @@ def _batch_upsert_instagram_comments(
                 media_urls = list(payload.get("media_urls") or [])
                 if media_urls and enable_media_followups:
                     try:
-                        mirror_job_id = _core._enqueue_platform_comment_media_mirror_job(
-                            context,
-                            platform="instagram",
-                            run_id=run_id,
-                            source_scope=source_scope,
-                            account=account,
-                            comment_row={**payload, **row},
-                            parent_job_id=job_id,
+                        with _core._SavepointScope(
                             conn=conn,
-                        )
+                            prefix="instagram_comment_media_mirror",
+                            index=total_upserted + row_index,
+                        ):
+                            mirror_job_id = _core._enqueue_platform_comment_media_mirror_job(
+                                context,
+                                platform="instagram",
+                                run_id=run_id,
+                                source_scope=source_scope,
+                                account=account,
+                                comment_row={**payload, **row},
+                                parent_job_id=job_id,
+                                conn=conn,
+                            )
                         if mirror_job_id and persist_stats is not None:
                             persist_stats["comment_media_mirror_jobs_enqueued"] = (
                                 int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
@@ -656,7 +662,7 @@ def _batch_upsert_instagram_comments(
             include_inserted_flag=True,
         )
         batch_total, batch_inserted = _upsert_write_counts(rows)
-        for row in rows:
+        for row_index, row in enumerate(rows, start=1):
             db_id = str(row.get("id") or "")
             ext_id = str(row.get("comment_id") or "")
             if db_id and ext_id:
@@ -665,16 +671,21 @@ def _batch_upsert_instagram_comments(
                 media_urls = list(payload.get("media_urls") or [])
                 if media_urls and enable_media_followups:
                     try:
-                        mirror_job_id = _core._enqueue_platform_comment_media_mirror_job(
-                            context,
-                            platform="instagram",
-                            run_id=run_id,
-                            source_scope=source_scope,
-                            account=account,
-                            comment_row={**payload, **row},
-                            parent_job_id=job_id,
+                        with _core._SavepointScope(
                             conn=conn,
-                        )
+                            prefix="instagram_comment_media_mirror",
+                            index=total_upserted + row_index,
+                        ):
+                            mirror_job_id = _core._enqueue_platform_comment_media_mirror_job(
+                                context,
+                                platform="instagram",
+                                run_id=run_id,
+                                source_scope=source_scope,
+                                account=account,
+                                comment_row={**payload, **row},
+                                parent_job_id=job_id,
+                                conn=conn,
+                            )
                         if mirror_job_id and persist_stats is not None:
                             persist_stats["comment_media_mirror_jobs_enqueued"] = (
                                 int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1

@@ -204,7 +204,26 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
     assert os.environ["TRR_REMOTE_EXECUTOR"] == "modal"
     assert os.environ["TRR_DB_POOL_MINCONN"] == "1"
-    assert os.environ["TRR_DB_POOL_MAXCONN"] == "4"
+    assert os.environ["TRR_DB_POOL_MAXCONN"] == "1"
+    assert os.environ["TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"] == "1"
+    assert os.environ["TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN"] == "1"
+    assert os.environ["TRR_DB_POOL_CLOSE_AFTER_RETURN"] == "1"
+    assert os.environ["TRR_DB_POOL_ACQUIRE_ATTEMPTS"] == "30"
+    assert os.environ["TRR_DB_POOL_ACQUIRE_SLEEP_MS"] == "200"
+    assert os.environ["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "5"
+    assert os.environ["TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT"] == "10"
+    assert os.environ["SOCIAL_MODAL_DISPATCH_LIMIT"] == "16"
+    assert os.environ["SOCIAL_WORKER_POOL_COMMENTS"] == "2"
+    assert os.environ["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
+    assert os.environ["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "3"
+    assert os.environ["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "10"
+    assert os.environ["SOCIAL_MIRROR_PLATFORM_CAP"] == "10"
+    assert os.environ["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "6"
+    assert os.environ["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "2"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "2"
+    assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "file_lock"
+    assert os.environ["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
+    assert os.environ["SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS"] == "180"
     assert os.environ["SOCIAL_QUEUE_ENABLED"] == "true"
 
 
@@ -217,7 +236,7 @@ def test_inject_modal_runtime_defaults_overrides_explicit_env(
     modal_jobs._inject_modal_runtime_defaults()
 
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
-    assert os.environ["TRR_DB_POOL_MAXCONN"] == "4"
+    assert os.environ["TRR_DB_POOL_MAXCONN"] == "1"
 
 
 def test_inject_modal_runtime_defaults_clears_object_storage_profile_when_static_creds_present(
@@ -280,6 +299,44 @@ def test_social_concurrency_limit_reads_env(monkeypatch: pytest.MonkeyPatch) -> 
         importlib.reload(modal_jobs)
 
 
+def test_execute_social_job_closes_db_pool_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+    from trr_backend.socials import control_plane
+
+    close_calls: list[str] = []
+
+    monkeypatch.setattr(
+        control_plane,
+        "claim_and_process_social_job",
+        lambda *, job_id, worker_id: {"claimed": True, "job": {"id": job_id, "worker_id": worker_id}},
+    )
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+
+    result = modal_jobs._execute_social_job("job-1", worker_prefix="modal:social-posts")
+
+    assert result["job_id"] == "job-1"
+    assert result["claimed"] is True
+    assert close_calls == ["closed"]
+
+
+def test_execute_social_job_closes_db_pool_after_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+    from trr_backend.socials import control_plane
+
+    close_calls: list[str] = []
+
+    def _raise_db_error(*, job_id: str, worker_id: str) -> None:
+        raise RuntimeError(f"claim failed {job_id} {worker_id}")
+
+    monkeypatch.setattr(control_plane, "claim_and_process_social_job", _raise_db_error)
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+
+    with pytest.raises(RuntimeError, match="claim failed job-1"):
+        modal_jobs._execute_social_job("job-1", worker_prefix="modal:social-posts")
+
+    assert close_calls == ["closed"]
+
+
 def test_build_social_image_base_includes_shared_script_payloads() -> None:
     image = modal_jobs._build_social_image_base(image_factory=_FakeImage)
 
@@ -311,6 +368,107 @@ def test_run_social_job_uses_browser_capable_image_binding() -> None:
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_media_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_comments_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["heartbeat_remote_executors"] is modal_jobs._browser_image
+
+
+def test_run_socialblade_scrape_persists_payload_with_following_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trr_backend.socials.socialblade.auth as auth_module
+    import trr_backend.socials.socialblade.scraper as scraper_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
+
+    def fake_scrape_socialblade(handle: str, cookies, *, platform: str = "instagram"):
+        captured["scrape"] = {"handle": handle, "cookies": cookies, "platform": platform}
+        return {"username": handle, "platform": platform, "stats_refreshed": True}
+
+    def fake_attach(payload, *, handle: str, platform: str, source: str, source_scope: str, enabled: bool):
+        captured["sidecar"] = {
+            "handle": handle,
+            "platform": platform,
+            "source": source,
+            "source_scope": source_scope,
+            "enabled": enabled,
+        }
+        return {**payload, "instagram_following_scrape": {"status": "completed"}}
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        captured["refresh_kwargs"] = kwargs
+        return kwargs["scraper"](service_module.sanitize_socialblade_handle(kwargs["handle"]))
+
+    monkeypatch.setattr(scraper_module, "scrape_socialblade", fake_scrape_socialblade)
+    monkeypatch.setattr(service_module, "attach_instagram_following_scrape", fake_attach)
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+
+    runner = getattr(modal_jobs.run_socialblade_scrape, "local", modal_jobs.run_socialblade_scrape)
+    payload = runner(
+        "NetworkOfficial",
+        person_id="person-1",
+        source="season_run",
+        force=True,
+        platform="instagram",
+        scrape_following=True,
+        source_scope="creator",
+    )
+
+    assert payload["instagram_following_scrape"] == {"status": "completed"}
+    assert captured["refresh_kwargs"] == {
+        "person_id": "person-1",
+        "handle": "NetworkOfficial",
+        "scraper": captured["refresh_kwargs"]["scraper"],
+        "source": "season_run",
+        "force": True,
+        "platform": "instagram",
+    }
+    assert captured["scrape"] == {
+        "handle": "networkofficial",
+        "cookies": {"cf_clearance": "token"},
+        "platform": "instagram",
+    }
+    assert captured["sidecar"] == {
+        "handle": "networkofficial",
+        "platform": "instagram",
+        "source": "season_run",
+        "source_scope": "creator",
+        "enabled": True,
+    }
+
+
+def test_run_socialblade_scrape_persists_account_scoped_payload_without_person(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trr_backend.socials.socialblade.auth as auth_module
+    import trr_backend.socials.socialblade.scraper as scraper_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {})
+    monkeypatch.setattr(scraper_module, "scrape_socialblade", lambda handle, _cookies, **_kwargs: {"username": handle})
+    monkeypatch.setattr(service_module, "attach_instagram_following_scrape", lambda payload, **_kwargs: payload)
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        captured["refresh_kwargs"] = kwargs
+        return {"ok": True}
+
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+
+    runner = getattr(modal_jobs.run_socialblade_scrape, "local", modal_jobs.run_socialblade_scrape)
+    payload = runner("NetworkOfficial", source="all_saved_instagram_backfill", force=True, platform="instagram")
+
+    assert payload == {"ok": True}
+    assert captured["refresh_kwargs"] == {
+        "person_id": None,
+        "handle": "NetworkOfficial",
+        "scraper": captured["refresh_kwargs"]["scraper"],
+        "source": "all_saved_instagram_backfill",
+        "force": True,
+        "platform": "instagram",
+    }
 
 
 def test_heartbeat_remote_executors_reports_social_auth_capabilities(

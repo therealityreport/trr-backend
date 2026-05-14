@@ -10,7 +10,7 @@ from time import monotonic
 from typing import Any
 
 from trr_backend.job_plane import execution_backend_canonical
-from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS, normalize_source_scope
 
 logger = logging.getLogger(__name__)
 
@@ -641,7 +641,13 @@ def dispatch_social_job(*, job_id: str, stage: str | None = None) -> dict[str, A
     )
 
 
-def dispatch_socialblade_scrape_sync(*, handle: str) -> dict[str, Any]:
+def dispatch_socialblade_scrape_sync(
+    *,
+    handle: str,
+    platform: str = "instagram",
+    scrape_following: bool = True,
+    source_scope: str = "network",
+) -> dict[str, Any]:
     """Synchronous dispatch — calls Modal .remote() and blocks until result.
 
     Unlike other dispatchers that use .spawn() (fire-and-forget), this uses
@@ -653,11 +659,17 @@ def dispatch_socialblade_scrape_sync(*, handle: str) -> dict[str, Any]:
         return {"error": f"Modal not ready: {reason}", "dispatched": False}
 
     app_name = modal_app_name()
+    normalized_source_scope = normalize_source_scope(source_scope)
     try:
         import modal
 
         fn = modal.Function.from_name(app_name, function_name)
-        result = fn.remote(handle=handle)
+        result = fn.remote(
+            handle=handle,
+            platform=platform,
+            scrape_following=scrape_following,
+            source_scope=normalized_source_scope,
+        )
         logger.info(
             "SocialBlade scrape completed via Modal: app=%s function=%s handle=%s",
             app_name,
@@ -677,12 +689,16 @@ def dispatch_socialblade_scrape_sync(*, handle: str) -> dict[str, Any]:
 
 def dispatch_socialblade_scrape(
     *,
-    person_id: str,
+    person_id: str | None = None,
     handle: str,
     source: str,
     force: bool = False,
+    platform: str = "instagram",
+    scrape_following: bool = True,
+    source_scope: str = "network",
 ) -> dict[str, Any]:
     """Asynchronous SocialBlade dispatch for cast and season-level refreshes."""
+    normalized_source_scope = normalize_source_scope(source_scope)
     return _spawn_named_modal_function(
         function_name=modal_socialblade_function_name(),
         log_label="socialblade refresh",
@@ -691,6 +707,9 @@ def dispatch_socialblade_scrape(
             "handle": handle,
             "source": source,
             "force": force,
+            "platform": platform,
+            "scrape_following": scrape_following,
+            "source_scope": normalized_source_scope,
         },
         dispatcher_name="socialblade",
     )

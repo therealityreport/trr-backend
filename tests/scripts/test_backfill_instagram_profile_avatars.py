@@ -91,6 +91,25 @@ def test_needs_avatar_backfill_detects_missing_owner_or_tagged_targets() -> None
     )
 
 
+def test_media_profile_pic_mirror_skips_comment_avatar_scan_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_MEDIA_MIRROR_COMMENT_AVATARS", raising=False)
+    monkeypatch.setattr(mod.social_repo, "_column_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        mod.social_repo.pg,
+        "fetch_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("comment avatar scan should be opt-in for media mirror jobs")
+        ),
+    )
+
+    row = _base_row(owner_profile_pic_url=None, raw_data={}, mentions=[])
+    post = SimpleNamespace(owner_detail=None, tagged_users_detail=[], collaborators_detail=[], mentions=[])
+
+    result = mod.social_repo._mirror_instagram_profile_pics_for_post(row, post=post)  # noqa: SLF001
+
+    assert result["profile_pic_mirror_status"] == "skipped"
+
+
 def test_main_dry_run_skips_preflight_and_reports_counts(monkeypatch, capsys) -> None:
     monkeypatch.setattr(mod, "load_env", lambda: None)
     monkeypatch.setattr(mod, "_parse_args", lambda _argv: _base_args())

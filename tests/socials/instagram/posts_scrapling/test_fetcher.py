@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -62,6 +64,37 @@ def test_extract_page_tokens_missing_values():
     assert tokens == {}
 
 
+def test_advisory_api_pacing_uses_social_control_pool(monkeypatch):
+    from trr_backend.db import pg
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import _try_advisory_lock_pace
+
+    calls: list[tuple[str, str]] = []
+
+    class FakeCursor:
+        def execute(self, _sql: str, _params: Any = None) -> None:
+            return None
+
+    @contextmanager
+    def fake_db_connection(*, label: str, pool_name: str = "default"):
+        calls.append((label, pool_name))
+        yield object()
+
+    @contextmanager
+    def fake_db_cursor(*, conn: Any = None, label: str = "write-cursor"):
+        del conn, label
+        yield FakeCursor()
+
+    monkeypatch.setattr(pg, "db_connection", fake_db_connection)
+    monkeypatch.setattr(pg, "db_cursor", fake_db_cursor)
+
+    result = _try_advisory_lock_pace(key="advisory-pool", delay_seconds=0.0)
+
+    assert result["acquired"] is True
+    assert result["paced"] is True
+    assert result["error"] is None
+    assert calls == [("instagram-posts-rate-limit-advisory", "social_control")]
+
+
 def test_build_graphql_headers():
     from trr_backend.socials.instagram.posts_scrapling.fetcher import _build_graphql_headers
 
@@ -74,6 +107,8 @@ def test_build_graphql_headers():
     assert headers["x-csrftoken"] == "csrf_val"
     assert headers["x-fb-lsd"] == "lsd_val"
     assert headers["x-bloks-version-id"] == "bloks_val"
+    assert headers["x-fb-friendly-name"] == "PolarisProfilePostsQuery"
+    assert headers["x-root-field-name"] == "xdt_api__v1__feed__user_timeline_graphql_connection"
     assert headers["x-requested-with"] == "XMLHttpRequest"
     assert headers["referer"] == "https://www.instagram.com/testuser/"
     assert "x-ig-app-id" in headers
@@ -91,11 +126,13 @@ def test_build_graphql_form_data():
         doc_id="25645538101792896",
     )
     assert data["doc_id"] == "25645538101792896"
-    assert data["fb_api_req_friendly_name"] == "PolarisProfilePostsTabContentQuery_connection"
+    assert data["fb_api_req_friendly_name"] == "PolarisProfilePostsQuery"
     variables = json.loads(data["variables"])
     assert variables["username"] == "testuser"
     assert variables["first"] == 33
     assert variables["after"] is None
+    assert variables["__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider"] is True
+    assert variables["__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider"] is False
     assert data["lsd"] == "lsd_val"
 
 

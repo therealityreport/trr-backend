@@ -12,15 +12,19 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+from requests.exceptions import RetryError
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
-_POST_URL_RE = re.compile(r"https://(?:www\.)?threads\.com/@([A-Za-z0-9._]+)/post/([A-Za-z0-9_-]+)", re.IGNORECASE)
+_POST_URL_RE = re.compile(
+    r"(?:https://(?:www\.)?threads\.com)?/@([A-Za-z0-9._]+)/post/([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
 _POST_CODE_IN_URL_RE = re.compile(
     r"(?:https?://(?:www\.)?threads\.com)?(?:/@[A-Za-z0-9._]+)?/post/([A-Za-z0-9_-]+)",
     re.IGNORECASE,
@@ -93,6 +97,13 @@ _USER_ID_RE = re.compile(
 )
 _USER_ID_SIMPLE_RE = re.compile(r'"userID"\s*:\s*"(\d+)"')
 _JAZOEST_RE = re.compile(r"jazoest[=:](\d+)")
+
+
+def _normalize_int_for_meta(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass
@@ -213,6 +224,8 @@ class ThreadsScraper:
         self._last_stop_reason: str | None = None
         self._last_retryable = False
         self._last_complete = False
+        self._last_playwright_discovery_meta: dict[str, Any] = {}
+        self._last_playwright_graphql_rows: dict[str, dict[str, str]] = {}
 
     @property
     def runtime_metadata(self) -> dict[str, Any]:
@@ -446,6 +459,7 @@ class ThreadsScraper:
         referer: str | None = None,
         delay_seconds: float = 1.0,
         fast_mode: bool = False,
+        cookies_override: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Execute a Threads GraphQL query and return parsed JSON."""
         self._rate_limit(delay_seconds, fast_mode=fast_mode)
@@ -473,7 +487,7 @@ class ThreadsScraper:
             data=body,
             timeout=(10, 60),
             headers=headers,
-            cookies=self.cookies,
+            cookies=self.cookies if cookies_override is None else cookies_override,
             proxies=self._request_proxies,
         )
         self._track_response_status(response.status_code)
@@ -490,6 +504,7 @@ class ThreadsScraper:
         referer: str | None = None,
         delay_seconds: float = 1.0,
         fast_mode: bool = False,
+        cookies_override: dict[str, str] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
         """Fetch one page of profile posts via GraphQL.
 
@@ -513,6 +528,7 @@ class ThreadsScraper:
             referer=referer,
             delay_seconds=delay_seconds,
             fast_mode=fast_mode,
+            cookies_override=cookies_override,
         )
 
         edges = (result.get("data") or {}).get("mediaData", {}).get("edges", [])
@@ -545,6 +561,7 @@ class ThreadsScraper:
         referer: str | None = None,
         delay_seconds: float = 1.0,
         fast_mode: bool = False,
+        cookies_override: dict[str, str] | None = None,
     ) -> int | None:
         """Fetch post views (impression_count) from Threads post-activity GraphQL query."""
         if not post_pk:
@@ -558,6 +575,7 @@ class ThreadsScraper:
                 referer=referer,
                 delay_seconds=delay_seconds,
                 fast_mode=fast_mode,
+                cookies_override=cookies_override,
             )
         except Exception:  # noqa: BLE001
             logger.debug("[threads] failed to fetch post view count for pk=%s", post_pk, exc_info=True)
@@ -792,78 +810,447 @@ class ThreadsScraper:
         raw = (os.getenv("SOCIAL_THREADS_PLAYWRIGHT_DISCOVERY", "true") or "").strip().lower()
         return raw not in {"0", "false", "off", "no"}
 
+    def _playwright_cookie_records(self, cookies: dict[str, str] | None = None) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        source_cookies = self.cookies if cookies is None else cookies
+        for name, value in source_cookies.items():
+            cookie_name = str(name or "").strip()
+            cookie_value = str(value or "")
+            if not cookie_name or not cookie_value:
+                continue
+            records.append(
+                {
+                    "name": cookie_name,
+                    "value": cookie_value,
+                    "domain": ".threads.com",
+                    "path": "/",
+                    "secure": True,
+                }
+            )
+        return records
+
+    def _playwright_proxy_config(self) -> dict[str, str] | None:
+        raw_proxy = str(self._proxy_url or "").strip()
+        if not raw_proxy:
+            return None
+        parsed = urlparse(raw_proxy)
+        if not parsed.scheme or not parsed.netloc:
+            return {"server": raw_proxy}
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return {"server": raw_proxy}
+        server = f"{parsed.scheme}://{hostname}"
+        if parsed.port:
+            server = f"{server}:{parsed.port}"
+        proxy: dict[str, str] = {"server": server}
+        if parsed.username:
+            proxy["username"] = unquote(parsed.username)
+        if parsed.password:
+            proxy["password"] = unquote(parsed.password)
+        return proxy
+
+    def _playwright_launch_options(self) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "headless": True,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+            ],
+        }
+        proxy = self._playwright_proxy_config()
+        if proxy:
+            options["proxy"] = proxy
+        return options
+
+    def _normalize_discovered_profile_post_url(self, href: str, *, username: str) -> str | None:
+        raw = str(href or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("/"):
+            raw = f"{self.BASE_URL}{raw}"
+        elif raw.startswith("http://"):
+            raw = f"https://{raw[len('http://') :]}"
+
+        parsed = urlparse(raw)
+        if parsed.scheme != "https" or parsed.netloc.lower() not in {"threads.com", "www.threads.com"}:
+            return None
+
+        pieces = [piece for piece in parsed.path.split("/") if piece]
+        if len(pieces) != 3:
+            return None
+
+        handle, post_marker, code = pieces
+        if not handle.startswith("@") or post_marker.lower() != "post":
+            return None
+        if handle[1:].lower() != str(username or "").strip("@").lower():
+            return None
+        if not _THREADS_CODE_RE.fullmatch(code):
+            return None
+        return f"{self.BASE_URL}/@{handle[1:]}/post/{code}"
+
     def _discover_posts_with_playwright(
         self,
         *,
         username: str,
         profile_url: str,
         delay_seconds: float,
+        target_count: int | None = None,
+        cookies_override: dict[str, str] | None = None,
     ) -> list[dict[str, str]]:
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
             logger.debug("[threads] playwright unavailable for discovery: %s", exc)
+            self._last_playwright_discovery_meta = {
+                "playwright_unavailable": True,
+                "playwright_error_class": exc.__class__.__name__,
+                "playwright_error": str(exc)[:240],
+                "proxy_configured_for_browser": bool(self._playwright_proxy_config()),
+                "graphql_response_pages": 0,
+                "graphql_response_edges": 0,
+            }
             return []
 
-        discovered: list[dict[str, str]] = []
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=self._headers().get("user-agent", ""),
-                locale="en-US",
-            )
-            page = context.new_page()
-            page.goto(profile_url, wait_until="domcontentloaded", timeout=45_000)
-            if delay_seconds > 0:
-                page.wait_for_timeout(max(750, int(delay_seconds * 1000)))
-            rows = page.evaluate(
-                """
-                (username) => {
-                  const token = `/@${username}/post/`;
-                  const links = Array.from(document.querySelectorAll('a[href]'));
-                  const seen = new Set();
-                  const out = [];
-                  for (const link of links) {
-                    const href = (link.getAttribute('href') || '').trim();
-                    if (!href || !href.includes(token)) continue;
-                    const normalizedHref = href.split('?')[0];
-                    if (seen.has(normalizedHref)) continue;
-                    seen.add(normalizedHref);
-                    const article = link.closest('article') || link.closest('[role="article"]') || link.parentElement;
-                    let preview = '';
-                    if (article) {
-                      const candidates = Array.from(article.querySelectorAll('div,span'))
-                        .map(el => (el.textContent || '').trim())
-                        .filter(Boolean)
-                        .filter(text => text.length >= 24)
-                        .filter(text => !/^\\d+[smhdwy]$/i.test(text))
-                        .filter(text => !/^(Like|Comment|Repost|Share)\\b/i.test(text));
-                      candidates.sort((a, b) => b.length - a.length);
-                      preview = candidates[0] || '';
-                    }
-                    out.push({ href: normalizedHref, preview });
-                  }
-                  return out;
+        def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+            raw = str(os.getenv(name) or "").strip()
+            if raw:
+                try:
+                    return max(minimum, min(int(raw), maximum))
+                except ValueError:
+                    logger.warning("[threads] invalid %s=%r; using default %s", name, raw, default)
+            return default
+
+        max_scrolls = _env_int("SOCIAL_THREADS_PLAYWRIGHT_DISCOVERY_MAX_SCROLLS", 220, minimum=1, maximum=2_000)
+        idle_scroll_limit = _env_int("SOCIAL_THREADS_PLAYWRIGHT_DISCOVERY_IDLE_SCROLLS", 8, minimum=1, maximum=100)
+        scroll_wait_ms = _env_int("SOCIAL_THREADS_PLAYWRIGHT_DISCOVERY_SCROLL_WAIT_MS", 350, minimum=50, maximum=5_000)
+        target = self._normalize_post_limit(target_count)
+        discovered_by_url: dict[str, dict[str, str]] = {}
+        rows: list[dict[str, str]] = []
+        self._last_playwright_discovery_meta = {}
+        collect_script = """
+            (username) => {
+              const token = `/@${username}/post/`;
+              const links = Array.from(document.querySelectorAll('a[href]'));
+              const out = [];
+              for (const link of links) {
+                const href = (link.getAttribute('href') || '').trim();
+                if (!href || !href.includes(token)) continue;
+                const normalizedHref = href.split('?')[0];
+                const article = link.closest('article') || link.closest('[role="article"]') || link.parentElement;
+                let preview = '';
+                if (article) {
+                  const candidates = Array.from(article.querySelectorAll('div,span'))
+                    .map(el => (el.textContent || '').trim())
+                    .filter(Boolean)
+                    .filter(text => text.length >= 24)
+                    .filter(text => !/^\\d+[smhdwy]$/i.test(text))
+                    .filter(text => !/^(Like|Comment|Repost|Share)\\b/i.test(text));
+                  candidates.sort((a, b) => b.length - a.length);
+                  preview = candidates[0] || '';
                 }
-                """,
-                username,
-            )
-            browser.close()
+                out.push({ href: normalizedHref, preview });
+              }
+              return out;
+            }
+        """
+        scroll_script = """
+            () => {
+              const candidates = Array.from(document.querySelectorAll('*'))
+                .filter(el => {
+                  const style = getComputedStyle(el);
+                  return (style.overflowY === 'auto' || style.overflowY === 'scroll')
+                    && el.scrollHeight > el.clientHeight + 20;
+                })
+                .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+              const target = candidates[0] || document.scrollingElement || document.documentElement;
+              const before = target.scrollTop || window.scrollY || 0;
+              const amount = Math.max((target.clientHeight || window.innerHeight) * 1.8, 1600);
+              const scrollsWindow = target === document.scrollingElement
+                || target === document.documentElement
+                || target === document.body;
+              if (scrollsWindow) {
+                window.scrollBy({ top: amount, behavior: 'instant' });
+              } else {
+                target.scrollBy({ top: amount, behavior: 'instant' });
+              }
+              const after = target.scrollTop || window.scrollY || 0;
+              return {
+                tag: target.tagName || 'WINDOW',
+                before,
+                after,
+                scrollHeight: target.scrollHeight || document.body.scrollHeight || 0,
+                clientHeight: target.clientHeight || window.innerHeight || 0,
+              };
+            }
+        """
+        response_pages = 0
+        response_edges = 0
+        graphql_template: dict[str, Any] = {}
+
+        def _remember_graphql_request(request: Any) -> None:
+            if graphql_template or "graphql/query" not in str(getattr(request, "url", "") or ""):
+                return
+            post_data = str(getattr(request, "post_data", "") or "")
+            if "BarcelonaProfileThreadsTab" not in post_data:
+                return
+            headers = getattr(request, "headers", {}) or {}
+            safe_headers = {
+                str(key): str(value)
+                for key, value in dict(headers).items()
+                if str(key).lower().startswith("x-") or str(key).lower() in {"accept", "content-type", "referer"}
+            }
+            if post_data and safe_headers:
+                graphql_template.update({"body": post_data, "headers": safe_headers})
+
+        def _merge_graphql_rows() -> None:
+            for url, row in dict(self._last_playwright_graphql_rows or {}).items():
+                if url:
+                    discovered_by_url.setdefault(url, row)
+
+        wheel_scrolls = 0
+        keyboard_scrolls = 0
+        input_scroll_failures = 0
+        networkidle_reached = False
+        scroll_index = -1
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(**self._playwright_launch_options())
+                context = None
+                try:
+                    browser_headers = {
+                        key: value
+                        for key, value in self._headers(document=True).items()
+                        if key.lower() not in {"accept-language", "user-agent"}
+                    }
+                    context = browser.new_context(
+                        user_agent=self._headers().get("user-agent", ""),
+                        locale="en-US",
+                        viewport={"width": 1280, "height": 900},
+                        extra_http_headers=browser_headers,
+                        ignore_https_errors=True,
+                    )
+                    context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+                    cookie_records = self._playwright_cookie_records(cookies_override)
+                    if cookie_records:
+                        context.add_cookies(cookie_records)
+                    page = context.new_page()
+                    page.on("request", _remember_graphql_request)
+                    page.on(
+                        "response",
+                        lambda response: self._track_threads_playwright_graphql_response(response, username=username),
+                    )
+                    page.goto(profile_url, wait_until="domcontentloaded", timeout=45_000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15_000)
+                        networkidle_reached = True
+                    except Exception:  # noqa: BLE001
+                        networkidle_reached = False
+                    page.wait_for_timeout(max(750, int(delay_seconds * 1000), scroll_wait_ms))
+                    last_count = 0
+                    idle_scrolls = 0
+                    last_scroll_after = 0
+                    stuck_scrolls = 0
+
+                    def _input_scroll() -> None:
+                        nonlocal input_scroll_failures, keyboard_scrolls, wheel_scrolls
+                        try:
+                            page.mouse.move(640, 450)
+                            page.mouse.wheel(0, 1800)
+                            wheel_scrolls += 1
+                        except Exception:  # noqa: BLE001
+                            input_scroll_failures += 1
+                        try:
+                            page.keyboard.press("PageDown")
+                            keyboard_scrolls += 1
+                        except Exception:  # noqa: BLE001
+                            input_scroll_failures += 1
+
+                    for scroll_index in range(max_scrolls + 1):
+                        for row in page.evaluate(collect_script, username):
+                            href = str((row or {}).get("href") or "").strip()
+                            if not href:
+                                continue
+                            normalized = self._normalize_discovered_profile_post_url(href, username=username)
+                            if not normalized:
+                                continue
+                            discovered_by_url.setdefault(
+                                normalized,
+                                {"url": normalized, "preview": str((row or {}).get("preview") or "").strip()},
+                            )
+                        _merge_graphql_rows()
+                        response_pages = max(
+                            response_pages,
+                            _normalize_int_for_meta(self._last_playwright_discovery_meta.get("graphql_response_pages")),
+                        )
+                        response_edges = max(
+                            response_edges,
+                            _normalize_int_for_meta(self._last_playwright_discovery_meta.get("graphql_response_edges")),
+                        )
+                        if target is not None and len(discovered_by_url) >= target:
+                            break
+                        if len(discovered_by_url) == last_count:
+                            idle_scrolls += 1
+                        else:
+                            idle_scrolls = 0
+                            last_count = len(discovered_by_url)
+                        if idle_scrolls >= idle_scroll_limit and scroll_index > 0:
+                            break
+                        scroll_meta = page.evaluate(scroll_script)
+                        scroll_after = _normalize_int_for_meta((scroll_meta or {}).get("after"))
+                        if scroll_after <= last_scroll_after:
+                            stuck_scrolls += 1
+                            _input_scroll()
+                        else:
+                            stuck_scrolls = 0
+                            last_scroll_after = scroll_after
+                            if idle_scrolls:
+                                _input_scroll()
+                        page.wait_for_timeout(scroll_wait_ms)
+                    _merge_graphql_rows()
+                    if graphql_template and (target is None or len(discovered_by_url) < target):
+                        replay_pages = 0
+                        body = str(graphql_template.get("body") or "")
+                        headers = dict(graphql_template.get("headers") or {})
+                        parsed_body = parse_qs(body)
+                        max_replay_pages = _env_int(
+                            "SOCIAL_THREADS_PLAYWRIGHT_GRAPHQL_REPLAY_MAX_PAGES",
+                            160,
+                            minimum=1,
+                            maximum=1_000,
+                        )
+                        while body and replay_pages < max_replay_pages:
+                            replay_pages += 1
+                            replay_result = page.evaluate(
+                                """
+                                async ({ body, headers }) => {
+                                  const response = await fetch('/graphql/query', {
+                                    method: 'POST',
+                                    credentials: 'include',
+                                    headers,
+                                    body,
+                                  });
+                                  const text = await response.text();
+                                  return { status: response.status, text };
+                                }
+                                """,
+                                {"body": body, "headers": headers},
+                            )
+                            status = _normalize_int_for_meta((replay_result or {}).get("status"))
+                            if status >= 400:
+                                self._last_playwright_discovery_meta = {
+                                    **dict(self._last_playwright_discovery_meta or {}),
+                                    "graphql_replay_status": status,
+                                }
+                                break
+                            try:
+                                replay_data = json.loads(str((replay_result or {}).get("text") or ""))
+                            except json.JSONDecodeError:
+                                self._last_playwright_discovery_meta = {
+                                    **dict(self._last_playwright_discovery_meta or {}),
+                                    "graphql_replay_parse_failed": True,
+                                }
+                                break
+                            edges = ((replay_data.get("data") or {}).get("mediaData") or {}).get("edges") or []
+                            page_info = ((replay_data.get("data") or {}).get("mediaData") or {}).get("page_info") or {}
+                            for row in self._rows_from_graphql_edges(edges, username=username):
+                                discovered_by_url.setdefault(row["url"], row)
+                            response_pages = max(response_pages, replay_pages)
+                            response_edges += len(edges)
+                            if target is not None and len(discovered_by_url) >= target:
+                                break
+                            cursor = str(page_info.get("end_cursor") or "").strip()
+                            if not page_info.get("has_next_page") or not cursor:
+                                break
+                            try:
+                                variables = json.loads((parsed_body.get("variables") or ["{}"])[0])
+                            except json.JSONDecodeError:
+                                break
+                            variables["after"] = cursor
+                            parsed_body["variables"] = [json.dumps(variables, separators=(",", ":"))]
+                            body = urlencode({key: values[0] for key, values in parsed_body.items() if values})
+                    rows = list(discovered_by_url.values())
+                    self._last_playwright_discovery_meta = {
+                        **dict(self._last_playwright_discovery_meta or {}),
+                        "scrolls_attempted": scroll_index + 1,
+                        "idle_scrolls": idle_scrolls,
+                        "stuck_scrolls": stuck_scrolls,
+                        "input_wheel_scrolls": wheel_scrolls,
+                        "input_keyboard_scrolls": keyboard_scrolls,
+                        "input_scroll_failures": input_scroll_failures,
+                        "networkidle_reached": networkidle_reached,
+                        "launch_args_enabled": True,
+                        "proxy_configured_for_browser": bool(self._playwright_proxy_config()),
+                        "cookies_supplied_to_browser": bool(cookie_records),
+                        "graphql_replay_used": bool(graphql_template),
+                        "graphql_response_pages": response_pages,
+                        "graphql_response_edges": response_edges,
+                    }
+                finally:
+                    if context is not None:
+                        context.close()
+                    browser.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[threads] playwright profile discovery failed for @%s: %s", username, exc, exc_info=True)
+            self._last_playwright_discovery_meta = {
+                **dict(self._last_playwright_discovery_meta or {}),
+                "playwright_error_class": exc.__class__.__name__,
+                "playwright_error": str(exc)[:240],
+                "scrolls_attempted": max(scroll_index + 1, 0),
+                "input_wheel_scrolls": wheel_scrolls,
+                "input_keyboard_scrolls": keyboard_scrolls,
+                "input_scroll_failures": input_scroll_failures,
+                "networkidle_reached": networkidle_reached,
+                "launch_args_enabled": True,
+                "proxy_configured_for_browser": bool(self._playwright_proxy_config()),
+                "graphql_response_pages": response_pages,
+                "graphql_response_edges": response_edges,
+            }
 
         for row in rows:
-            href = str((row or {}).get("href") or "").strip()
-            if not href:
+            if row.get("url"):
+                discovered_by_url.setdefault(row["url"], row)
+        return list(discovered_by_url.values())
+
+    def _rows_from_graphql_edges(self, edges: list[dict[str, Any]], *, username: str) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        for edge in edges:
+            post = self._build_post_from_graphql(edge, username=username)
+            if not post:
                 continue
-            normalized = href
-            if normalized.startswith("/"):
-                normalized = f"{self.BASE_URL}{normalized}"
-            elif normalized.startswith("http://"):
-                normalized = f"https://{normalized[len('http://') :]}"
-            if not normalized.startswith("https://www.threads.com/"):
+            normalized = self._normalize_discovered_profile_post_url(post.url, username=username)
+            if not normalized:
                 continue
-            normalized = normalized.split("?", 1)[0]
-            discovered.append({"url": normalized, "preview": str((row or {}).get("preview") or "").strip()})
-        return discovered
+            rows.append({"url": normalized, "preview": str(post.text or "").strip()})
+        return rows
+
+    def _track_threads_playwright_graphql_response(
+        self,
+        response: Any,
+        *,
+        username: str | None = None,
+        counter: Any | None = None,
+    ) -> None:
+        if "graphql/query" not in str(getattr(response, "url", "") or ""):
+            return
+        try:
+            data = response.json()
+        except Exception:  # noqa: BLE001
+            return
+        edges = ((data.get("data") or {}).get("mediaData") or {}).get("edges") or []
+        page_info = ((data.get("data") or {}).get("mediaData") or {}).get("page_info") or {}
+        meta = dict(self._last_playwright_discovery_meta or {})
+        meta["graphql_response_pages"] = _normalize_int_for_meta(meta.get("graphql_response_pages")) + 1
+        meta["graphql_response_edges"] = _normalize_int_for_meta(meta.get("graphql_response_edges")) + len(edges)
+        meta["graphql_has_next_page"] = bool(page_info.get("has_next_page"))
+        meta["graphql_cursor_present"] = bool(page_info.get("end_cursor"))
+        self._last_playwright_discovery_meta = meta
+        if username:
+            for row in self._rows_from_graphql_edges(edges, username=username):
+                self._last_playwright_graphql_rows[row["url"]] = row
+        if counter is not None:
+            counter(len(edges))
 
     def _build_post_from_html(self, *, url: str, html_text: str, username: str) -> ThreadsPost:
         og_url = self._first_group(_OG_URL_RE, html_text) or url
@@ -1001,6 +1388,31 @@ class ThreadsScraper:
     # Main scrape entry point
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _authenticated_profile_fetch_can_retry_anonymously(exc: BaseException) -> bool:
+        if isinstance(exc, requests.HTTPError):
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            return status_code in {403, 404, 429, 500, 502, 503, 504}
+        normalized = f"{exc.__class__.__name__}: {exc}".lower()
+        return isinstance(exc, RetryError) or any(
+            snippet in normalized
+            for snippet in (
+                "too many 429",
+                "too many 500",
+                "too many 502",
+                "too many 503",
+                "too many 504",
+                "429 error responses",
+                "500 error responses",
+                "502 error responses",
+                "503 error responses",
+                "504 error responses",
+                "max retries exceeded",
+                "read timed out",
+                "timeout",
+            )
+        )
+
     def _scrape_via_graphql(
         self,
         config: ThreadsScrapeConfig,
@@ -1008,6 +1420,7 @@ class ThreadsScraper:
         page_html: str,
         profile_url: str,
         progress_cb: Any | None = None,
+        cookies_override: dict[str, str] | None = None,
     ) -> list[ThreadsPost] | None:
         """Attempt GraphQL-based scraping. Returns None if tokens unavailable."""
         tokens = self._extract_page_tokens(page_html)
@@ -1045,6 +1458,7 @@ class ThreadsScraper:
                     referer=profile_url,
                     delay_seconds=config.delay_seconds,
                     fast_mode=config.fast_mode,
+                    cookies_override=cookies_override,
                 )
             except Exception:
                 logger.warning("[threads] GraphQL page fetch failed at page %d", pages_scanned, exc_info=True)
@@ -1088,6 +1502,7 @@ class ThreadsScraper:
                         referer=post.url or profile_url,
                         delay_seconds=config.delay_seconds,
                         fast_mode=config.fast_mode,
+                        cookies_override=cookies_override,
                     )
                     if view_count is not None:
                         post.views = view_count
@@ -1152,6 +1567,7 @@ class ThreadsScraper:
         page_html: str,
         profile_url: str,
         progress_cb: Any | None = None,
+        cookies_override: dict[str, str] | None = None,
     ) -> list[ThreadsPost]:
         """OG-tag / Playwright fallback scraping (legacy path)."""
         username = config.normalized_username
@@ -1166,20 +1582,23 @@ class ThreadsScraper:
         candidate_urls = self._extract_post_urls(page_html)
         candidate_urls_found = len(candidate_urls)
         source = "public_meta_fallback"
-        if not candidate_urls and self._playwright_discovery_enabled():
+        max_post_limit = self._normalize_post_limit(config.max_pages)
+        needs_browser_discovery = not candidate_urls or (max_post_limit is None or len(candidate_urls) < max_post_limit)
+        if needs_browser_discovery and self._playwright_discovery_enabled():
             discovered = self._discover_posts_with_playwright(
                 username=username,
                 profile_url=profile_url,
                 delay_seconds=config.delay_seconds,
+                target_count=max_post_limit,
+                cookies_override=cookies_override,
             )
-            candidate_urls = [
-                str(item.get("url") or "").strip() for item in discovered if str(item.get("url") or "").strip()
-            ]
-            preview_by_url = {
-                str(item.get("url") or "").strip(): str(item.get("preview") or "").strip()
-                for item in discovered
-                if str(item.get("url") or "").strip()
-            }
+            for item in discovered:
+                discovered_url = str(item.get("url") or "").strip()
+                if not discovered_url:
+                    continue
+                if discovered_url not in candidate_urls:
+                    candidate_urls.append(discovered_url)
+                preview_by_url[discovered_url] = str(item.get("preview") or "").strip()
             if candidate_urls:
                 source = "playwright_profile_discovery"
             candidate_urls_found = len(candidate_urls)
@@ -1187,8 +1606,12 @@ class ThreadsScraper:
         for candidate_url in candidate_urls:
             posts_checked += 1
             try:
-                post_html = self._fetch_html(
-                    candidate_url, delay_seconds=config.delay_seconds, referer=profile_url, fast_mode=config.fast_mode
+                post_html = self._fetch_html_with_cookies(
+                    candidate_url,
+                    delay_seconds=config.delay_seconds,
+                    referer=profile_url,
+                    cookies_override=cookies_override,
+                    fast_mode=config.fast_mode,
                 )
             except Exception:
                 failed_candidate_fetches += 1
@@ -1215,7 +1638,6 @@ class ThreadsScraper:
                         "matched_posts": matched_posts,
                     }
                 )
-            max_post_limit = self._normalize_post_limit(config.max_pages)
             if max_post_limit is not None:
                 if matched_posts >= max_post_limit:
                     break
@@ -1229,6 +1651,14 @@ class ThreadsScraper:
             "candidate_urls_found": candidate_urls_found,
             "failed_candidate_fetches": failed_candidate_fetches,
         }
+        if self._last_playwright_discovery_meta:
+            playwright_discovery = dict(self._last_playwright_discovery_meta)
+            self.last_retrieval_meta["playwright_discovery"] = playwright_discovery
+            if source == "playwright_profile_discovery":
+                self.last_retrieval_meta["profile_discovery_complete"] = bool(
+                    _normalize_int_for_meta(playwright_discovery.get("graphql_response_pages")) > 0
+                    and not bool(playwright_discovery.get("graphql_has_next_page"))
+                )
         if matched_posts == 0 and failed_candidate_fetches > 0:
             self.last_retrieval_meta["error_code"] = "threads_fallback_post_fetch_failed"
             self.last_retrieval_meta["retryable"] = True
@@ -1257,17 +1687,24 @@ class ThreadsScraper:
         # document=True adds sec-ch-ua / sec-fetch-* headers that trigger Meta's
         # full SSR payload (with preloader data containing userID + tokens).
         profile_fetch_mode = "authenticated" if self.cookies else "anonymous"
+        authenticated_profile_fetch_error: dict[str, Any] | None = None
         try:
             page_html = self._fetch_html(
                 profile_url, delay_seconds=config.delay_seconds, document=True, fast_mode=config.fast_mode
             )
-        except requests.HTTPError as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code != 404 or not self.cookies:
+        except Exception as exc:
+            if not self.cookies or not self._authenticated_profile_fetch_can_retry_anonymously(exc):
                 raise
+            response = getattr(exc, "response", None)
+            authenticated_profile_fetch_error = {
+                "error_class": exc.__class__.__name__,
+                "status_code": getattr(response, "status_code", None),
+                "reason": str(exc)[:240],
+            }
             logger.warning(
-                "[threads] authenticated profile fetch returned 404 for @%s; retrying without cookies",
+                "[threads] authenticated profile fetch failed for @%s (%s); retrying without cookies",
                 username,
+                exc,
             )
             page_html = self._fetch_html_with_cookies(
                 profile_url,
@@ -1278,17 +1715,23 @@ class ThreadsScraper:
             )
             profile_fetch_mode = "anonymous_fallback"
 
-        # Try GraphQL API first (requires auth cookies)
-        if self.cookies:
+        graphql_cookie_override = {} if profile_fetch_mode in {"anonymous", "anonymous_fallback"} else None
+        # Try GraphQL API first. Anonymous profile pages can expose usable
+        # Relay tokens even when stored cookies are stale.
+        if self.cookies or graphql_cookie_override is not None:
             graphql_posts = self._scrape_via_graphql(
                 config,
                 page_html=page_html,
                 profile_url=profile_url,
                 progress_cb=progress_cb,
+                cookies_override=graphql_cookie_override,
             )
             if graphql_posts is not None:
                 self.last_retrieval_meta["profile_fetch_mode"] = profile_fetch_mode
                 if profile_fetch_mode == "anonymous_fallback":
+                    self.last_retrieval_meta["authenticated_profile_fetch_error"] = (
+                        authenticated_profile_fetch_error or {}
+                    )
                     self._fallback_chain = [
                         "authenticated_profile_fetch",
                         "anonymous_profile_fetch",
@@ -1308,9 +1751,58 @@ class ThreadsScraper:
             page_html=page_html,
             profile_url=profile_url,
             progress_cb=progress_cb,
+            cookies_override={} if profile_fetch_mode == "anonymous_fallback" else None,
         )
         self.last_retrieval_meta["profile_fetch_mode"] = profile_fetch_mode
+        if (
+            profile_fetch_mode == "authenticated"
+            and self.cookies
+            and not fallback_posts
+            and _normalize_int_for_meta(self.last_retrieval_meta.get("candidate_urls_found")) == 0
+        ):
+            logger.warning(
+                "[threads] authenticated profile fetch for @%s yielded no posts; retrying anonymous profile discovery",
+                username,
+            )
+            anonymous_html = self._fetch_html_with_cookies(
+                profile_url,
+                delay_seconds=config.delay_seconds,
+                document=True,
+                cookies_override={},
+                fast_mode=config.fast_mode,
+            )
+            anonymous_graphql_posts = self._scrape_via_graphql(
+                config,
+                page_html=anonymous_html,
+                profile_url=profile_url,
+                progress_cb=progress_cb,
+                cookies_override={},
+            )
+            if anonymous_graphql_posts is not None:
+                self.last_retrieval_meta["profile_fetch_mode"] = "anonymous_empty_authenticated_fallback"
+                self.last_retrieval_meta["authenticated_empty_profile_retry"] = True
+                self._fallback_chain = [
+                    "authenticated_empty_profile",
+                    "anonymous_profile_fetch",
+                    *self._fallback_chain,
+                ]
+                return anonymous_graphql_posts
+            fallback_posts = self._scrape_via_fallback(
+                config,
+                page_html=anonymous_html,
+                profile_url=profile_url,
+                progress_cb=progress_cb,
+                cookies_override={},
+            )
+            self.last_retrieval_meta["profile_fetch_mode"] = "anonymous_empty_authenticated_fallback"
+            self.last_retrieval_meta["authenticated_empty_profile_retry"] = True
+            self._fallback_chain = [
+                "authenticated_empty_profile",
+                "anonymous_profile_fetch",
+                *self._fallback_chain,
+            ]
         if profile_fetch_mode == "anonymous_fallback":
+            self.last_retrieval_meta["authenticated_profile_fetch_error"] = authenticated_profile_fetch_error or {}
             self._fallback_chain = [
                 "authenticated_profile_fetch",
                 "anonymous_profile_fetch",

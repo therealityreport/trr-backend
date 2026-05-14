@@ -38,7 +38,10 @@ def test_run_repair_stops_when_local_validation_fails(monkeypatch: pytest.Monkey
         if "refresh_cookies.py" in joined:
             if "--force" in command:
                 return _completed(stdout='{"platform":"instagram","validated":true,"reason":null}\n')
-            return _completed(stdout='{"platform":"instagram","validated":false,"reason":"cookie_schema_invalid"}\n')
+            return _completed(
+                stdout='{"platform":"instagram","validated":false,"reason":"cookie_schema_invalid"}\n',
+                returncode=1,
+            )
         raise AssertionError(f"unexpected command: {command}")
 
     monkeypatch.setattr(cli, "load_env", lambda: None)

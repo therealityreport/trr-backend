@@ -57,7 +57,9 @@ from trr_backend.socials.instagram.constants import (
     GRAPHQL_URL,
     PROFILE_POSTS_DOC_IDS,
     PROFILE_POSTS_FAST_PAGE_SIZE,
+    PROFILE_POSTS_FRIENDLY_NAME,
     PROFILE_POSTS_PAGE_SIZE,
+    PROFILE_POSTS_ROOT_FIELD_NAME,
     WEB_X_ASBD_ID,
 )
 from trr_backend.socials.instagram.posts_scrapling.proxy import (
@@ -73,7 +75,8 @@ logger = logging.getLogger("socials.instagram.posts_scrapling.fetcher")
 # ---------------------------------------------------------------------------
 
 _IG_APP_ID = "936619743392459"
-_FRIENDLY_NAME = "PolarisProfilePostsTabContentQuery_connection"
+_FRIENDLY_NAME = PROFILE_POSTS_FRIENDLY_NAME
+_ROOT_FIELD_NAME = PROFILE_POSTS_ROOT_FIELD_NAME
 _POSTS_REQUEST_DELAY_DEFAULT = 0.15
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -202,7 +205,7 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float) -> dict[str, Any]
     except Exception as exc:  # noqa: BLE001
         return {"acquired": False, "paced": True, "wait_ms": 0, "error": f"pg_import_failed:{exc}"}
     try:
-        with pg.db_connection(label="instagram-posts-rate-limit-advisory") as conn:
+        with pg.db_connection(label="instagram-posts-rate-limit-advisory", pool_name="social_control") as conn:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute("select pg_advisory_lock(%s::int, %s::int)", (namespace, lock_key))
                 wait_ms = int((time.monotonic() - started_at) * 1000)
@@ -493,7 +496,7 @@ def _build_graphql_headers(
     """Build headers for the GraphQL POST.
 
     Self-contained — does not import from scraper.py. Mirrors the header set
-    the Instagram web client sends for the PolarisProfilePostsTabContentQuery.
+    the Instagram web client sends for the PolarisProfilePostsQuery.
     """
     headers: dict[str, str] = {
         "accept": "*/*",
@@ -508,6 +511,7 @@ def _build_graphql_headers(
         "x-asbd-id": str(os.getenv("INSTAGRAM_WEB_X_ASBD_ID") or WEB_X_ASBD_ID),
         "x-fb-friendly-name": _FRIENDLY_NAME,
         "x-ig-app-id": _IG_APP_ID,
+        "x-root-field-name": _ROOT_FIELD_NAME,
         "x-requested-with": "XMLHttpRequest",
     }
     csrf = str(csrftoken or "").strip()
@@ -535,7 +539,7 @@ def _build_graphql_form_data(
     """Build the x-www-form-urlencoded payload for the GraphQL posts POST.
 
     Shape mirrors what the Instagram web client sends for the
-    PolarisProfilePostsTabContentQuery_connection operation. Runtime tokens
+    PolarisProfilePostsQuery operation. Runtime tokens
     (``lsd``, ``__spin_r``, ``__spin_b``, ``__spin_t``, ``hsi``) are merged in
     only when present.
     """
@@ -553,6 +557,8 @@ def _build_graphql_form_data(
         "first": None if reverse else page_size,
         "last": page_size if reverse else None,
         "username": username,
+        "__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider": True,
+        "__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider": False,
     }
     data: dict[str, str] = {
         "av": viewer_id,
@@ -1015,10 +1021,7 @@ class InstagramPostsScraplingFetcher:
                 "graphql_cursor": metadata.get("graphql_cursor"),
             }
         )
-        connection = ((payload or {}).get("data") or {}).get(
-            "xdt_api__v1__feed__user_timeline_graphql_connection",
-            {},
-        )
+        connection = ((payload or {}).get("data") or {}).get(_ROOT_FIELD_NAME, {})
         if not isinstance(connection, dict) or not connection:
             reason = str(
                 metadata.get("error_code") or metadata.get("request_error_code") or "requests_fallback_no_connection"
@@ -1216,7 +1219,7 @@ class InstagramPostsScraplingFetcher:
                     fetch_reason = current_reason
                 continue
 
-            connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection") or {}
+            connection = payload.get("data", {}).get(_ROOT_FIELD_NAME) or {}
             if not connection:
                 self._record_doc_id_empty(doc_id, "graphql_empty_connection")
                 if not fetch_reason:

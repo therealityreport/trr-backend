@@ -95,7 +95,8 @@ def normalize_instagram_profile(payload: dict[str, Any]) -> InstagramProfile:
         profile_pic_url=_string_or_none(_first_value(user, "profile_pic_url", "profilePicUrl")),
         profile_pic_url_hd=_string_or_none(
             _first_value(user, "profile_pic_url_hd", "profilePicUrlHd", "profilePicUrlHD")
-        ),
+        )
+        or _string_or_none(_first_value(_first_value(user, "hd_profile_pic_url_info", "hdProfilePicUrlInfo"), "url")),
         about_raw=about,
         country=_string_or_none(_first_value(about or {}, "country", "country_name", "account_country")),
         date_joined=_string_or_none(_first_value(about or {}, "date_joined", "joined_date", "joinedDate")),

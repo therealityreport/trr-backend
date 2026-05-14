@@ -22,9 +22,11 @@ from pathlib import Path
 # Add project root to path (scripts/socials/twitter -> project root)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
+from trr_backend.db import pg
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.twitter import Tweet, TwitterScrapeConfig, TwitterScraper, mirror_tweet_media
 from trr_backend.socials.twitter.ops import persist_cli_search
+from trr_backend.socials.twitter.repair_planner import build_twitter_repair_plan
 from trr_backend.utils.env import load_env
 
 logging.basicConfig(
@@ -184,6 +186,96 @@ def _print_persist_summary(summary: dict[str, object] | None) -> None:
         print(f"  - error: {summary['error']}")
 
 
+def _load_repair_plan_inputs(
+    account: str,
+) -> tuple[list[dict[str, object]], dict[str, int], dict[str, int], list[dict[str, object]]]:
+    normalized_account = str(account or "").strip().lstrip("@").lower()
+    catalog_rows = pg.fetch_all(
+        """
+        select source_id, posted_at,
+               greatest(coalesce(replies_count, 0), 0)::int as replies_count,
+               greatest(coalesce(quotes, 0), 0)::int as quotes_count
+        from social.twitter_account_catalog_posts
+        where ltrim(lower(coalesce(nullif(source_account, ''), '')), '@') = %s
+          and greatest(coalesce(replies_count, 0), 0) + greatest(coalesce(quotes, 0), 0) > 0
+        """,
+        [normalized_account],
+    )
+    saved_reply_rows = pg.fetch_all(
+        """
+        select thread_root_tweet_id as source_id, count(*)::int as saved_count
+        from social.twitter_tweets
+        where ltrim(lower(coalesce(nullif(source_account, ''), '')), '@') = %s
+          and is_reply is true
+          and thread_root_tweet_id is not null
+        group by thread_root_tweet_id
+        """,
+        [normalized_account],
+    )
+    saved_quote_rows = pg.fetch_all(
+        """
+        select quoted_tweet_id as source_id, count(*)::int as saved_count
+        from social.twitter_tweets
+        where ltrim(lower(coalesce(nullif(source_account, ''), '')), '@') = %s
+          and is_quote is true
+          and quoted_tweet_id is not null
+        group by quoted_tweet_id
+        """,
+        [normalized_account],
+    )
+    try:
+        state_rows = pg.fetch_all(
+            """
+            select root_source_id, interaction_kind, strategy, status, reported_count,
+                   saved_count_before, saved_count_after, unique_saved_delta,
+                   duplicate_count, off_root_count, pages_scanned,
+                   exhaustion_reason, last_error_code
+            from social.twitter_interaction_fetch_state
+            where ltrim(lower(source_account), '@') = %s
+            """,
+            [normalized_account],
+        )
+    except Exception:
+        logger.debug("twitter_interaction_fetch_state is not readable yet", exc_info=True)
+        state_rows = []
+    saved_replies = {str(row.get("source_id")): int(row.get("saved_count") or 0) for row in saved_reply_rows}
+    saved_quotes = {str(row.get("source_id")): int(row.get("saved_count") or 0) for row in saved_quote_rows}
+    return list(catalog_rows), saved_replies, saved_quotes, list(state_rows)
+
+
+def _print_repair_plan(candidates: list, *, as_json: bool) -> None:
+    rows = [
+        {
+            "root_source_id": candidate.root_source_id,
+            "interaction_kind": candidate.interaction_kind,
+            "reported_count": candidate.reported_count,
+            "saved_count": candidate.saved_count,
+            "raw_missing": candidate.raw_missing,
+            "actionable_missing": candidate.actionable_missing,
+            "exhausted_missing": candidate.exhausted_missing,
+            "expected_unique_gain": candidate.expected_unique_gain,
+            "suppressed": candidate.suppressed,
+            "suppression_reason": candidate.suppression_reason,
+        }
+        for candidate in candidates
+    ]
+    if as_json:
+        print(json.dumps({"candidates": rows}, indent=2, default=str))
+        return
+    print("\nTwitter repair plan:")
+    if not rows:
+        print("  No actionable repair candidates.")
+        return
+    for index, row in enumerate(rows, start=1):
+        marker = " suppressed" if row["suppressed"] else ""
+        reason = f" reason={row['suppression_reason']}" if row["suppression_reason"] else ""
+        print(
+            f"  {index}. {row['root_source_id']} {row['interaction_kind']}: "
+            f"missing={row['raw_missing']} actionable={row['actionable_missing']} "
+            f"expected_gain={row['expected_unique_gain']}{marker}{reason}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Search Twitter/X for tweets and fetch replies/quotes",
@@ -230,6 +322,11 @@ Examples:
         action="store_true",
         help="Fetch quote tweets for a specific tweet (requires --tweet)",
     )
+    dedicated_mode.add_argument(
+        "--plan-repairs",
+        action="store_true",
+        help="Print a coverage-weighted repair plan without fetching X",
+    )
     parser.add_argument(
         "--tweet",
         help="Tweet ID to fetch replies/quotes from (use with --replies or --quotes)",
@@ -259,6 +356,10 @@ Examples:
         help="Label stored on each persisted row (defaults to --query value)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--account", default="TheTraitorsUS", help="Account handle for --plan-repairs")
+    parser.add_argument("--include-suppressed", action="store_true", help="Include suppressed repair candidates")
+    parser.add_argument("--force-repairs", action="store_true", help="Ignore prior low-yield/exhausted suppression")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON for --plan-repairs")
 
     args = parser.parse_args()
 
@@ -271,6 +372,20 @@ Examples:
     env_path = load_env()
     if env_path:
         logger.debug("Loaded environment from %s", env_path)
+
+    if args.plan_repairs:
+        catalog_rows, saved_replies, saved_quotes, state_rows = _load_repair_plan_inputs(args.account)
+        candidates = build_twitter_repair_plan(
+            catalog_rows=catalog_rows,
+            saved_replies_by_root=saved_replies,
+            saved_quotes_by_root=saved_quotes,
+            interaction_states=state_rows,
+            force=args.force_repairs,
+            include_suppressed=args.include_suppressed,
+            max_candidates=args.max_pages,
+        )
+        _print_repair_plan(candidates, as_json=args.json)
+        return
 
     # Load auth: prefer env vars (SOCIAL_TWITTER_COOKIES_JSON), fall back to cookie file.
     cookies = {}

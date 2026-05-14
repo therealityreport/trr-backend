@@ -63,6 +63,54 @@ def post_deploy_verify_delay_seconds() -> float:
     return max(0.0, parsed)
 
 
+def _list_field(payload: dict[str, Any], key: str) -> list[Any]:
+    value = payload.get(key)
+    return list(value) if isinstance(value, list) else []
+
+
+def _remote_auth_probe_failures(readiness: dict[str, Any]) -> list[str]:
+    blocking_failures = [
+        str(reason).strip() for reason in _list_field(readiness, "blocking_probe_failures") if str(reason).strip()
+    ]
+    probe = readiness.get("remote_auth_probe")
+    if not isinstance(probe, dict) or bool(probe.get("ready")):
+        return []
+    reason = str(probe.get("reason") or "").strip() or "remote_auth_probe_failed"
+    if blocking_failures and any(failure != reason for failure in blocking_failures):
+        return []
+    return blocking_failures or [reason]
+
+
+def _modal_resources_ready_for_startup(readiness: dict[str, Any]) -> bool:
+    if bool(readiness.get("ok")):
+        return True
+    if not bool(readiness.get("app_found")):
+        return False
+    for key in (
+        "missing_secrets",
+        "missing_functions",
+        "missing_required_social_functions",
+        "missing_web_endpoints",
+    ):
+        if _list_field(readiness, key):
+            return False
+    return bool(_remote_auth_probe_failures(readiness))
+
+
+def _modal_auth_advisory(readiness: dict[str, Any]) -> dict[str, Any] | None:
+    failures = _remote_auth_probe_failures(readiness)
+    if bool(readiness.get("ok")) or not failures or not _modal_resources_ready_for_startup(readiness):
+        return None
+    return {
+        "reason": "modal_auth_probe_failed",
+        "failures": failures,
+        "remediation": (
+            "Modal resources are ready, but Instagram remote auth is blocked. "
+            "Run scripts/modal/repair_instagram_auth.py after completing Instagram checkpoint/login."
+        ),
+    }
+
+
 def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
     source_env = prepare_named_secrets._load_source_env(repo_root / ".env")
     runtime_values, social_values = prepare_named_secrets._split_env(source_env)
@@ -192,9 +240,16 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     current_fingerprint = build_modal_fingerprint(repo_root)
     saved_fingerprint = load_saved_fingerprint(repo_root)
     fingerprint_changed = current_fingerprint != saved_fingerprint
+    startup_resources_ready = _modal_resources_ready_for_startup(readiness)
+    startup_auth_advisory = _modal_auth_advisory(readiness)
 
-    if readiness.get("ok") and not fingerprint_changed:
+    if startup_resources_ready and not fingerprint_changed:
         payload = default_result()
+        if startup_auth_advisory:
+            payload["state"] = "advisory"
+            payload["reason"] = startup_auth_advisory["reason"]
+            payload["remediation"] = startup_auth_advisory["remediation"]
+            payload["auth_advisory_failures"] = startup_auth_advisory["failures"]
         payload["readiness"] = readiness
         return payload
 
@@ -248,7 +303,9 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         return payload
 
     refreshed = verify_readiness_after_deploy(repo_root)
-    if not refreshed.get("ok"):
+    refreshed_startup_resources_ready = _modal_resources_ready_for_startup(refreshed)
+    refreshed_auth_advisory = _modal_auth_advisory(refreshed)
+    if not refreshed_startup_resources_ready:
         payload = default_result()
         payload["state"] = "blocked"
         payload["reason"] = "modal_verify_failed"
@@ -264,6 +321,10 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     payload["deployed"] = True
     payload["fingerprint_changed"] = fingerprint_changed
     payload["readiness"] = refreshed
+    if refreshed_auth_advisory:
+        payload["reason"] = refreshed_auth_advisory["reason"]
+        payload["remediation"] = refreshed_auth_advisory["remediation"]
+        payload["auth_advisory_failures"] = refreshed_auth_advisory["failures"]
     return payload
 
 

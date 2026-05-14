@@ -2222,7 +2222,7 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float, deadline: float |
     except Exception as exc:  # noqa: BLE001
         return {"acquired": False, "paced": True, "wait_ms": 0, "error": f"pg_import_failed:{exc}"}
     try:
-        with pg.db_connection(label="instagram-comments-rate-limit-advisory") as conn:
+        with pg.db_connection(label="instagram-comments-rate-limit-advisory", pool_name="social_control") as conn:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute("select pg_advisory_lock(%s::int, %s::int)", (namespace, lock_key))
                 wait_ms = int((time.monotonic() - started_at) * 1000)

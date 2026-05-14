@@ -149,6 +149,7 @@ def validate_browser_cookie_session(
         return False, f"missing_any_cookie:{','.join(required_cookie_names_any)}"
 
     try:
+        from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # noqa: BLE001
@@ -174,7 +175,7 @@ def validate_browser_cookie_session(
             )
             page = context.new_page()
             try:
-                page.goto(
+                response = page.goto(
                     validation_url,
                     wait_until="domcontentloaded",
                     timeout=_remaining_timeout_ms(deadline, floor_ms=5_000),
@@ -182,6 +183,10 @@ def validate_browser_cookie_session(
                 page.wait_for_timeout(3_000)
             except PlaywrightTimeoutError:
                 return False, "validation_timeout"
+            except PlaywrightError as exc:
+                return False, f"validation_navigation_failed:{type(exc).__name__}"
+            if response is not None and int(response.status or 0) >= 400:
+                return False, f"validation_http_status:{response.status}"
 
             current_url = str(page.url or "").lower()
             if any(marker.lower() in current_url for marker in invalid_url_markers):

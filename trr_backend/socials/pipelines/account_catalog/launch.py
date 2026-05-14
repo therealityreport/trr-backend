@@ -409,6 +409,21 @@ def _catalog_stage_graph(
     return {stage: graph[stage] for stage in _CATALOG_STAGE_GRAPH_STAGES}
 
 
+def _comments_status_from_posts_stage(
+    *,
+    platform: str,
+    effective_selected_tasks: Sequence[Any] | None,
+    job_status: str | None,
+) -> str:
+    selected = set(_normalize_optional_social_account_catalog_backfill_selected_tasks(effective_selected_tasks) or [])
+    if "comments" not in selected:
+        return "skipped"
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform in {"tiktok", "twitter", "youtube", "threads"}:
+        return str(job_status or "").strip().lower() or "pending"
+    return "skipped"
+
+
 def _catalog_stage_graph_metadata(
     *,
     selected_tasks: Sequence[Any] | None,
@@ -987,7 +1002,11 @@ def launch_social_account_catalog_backfill(
                         selected_tasks=normalized_selected_tasks,
                         effective_selected_tasks=effective_selected_tasks,
                         detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
-                        comments_status="skipped",
+                        comments_status=_comments_status_from_posts_stage(
+                            platform=normalized_platform,
+                            effective_selected_tasks=effective_selected_tasks,
+                            job_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
+                        ),
                         media_status=(
                             str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
                             if "media" in effective_selected_tasks
@@ -1045,7 +1064,11 @@ def launch_social_account_catalog_backfill(
                 selected_tasks=normalized_selected_tasks,
                 effective_selected_tasks=effective_selected_tasks,
                 detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
-                comments_status="skipped",
+                comments_status=_comments_status_from_posts_stage(
+                    platform=normalized_platform,
+                    effective_selected_tasks=effective_selected_tasks,
+                    job_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
+                ),
                 media_status=(
                     str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
                     if "media" in effective_selected_tasks
@@ -1105,10 +1128,10 @@ def launch_social_account_catalog_backfill(
                         selected_tasks=normalized_selected_tasks,
                         effective_selected_tasks=effective_selected_tasks,
                         detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
-                        comments_status=(
-                            str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
-                            if normalized_platform in {"twitter", "threads"} and "comments" in effective_selected_tasks
-                            else "skipped"
+                        comments_status=_comments_status_from_posts_stage(
+                            platform=normalized_platform,
+                            effective_selected_tasks=effective_selected_tasks,
+                            job_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
                         ),
                         media_status=(
                             str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
@@ -1167,10 +1190,10 @@ def launch_social_account_catalog_backfill(
                 selected_tasks=normalized_selected_tasks,
                 effective_selected_tasks=effective_selected_tasks,
                 detail_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
-                comments_status=(
-                    str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
-                    if normalized_platform in {"twitter", "threads"} and "comments" in effective_selected_tasks
-                    else "skipped"
+                comments_status=_comments_status_from_posts_stage(
+                    platform=normalized_platform,
+                    effective_selected_tasks=effective_selected_tasks,
+                    job_status=str((catalog_result or {}).get("status") or "").strip().lower() or "pending",
                 ),
                 media_status=(
                     str((catalog_result or {}).get("status") or "").strip().lower() or "pending"
@@ -1393,6 +1416,8 @@ def launch_social_account_catalog_backfill(
             details_refresh_skip_detail_fetch="post_details" not in catalog_tasks,
             details_refresh_force_detail_fetch=force_detail_fetch,
             details_refresh_skip_media_followups="media" not in catalog_tasks,
+            selected_tasks=normalized_selected_tasks,
+            effective_selected_tasks=effective_selected_tasks,
             launch_group_id=launch_group_id,
             existing_run_id=existing_catalog_run_id,
         )

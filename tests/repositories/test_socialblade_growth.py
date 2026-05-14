@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from trr_backend.repositories.socialblade_growth import _row_to_response, merge_chart_data
+from trr_backend.repositories import socialblade_growth as growth_repo
+from trr_backend.repositories.socialblade_growth import _row_to_response, insert_growth_snapshot, merge_chart_data
 
 
 def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_zeroes() -> None:
@@ -147,8 +148,69 @@ def test_merge_chart_data_stores_previous_run_snapshot_on_full_refresh() -> None
     }
 
 
+def test_merge_chart_data_preserves_fresh_instagram_following_sidecar() -> None:
+    existing = {
+        "scraped_at": "2026-03-18T05:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 685081},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {"data": [{"date": "2026-03-18", "followers": 685081}]},
+        "instagram_following_scrape": {"status": "failed"},
+    }
+    fresh = {
+        "scraped_at": "2026-04-07T08:30:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 687613},
+        "rankings": {"grade": "A-"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {"data": [{"date": "2026-04-07", "followers": 687613}]},
+        "instagram_following_scrape": {"status": "completed", "relationships_upserted": 50},
+    }
+
+    merged = merge_chart_data(existing, fresh)
+
+    assert merged["instagram_following_scrape"] == {"status": "completed", "relationships_upserted": 50}
+
+
+def test_merge_chart_data_updates_scraper_metadata_on_full_refresh() -> None:
+    existing = {
+        "scraped_at": "2026-05-12T08:00:00Z",
+        "stats_refreshed": True,
+        "history_source": "unavailable",
+        "profile_stats": {"followers": 1500000, "media_count": 100000000},
+        "profile_stats_labels": {"media_count": "Videos"},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {"row_count": 14},
+        "daily_total_followers_chart": {"data": [{"date": "2026-05-12", "followers": 1500000}]},
+        "socialblade_url": "https://socialblade.com/tiktok/user/bravotv",
+    }
+    fresh = {
+        "scraped_at": "2026-05-13T08:00:00Z",
+        "stats_refreshed": True,
+        "history_source": "page_trpc_capture",
+        "profile_stats": {"followers": 1600000, "media_count": 111400000},
+        "profile_stats_labels": {"media_count": "Likes"},
+        "rankings": {"grade": "A-"},
+        "daily_channel_metrics_60day": {"row_count": 31},
+        "daily_total_followers_chart": {"data": [{"date": "2026-05-13", "followers": 1600000}]},
+        "chart_metric_label": "Followers",
+        "socialblade_url": "https://socialblade.com/tiktok/user/bravotv",
+        "runtime_metadata": {"fallback_chain": ["scrapling_warmup", "tiktok_page_trpc_capture"]},
+    }
+
+    merged = merge_chart_data(existing, fresh)
+
+    assert merged["history_source"] == "page_trpc_capture"
+    assert merged["profile_stats_labels"]["media_count"] == "Likes"
+    assert merged["chart_metric_label"] == "Followers"
+    assert merged["runtime_metadata"] == {"fallback_chain": ["scrapling_warmup", "tiktok_page_trpc_capture"]}
+    assert merged["daily_channel_metrics_60day"] == {"row_count": 31}
+
+
 def test_row_to_response_exposes_previous_run_snapshot() -> None:
     row = {
+        "id": "growth-row-1",
         "platform": "instagram",
         "account_handle": "thetraitors.us",
         "scraped_at": datetime.now(tz=UTC),
@@ -161,6 +223,7 @@ def test_row_to_response_exposes_previous_run_snapshot() -> None:
             "profile_stats_labels": {"followers": "Followers"},
             "chart_metric_label": "Followers",
             "socialblade_url": "https://socialblade.com/instagram/user/thetraitors.us",
+            "instagram_following_scrape": {"status": "completed", "relationships_upserted": 50},
             "previous_run": {
                 "scraped_at": "2026-04-19T12:00:00Z",
                 "profile_stats": {"followers": 950},
@@ -171,8 +234,67 @@ def test_row_to_response_exposes_previous_run_snapshot() -> None:
 
     response = _row_to_response(row)
 
+    assert response["row_id"] == "growth-row-1"
     assert response["previous_run"] == {
         "scraped_at": "2026-04-19T12:00:00Z",
         "profile_stats": {"followers": 950},
         "rankings": {"grade": "B-"},
+    }
+    assert response["instagram_following_scrape"] == {"status": "completed", "relationships_upserted": 50}
+
+
+def test_insert_growth_snapshot_writes_immutable_row(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute_returning(sql: str, params: list[object]):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [
+            {
+                "id": "snapshot-1",
+                "growth_data_id": "growth-row-1",
+                "platform": "instagram",
+                "account_handle": "bravotv",
+                "scraped_at": datetime(2026, 5, 13, tzinfo=UTC),
+            }
+        ]
+
+    monkeypatch.setattr(growth_repo.pg, "execute_returning", fake_execute_returning)
+
+    row = insert_growth_snapshot(
+        "person-1",
+        "@BravoTV",
+        {
+            "scraped_at": "2026-05-13T12:00:00Z",
+            "stats_refreshed": True,
+            "profile_stats": {"followers": 1000},
+            "rankings": {"grade": "B+"},
+            "daily_channel_metrics_60day": {"row_count": 60},
+            "daily_total_followers_chart": {"data": []},
+        },
+        growth_data_id="growth-row-1",
+        source="all_saved_instagram_backfill",
+        force=True,
+    )
+
+    assert "pipeline.socialblade_growth_snapshots" in str(captured["sql"])
+    assert captured["params"][0:6] == [
+        "growth-row-1",
+        "person-1",
+        "instagram",
+        "bravotv",
+        "bravotv",
+        "2026-05-13T12:00:00Z",
+    ]
+    assert captured["params"][-3:] == [
+        "all_saved_instagram_backfill",
+        "all_saved_instagram_backfill",
+        True,
+    ]
+    assert row == {
+        "id": "snapshot-1",
+        "growth_data_id": "growth-row-1",
+        "platform": "instagram",
+        "account_handle": "bravotv",
+        "scraped_at": "2026-05-13T00:00:00+00:00",
     }

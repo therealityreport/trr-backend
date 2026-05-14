@@ -33,12 +33,12 @@ def test_apply_workspace_runtime_env_maps_remote_social_caps(tmp_path) -> None:
     workspace_root = tmp_path
     (workspace_root / ".logs" / "workspace").mkdir(parents=True)
     (workspace_root / ".logs" / "workspace" / "pids.env").write_text(
-        "WORKSPACE_TRR_REMOTE_SOCIAL_DISPATCH_LIMIT=12\n"
-        "WORKSPACE_TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT=12\n"
+        "WORKSPACE_TRR_REMOTE_SOCIAL_DISPATCH_LIMIT=4\n"
+        "WORKSPACE_TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT=4\n"
         "WORKSPACE_TRR_REMOTE_SOCIAL_POSTS=1\n"
-        "WORKSPACE_TRR_REMOTE_SOCIAL_COMMENTS=8\n"
-        "WORKSPACE_TRR_REMOTE_SOCIAL_MEDIA_MIRROR=3\n"
-        "WORKSPACE_TRR_REMOTE_SOCIAL_COMMENT_MEDIA_MIRROR=2\n",
+        "WORKSPACE_TRR_REMOTE_SOCIAL_COMMENTS=3\n"
+        "WORKSPACE_TRR_REMOTE_SOCIAL_MEDIA_MIRROR=1\n"
+        "WORKSPACE_TRR_REMOTE_SOCIAL_COMMENT_MEDIA_MIRROR=1\n",
         encoding="utf-8",
     )
     repo_root.mkdir()
@@ -46,13 +46,13 @@ def test_apply_workspace_runtime_env_maps_remote_social_caps(tmp_path) -> None:
     env: dict[str, str] = {}
     helper.apply_workspace_runtime_env(repo_root=repo_root, environ=env)
 
-    assert env["SOCIAL_MODAL_DISPATCH_LIMIT"] == "12"
-    assert env["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "12"
+    assert env["SOCIAL_MODAL_DISPATCH_LIMIT"] == "4"
+    assert env["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "4"
     assert env["SOCIAL_WORKER_POOL_POSTS"] == "1"
-    assert env["SOCIAL_WORKER_POOL_COMMENTS"] == "8"
-    assert env["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "3"
-    assert env["SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR"] == "2"
-    assert env["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "8"
+    assert env["SOCIAL_WORKER_POOL_COMMENTS"] == "3"
+    assert env["SOCIAL_WORKER_POOL_MEDIA_MIRROR"] == "1"
+    assert env["SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR"] == "1"
+    assert env["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "3"
 
 
 def test_apply_workspace_runtime_env_preserves_explicit_shell_overrides(tmp_path) -> None:

@@ -61,6 +61,51 @@ def test_reconcile_modal_runtime_is_ok_when_readiness_passes_and_fingerprint_unc
     assert result["readiness"]["advisory_probe_failures"] == ["challenge_page"]
 
 
+def test_reconcile_modal_runtime_advises_when_only_remote_auth_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("WORKSPACE_TRR_REMOTE_EXECUTOR", "modal")
+    monkeypatch.setattr(
+        cli,
+        "verify_readiness",
+        lambda repo_root=cli.REPO_ROOT: {
+            "ok": False,
+            "app_found": True,
+            "missing_secrets": [],
+            "missing_functions": [],
+            "missing_required_social_functions": [],
+            "missing_web_endpoints": [],
+            "blocking_probe_failures": ["checkpoint_required"],
+            "remote_auth_probe": {
+                "platform": "instagram",
+                "ready": False,
+                "reason": "checkpoint_required",
+            },
+        },
+    )
+    monkeypatch.setattr(cli, "build_modal_fingerprint", lambda repo_root=cli.REPO_ROOT: "abc")
+    monkeypatch.setattr(cli, "load_saved_fingerprint", lambda repo_root=cli.REPO_ROOT: "abc")
+    monkeypatch.setattr(
+        cli,
+        "apply_named_secrets",
+        lambda repo_root=cli.REPO_ROOT: pytest.fail("auth-only failure should not trigger secret apply"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "deploy_modal_app",
+        lambda repo_root=cli.REPO_ROOT: pytest.fail("auth-only failure should not trigger deploy"),
+    )
+
+    result = cli.reconcile_modal_runtime()
+
+    assert result["state"] == "advisory"
+    assert result["reason"] == "modal_auth_probe_failed"
+    assert result["deployed"] is False
+    assert result["fingerprint_changed"] is False
+    assert result["auth_advisory_failures"] == ["checkpoint_required"]
+
+
 def test_reconcile_modal_runtime_deploys_when_readiness_missing_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WORKSPACE_TRR_MODAL_ENABLED", "1")
     monkeypatch.setenv("WORKSPACE_TRR_REMOTE_EXECUTOR", "modal")
@@ -196,6 +241,60 @@ def test_reconcile_modal_runtime_retries_post_deploy_readiness(monkeypatch: pyte
 
     assert result["state"] == "fixed"
     assert result["readiness"]["ok"] is True
+    assert saved["value"] == "new"
+
+
+def test_reconcile_modal_runtime_saves_fingerprint_after_deploy_with_auth_advisory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("WORKSPACE_TRR_REMOTE_EXECUTOR", "modal")
+    states = iter(
+        [
+            {"ok": True},
+            {
+                "ok": False,
+                "app_found": True,
+                "missing_secrets": [],
+                "missing_functions": [],
+                "missing_required_social_functions": [],
+                "missing_web_endpoints": [],
+                "blocking_probe_failures": ["checkpoint_required"],
+                "remote_auth_probe": {
+                    "platform": "instagram",
+                    "ready": False,
+                    "reason": "checkpoint_required",
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr(cli, "verify_readiness", lambda repo_root=cli.REPO_ROOT: next(states))
+    monkeypatch.setattr(cli, "post_deploy_verify_attempts", lambda: 1)
+    monkeypatch.setattr(cli, "post_deploy_verify_delay_seconds", lambda: 0.0)
+    monkeypatch.setattr(cli, "build_modal_fingerprint", lambda repo_root=cli.REPO_ROOT: "new")
+    monkeypatch.setattr(cli, "load_saved_fingerprint", lambda repo_root=cli.REPO_ROOT: "old")
+    monkeypatch.setattr(
+        cli,
+        "apply_named_secrets",
+        lambda repo_root=cli.REPO_ROOT: subprocess.CompletedProcess(["python"], 0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        cli,
+        "deploy_modal_app",
+        lambda repo_root=cli.REPO_ROOT: subprocess.CompletedProcess(["python"], 0, stdout="ok", stderr=""),
+    )
+    saved: dict[str, str] = {}
+    monkeypatch.setattr(
+        cli,
+        "save_fingerprint",
+        lambda fingerprint, repo_root=cli.REPO_ROOT: saved.update({"value": fingerprint}),
+    )
+
+    result = cli.reconcile_modal_runtime()
+
+    assert result["state"] == "fixed"
+    assert result["reason"] == "modal_auth_probe_failed"
+    assert result["auth_advisory_failures"] == ["checkpoint_required"]
     assert saved["value"] == "new"
 
 

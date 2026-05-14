@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -66,7 +67,8 @@ def test_fetch_posts_graphql_warms_profile_page_and_uses_public_web_headers(monk
     assert scraper.last_retrieval_meta["retrieval_transport"] == "requests_enriched"
     assert captured["warm_url"] == "https://www.instagram.com/bravotv/"
     assert captured["post_url"] == scraper.GRAPHQL_URL
-    assert captured["post_headers"]["x-fb-friendly-name"] == "PolarisProfilePostsTabContentQuery_connection"
+    assert captured["post_headers"]["x-fb-friendly-name"] == "PolarisProfilePostsQuery"
+    assert captured["post_headers"]["x-root-field-name"] == "xdt_api__v1__feed__user_timeline_graphql_connection"
     assert captured["post_headers"]["x-fb-lsd"] == "lsd-token"
     assert captured["post_headers"]["x-csrftoken"] == "csrf-token"
     assert captured["post_headers"]["x-asbd-id"] == scraper.WEB_X_ASBD_ID
@@ -74,11 +76,14 @@ def test_fetch_posts_graphql_warms_profile_page_and_uses_public_web_headers(monk
         captured["post_headers"]["x-bloks-version-id"]
         == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     )
-    assert captured["post_data"]["doc_id"] == "25645538101792896"
+    assert captured["post_data"]["doc_id"] == "26859136577041380"
     assert captured["post_data"]["av"] == "0"
     assert captured["post_data"]["__user"] == "0"
     assert captured["post_data"]["lsd"] == "lsd-token"
     assert captured["post_data"]["jazoest"] == "2913"
+    variables = json.loads(captured["post_data"]["variables"])
+    assert variables["__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider"] is True
+    assert variables["__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider"] is False
 
 
 def test_fetch_posts_graphql_retries_cursor_pages_with_fresh_profile_context(monkeypatch) -> None:
@@ -730,6 +735,72 @@ def test_fetch_posts_graphql_uses_request_client(monkeypatch: pytest.MonkeyPatch
 
     assert payload is not None
     assert calls == ["graphql_profile_posts"]
+
+
+def test_fetch_profile_page_content_graphql_uses_copied_profile_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "x", "csrftoken": "y", "ds_user_id": "541"})
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(scraper, "resolve_profile_user_id_graphql", lambda *_args, **_kwargs: "123456")
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *_args, **_kwargs: {
+            "lsd": "lsd-1",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+    monkeypatch.setattr(scraper, "_request_cookies", lambda: {"sessionid": "x", "csrftoken": "y", "ds_user_id": "541"})
+    monkeypatch.setattr(scraper, "_graphql_form_runtime_fields", lambda **_kwargs: {"lsd": "lsd-1", "jazoest": "2913"})
+    monkeypatch.setattr(scraper, "_profile_page_content_doc_ids", lambda: ["35710877621861450"])
+
+    class _Client:
+        def post_form_json(
+            self,
+            url: str,
+            *,
+            query_type: str,
+            headers: dict[str, Any],
+            cookies: dict[str, str],
+            data: dict[str, Any],
+            **_kwargs: Any,
+        ) -> dict[str, Any]:
+            captured.update(
+                {
+                    "url": url,
+                    "query_type": query_type,
+                    "headers": headers,
+                    "cookies": cookies,
+                    "data": data,
+                    "variables": json.loads(data["variables"]),
+                }
+            )
+            return {
+                "data": {
+                    "user": {
+                        "id": "123456",
+                        "pk": "123456",
+                        "username": "sampleaccount",
+                        "follower_count": 123_456,
+                    }
+                }
+            }
+
+    monkeypatch.setattr(scraper, "_request_client", _Client())
+
+    payload = scraper.fetch_profile_page_content_graphql("sampleaccount", delay=0.0)
+
+    assert payload is not None
+    assert captured["url"] == scraper.GRAPHQL_URL
+    assert captured["query_type"] == "graphql_profile_page_content"
+    assert captured["headers"]["x-fb-friendly-name"] == "PolarisProfilePageContentQuery"
+    assert captured["headers"]["x-root-field-name"] == "fetch__XDTUserDict"
+    assert captured["headers"]["x-ig-app-id"] == "936619743392459"
+    assert captured["headers"]["x-fb-lsd"] == "lsd-1"
+    assert captured["data"]["doc_id"] == "35710877621861450"
+    assert captured["variables"]["id"] == "123456"
+    assert captured["variables"]["enable_integrity_filters"] is True
+    assert payload["data"]["user"]["username"] == "sampleaccount"
 
 
 def test_redirect_login_failure_marks_auth_block_and_attempts_interactive_repair(

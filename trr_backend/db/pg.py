@@ -38,8 +38,8 @@ DEFAULT_POOL_MINCONN = 2
 DEFAULT_POOL_MAXCONN = 24
 DEFAULT_SESSION_POOLER_MINCONN = 1
 DEFAULT_SESSION_POOLER_MAXCONN = 2
-DEFAULT_MODAL_SESSION_POOLER_MINCONN = 2
-DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 8
+DEFAULT_MODAL_SESSION_POOLER_MINCONN = 1
+DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 1
 LOCAL_SESSION_POOLER_MAX_CEILING = 8
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
@@ -161,6 +161,10 @@ def _env_truthy(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _close_pool_connection_after_return() -> bool:
+    return _env_truthy("TRR_DB_POOL_CLOSE_AFTER_RETURN")
+
+
 def _is_local_or_dev_runtime() -> bool:
     runtime_markers = [
         os.getenv("APP_ENV"),
@@ -211,7 +215,12 @@ def _is_pool_exhausted_error(error: Exception) -> bool:
 def _database_service_unavailable_reason(message: str) -> str:
     if "canceling statement due to statement timeout" in message:
         return "statement_timeout"
-    if "maxclientsinsessionmode" in message or "max clients reached - in session mode" in message:
+    if (
+        "emaxconnsession" in message
+        or "maxclientsinsessionmode" in message
+        or "max clients reached - in session mode" in message
+        or "max clients reached in session mode" in message
+    ):
         return "session_pool_capacity"
     if "connection pool exhausted" in message or "pool exhausted" in message:
         return "pool_capacity"
@@ -286,8 +295,10 @@ def _is_transient_transport_error(error: Exception) -> bool:
         "connection refused",
         "connection timed out",
         "could not receive data from server",
+        "emaxconnsession",
         "maxclientsinsessionmode",
         "max clients reached - in session mode",
+        "max clients reached in session mode",
         "no route to host",
         "connection pool is closed",
         "pool is closed",
@@ -1082,6 +1093,7 @@ def db_connection(*, label: str = "write", pool_name: str = "default"):
     finally:
         should_close = (
             discard_connection
+            or _close_pool_connection_after_return()
             or _is_connection_closed(conn)
             or not _ensure_connection_idle(
                 conn,
@@ -1140,6 +1152,7 @@ def db_read_connection(*, label: str = "read", pool_name: str = "default"):
                 logger.exception("[db-pool] autocommit_restore_failed label=%s", label)
         should_close = (
             discard_connection
+            or _close_pool_connection_after_return()
             or autocommit_restore_failed
             or _is_connection_closed(conn)
             or (not discard_connection and not _ensure_connection_idle(conn, label=label, phase="read-return"))

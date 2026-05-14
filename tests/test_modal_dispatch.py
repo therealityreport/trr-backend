@@ -181,6 +181,39 @@ def test_dispatch_social_job_uses_stage_specific_function(monkeypatch: pytest.Mo
     assert captured["kwargs"] == {"job_id": "job-1"}
 
 
+def test_dispatch_socialblade_scrape_passes_platform_and_following_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_spawn_named_modal_function(**kwargs):
+        captured.update(kwargs)
+        return {"dispatched": True, "call_id": "fc-123"}
+
+    monkeypatch.setattr(modal_dispatch, "_spawn_named_modal_function", _fake_spawn_named_modal_function)
+
+    modal_dispatch.dispatch_socialblade_scrape(
+        person_id="person-1",
+        handle="networkofficial",
+        source="season_run",
+        force=True,
+        platform="instagram",
+        scrape_following=True,
+        source_scope="creator",
+    )
+
+    assert captured["function_name"] == "run_socialblade_scrape"
+    assert captured["kwargs"] == {
+        "person_id": "person-1",
+        "handle": "networkofficial",
+        "source": "season_run",
+        "force": True,
+        "platform": "instagram",
+        "scrape_following": True,
+        "source_scope": "creator",
+    }
+
+
 def test_spawn_named_modal_function_includes_drift_visible_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeCall:
         object_id = "fc-123"

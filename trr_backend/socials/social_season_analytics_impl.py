@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import time as time_module
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager, nullcontext
@@ -171,7 +171,7 @@ SOCIAL_DB_UPSERT_BATCH_SIZE_COMMENTS_DEFAULT = 300
 SOCIAL_DB_UPSERT_BATCH_SIZE_POSTS_DEFAULT = 100
 SOCIAL_DB_UPSERT_BATCH_SIZE_MAX = 1000
 SOCIAL_RUN_IN_FLIGHT_CAP_DEFAULT = 12
-SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP_DEFAULT = 16
+SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP_DEFAULT = 4
 SOCIAL_QUEUE_STATUS_CACHE_TTL_SECONDS_DEFAULT = 20
 SOCIAL_WORKER_HEALTH_CACHE_TTL_SECONDS_DEFAULT = 5
 SOCIAL_INSTAGRAM_COOKIE_VALIDATION_TTL_SECONDS_DEFAULT = 900
@@ -184,7 +184,7 @@ SOCIAL_QUEUE_STATUS_DISPATCH_BLOCKED_JOBS_LIMIT_DEFAULT = 100
 SOCIAL_MODAL_DISPATCH_NO_PROGRESS_SECONDS_DEFAULT = 600
 SOCIAL_MODAL_DISPATCH_BLOCKED_FAILURE_LIMIT_DEFAULT = 3
 SOCIAL_MODAL_DISPATCH_RETRY_DELAY_SECONDS_DEFAULT = 120
-SOCIAL_MODAL_DISPATCH_LIMIT_DEFAULT = 25
+SOCIAL_MODAL_DISPATCH_LIMIT_DEFAULT = 4
 SOCIAL_MODAL_STALE_UNCLAIMED_RECOVERY_LIMIT_DEFAULT = 3
 SOCIAL_MODAL_MIRROR_LAG_AGE_SECONDS_DEFAULT = 900
 CATALOG_BACKFILL_MULTI_RUNNER_COUNT = 2
@@ -290,7 +290,7 @@ PLATFORM_POST_TABLES = {
     "threads": "meta_threads_posts",
 }
 CATALOG_SUPPORTED_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube", "facebook", "threads")
-REMOTE_AUTH_REQUIRED_PLATFORMS = ("instagram", "tiktok", "twitter", "facebook", "threads")
+REMOTE_AUTH_REQUIRED_PLATFORMS = ("instagram", "tiktok", "twitter", "facebook")
 REMOTE_AUTH_MISSING_HINTS = {
     "instagram": ["SOCIAL_INSTAGRAM_COOKIES_JSON|SOCIAL_INSTAGRAM_COOKIES_FILE"],
     "tiktok": ["SOCIAL_TIKTOK_COOKIES_JSON|SOCIAL_TIKTOK_COOKIES_FILE|TIKTOK_COOKIES_JSON|TIKTOK_COOKIES_FILE"],
@@ -815,6 +815,22 @@ def _shared_account_prefers_partitioned_backfill_recovery(
     if recovery_depth >= 1:
         return False
     return _catalog_full_history_partition_supported(normalized_platform)
+
+
+def _shared_account_error_is_database_capacity(error_class: Any = None, message: Any = None) -> bool:
+    normalized_class = str(error_class or "").strip().lower()
+    normalized_message = str(message or "").strip().lower()
+    if normalized_class == "databaseserviceunavailableerror":
+        return True
+    return any(
+        token in normalized_message
+        for token in (
+            "emaxconnsession",
+            "max clients reached",
+            "pool exhausted",
+            "database pool",
+        )
+    )
 
 
 def _shared_account_retry_uses_frontier_recovery(
@@ -1792,9 +1808,9 @@ def _modal_dispatch_stage_global_cap(stage: str | None) -> int:
     normalized_stage = _modal_dispatch_capacity_stage(stage)
     env_map = {
         "posts": ("SOCIAL_WORKER_POOL_POSTS", 8),
-        "comments": ("SOCIAL_WORKER_POOL_COMMENTS", 8),
-        SHARED_ACCOUNT_DISCOVERY_STAGE: ("SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY", 4),
-        SHARED_ACCOUNT_POSTS_STAGE: ("SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS", 8),
+        "comments": ("SOCIAL_WORKER_POOL_COMMENTS", 3),
+        SHARED_ACCOUNT_DISCOVERY_STAGE: ("SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY", 3),
+        SHARED_ACCOUNT_POSTS_STAGE: ("SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS", 5),
         POST_CLASSIFY_STAGE: ("SOCIAL_WORKER_POOL_POST_CLASSIFY", 10),
         SEASON_MATERIALIZE_STAGE: ("SOCIAL_WORKER_POOL_SEASON_MATERIALIZE", 10),
         ANALYTICS_REFRESH_STAGE: ("SOCIAL_WORKER_POOL_ANALYTICS_REFRESH", 4),
@@ -1812,10 +1828,10 @@ def _modal_dispatch_platform_cap(stage: str | None, platform: str | None) -> int
         return None
     if normalized_stage in {"posts", "comments"}:
         defaults = {
-            "instagram": 2,
-            "tiktok": 2,
-            "twitter": 2,
-            "youtube": 2,
+            "instagram": 3,
+            "tiktok": 1,
+            "twitter": 1,
+            "youtube": 1,
             "facebook": 1,
             "threads": 1,
         }
@@ -1823,10 +1839,10 @@ def _modal_dispatch_platform_cap(stage: str | None, platform: str | None) -> int
         return _resolve_positive_int_env(env_name, defaults.get(normalized_platform, 1), minimum=1)
     if normalized_stage == SHARED_ACCOUNT_POSTS_STAGE:
         defaults = {
-            "instagram": 4,
-            "tiktok": 4,
+            "instagram": 1,
+            "tiktok": 1,
             "twitter": 1,
-            "threads": 3,
+            "threads": 1,
             "youtube": 1,
             "facebook": 1,
         }
@@ -1834,8 +1850,8 @@ def _modal_dispatch_platform_cap(stage: str | None, platform: str | None) -> int
         return _resolve_positive_int_env(env_name, defaults.get(normalized_platform, 1), minimum=1)
     if normalized_stage == SHARED_ACCOUNT_DISCOVERY_STAGE:
         defaults = {
-            "instagram": 2,
-            "tiktok": 2,
+            "instagram": 1,
+            "tiktok": 1,
             "twitter": 1,
             "threads": 1,
             "youtube": 1,
@@ -1871,7 +1887,7 @@ def _resolve_dispatch_account_handle(config: dict[str, Any]) -> str | None:
 
 
 def _platform_cap_per_account_scaling_enabled() -> bool:
-    raw = (os.getenv("SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING") or "true").strip().lower()
+    raw = (os.getenv("SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING") or "false").strip().lower()
     return raw not in {"0", "false", "off", "no"}
 
 
@@ -2075,7 +2091,9 @@ def _build_modal_executor_health_payload(
             if isinstance(remote_auth_capabilities, dict)
             else {}
         )
-        if not _platform_requires_remote_auth(candidate_platform) or bool(capability.get("ready")):
+        if not _platform_requires_remote_auth(candidate_platform):
+            return capability
+        if bool(capability.get("ready")) and not allow_probe:
             return capability
         if capability and not allow_probe:
             return capability
@@ -2084,9 +2102,24 @@ def _build_modal_executor_health_payload(
         if candidate_platform not in remote_probe_cache:
             remote_probe_cache[candidate_platform] = _probe_modal_remote_auth_health(candidate_platform)
         probe_payload = remote_probe_cache.get(candidate_platform)
-        if not isinstance(probe_payload, Mapping) or not bool(probe_payload.get("ready")):
+        if not isinstance(probe_payload, Mapping):
             return capability
         resolved = dict(capability)
+        if not bool(probe_payload.get("ready")):
+            resolved.update(
+                {
+                    "required": True,
+                    "executor_backend": "modal",
+                    "ready": False,
+                    "reason": str(probe_payload.get("reason") or "").strip()
+                    or str(capability.get("reason") or "").strip()
+                    or f"{candidate_platform}_remote_auth_unavailable",
+                    "detail": _metadata_dict(probe_payload.get("detail")) or None,
+                    "missing_hints": list(capability.get("missing_hints") or []),
+                    "probe_source": "modal_remote_auth_probe",
+                }
+            )
+            return resolved
         resolved.update(
             {
                 "required": True,
@@ -2100,7 +2133,10 @@ def _build_modal_executor_health_payload(
         )
         return resolved
 
-    target_remote_auth = _resolved_remote_auth_capability(target_platform, allow_probe=target_platform == "instagram")
+    target_remote_auth = _resolved_remote_auth_capability(
+        target_platform,
+        allow_probe=_platform_requires_remote_auth(target_platform),
+    )
     instagram_remote_auth = (
         target_remote_auth if target_platform == "instagram" else _resolved_remote_auth_capability("instagram")
     )
@@ -2460,7 +2496,7 @@ def _worker_heartbeat_schema_ready() -> bool:
 
 def get_worker_auth_capabilities() -> dict[str, Any]:
     """Describe platform auth capabilities for the current worker environment."""
-    instagram_cookies = _load_instagram_cookies()
+    instagram_cookies = _load_instagram_cookies_from_sources()
     tiktok_cookies = _load_tiktok_cookies()
     twitter_cookies, twitter_bearer = _load_twitter_auth()
     twikit_creds = _load_twikit_credentials(twitter_cookies)
@@ -2577,11 +2613,23 @@ def probe_remote_auth_health(platform: str) -> dict[str, Any]:
     if normalized_platform == "threads":
         cookies = _load_threads_cookies_from_sources()
         is_valid, reason = _validate_threads_cookie_health(cookies)
+        try:
+            from trr_backend.socials.threads.posts_scrapling.proxy import select_threads_posts_proxy
+
+            proxy_config = select_threads_posts_proxy()
+        except Exception:  # noqa: BLE001
+            proxy_config = None
         return {
             "platform": normalized_platform,
             "ready": bool(is_valid),
             "reason": str(reason or "").strip() or None,
             **_remote_auth_safe_structure_flags(normalized_platform, cookies=cookies),
+            "threads_posts_proxy_ready": bool(proxy_config),
+            "threads_posts_proxy_fingerprint": proxy_config.fingerprint if proxy_config else "none",
+            "threads_posts_proxy_provider": str(os.getenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER") or "").strip() or None,
+            "decodo_username_present": bool(str(os.getenv("DECODO_USERNAME") or "").strip()),
+            "decodo_password_present": bool(str(os.getenv("DECODO_PASSWORD") or "").strip()),
+            "decodo_gateway_present": bool(str(os.getenv("DECODO_GATEWAY") or "").strip()),
         }
     if not normalized_platform:
         raise ValueError(f"Unsupported remote auth probe platform: {platform}")
@@ -4485,9 +4533,13 @@ def _instagram_auth_repair_module():
     return repair_instagram_auth
 
 
-def _merge_catalog_run_config(*, run_id: str, metadata_updates: Mapping[str, Any]) -> dict[str, Any]:
-    row = pg.fetch_one(
-        """
+def _merge_catalog_run_config(
+    *,
+    run_id: str,
+    metadata_updates: Mapping[str, Any],
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    query = """
         update social.scrape_runs
         set config = coalesce(config, '{}'::jsonb) || %s::jsonb
         where id = %s::uuid
@@ -4495,9 +4547,13 @@ def _merge_catalog_run_config(*, run_id: str, metadata_updates: Mapping[str, Any
           id::text as id,
           status,
           config
-        """,
-        [_json_dumps(_metadata_dict(metadata_updates)), run_id],
-    )
+        """
+    params = [_json_dumps(_metadata_dict(metadata_updates)), run_id]
+    if conn is not None:
+        with pg.db_cursor(conn=conn, label="merge_catalog_run_config") as cur:
+            row = pg.fetch_one_with_cursor(cur, query, params)
+    else:
+        row = pg.fetch_one(query, params)
     _invalidate_queue_status_cache()
     return {
         "id": str((row or {}).get("id") or "").strip(),
@@ -4857,6 +4913,121 @@ def recover_failed_instagram_comments_capacity_jobs(
           candidates.recovery_reason
         """,
         [INSTAGRAM_COMMENTS_SCRAPLING_STAGE, normalized_run_id, normalized_run_id, safe_limit],
+    )
+    finalized_run_ids: set[str] = set()
+    for row in rows:
+        recovered_run_id = str(row.get("run_id") or "").strip()
+        if recovered_run_id and recovered_run_id not in finalized_run_ids:
+            _finalize_run_status(recovered_run_id, force_recompute=True)
+            finalized_run_ids.add(recovered_run_id)
+    return rows
+
+
+def recover_failed_media_mirror_transient_jobs(
+    *,
+    run_id: str | None = None,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Requeue media mirror jobs that old workers misclassified as fatal."""
+
+    safe_limit = max(1, min(int(limit or 25), 250))
+    try:
+        normalized_run_id = str(UUID(str(run_id))) if str(run_id or "").strip() else None
+    except (TypeError, ValueError):
+        return []
+    rows = pg.fetch_all(
+        """
+        with candidates as (
+          select
+            j.id,
+            case
+              when lower(coalesce(j.error_message, '')) like '%%http_429%%' then 'http_429'
+              when lower(coalesce(j.error_message, '')) like '%%http_500%%' then 'http_500'
+              when lower(coalesce(j.error_message, '')) like '%%http_502%%' then 'http_502'
+              when lower(coalesce(j.error_message, '')) like '%%http_503%%' then 'http_503'
+              when lower(coalesce(j.error_message, '')) like '%%http_504%%' then 'http_504'
+              when lower(coalesce(j.error_message, '')) like '%%request_timeout%%' then 'request_timeout'
+              when lower(coalesce(j.error_message, '')) like '%%connection_error%%' then 'connection_error'
+              when lower(coalesce(j.error_message, '')) like '%%request_error%%' then 'request_error'
+              else 'transient_media_mirror'
+            end as recovery_reason
+          from social.scrape_jobs j
+          where j.status = 'failed'
+            and coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) in (%s, %s)
+            and (%s::uuid is null or j.run_id = %s::uuid)
+            and coalesce(j.attempt_count, 0) < coalesce(j.max_attempts, 1)
+            and (
+              lower(coalesce(j.last_error_code, '')) = 'transient_error'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:%%http_429%%'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:%%http_500%%'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:%%http_502%%'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:%%http_503%%'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:%%http_504%%'
+              or lower(coalesce(j.error_message, '')) like '%%upload_failed:%%http_429%%'
+              or lower(coalesce(j.error_message, '')) like '%%upload_failed:%%http_500%%'
+              or lower(coalesce(j.error_message, '')) like '%%upload_failed:%%http_502%%'
+              or lower(coalesce(j.error_message, '')) like '%%upload_failed:%%http_503%%'
+              or lower(coalesce(j.error_message, '')) like '%%upload_failed:%%http_504%%'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:request_timeout%%'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:connection_error%%'
+              or lower(coalesce(j.error_message, '')) like '%%download_failed:request_error%%'
+            )
+          order by coalesce(j.completed_at, j.created_at) asc
+          limit %s
+        )
+        update social.scrape_jobs j
+        set
+          status = 'retrying',
+          available_at = now(),
+          completed_at = null,
+          error_message = null,
+          last_error_code = null,
+          last_error_class = null,
+          claimed_at = null,
+          worker_id = null,
+          metadata = coalesce(j.metadata, '{}'::jsonb)
+            || jsonb_build_object(
+              'retryable_failure_recovery',
+              jsonb_build_object(
+                'reason', candidates.recovery_reason,
+                'recovered_at', to_jsonb(now()),
+                'source', 'recover_failed_media_mirror_transient_jobs'
+              ),
+              'activity',
+              coalesce(j.metadata->'activity', '{}'::jsonb)
+                || jsonb_build_object(
+                  'phase', 'media_mirror_transient_recovered',
+                  'last_progress_at', to_jsonb(now())
+                ),
+              'dispatch',
+              coalesce(j.metadata->'dispatch', '{}'::jsonb)
+                || jsonb_build_object(
+                  'remote_invocation_id', null,
+                  'remote_invocation_status', null,
+                  'remote_invocation_checked_at', null,
+                  'remote_task_id', null,
+                  'remote_pending_since', null,
+                  'remote_blocked_reason', null,
+                  'lease_expires_at', null,
+                  'last_dispatch_error', null,
+                  'last_dispatch_error_code', null,
+                  'last_dispatch_error_at', null,
+                  'dispatch_attempt_count', 0,
+                  'dispatch_blocked_failure_count', 0,
+                  'dispatch_blocked_terminalized_at', null,
+                  'stale_unclaimed_dispatch_exhausted', false
+                )
+            )
+        from candidates
+        where j.id = candidates.id
+        returning
+          j.id::text as id,
+          j.run_id::text as run_id,
+          j.platform,
+          j.status,
+          candidates.recovery_reason
+        """,
+        [INSTAGRAM_MEDIA_MIRROR_STAGE, COMMENT_MEDIA_MIRROR_STAGE, normalized_run_id, normalized_run_id, safe_limit],
     )
     finalized_run_ids: set[str] = set()
     for row in rows:
@@ -6062,22 +6233,22 @@ def _relation_columns(
     return columns
 
 
-def _scrape_jobs_features() -> dict[str, bool]:
+def _scrape_jobs_features(*, conn: Any | None = None) -> dict[str, bool]:
     global _scrape_jobs_features_cache
     if _scrape_jobs_features_cache is not None:
         return _scrape_jobs_features_cache
-    has_run_id = _column_exists("social", "scrape_jobs", "run_id")
+    has_run_id = _column_exists("social", "scrape_jobs", "run_id", conn=conn)
     has_queue_fields = all(
         [
-            _column_exists("social", "scrape_jobs", "attempt_count"),
-            _column_exists("social", "scrape_jobs", "max_attempts"),
-            _column_exists("social", "scrape_jobs", "priority"),
-            _column_exists("social", "scrape_jobs", "available_at"),
-            _column_exists("social", "scrape_jobs", "claimed_at"),
-            _column_exists("social", "scrape_jobs", "heartbeat_at"),
-            _column_exists("social", "scrape_jobs", "worker_id"),
-            _column_exists("social", "scrape_jobs", "last_error_code"),
-            _column_exists("social", "scrape_jobs", "last_error_class"),
+            _column_exists("social", "scrape_jobs", "attempt_count", conn=conn),
+            _column_exists("social", "scrape_jobs", "max_attempts", conn=conn),
+            _column_exists("social", "scrape_jobs", "priority", conn=conn),
+            _column_exists("social", "scrape_jobs", "available_at", conn=conn),
+            _column_exists("social", "scrape_jobs", "claimed_at", conn=conn),
+            _column_exists("social", "scrape_jobs", "heartbeat_at", conn=conn),
+            _column_exists("social", "scrape_jobs", "worker_id", conn=conn),
+            _column_exists("social", "scrape_jobs", "last_error_code", conn=conn),
+            _column_exists("social", "scrape_jobs", "last_error_class", conn=conn),
         ]
     )
     _scrape_jobs_features_cache = {
@@ -6299,7 +6470,7 @@ def _social_account_catalog_start_lock(*, platform: str, account_handle: str, ru
         account_handle=account_handle,
         run_family=run_family,
     )
-    with pg.db_connection(label="catalog-start-lock") as conn:
+    with pg.db_connection(label="catalog-start-lock", pool_name="social_control") as conn:
         with pg.db_cursor(conn=conn, label="catalog-start-lock") as cur:
             locked_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
         locked = bool(locked_row.get("locked"))
@@ -6439,10 +6610,7 @@ def _show_is_rhoslc(context: SeasonContext | None) -> bool:
 
 _BRAVO_CORE_PLATFORM_ACCOUNTS: dict[str, tuple[str, ...]] = {
     "instagram": ("bravotv", "bravowwhl", "bravodailydish"),
-    "tiktok": ("bravotv", "bravowwhl"),
-    "twitter": ("bravotv", "bravowwhl"),
-    "youtube": ("bravo", "wwhl"),
-    "threads": ("bravotv", "bravowwhl"),
+    "threads": ("bravotv", "bravowwhl", "bravodailydish"),
 }
 
 
@@ -8192,19 +8360,34 @@ def _validate_threads_cookie_health(cookies: dict[str, str]) -> tuple[bool, str 
         platform_label="threads",
         cookies=cookies,
         cache_entry=_threads_cookie_validation_cache,
-        validation_url="https://www.threads.com/",
+        validation_url="https://www.threads.com/@threads",
         cookie_domains=(".threads.com", "www.threads.com", ".instagram.com"),
         required_cookie_names_any=("sessionid",),
         required_cookie_names_all=("csrftoken",),
         invalid_url_markers=("/login",),
-        invalid_body_patterns=(r"Log in with your Instagram account", r"Continue with Instagram"),
+        invalid_body_patterns=(r"Log in with your Instagram account", r"Continue with Instagram", r"Page Not Found"),
     )
     return is_valid, reason
 
 
+def _threads_auth_credentials() -> tuple[str | None, str | None]:
+    username, password = _platform_auth_credentials("SOCIAL_AUTH_THREADS_USERNAME", "SOCIAL_AUTH_THREADS_PASSWORD")
+    if username and password:
+        return username, password
+    return _platform_auth_credentials("SOCIAL_AUTH_INSTAGRAM_USERNAME", "SOCIAL_AUTH_INSTAGRAM_PASSWORD")
+
+
+def _threads_cookie_auto_refresh_enabled() -> bool:
+    raw = (os.getenv("SOCIAL_THREADS_COOKIE_AUTO_REFRESH") or "").strip().lower()
+    if raw:
+        return raw not in {"0", "false", "off", "no"}
+    username, password = _threads_auth_credentials()
+    return bool(username and password)
+
+
 def _refresh_threads_cookies(stale_reason: str | None = None) -> dict[str, str]:
     global _threads_cookie_validation_cache, _threads_cookie_runtime_override
-    username, password = _platform_auth_credentials("SOCIAL_AUTH_THREADS_USERNAME", "SOCIAL_AUTH_THREADS_PASSWORD")
+    username, password = _threads_auth_credentials()
     if not username or not password:
         return {}
     from trr_backend.socials.threads.cookie_refresh import refresh_threads_cookies
@@ -8239,15 +8422,14 @@ def _ensure_threads_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
     global _threads_cookie_runtime_override
     if _threads_cookie_runtime_override:
         return dict(_threads_cookie_runtime_override)
-    if not _platform_cookie_auto_refresh_enabled(
-        "SOCIAL_THREADS_COOKIE_AUTO_REFRESH",
-        "SOCIAL_AUTH_THREADS_USERNAME",
-        "SOCIAL_AUTH_THREADS_PASSWORD",
-    ):
-        return cookies
+    if not cookies:
+        return {}
     is_valid, reason = _validate_threads_cookie_health(cookies)
     if is_valid:
         return cookies
+    if not _threads_cookie_auto_refresh_enabled():
+        logger.warning("Threads cookies failed validation (%s); continuing without cookies", reason or "unknown")
+        return {}
     with _threads_cookie_refresh_lock:
         latest = _threads_cookie_runtime_override or _load_threads_cookies_from_sources()
         latest_valid, _ = _validate_threads_cookie_health(dict(latest))
@@ -8260,7 +8442,8 @@ def _ensure_threads_cookies_fresh(cookies: dict[str, str]) -> dict[str, str]:
             if refreshed_valid:
                 return refreshed
             logger.warning("Threads cookies refreshed but validation still failed (%s)", refreshed_reason or "unknown")
-        return cookies
+        logger.warning("Threads cookies failed validation (%s); continuing without cookies", reason or "unknown")
+        return {}
 
 
 def _load_threads_cookies() -> dict[str, str]:
@@ -9081,50 +9264,10 @@ def _default_targets(context: SeasonContext, *, source_scope: str = "network") -
             "config": {"include_comments": True},
         },
         {
-            "platform": "tiktok",
-            "source_scope": source_scope,
-            "timezone": "America/New_York",
-            "accounts": ["bravotv", "bravowwhl"],
-            "hashtags": hashtags,
-            "keywords": keywords,
-            "is_active": True,
-            "config": {"include_comments": True},
-        },
-        {
-            "platform": "twitter",
-            "source_scope": source_scope,
-            "timezone": "America/New_York",
-            "accounts": ["BravoTV", "BravoWWHL"],
-            "hashtags": hashtags,
-            "keywords": keywords,
-            "is_active": True,
-            "config": {"include_replies": True},
-        },
-        {
-            "platform": "youtube",
-            "source_scope": source_scope,
-            "timezone": "America/New_York",
-            "accounts": ["bravo", "wwhl"],
-            "hashtags": hashtags,
-            "keywords": keywords,
-            "is_active": True,
-            "config": {"include_comments": True},
-        },
-        {
-            "platform": "facebook",
-            "source_scope": source_scope,
-            "timezone": "America/New_York",
-            "accounts": ["Bravo"],
-            "hashtags": hashtags,
-            "keywords": keywords,
-            "is_active": True,
-            "config": {"include_comments": True},
-        },
-        {
             "platform": "threads",
             "source_scope": source_scope,
             "timezone": "America/New_York",
-            "accounts": ["bravotv", "bravowwhl"],
+            "accounts": ["bravotv", "bravodailydish", "bravowwhl"],
             "hashtags": hashtags,
             "keywords": keywords,
             "is_active": True,
@@ -9136,11 +9279,7 @@ def _default_targets(context: SeasonContext, *, source_scope: str = "network") -
 
 _DEFAULT_PLATFORM_ACCOUNTS: dict[str, list[str]] = {
     "instagram": ["bravotv", "bravodailydish", "bravowwhl"],
-    "tiktok": ["bravotv", "bravowwhl"],
-    "twitter": ["bravotv", "bravowwhl"],
-    "youtube": ["bravo", "wwhl"],
-    "facebook": ["bravo"],
-    "threads": ["bravotv", "bravowwhl"],
+    "threads": ["bravotv", "bravodailydish", "bravowwhl"],
 }
 
 _BRAVO_OFFICIAL_ACCOUNT_ALIASES = {"bravo", "bravotv", "bravodailydish", "bravowwhl", "wwhl"}
@@ -10956,8 +11095,7 @@ def _touch_job_dispatch_metadata(
         """
         update social.scrape_jobs
         set
-          metadata = %s::jsonb,
-          heartbeat_at = now()
+          metadata = %s::jsonb
         where id = %s::uuid
         returning id::text
         """,
@@ -11170,10 +11308,41 @@ def _update_job_config(job_id: str, *, config_updates: Mapping[str, Any] | None 
     return _metadata_dict(row.get("config"))
 
 
+def _mark_claimed_modal_dispatch_running(claimed_job: Mapping[str, Any] | None) -> None:
+    if not isinstance(claimed_job, Mapping):
+        return
+    job_id = str(claimed_job.get("id") or "").strip()
+    if not job_id:
+        return
+    dispatch = _job_dispatch_metadata(claimed_job)
+    dispatch_backend = str(dispatch.get("dispatch_backend") or "").strip().lower()
+    remote_invocation_id = str(dispatch.get("remote_invocation_id") or "").strip()
+    if dispatch_backend != "modal" and not remote_invocation_id:
+        return
+    _touch_job_dispatch_metadata(
+        job_id,
+        dispatch_backend=dispatch_backend or "modal",
+        dispatch_requested_at=_coerce_dt(dispatch.get("dispatch_requested_at")),
+        dispatch_attempt_count=_dispatch_metadata_attempt_count(dispatch),
+        remote_invocation_id=remote_invocation_id or None,
+        lease_expires_at=None,
+        last_dispatch_error=None,
+        last_dispatch_error_code=None,
+        last_dispatch_error_at=None,
+        remote_invocation_status="running",
+        remote_invocation_checked_at=_now_utc(),
+        remote_task_id=str(dispatch.get("remote_task_id") or "").strip() or None,
+        remote_pending_since=None,
+        remote_blocked_reason=None,
+        dispatch_blocked_failure_count=0,
+        dispatch_blocked_first_seen_at=None,
+    )
+
+
 def _claim_job_by_id(*, job_id: str, worker_id: str) -> dict[str, Any] | None:
     return pg.fetch_one(
         """
-        update social.scrape_jobs
+        update social.scrape_jobs as j
         set
           status = 'running',
           started_at = coalesce(started_at, now()),
@@ -11184,9 +11353,43 @@ def _claim_job_by_id(*, job_id: str, worker_id: str) -> dict[str, Any] | None:
           error_message = null,
           last_error_code = null,
           last_error_class = null
-        where id = %s::uuid
-          and status in ('queued', 'pending', 'retrying')
-          and available_at <= now()
+        where j.id = %s::uuid
+          and j.status in ('queued', 'pending', 'retrying')
+          and j.available_at <= now()
+          and not (
+            coalesce(j.config->>'stage', j.metadata->>'stage', j.job_type) in (
+              'shared_account_discovery',
+              'shared_account_posts'
+            )
+            and exists (
+              select 1
+              from social.scrape_jobs active
+              where active.id <> j.id
+                and active.status = 'running'
+                and coalesce(active.config->>'stage', active.metadata->>'stage', active.job_type) in (
+                  'shared_account_discovery',
+                  'shared_account_posts'
+                )
+                and lower(coalesce(active.platform, '')) = lower(coalesce(j.platform, ''))
+                and lower(coalesce(
+                  nullif(trim(active.config->>'account'), ''),
+                  nullif(trim(active.config->>'account_handle'), ''),
+                  nullif(trim(active.metadata->>'account'), ''),
+                  ''
+                )) <> ''
+                and lower(coalesce(
+                  nullif(trim(active.config->>'account'), ''),
+                  nullif(trim(active.config->>'account_handle'), ''),
+                  nullif(trim(active.metadata->>'account'), ''),
+                  ''
+                )) = lower(coalesce(
+                  nullif(trim(j.config->>'account'), ''),
+                  nullif(trim(j.config->>'account_handle'), ''),
+                  nullif(trim(j.metadata->>'account'), ''),
+                  ''
+                ))
+            )
+          )
         returning
           id::text,
           run_id::text as run_id,
@@ -11712,7 +11915,7 @@ def _instagram_reported_comments_sql(alias: str = "p") -> str:
         f"{raw} -> 'metrics' ->> 'comments'",
     ]
     raw_expr = ", ".join(_sql_json_text_non_negative_int(expr) for expr in raw_candidates)
-    return f"coalesce({safe_alias}.comments_count, greatest({raw_expr}), 0)"
+    return f"greatest(coalesce({safe_alias}.comments_count, 0), {raw_expr}, 0)"
 
 
 def _instagram_external_facebook_comments_sql(
@@ -14228,8 +14431,15 @@ def _classify_mirror_download_exception(exc: Exception) -> tuple[str, bool]:
 def _is_retryable_mirror_reason(reason: str) -> bool:
     normalized = str(reason or "").strip().lower()
     known_prefixes = ("download_failed:", "upload_failed:", "ytdlp_fallback_failed:")
-    while any(normalized.startswith(prefix) for prefix in known_prefixes):
-        normalized = normalized.split(":", 1)[1]
+    while normalized:
+        media_match = re.match(r"^(?:media\[\d+\]|media|thumbnail|cover):(.+)$", normalized)
+        if media_match:
+            normalized = media_match.group(1)
+            continue
+        if any(normalized.startswith(prefix) for prefix in known_prefixes):
+            normalized = normalized.split(":", 1)[1]
+            continue
+        break
     return normalized in {
         "request_timeout",
         "connection_error",
@@ -14442,6 +14652,7 @@ def _mirror_platform_media_to_s3_result(
     prefer_first_media_as_thumbnail: bool = True,
     display_name: str | None = None,
     tweet_url: str | None = None,
+    progress_cb: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     from trr_backend.media.s3_mirror import (
         build_hosted_url,
@@ -14526,11 +14737,23 @@ def _mirror_platform_media_to_s3_result(
     saw_retryable_error = False
     instagram_refresh_scraper: Any | None = None
     generated_at = _iso(_now_utc())
+    last_progress_emit = 0.0
+
+    def _emit_mirror_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_emit
+        if progress_cb is None:
+            return
+        now_monotonic = time_module.monotonic()
+        if not force and (now_monotonic - last_progress_emit) < 15:
+            return
+        progress_cb()
+        last_progress_emit = now_monotonic
 
     def _download_with_ytdlp(source_url: str) -> tuple[str, str]:
         temp_dir = tempfile.mkdtemp(prefix=f"{normalized_platform}-mirror-ytdlp-")
         output_template = os.path.join(temp_dir, "media.%(ext)s")
         try:
+            _emit_mirror_progress(force=True)
             cmd = [
                 os.getenv("SOCIAL_MEDIA_MIRROR_YTDLP_BIN", "yt-dlp"),
                 "--no-playlist",
@@ -14549,6 +14772,7 @@ def _mirror_platform_media_to_s3_result(
                 text=True,
                 timeout=180,
             )
+            _emit_mirror_progress(force=True)
             sized_candidates: list[tuple[int, str]] = []
             for candidate in sorted(glob.glob(os.path.join(temp_dir, "media.*"))):
                 if not os.path.exists(candidate):
@@ -14662,6 +14886,7 @@ def _mirror_platform_media_to_s3_result(
         if not source_url.lower().startswith(("http://", "https://")):
             raise RuntimeError("invalid_source_url")
 
+        _emit_mirror_progress(force=True)
         original_source_url = source_url
         current_source_url = source_url
         if normalized_platform == "instagram" and _is_instagram_signed_cdn_url(current_source_url):
@@ -14718,6 +14943,7 @@ def _mirror_platform_media_to_s3_result(
                             for chunk in response.iter_content(chunk_size=SOCIAL_MEDIA_MIRROR_CHUNK_SIZE_BYTES):
                                 if not chunk:
                                     continue
+                                _emit_mirror_progress()
                                 total_bytes += len(chunk)
                                 if total_bytes > max_asset_bytes:
                                     raise RuntimeError("asset_too_large")
@@ -14823,6 +15049,7 @@ def _mirror_platform_media_to_s3_result(
                     height = None
             key = f"{key_root}/{object_name}{ext}"
             try:
+                _emit_mirror_progress(force=True)
                 with open(temp_path, "rb") as fileobj:
                     s3_client.upload_fileobj(
                         fileobj,
@@ -14833,6 +15060,7 @@ def _mirror_platform_media_to_s3_result(
                             "CacheControl": "public, max-age=31536000, immutable",
                         },
                     )
+                _emit_mirror_progress(force=True)
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(f"upload_failed:{exc.__class__.__name__}") from exc
             if normalized_source_role == "cover":
@@ -14854,6 +15082,7 @@ def _mirror_platform_media_to_s3_result(
                             key_prefix=variant_root,
                             build_hosted_url=build_hosted_url,
                         )
+                        _emit_mirror_progress(force=True)
                         display_variant_entries = {
                             variant.variant_key: {
                                 "url": variant.url,
@@ -14910,6 +15139,7 @@ def _mirror_platform_media_to_s3_result(
 
     if source_thumbnail_url:
         try:
+            _emit_mirror_progress(force=True)
             hosted_thumbnail_entry = _download_and_upload(
                 source_thumbnail_url,
                 object_name="cover-original",
@@ -14927,6 +15157,7 @@ def _mirror_platform_media_to_s3_result(
 
     for idx, media_url in enumerate(source_media_urls):
         try:
+            _emit_mirror_progress(force=True)
             media_obj_name = f"media-{idx + 1:02d}"
             hosted_entry = _download_and_upload(
                 media_url,
@@ -15082,6 +15313,7 @@ def _download_avatar_to_tempfile(
     source_url: str,
     *,
     headers: Mapping[str, str],
+    progress_cb: Callable[[], None] | None = None,
 ) -> tuple[str, str, str]:
     temp_path: str | None = None
     content_type = "application/octet-stream"
@@ -15105,6 +15337,8 @@ def _download_avatar_to_tempfile(
                 for chunk in response.iter_content(chunk_size=SOCIAL_MEDIA_MIRROR_CHUNK_SIZE_BYTES):
                     if not chunk:
                         continue
+                    if progress_cb is not None:
+                        progress_cb()
                     total_bytes += len(chunk)
                     if total_bytes > _social_avatar_mirror_max_bytes():
                         raise RuntimeError("asset_too_large")
@@ -15126,6 +15360,7 @@ def _mirror_instagram_profile_pics_for_post(
     post_row: dict[str, Any],
     *,
     post: Any,
+    progress_cb: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Mirror profile pictures for a post's owner and tagged users to S3.
 
@@ -15149,6 +15384,10 @@ def _mirror_instagram_profile_pics_for_post(
     cached_profile_meta_map: dict[str, dict[str, Any]] = {}
     completed_handles: set[str] = set()
     deferred_handles: set[str] = set()
+
+    def _emit_profile_pic_progress() -> None:
+        if progress_cb is not None:
+            progress_cb()
 
     def _avatar_meta_payload(
         hosted_url: str,
@@ -15185,6 +15424,7 @@ def _mirror_instagram_profile_pics_for_post(
             if url and uname and uname not in pic_urls:
                 pic_urls[uname] = url
 
+    include_comment_avatars = _env_truthy("SOCIAL_INSTAGRAM_MEDIA_MIRROR_COMMENT_AVATARS", default=False)
     mentions = _as_text_list(
         getattr(post, "mentions", None)
         or post_row.get("mentions")
@@ -15193,6 +15433,7 @@ def _mirror_instagram_profile_pics_for_post(
         strip_prefix="@",
     )
     for mention in mentions:
+        _emit_profile_pic_progress()
         normalized_mention = _avatar_registry_handle(mention)
         if not normalized_mention or normalized_mention in pic_urls:
             continue
@@ -15217,7 +15458,11 @@ def _mirror_instagram_profile_pics_for_post(
         deferred_handles.add(normalized_mention)
 
     post_db_id = str(post_row.get("id") or "").strip()
-    if post_db_id and _column_exists("social", "instagram_comments", "author_profile_pic_url"):
+    if (
+        include_comment_avatars
+        and post_db_id
+        and _column_exists("social", "instagram_comments", "author_profile_pic_url")
+    ):
         commenter_rows = pg.fetch_all(
             """
             select distinct username, author_profile_pic_url
@@ -15228,6 +15473,7 @@ def _mirror_instagram_profile_pics_for_post(
             [post_db_id],
         )
         for comment_row in commenter_rows:
+            _emit_profile_pic_progress()
             comment_handle = _avatar_registry_handle(comment_row.get("username"))
             comment_source_url = str(comment_row.get("author_profile_pic_url") or "").strip()
             if not comment_handle:
@@ -15254,10 +15500,12 @@ def _mirror_instagram_profile_pics_for_post(
 
     if deferred_handles:
         try:
+            _emit_profile_pic_progress()
             scraper = _build_instagram_scraper_with_auth_fallback(
                 caller_context="comment-avatar-refresh",
             )
             for handle in sorted(deferred_handles):
+                _emit_profile_pic_progress()
                 cached_entry = _avatar_registry_lookup_any(platform="instagram", account_handle=handle)
                 cached_status = str((cached_entry or {}).get("status") or "").strip().lower()
                 cached_hosted = str((cached_entry or {}).get("hosted_url") or "").strip()
@@ -15278,6 +15526,7 @@ def _mirror_instagram_profile_pics_for_post(
                     continue
                 try:
                     profile_payload = scraper.fetch_profile_info(handle, delay=0.0)
+                    _emit_profile_pic_progress()
                 except Exception:  # noqa: BLE001
                     profile_payload = None
                 resolved_profile_pic = scraper._extract_profile_avatar_from_profile_payload(profile_payload)  # noqa: SLF001
@@ -15331,6 +15580,7 @@ def _mirror_instagram_profile_pics_for_post(
     url_to_profile_meta: dict[str, dict[str, Any]] = {}
 
     for username, source_url in pic_urls.items():
+        _emit_profile_pic_progress()
         if source_url in url_to_hosted:
             hosted_map[username] = url_to_hosted[source_url]
             if source_url in url_to_profile_meta:
@@ -15381,10 +15631,13 @@ def _mirror_instagram_profile_pics_for_post(
                     ),
                     "accept": "*/*",
                 },
+                progress_cb=_emit_profile_pic_progress,
             )
+            _emit_profile_pic_progress()
             ext = guess_ext_from_content_type(content_type)
             key = build_instagram_profile_pic_s3_key(username, sha256, ext)
             try:
+                _emit_profile_pic_progress()
                 with open(temp_path, "rb") as fileobj:
                     s3_client.upload_fileobj(
                         fileobj,
@@ -15395,6 +15648,7 @@ def _mirror_instagram_profile_pics_for_post(
                             "CacheControl": "public, max-age=31536000, immutable",
                         },
                     )
+                _emit_profile_pic_progress()
             finally:
                 try:
                     os.remove(temp_path)
@@ -15440,6 +15694,7 @@ def _mirror_instagram_profile_pics_for_post(
 
     if post_db_id and hosted_map and _column_exists("social", "instagram_comments", "hosted_author_profile_pic_url"):
         try:
+            _emit_profile_pic_progress()
             _update_instagram_comment_hosted_author_profile_pics(
                 post_id=post_db_id,
                 hosted_author_profile_pics=hosted_map,
@@ -15536,6 +15791,7 @@ def _mirror_post_author_avatar_to_s3(
     platform: str,
     username: str,
     source_avatar_url: str,
+    progress_cb: Callable[[], None] | None = None,
 ) -> str | None:
     """Mirror a single profile picture to S3. Returns hosted URL or None.
 
@@ -15596,10 +15852,15 @@ def _mirror_post_author_avatar_to_s3(
                 ),
                 "accept": "*/*",
             },
+            progress_cb=progress_cb,
         )
+        if progress_cb is not None:
+            progress_cb()
         ext = guess_ext_from_content_type(content_type)
         key = build_profile_pic_s3_key(platform, username, sha256, ext)
         try:
+            if progress_cb is not None:
+                progress_cb()
             with open(temp_path, "rb") as fileobj:
                 s3_client.upload_fileobj(
                     fileobj,
@@ -15610,6 +15871,8 @@ def _mirror_post_author_avatar_to_s3(
                         "CacheControl": "public, max-age=31536000, immutable",
                     },
                 )
+            if progress_cb is not None:
+                progress_cb()
         finally:
             try:
                 os.remove(temp_path)
@@ -17483,8 +17746,29 @@ def _load_existing_twitter_account_catalog_posts(
     if not normalized_account:
         return []
 
+    config = _metadata_dict(_kwargs.get("config"))
+    raw_anchor_source_ids = config.get("comment_anchor_source_ids")
+    if isinstance(raw_anchor_source_ids, Mapping):
+        platform_anchor_source_ids = None
+        for key, value in raw_anchor_source_ids.items():
+            if str(key or "").strip().lower() in {"twitter", "x"}:
+                platform_anchor_source_ids = value
+                break
+        raw_anchor_source_ids = platform_anchor_source_ids
+    if isinstance(raw_anchor_source_ids, str):
+        anchor_source_candidates = [raw_anchor_source_ids]
+    elif isinstance(raw_anchor_source_ids, (list, tuple, set)):
+        anchor_source_candidates = list(raw_anchor_source_ids)
+    else:
+        anchor_source_candidates = []
+    anchor_source_ids = list(
+        dict.fromkeys(str(item or "").strip() for item in anchor_source_candidates if str(item or "").strip())
+    )
     conditions = ["ltrim(lower(coalesce(nullif(source_account, ''), '')), '@') = %s"]
     params: list[Any] = [normalized_account]
+    if anchor_source_ids:
+        conditions.append("source_id = any(%s::text[])")
+        params.append(anchor_source_ids)
     if date_start is not None:
         conditions.append("posted_at >= %s")
         params.append(date_start)
@@ -17706,6 +17990,10 @@ def _runtime_version_label(payload: Mapping[str, Any] | None = None) -> str | No
     return label or None
 
 
+def _runtime_version_label_is_generic(label: str | None) -> bool:
+    return str(label or "").strip().lower() in {"local", "modal"}
+
+
 def _runtime_version_backend(payload: Mapping[str, Any] | None = None) -> str | None:
     metadata = _metadata_dict(payload)
     backend = str(metadata.get("execution_backend") or "").strip().lower()
@@ -17752,6 +18040,8 @@ def _runtime_versions_equivalent(
     left_label = str(left.get("label") or "").strip() or None
     right_label = str(right.get("label") or "").strip() or None
     if left_label and right_label:
+        if _runtime_version_label_is_generic(left_label) or _runtime_version_label_is_generic(right_label):
+            return bool(left_backend and right_backend and left_backend == right_backend)
         return left_label == right_label
 
     return bool(left_backend and right_backend and left_backend == right_backend)
@@ -17781,16 +18071,18 @@ def _runtime_version_satisfies_requirement(
     if required_commit:
         return required_commit == observed_commit
 
+    required_label = _runtime_version_label(required)
+    observed_label = _runtime_version_label(observed)
+    if required_label:
+        if _runtime_version_label_is_generic(required_label):
+            return bool(required_backend and observed_backend and required_backend == observed_backend)
+        return bool(observed_label and required_label == observed_label)
+
     if observed_modal_image or observed_commit:
         return bool(required_backend and observed_backend and required_backend == observed_backend)
 
     if required_backend == "local" and observed_backend == "local":
         return True
-
-    required_label = _runtime_version_label(required)
-    observed_label = _runtime_version_label(observed)
-    if required_label:
-        return bool(observed_label and required_label == observed_label)
 
     return bool(required_backend and observed_backend and required_backend == observed_backend)
 
@@ -17846,9 +18138,15 @@ def _resolve_authoritative_catalog_runtime_version(
         if not bool(worker.get("is_fresh")) or not bool(worker.get("is_healthy")):
             continue
         metadata = _metadata_dict(worker.get("metadata"))
+        worker_id = str(worker.get("worker_id") or "").strip().lower()
+        dispatcher_name = str(metadata.get("dispatcher_name") or "").strip().lower()
+        if normalized_backend == "modal":
+            is_social_catalog_worker = dispatcher_name == "social" or worker_id == "modal:social-dispatcher"
+            if not is_social_catalog_worker:
+                continue
         runtime_version = _metadata_dict(metadata.get("runtime_version"))
         worker_backend = str(metadata.get("execution_backend_canonical") or "").strip().lower() or (
-            "modal" if str(worker.get("worker_id") or "").strip().lower().startswith("modal:") else None
+            "modal" if worker_id.startswith("modal:") else None
         )
         runtime_backend = str(runtime_version.get("execution_backend") or "").strip().lower() or None
         if worker_backend != "modal" and runtime_backend != "modal":
@@ -17857,6 +18155,13 @@ def _resolve_authoritative_catalog_runtime_version(
             **runtime_version,
             "execution_backend": runtime_backend or worker_backend or "modal",
         }
+        if (
+            str(effective_runtime.get("execution_backend") or "").strip().lower() == "modal"
+            and str(effective_runtime.get("modal_image") or "").strip()
+            and not str(effective_runtime.get("commit_sha") or "").strip()
+        ):
+            effective_runtime.pop("modal_image", None)
+            effective_runtime["label"] = "modal"
         if not any(_runtime_version_identity(effective_runtime).values()):
             continue
         seen_at = _coerce_dt(worker.get("last_seen_at")) or datetime.fromtimestamp(0, tz=UTC)
@@ -19069,6 +19374,8 @@ def _enqueue_platform_media_mirror_job(
         return None
     if not _platform_post_needs_media_mirror(normalized_platform, post_row, conn=conn):
         return None
+    if not _run_allows_followup_job_enqueue(run_id, conn=conn):
+        return None
 
     mirror_job_status = "queued" if is_queue_enabled() else "pending"
     config = {
@@ -19132,6 +19439,23 @@ def _enqueue_instagram_media_mirror_job(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.media_mirror import _LOCAL_ROOM_FUNCTIONS
 
     return _LOCAL_ROOM_FUNCTIONS["_enqueue_instagram_media_mirror_job"](*args, **kwargs)
+
+
+def _run_allows_followup_job_enqueue(run_id: str | None, *, conn: Any | None = None) -> bool:
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return True
+    row = pg.fetch_one(
+        """
+        select status
+        from social.scrape_runs
+        where id = %s::uuid
+        """,
+        [normalized_run_id],
+        conn=conn,
+    )
+    status = str((row or {}).get("status") or "").strip().lower()
+    return status in {"queued", "pending", "running", "retrying"}
 
 
 def _comment_media_platform_schema(platform: str) -> tuple[str, str, str] | None:
@@ -19244,6 +19568,8 @@ def _enqueue_platform_comment_media_mirror_job(
 
     job_type = PLATFORM_COMMENT_MEDIA_MIRROR_JOB_TYPES.get(normalized_platform)
     if not job_type:
+        return None
+    if not _run_allows_followup_job_enqueue(run_id, conn=conn):
         return None
     mirror_job_status = "queued" if is_queue_enabled() else "pending"
     config = {
@@ -20436,16 +20762,17 @@ def _upsert_instagram_comment_tree(
         _record_comment_write_counts(persist_stats, total=1, inserted=inserted)
     if row and media_urls and enable_media_followups:
         try:
-            mirror_job_id = _enqueue_platform_comment_media_mirror_job(
-                context,
-                platform="instagram",
-                run_id=run_id,
-                source_scope=source_scope,
-                account=account,
-                comment_row={**payload, **row},
-                parent_job_id=job_id,
-                conn=conn,
-            )
+            with _SavepointScope(conn=conn, prefix="instagram_comment_media_mirror", index=1):
+                mirror_job_id = _enqueue_platform_comment_media_mirror_job(
+                    context,
+                    platform="instagram",
+                    run_id=run_id,
+                    source_scope=source_scope,
+                    account=account,
+                    comment_row={**payload, **row},
+                    parent_job_id=job_id,
+                    conn=conn,
+                )
             if mirror_job_id and persist_stats is not None:
                 persist_stats["comment_media_mirror_jobs_enqueued"] = (
                     int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
@@ -20721,7 +21048,7 @@ def _batch_upsert_instagram_comments(
             include_inserted_flag=True,
         )
         batch_total, batch_inserted = _upsert_write_counts(rows)
-        for row in rows:
+        for row_index, row in enumerate(rows, start=1):
             db_id = str(row.get("id") or "")
             ext_id = str(row.get("comment_id") or "")
             if db_id and ext_id:
@@ -20730,16 +21057,21 @@ def _batch_upsert_instagram_comments(
                 media_urls = list(payload.get("media_urls") or [])
                 if media_urls and enable_media_followups:
                     try:
-                        mirror_job_id = _enqueue_platform_comment_media_mirror_job(
-                            context,
-                            platform="instagram",
-                            run_id=run_id,
-                            source_scope=source_scope,
-                            account=account,
-                            comment_row={**payload, **row},
-                            parent_job_id=job_id,
+                        with _SavepointScope(
                             conn=conn,
-                        )
+                            prefix="instagram_comment_media_mirror",
+                            index=total_upserted + row_index,
+                        ):
+                            mirror_job_id = _enqueue_platform_comment_media_mirror_job(
+                                context,
+                                platform="instagram",
+                                run_id=run_id,
+                                source_scope=source_scope,
+                                account=account,
+                                comment_row={**payload, **row},
+                                parent_job_id=job_id,
+                                conn=conn,
+                            )
                         if mirror_job_id and persist_stats is not None:
                             persist_stats["comment_media_mirror_jobs_enqueued"] = (
                                 int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
@@ -20775,7 +21107,7 @@ def _batch_upsert_instagram_comments(
             include_inserted_flag=True,
         )
         batch_total, batch_inserted = _upsert_write_counts(rows)
-        for row in rows:
+        for row_index, row in enumerate(rows, start=1):
             db_id = str(row.get("id") or "")
             ext_id = str(row.get("comment_id") or "")
             if db_id and ext_id:
@@ -20784,16 +21116,21 @@ def _batch_upsert_instagram_comments(
                 media_urls = list(payload.get("media_urls") or [])
                 if media_urls and enable_media_followups:
                     try:
-                        mirror_job_id = _enqueue_platform_comment_media_mirror_job(
-                            context,
-                            platform="instagram",
-                            run_id=run_id,
-                            source_scope=source_scope,
-                            account=account,
-                            comment_row={**payload, **row},
-                            parent_job_id=job_id,
+                        with _SavepointScope(
                             conn=conn,
-                        )
+                            prefix="instagram_comment_media_mirror",
+                            index=total_upserted + row_index,
+                        ):
+                            mirror_job_id = _enqueue_platform_comment_media_mirror_job(
+                                context,
+                                platform="instagram",
+                                run_id=run_id,
+                                source_scope=source_scope,
+                                account=account,
+                                comment_row={**payload, **row},
+                                parent_job_id=job_id,
+                                conn=conn,
+                            )
                         if mirror_job_id and persist_stats is not None:
                             persist_stats["comment_media_mirror_jobs_enqueued"] = (
                                 int(persist_stats.get("comment_media_mirror_jobs_enqueued") or 0) + 1
@@ -26460,6 +26797,7 @@ def _classify_job_error(exc: Exception) -> tuple[str, str, bool]:
         "connection",
         "network",
         "429",
+        "http_500",
         "502",
         "503",
         "504",
@@ -26469,7 +26807,7 @@ def _classify_job_error(exc: Exception) -> tuple[str, str, bool]:
         "unexpected",
         "login_required",
     )
-    if any(marker in message for marker in transient_markers):
+    if _is_retryable_mirror_reason(message) or any(marker in message for marker in transient_markers):
         return "transient_error", error_class, True
     return "fatal_error", error_class, False
 
@@ -26481,6 +26819,9 @@ def _run_platform_media_mirror_stage(
     job_id: str,
     config: dict[str, Any],
 ) -> tuple[int, int, dict[str, Any]]:
+    def _heartbeat() -> None:
+        _touch_job_heartbeat(job_id)
+
     normalized_platform = (platform or "").strip().lower()
     table = PLATFORM_POST_TABLES.get(normalized_platform)
     source_id_column = PLATFORM_SOURCE_ID_COLUMN.get(normalized_platform)
@@ -26538,6 +26879,7 @@ def _run_platform_media_mirror_stage(
         """,
         [post_id],
     )
+    _heartbeat()
     if not post_row:
         raise ValueError(f"mirror_post_not_found:{post_id}")
 
@@ -26610,8 +26952,10 @@ def _run_platform_media_mirror_stage(
             or source_media_needs_quality_repair
         )
         if needs_re_resolve and source_id:
+            _heartbeat()
             try:
                 resolution_payload = _resolve_instagram_media_for_shortcode(shortcode=source_id)
+                _heartbeat()
                 resolved_media_urls = _normalize_unique_terms(
                     [str(url).strip() for url in (resolution_payload.get("media_urls") or []) if str(url).strip()]
                 )
@@ -26653,6 +26997,7 @@ def _run_platform_media_mirror_stage(
             or source_media_needs_quality_repair
         )
         if needs_re_resolve and source_id:
+            _heartbeat()
             try:
                 canonical_url = str(raw_data.get("url") or "").strip() if isinstance(raw_data, dict) else ""
                 if not canonical_url and isinstance(raw_data, dict):
@@ -26666,6 +27011,7 @@ def _run_platform_media_mirror_stage(
                     allow_ytdlp=allow_ytdlp,
                     validate_download_url=False,
                 )
+                _heartbeat()
                 resolved_media_urls = _normalize_unique_terms(
                     [str(url).strip() for url in (resolution_payload.get("media_urls") or []) if str(url).strip()]
                 )
@@ -26731,8 +27077,10 @@ def _run_platform_media_mirror_stage(
             or source_media_needs_quality_repair
         )
         if needs_re_resolve and source_id:
+            _heartbeat()
             try:
                 resolution_payload = _resolve_youtube_media_for_video_id(video_id=source_id)
+                _heartbeat()
                 resolved_media_urls = _normalize_unique_terms(
                     [str(url).strip() for url in (resolution_payload.get("media_urls") or []) if str(url).strip()]
                 )
@@ -26776,6 +27124,7 @@ def _run_platform_media_mirror_stage(
             or source_media_needs_quality_repair
         )
         if needs_re_resolve and source_id:
+            _heartbeat()
             try:
                 from trr_backend.socials.twitter import TwitterScraper
 
@@ -26794,6 +27143,7 @@ def _run_platform_media_mirror_stage(
                     twikit_credentials=twikit_creds,
                 )
                 summary = _fetch_and_apply_twitter_metric_summary(scraper=scraper, tweet_id=source_id) or {}
+                _heartbeat()
                 resolved_media_urls = _merge_twitter_media_urls(
                     source_media_urls,
                     list(summary.get("media_urls") or []),
@@ -26834,6 +27184,7 @@ def _run_platform_media_mirror_stage(
             (not source_media_urls) or (mirror_status in {"failed", "partial"}) or source_media_needs_quality_repair
         )
         if needs_re_resolve and source_id:
+            _heartbeat()
             try:
                 from trr_backend.socials.threads import resolve_threads_media
 
@@ -26841,6 +27192,7 @@ def _run_platform_media_mirror_stage(
                 if not isinstance(raw_data, dict) or not raw_data:
                     raw_data = post_row.get("raw_data") if isinstance(post_row.get("raw_data"), dict) else {}
                 resolution = resolve_threads_media(raw_data, validate_urls=False)
+                _heartbeat()
                 if resolution.media_urls:
                     source_media_urls = resolution.media_urls
                     source_thumbnail_url = resolution.thumbnail_url or _select_thumbnail_candidate(
@@ -26886,6 +27238,7 @@ def _run_platform_media_mirror_stage(
             media_mirror_attempt_count=attempt_count,
             media_mirror_last_job_id=job_id,
         )
+        _heartbeat()
     source_assets = []
     if isinstance(source_media_asset_meta.get("source_assets"), list):
         source_assets = [
@@ -27056,14 +27409,22 @@ def _run_platform_media_mirror_stage(
     }
     if need_media_asset_repair:
         _tweet_url = f"https://x.com/i/status/{source_id}" if normalized_platform == "twitter" and source_id else None
-        result = _mirror_platform_media_to_s3_result(
-            context,
-            platform=normalized_platform,
-            post=SimpleNamespace(**mirror_post),
-            week_index=week_index,
-            display_name=_display_name,
-            tweet_url=_tweet_url,
-        )
+        mirror_kwargs = {
+            "platform": normalized_platform,
+            "post": SimpleNamespace(**mirror_post),
+            "week_index": week_index,
+            "display_name": _display_name,
+            "tweet_url": _tweet_url,
+            "progress_cb": _heartbeat,
+        }
+        try:
+            result = _mirror_platform_media_to_s3_result(context, **mirror_kwargs)
+        except TypeError as exc:
+            if "progress_cb" not in str(exc):
+                raise
+            mirror_kwargs.pop("progress_cb", None)
+            result = _mirror_platform_media_to_s3_result(context, **mirror_kwargs)
+        _heartbeat()
         _update_platform_post_media_mirror_fields(
             platform=normalized_platform,
             post_id=post_id,
@@ -27199,15 +27560,20 @@ def _run_platform_media_mirror_stage(
                 strip_prefix="@",
             )
 
+            include_comment_avatars = _env_truthy("SOCIAL_INSTAGRAM_MEDIA_MIRROR_COMMENT_AVATARS", default=False)
             has_any_profile_target = (
                 (profile_post.owner_detail and getattr(profile_post.owner_detail, "profile_pic_url", None))
                 or any(getattr(u, "profile_pic_url", None) for u in profile_post.tagged_users_detail)
                 or any(getattr(u, "profile_pic_url", None) for u in profile_post.collaborators_detail)
                 or bool(profile_post.mentions)
-                or bool(post_id)
+                or (include_comment_avatars and bool(post_id))
             )
             if has_any_profile_target:
-                profile_pic_result = _mirror_instagram_profile_pics_for_post(post_row, post=profile_post)
+                profile_pic_result = _mirror_instagram_profile_pics_for_post(
+                    post_row,
+                    post=profile_post,
+                    progress_cb=_heartbeat,
+                )
                 _update_instagram_profile_pic_mirror_fields(
                     post_id=post_id,
                     hosted_owner_profile_pic_url=profile_pic_result.get("hosted_owner_profile_pic_url"),
@@ -27238,6 +27604,7 @@ def _run_platform_media_mirror_stage(
                     platform=normalized_platform,
                     username=post_username or source_id or "unknown",
                     source_avatar_url=source_avatar,
+                    progress_cb=_heartbeat,
                 )
                 if hosted_avatar:
                     if hosted_avatar != existing_hosted_avatar:
@@ -31096,7 +31463,7 @@ def _load_social_account_catalog_run_row(
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
     if verify_account:
-        _assert_social_account_profile_exists(normalized_platform, normalized_account)
+        _assert_social_account_profile_exists(normalized_platform, normalized_account, conn=conn)
     run_row = pg.fetch_one(
         """
         select
@@ -31163,7 +31530,7 @@ def _load_social_account_catalog_jobs(
 ) -> list[dict[str, Any]]:
     normalized_platform = _normalize_social_account_profile_platform(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
-    resolved_features = dict(features or _scrape_jobs_features())
+    resolved_features = dict(features or _scrape_jobs_features(conn=conn))
     select_worker_id = "j.worker_id" if bool(resolved_features.get("has_queue_fields")) else "null::text as worker_id"
     select_last_error_code = (
         "j.last_error_code" if bool(resolved_features.get("has_queue_fields")) else "null::text as last_error_code"
@@ -31212,6 +31579,7 @@ def _repair_finalizing_catalog_launch_after_jobs(
     job_rows: Sequence[Mapping[str, Any]],
     platform: str,
     account_handle: str,
+    conn: Any | None = None,
 ) -> dict[str, Any] | None:
     if not job_rows:
         return None
@@ -31283,7 +31651,7 @@ def _repair_finalizing_catalog_launch_after_jobs(
     if attached_followups:
         metadata_updates["attached_followups"] = attached_followups
 
-    merged = _merge_catalog_run_config(run_id=run_id, metadata_updates=metadata_updates)
+    merged = _merge_catalog_run_config(run_id=run_id, metadata_updates=metadata_updates, conn=conn)
     merged_config = _metadata_dict(merged.get("config"))
     logger.info(
         (
@@ -32150,8 +32518,18 @@ def _catalog_source_ids_for_hashtag(platform: str, account_handle: str, hashtag:
 
 def _suggest_show_ids_for_hashtag(*, platform: str, source_scope: str, hashtag: str) -> list[str]:
     normalized_hashtag = _normalize_social_account_profile_hashtag(hashtag)
+    return _suggest_show_ids_for_hashtag_from_targets(
+        normalized_hashtag,
+        _list_matchable_seasons(source_scope=source_scope, platform=platform),
+    )
+
+
+def _suggest_show_ids_for_hashtag_from_targets(
+    normalized_hashtag: str,
+    targets: Iterable[Mapping[str, Any]],
+) -> list[str]:
     suggestions: list[str] = []
-    for target in _list_matchable_seasons(source_scope=source_scope, platform=platform):
+    for target in targets:
         target_hashtags = _normalize_terms(target.get("hashtags"), strip_prefix="#")
         if normalized_hashtag not in target_hashtags:
             continue
@@ -32171,6 +32549,7 @@ def _upsert_account_hashtag_review_queue(
     hashtag: str,
     post_row_id: str | None,
     source_id: str | None,
+    suggested_show_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized_platform = _normalize_platform_name(platform)
     normalized_account = _normalize_social_account_profile_handle(account_handle)
@@ -32199,7 +32578,15 @@ def _upsert_account_hashtag_review_queue(
     suggested_show_ids = _normalize_unique_terms(
         [
             *(_json_text_list(existing.get("suggested_show_ids"))),
-            *_suggest_show_ids_for_hashtag(platform=platform, source_scope=source_scope, hashtag=normalized_hashtag),
+            *(
+                suggested_show_ids
+                if suggested_show_ids is not None
+                else _suggest_show_ids_for_hashtag(
+                    platform=platform,
+                    source_scope=source_scope,
+                    hashtag=normalized_hashtag,
+                )
+            ),
         ]
     )
     review_status = str(existing.get("review_status") or "pending").strip() or "pending"
@@ -32287,17 +32674,46 @@ def _classify_shared_catalog_rows(
     account_handle: str,
     source_ids: list[str] | None,
     progress_cb: Callable[[dict[str, int]], None] | None = None,
+    heartbeat_cb: Callable[[], None] | None = None,
 ) -> dict[str, int]:
     rows = _fetch_shared_catalog_rows(platform, account_handle, source_ids=source_ids)
+    if heartbeat_cb:
+        heartbeat_cb()
     assignment_rows = _fetch_social_account_profile_assignment_rows(platform, account_handle)
+    if heartbeat_cb:
+        heartbeat_cb()
     assignments_by_hashtag = _group_social_account_profile_assignments(assignment_rows)
     review_rows = _fetch_account_hashtag_review_rows(platform=platform, account_handle=account_handle)
+    if heartbeat_cb:
+        heartbeat_cb()
     review_by_hashtag = {
         _normalize_social_account_profile_hashtag(row.get("normalized_hashtag") or row.get("display_hashtag")): row
         for row in review_rows
     }
     counts = {"assigned": 0, "ambiguous": 0, "needs_review": 0, "unassigned": 0}
+    matchable_targets: list[dict[str, Any]] | None = None
+    suggested_show_ids_by_hashtag: dict[str, list[str]] = {}
+
+    def _suggestions_for_unknown_hashtag(normalized_hashtag: str, review_row: Mapping[str, Any]) -> list[str]:
+        nonlocal matchable_targets
+        if review_row:
+            return _json_text_list(review_row.get("suggested_show_ids"))
+        cached = suggested_show_ids_by_hashtag.get(normalized_hashtag)
+        if cached is not None:
+            return cached
+        if heartbeat_cb:
+            heartbeat_cb()
+        if matchable_targets is None:
+            matchable_targets = _list_matchable_seasons(source_scope=source_scope, platform=platform)
+        if heartbeat_cb:
+            heartbeat_cb()
+        suggestions = _suggest_show_ids_for_hashtag_from_targets(normalized_hashtag, matchable_targets)
+        suggested_show_ids_by_hashtag[normalized_hashtag] = suggestions
+        return suggestions
+
     for row in rows:
+        if heartbeat_cb:
+            heartbeat_cb()
         row_id = str(row.get("id") or "").strip()
         source_id = str(row.get("source_id") or "").strip()
         if not row_id or not source_id:
@@ -32324,6 +32740,8 @@ def _classify_shared_catalog_rows(
             if str(review_row.get("review_status") or "") == "resolved_non_show":
                 continue
             unknown_hashtags.append(normalized_hashtag)
+            if heartbeat_cb:
+                heartbeat_cb()
             review_by_hashtag[normalized_hashtag] = _upsert_account_hashtag_review_queue(
                 platform=platform,
                 source_scope=source_scope,
@@ -32331,7 +32749,10 @@ def _classify_shared_catalog_rows(
                 hashtag=normalized_hashtag,
                 post_row_id=row_id,
                 source_id=source_id,
+                suggested_show_ids=_suggestions_for_unknown_hashtag(normalized_hashtag, review_row),
             )
+            if heartbeat_cb:
+                heartbeat_cb()
 
         deduped_matches: list[dict[str, Any]] = []
         seen_match_keys: set[tuple[str, str]] = set()
@@ -32366,6 +32787,8 @@ def _classify_shared_catalog_rows(
             candidate_matches=deduped_matches,
         )
         counts[assignment_status] += 1
+        if heartbeat_cb:
+            heartbeat_cb()
         if progress_cb:
             progress_cb(dict(counts))
     return counts
@@ -32645,7 +33068,8 @@ def _shared_instagram_account_lock_wait_seconds(*args: Any, **kwargs: Any) -> An
 def _shared_instagram_account_execution(*args: Any, **kwargs: Any) -> Any:
     from trr_backend.socials.instagram.catalog_ingest import _LOCAL_ROOM_FUNCTIONS
 
-    return _LOCAL_ROOM_FUNCTIONS["_shared_instagram_account_execution"](*args, **kwargs)
+    with _LOCAL_ROOM_FUNCTIONS["_shared_instagram_account_execution"](*args, **kwargs) as resolved_account:
+        yield resolved_account
 
 
 def _fetch_shared_instagram_graphql_posts_page(*args: Any, **kwargs: Any) -> Any:
@@ -33252,6 +33676,14 @@ def _shared_tiktok_catalog_max_comments_per_post(config: Mapping[str, Any]) -> i
     return 0
 
 
+def _shared_tiktok_comment_fetch_timeout_seconds(config: Mapping[str, Any]) -> int:
+    for key in ("comment_fetch_timeout_seconds", "tiktok_comment_fetch_timeout_seconds"):
+        if config.get(key) is not None:
+            value = _normalize_non_negative_int(config.get(key))
+            return max(5, value) if value > 0 else 0
+    return max(5, _resolve_positive_int_env("SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS", 180, minimum=5))
+
+
 def _normalize_uuid_text(value: Any) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -33358,6 +33790,10 @@ class _SharedYouTubeCommentPersistTimeoutError(_SharedYouTubeOperationTimeoutErr
     pass
 
 
+class _SharedTikTokCommentFetchTimeoutError(_SharedYouTubeOperationTimeoutError):
+    pass
+
+
 def _shared_youtube_comment_fetch_deadline(seconds: int, *, video_id: str) -> Any:
     return _shared_youtube_operation_deadline(
         seconds,
@@ -33379,6 +33815,14 @@ def _shared_youtube_comment_persist_deadline(seconds: int, *, video_id: str) -> 
         seconds,
         message=f"YouTube comment persist timed out for {video_id} after {seconds}s",
         timeout_type=_SharedYouTubeCommentPersistTimeoutError,
+    )
+
+
+def _shared_tiktok_comment_fetch_deadline(seconds: int, *, video_id: str) -> Any:
+    return _shared_youtube_operation_deadline(
+        seconds,
+        message=f"TikTok comment fetch timed out for {video_id} after {seconds}s",
+        timeout_type=_SharedTikTokCommentFetchTimeoutError,
     )
 
 
@@ -34091,6 +34535,7 @@ def _hydrate_shared_tiktok_catalog_post(
     comments: list[Any] = []
     local_comment_stats = _new_comment_persist_stats()
     observed_comment_ids: set[str] = set()
+    comment_fetch_timeout_seconds = _shared_tiktok_comment_fetch_timeout_seconds(config)
 
     def _emit_comment_fetch_progress(payload: dict[str, Any]) -> None:
         if not progress_cb:
@@ -34106,20 +34551,39 @@ def _hydrate_shared_tiktok_catalog_post(
         )
 
     try:
-        comments = scraper.fetch_comments(
-            video_id,
-            username=account_handle,
-            max_comments=max_comments_per_post or None,
-            fetch_replies=True,
-            delay=_shared_tiktok_catalog_comment_delay_seconds(),
-            fast_mode=True,
-            progress_callback=_emit_comment_fetch_progress,
-        )
+        with _shared_tiktok_comment_fetch_deadline(comment_fetch_timeout_seconds, video_id=video_id):
+            comments = scraper.fetch_comments(
+                video_id,
+                username=account_handle,
+                max_comments=max_comments_per_post or None,
+                fetch_replies=True,
+                delay=_shared_tiktok_catalog_comment_delay_seconds(),
+                fast_mode=True,
+                progress_callback=_emit_comment_fetch_progress,
+            )
         fail_reason = str(
             getattr(scraper, "last_comment_fetch_reason", "") or getattr(scraper, "_last_api_fail_reason", "") or ""
         ).strip()
         if fail_reason:
             comment_fail_reasons[fail_reason] += 1
+    except _SharedTikTokCommentFetchTimeoutError:
+        fetch_failed = True
+        fail_reason = "comment_fetch_timeout"
+        comment_fail_reasons[fail_reason] += 1
+        setter = getattr(scraper, "_set_comment_failure_reason", None)
+        if callable(setter):
+            setter(fail_reason)
+        try:
+            session = getattr(scraper, "session", None)
+            if session is not None and hasattr(session, "close"):
+                session.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("[tiktok] Failed to close scraper session after comment timeout", exc_info=True)
+        logger.warning(
+            "[tiktok] Timed out fetching shared catalog comments video_id=%s after %ss",
+            video_id or "?",
+            comment_fetch_timeout_seconds,
+        )
     except Exception:  # noqa: BLE001
         fetch_failed = True
         fail_reason = "fetch_exception"
@@ -35655,7 +36119,7 @@ def _run_shared_account_discovery_stage(
                         priority=100,
                         worker_id=followup_worker_id,
                         preclaim=bool(followup_worker_id),
-                        max_attempts=1,
+                        max_attempts=3,
                     )
                     activity["phase"] = "discovery_transport_recovery_enqueued"
                     activity["queued_jobs"] = 1
@@ -36379,8 +36843,8 @@ def _run_shared_account_posts_stage(
     saved_posts = 0
     saved_comments = 0
 
-    def _flush_progress(*, force: bool = False) -> None:
-        _emit_job_progress(
+    def _flush_progress(*, force: bool = False) -> bool:
+        return _emit_job_progress(
             job_id=job_id,
             stage=SHARED_ACCOUNT_POSTS_STAGE,
             platform=platform,
@@ -36391,11 +36855,14 @@ def _run_shared_account_posts_stage(
             comments_upserted=saved_comments,
             activity=activity,
             progress_state=progress_state,
+            worker_id=worker_id,
             force=force,
         )
 
     def _on_scrape_progress(payload: dict[str, Any]) -> None:
         nonlocal scraped_posts, scraped_comments, matched_posts, saved_posts, saved_comments
+        prior_saved_posts = saved_posts
+        prior_saved_comments = saved_comments
         activity["phase"] = str(payload.get("phase") or SHARED_ACCOUNT_POSTS_STAGE)
         if payload.get("pages_scanned") is not None:
             activity["pages_scanned"] = _normalize_non_negative_int(payload.get("pages_scanned"))
@@ -36420,7 +36887,15 @@ def _run_shared_account_posts_stage(
         matched_posts = max(matched_posts, _normalize_non_negative_int(payload.get("matched_posts")))
         saved_posts = max(saved_posts, _normalize_non_negative_int(payload.get("saved_posts")))
         saved_comments = max(saved_comments, _normalize_non_negative_int(payload.get("comments_upserted")))
-        _flush_progress(force=payload.get("saved_posts") is not None or payload.get("comments_upserted") is not None)
+        force = (
+            payload.get("saved_posts") is not None
+            and _normalize_non_negative_int(payload.get("saved_posts")) > prior_saved_posts
+        ) or (
+            payload.get("comments_upserted") is not None
+            and _normalize_non_negative_int(payload.get("comments_upserted")) > prior_saved_comments
+        )
+        if not _flush_progress(force=force):
+            _touch_job_heartbeat(job_id, worker_id=worker_id)
 
     _flush_progress(force=True)
     rows, retrieval_meta = _scrape_shared_posts_for_account(
@@ -36508,13 +36983,31 @@ def _run_shared_account_posts_stage(
         and str(config.get("ingest_mode") or "").strip().lower() == "details_refresh"
         and catalog_action_scope in {"", "full_history"}
     )
+    retrieval_source = str(retrieval_meta.get("source") or "").strip().lower()
+    is_incomplete_threads_profile_fallback = (
+        normalized_platform == "threads"
+        and _shared_catalog_mode(config)
+        and retrieval_source in {"public_meta_fallback", "playwright_profile_discovery"}
+        and completion_target_posts > 0
+        and missing_posts > 0
+        and not (
+            retrieval_source == "playwright_profile_discovery"
+            and bool(retrieval_meta.get("profile_discovery_complete"))
+        )
+    )
     if (
-        (is_single_runner_fallback or is_catalog_details_refresh)
+        (is_single_runner_fallback or is_catalog_details_refresh or is_incomplete_threads_profile_fallback)
         and completion_target_posts > 0
         and missing_posts > 0
         and not completion_tolerance_applied
     ):
-        failure_context = "details refresh" if is_catalog_details_refresh else "fallback"
+        failure_context = (
+            "details refresh"
+            if is_catalog_details_refresh
+            else "threads profile fallback"
+            if is_incomplete_threads_profile_fallback
+            else "fallback"
+        )
         raise SharedStageRuntimeError(
             (
                 f"Shared-account {failure_context} ended early for @{account_handle}: "
@@ -36528,6 +37021,8 @@ def _run_shared_account_posts_stage(
                     "completion_failure_reason": (
                         "details_refresh_missing_catalog_posts"
                         if is_catalog_details_refresh
+                        else "threads_fallback_missing_catalog_posts"
+                        if is_incomplete_threads_profile_fallback
                         else "fallback_missing_catalog_posts"
                     ),
                     "expected_total_posts": expected_total_posts,
@@ -36652,8 +37147,8 @@ def _run_shared_post_classify_stage(
     unmatched_count = 0
     needs_review_count = 0
 
-    def _flush_progress(*, force: bool = False) -> None:
-        _emit_job_progress(
+    def _flush_progress(*, force: bool = False) -> bool:
+        return _emit_job_progress(
             job_id=job_id,
             stage=POST_CLASSIFY_STAGE,
             platform=platform,
@@ -36664,6 +37159,7 @@ def _run_shared_post_classify_stage(
             comments_upserted=0,
             activity=activity,
             progress_state=progress_state,
+            worker_id=worker_id,
             force=force,
         )
 
@@ -36671,7 +37167,8 @@ def _run_shared_post_classify_stage(
         activity["phase"] = "post_classify_running"
         activity["posts_checked"] = processed_rows
         activity["matched_posts"] = matched_count
-        _flush_progress(force=force)
+        if not _flush_progress(force=force):
+            _touch_job_heartbeat(job_id, worker_id=worker_id)
 
     _flush_progress(force=True)
 
@@ -36693,6 +37190,7 @@ def _run_shared_post_classify_stage(
             account_handle=account_handle,
             source_ids=source_ids or None,
             progress_cb=_on_catalog_progress,
+            heartbeat_cb=lambda: _touch_job_heartbeat(job_id, worker_id=worker_id),
         )
         matched_count = _normalize_non_negative_int(counts.get("assigned"))
         ambiguous_count = _normalize_non_negative_int(counts.get("ambiguous"))
@@ -37241,6 +37739,7 @@ def _execute_shared_claimed_job(job: Mapping[str, Any], *, worker_id: str | None
             can_retry
             and stage == SHARED_ACCOUNT_POSTS_STAGE
             and error_code != "instagram_modal_initial_empty_page"
+            and not _shared_account_error_is_database_capacity(error_class, exc)
             and _shared_account_prefers_partitioned_backfill_recovery(
                 config,
                 platform=platform,
@@ -37429,6 +37928,7 @@ def _dispatch_request_is_fresh(job: Mapping[str, Any]) -> bool:
 def _list_candidate_jobs_for_modal_dispatch(*, run_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
     safe_limit = max(1, min(int(limit), 500))
     sql = """
+        with due_jobs as (
         select
           id::text as id,
           run_id::text as run_id,
@@ -37439,12 +37939,32 @@ def _list_candidate_jobs_for_modal_dispatch(*, run_id: str | None = None, limit:
           created_at,
           available_at,
           config,
-          metadata
+          metadata,
+          row_number() over (
+            partition by
+              coalesce(run_id::text, ''),
+              lower(coalesce(platform, '')),
+              lower(coalesce(config->>'stage', metadata->>'stage', job_type, 'unknown'))
+            order by priority asc, created_at asc
+          ) as queue_rank
         from social.scrape_jobs
         where status in ('queued', 'pending', 'retrying')
           and available_at <= now()
           and (%s::uuid is null or run_id = %s::uuid)
-        order by priority asc, created_at asc
+        )
+        select
+          id,
+          run_id,
+          platform,
+          job_type,
+          status,
+          priority,
+          created_at,
+          available_at,
+          config,
+          metadata
+        from due_jobs
+        order by queue_rank asc, priority asc, created_at asc
         limit %s
     """
     return pg.fetch_all(sql, [run_id, run_id, safe_limit])
@@ -37505,12 +38025,43 @@ def _current_modal_dispatch_running_counts() -> tuple[
     return by_stage, by_stage_platform, by_run, by_run_stage_platform, active_accounts_by_stage_platform
 
 
+def _run_pause_after_current_requested(run_id: str | None) -> bool:
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id or not _relation_exists("social.scrape_runs"):
+        return False
+    try:
+        row = pg.fetch_one(
+            """
+            select config
+            from social.scrape_runs
+            where id = %s
+            """,
+            [normalized_run_id],
+        )
+    except Exception:
+        logger.debug("Failed to load scrape run pause state: run_id=%s", normalized_run_id, exc_info=True)
+        return False
+    config = _metadata_dict((row or {}).get("config"))
+    dispatch_control = _metadata_dict(config.get("dispatch_control"))
+    return bool(config.get("pause_after_current") or dispatch_control.get("pause_after_current"))
+
+
 def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
     safe_limit = max(1, min(int(limit or _modal_dispatch_limit()), SOCIAL_JOB_CLAIM_BATCH_SIZE_MAX))
     if not is_queue_enabled():
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "queue_disabled"}
     if not is_modal_remote_executor_enabled():
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "remote_executor_not_modal"}
+    if _run_pause_after_current_requested(run_id):
+        _touch_modal_social_dispatcher_heartbeat(
+            metadata_updates={
+                "dispatch_enabled": True,
+                "last_dispatch_blocked_reason": "pause_after_current",
+                "last_dispatch_error": None,
+                "last_dispatch_error_code": None,
+            }
+        )
+        return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "pause_after_current"}
     recovered_capacity = (
         recover_failed_instagram_comments_capacity_jobs(run_id=run_id, limit=max(safe_limit, 25)) if run_id else []
     )
@@ -37580,6 +38131,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         if _job_requires_dedicated_worker_lane(job_config, platform=platform):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
+        terminal_remote_invocation = False
         if existing_remote_invocation_id:
             refreshed_lease_expires_at = _now_utc() + timedelta(
                 seconds=_resolve_stale_seconds_for_job(
@@ -37633,7 +38185,15 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     }
                 else:
                     continue
-        if _dispatch_request_is_fresh(job):
+            else:
+                terminal_remote_invocation = True
+                job_dispatch = {
+                    **job_dispatch,
+                    "remote_invocation_status": inspection_status,
+                    "remote_invocation_checked_at": inspection.get("checked_at"),
+                    "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
+                }
+        if not terminal_remote_invocation and _dispatch_request_is_fresh(job):
             continue
         if running_by_stage.get(capacity_stage, 0) >= _modal_dispatch_stage_global_cap(stage):
             continue
@@ -37641,6 +38201,12 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         candidate_account = _resolve_dispatch_account_handle(job_config)
         sp_key = (capacity_stage, platform)
         existing_accounts = active_accounts_by_stage_platform.get(sp_key, set())
+        if (
+            candidate_account
+            and capacity_stage in {SHARED_ACCOUNT_DISCOVERY_STAGE, SHARED_ACCOUNT_POSTS_STAGE}
+            and candidate_account in existing_accounts
+        ):
+            continue
         prospective_accounts = existing_accounts | {candidate_account} if candidate_account else existing_accounts
         effective_cap = _modal_dispatch_effective_platform_cap(
             stage,
@@ -37844,6 +38410,7 @@ def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, An
     run_id = str(claimed.get("run_id") or "").strip() or None
     if run_id:
         _set_run_status(run_id, "running")
+    _mark_claimed_modal_dispatch_running(claimed)
     result = process_claimed_job(claimed, worker_id=worker_id)
     dispatch_due_social_jobs(run_id=run_id, limit=1)
     return {
@@ -38024,7 +38591,13 @@ def _claim_next_jobs(
                     nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
                     and nullif(j.config->'required_runtime_version'->>'commit_sha', '') is null
                     and nullif(j.config->'required_runtime_version'->>'label', '') is not null
-                    and j.config->'required_runtime_version'->>'label' = %s::text
+                    and (
+                      j.config->'required_runtime_version'->>'label' = %s::text
+                      or (
+                        lower(j.config->'required_runtime_version'->>'label') in ('modal', 'local')
+                        and lower(j.config->'required_runtime_version'->>'label') = %s::text
+                      )
+                    )
                   )
                   or (
                     nullif(j.config->'required_runtime_version'->>'modal_image', '') is null
@@ -38127,6 +38700,7 @@ def _claim_next_jobs(
             authoritative_modal_image,
             authoritative_modal_commit,
             authoritative_modal_label,
+            authoritative_modal_backend,
             authoritative_modal_backend,
             worker_id,
             worker_id,
@@ -44182,6 +44756,7 @@ def _rows_for_platform(
 
     if platform == "instagram":
         thumbnail_expr = _instagram_posts_thumbnail_expr("p")
+        reported_comments_expr = _instagram_reported_comments_sql("p")
         account_filter_posts = (
             "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
             if apply_account_filter
@@ -44208,13 +44783,13 @@ def _rows_for_platform(
                 {instagram_post_text_expr} as text,
                 greatest(
                   0,
-                  coalesce(p.likes, 0) + coalesce(p.comments_count, 0) + coalesce(p.views, 0)
+                  coalesce(p.likes, 0) + ({reported_comments_expr}) + coalesce(p.views, 0)
                 )::bigint as engagement,
                 p.posted_at as ts,
                 ('https://www.instagram.com/p/' || p.shortcode || '/')::text as url,
                 p.username as author,
                 {thumbnail_expr}::text as thumbnail_url,
-                greatest(0, coalesce(p.comments_count, 0))::bigint as reported_comments
+                ({reported_comments_expr})::bigint as reported_comments
               from social.instagram_posts p
               where p.season_id = %s
                 and p.posted_at >= %s
@@ -45340,6 +45915,7 @@ def _comments_coverage_for_platform(
     twitter_quote_active_filter_q = "and q.is_missing = false" if _comment_lifecycle_supported("twitter_tweets") else ""
 
     if platform == "instagram":
+        reported_comments_expr = _instagram_reported_comments_sql("p")
         account_filter = (
             "and ltrim(lower(coalesce(nullif(p.username, ''), nullif(p.source_account, ''), '')), '@') = any(%s)"
             if apply_account_filter
@@ -45354,7 +45930,7 @@ def _comments_coverage_for_platform(
             with posts as (
               select
                 p.id,
-                greatest(0, coalesce(p.comments_count, 0))::bigint as reported_comments
+                ({reported_comments_expr})::bigint as reported_comments
               from social.instagram_posts p
               where p.season_id = %s
                 and p.posted_at >= %s
@@ -47162,6 +47738,7 @@ def _week_detail_instagram(
     sort_dir: str = "desc",
 ) -> dict[str, Any]:
     thumbnail_expr = _instagram_posts_thumbnail_expr("p")
+    reported_comments_expr = _instagram_reported_comments_sql("p")
     hosted_media_urls_expr = _instagram_posts_json_array_expr("p", "hosted_media_urls")
     post_format_expr = _instagram_posts_json_text_expr("p", "post_format")
     profile_tags_expr = _instagram_posts_json_array_expr("p", "profile_tags")
@@ -47203,12 +47780,12 @@ def _week_detail_instagram(
         field_expr_by_sort={
             "likes": "p.likes",
             "views": "p.views",
-            "comments_count": "p.comments_count",
+            "comments_count": reported_comments_expr,
             "shares": repost_count_expr,
             "retweets": "0",
         },
         engagement_expr=(
-            f"coalesce(p.likes, 0) + coalesce(p.comments_count, 0) + coalesce(p.views, 0) "
+            f"coalesce(p.likes, 0) + ({reported_comments_expr}) + coalesce(p.views, 0) "
             f"+ coalesce({repost_count_expr}, 0)"
         ),
         sort_field=sort_field,
@@ -47223,7 +47800,7 @@ def _week_detail_instagram(
           p.username as author,
           p.caption as text,
           coalesce(p.likes, 0) as likes,
-          coalesce(p.comments_count, 0) as comments_count,
+          ({reported_comments_expr}) as comments_count,
           coalesce(p.views, 0) as views,
           coalesce({repost_count_expr}, 0) as shares,
           p.media_type,
@@ -55893,7 +56470,11 @@ def start_tiktok_posts_scrapling_scrape(
 
     lock_key = _social_account_posts_scrapling_start_lock_key(normalized_platform, normalized_account)
     lock_label = f"posts-scrapling-start-lock:tiktok:{normalized_account[:48]}"
-    with pg.db_connection(label=lock_label) as lock_conn:
+    # Keep the recovery advisory lock out of the default query pool. Modal
+    # social workers intentionally cap the default session-pooler connection at
+    # one, and recovery finalization performs normal catalog queries while the
+    # lock is held.
+    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
         with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
             lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
         if not bool(lock_row.get("locked")):
@@ -56760,7 +57341,7 @@ def get_social_account_catalog_review_queue(platform: str, account_handle: str) 
                 """
                 select id::text as id, name, slug
                 from core.shows
-                where id = any(%s)
+                where id = any(%s::uuid[])
                 """,
                 [suggested_show_ids],
             )
@@ -57729,12 +58310,12 @@ def _catalog_launch_recovery_lock(platform: str, account_handle: str):
     lock_key = _social_account_catalog_start_lock_key(normalized_platform, normalized_account)
     lock_label = f"catalog-launch-recovery-lock:{normalized_platform}:{normalized_account[:48]}"
     locked = False
-    with pg.db_connection(label=lock_label) as lock_conn:
+    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
         try:
             with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
                 lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
             locked = bool(lock_row.get("locked"))
-            yield locked
+            yield locked, lock_conn if locked else None
         finally:
             if locked:
                 try:
@@ -57761,18 +58342,27 @@ def recover_pending_social_account_catalog_launch(
     if not normalized_run_id:
         return {"recovered": False, "reason": "missing_run_id"}
 
-    with _catalog_launch_recovery_lock(normalized_platform, normalized_account) as locked:
+    with _catalog_launch_recovery_lock(normalized_platform, normalized_account) as lock_state:
+        if isinstance(lock_state, tuple):
+            locked = bool(lock_state[0])
+            lock_conn = lock_state[1] if len(lock_state) > 1 else None
+        else:
+            locked = bool(lock_state)
+            lock_conn = None
         if not locked:
             return {"recovered": False, "reason": "recovery_lock_busy", "run_id": normalized_run_id}
         run_row = _load_social_account_catalog_run_row(
             platform=normalized_platform,
             account_handle=normalized_account,
             run_id=normalized_run_id,
+            conn=lock_conn,
+            verify_account=lock_conn is None,
         )
         job_rows = _load_social_account_catalog_jobs(
             run_id=normalized_run_id,
             platform=normalized_platform,
             account_handle=normalized_account,
+            conn=lock_conn,
         )
         if job_rows:
             repaired_config = _repair_finalizing_catalog_launch_after_jobs(
@@ -57780,6 +58370,7 @@ def recover_pending_social_account_catalog_launch(
                 job_rows=job_rows,
                 platform=normalized_platform,
                 account_handle=normalized_account,
+                conn=lock_conn,
             )
             return {
                 "recovered": False,
@@ -57836,7 +58427,7 @@ def _reserve_social_account_catalog_launch(
     lock_key = _social_account_catalog_start_lock_key(normalized_platform, normalized_account)
     lock_label = f"catalog-start-lock:{normalized_platform}:{normalized_account[:48]}"
     lock_wait_started_at = time_module.perf_counter()
-    with pg.db_connection(label=lock_label) as lock_conn:
+    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
         with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
             lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
         lock_wait_ms = round((time_module.perf_counter() - lock_wait_started_at) * 1000, 1)
@@ -58403,7 +58994,7 @@ def remediate_social_account_catalog_runtime_supersession(
         lock_key = _catalog_runtime_supersession_lock_key(candidate_run_id)
         lock_label = f"catalog-runtime-supersession:{candidate_run_id[:48]}"
         try:
-            with pg.advisory_session_lock(lock_key, label=lock_label) as lock_conn:
+            with pg.advisory_session_lock(lock_key, label=lock_label, pool_name="social_control") as lock_conn:
                 locked_run = _load_catalog_run_row_by_id(candidate_run_id, conn=lock_conn)
                 locked_config = _metadata_dict(locked_run.get("config"))
                 existing_replacement = _find_catalog_replacement_run(
@@ -59178,7 +59769,7 @@ def _validate_social_account_profile_assignment_targets(
             """
             select id::text as id, name, slug
             from core.shows
-            where id = any(%s)
+            where id = any(%s::uuid[])
             """,
             [show_ids],
         )

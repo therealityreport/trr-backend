@@ -7,7 +7,9 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from trr_backend.socials import browser_cookie_refresh
 from trr_backend.socials.facebook import cookie_refresh as facebook_cookie_refresh
+from trr_backend.socials.instagram import auth_runtime as instagram_auth_runtime
 from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh
 from trr_backend.socials.instagram.scraper import load_cookies_from_file
 from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh
@@ -33,6 +35,21 @@ def test_threads_cookie_refresh_prefers_instagram_entrypoint() -> None:
     assert 'input[name="pass"]' in threads_cookie_refresh._SPEC.password_selectors
 
 
+def test_instagram_cookie_validation_username_uses_public_fallback_not_login_identity(monkeypatch) -> None:
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_FALLBACK_USERNAME", raising=False)
+    monkeypatch.setenv("SOCIAL_AUTH_INSTAGRAM_USERNAME", "private-login@example.com")
+    monkeypatch.setenv("INSTAGRAM_USERNAME", "legacy-private-login@example.com")
+
+    assert instagram_auth_runtime._instagram_cookie_validation_username() == "instagram"
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_FALLBACK_USERNAME", "BravoTV")
+    assert instagram_auth_runtime._instagram_cookie_validation_username() == "bravotv"
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME", "@TheTraitorsUS")
+    assert instagram_auth_runtime._instagram_cookie_validation_username() == "thetraitorsus"
+
+
 def test_threads_cookie_refresh_falls_back_to_direct_login(monkeypatch, tmp_path: Path) -> None:
     seen_specs: list[object] = []
 
@@ -55,6 +72,126 @@ def test_threads_cookie_refresh_falls_back_to_direct_login(monkeypatch, tmp_path
     assert seen_specs == [threads_cookie_refresh._SPEC, threads_cookie_refresh._DIRECT_LOGIN_SPEC]
     assert cookies["sessionid"] == "fresh-session"
     assert cookies["csrftoken"] == "fresh-csrf"
+
+
+def test_validate_browser_cookie_session_returns_invalid_on_navigation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakePlaywrightError(Exception):
+        pass
+
+    class _FakePage:
+        url = "https://www.threads.com/"
+
+        def goto(self, *_args: object, **_kwargs: object) -> None:
+            raise _FakePlaywrightError("net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+
+    class _FakeContext:
+        def add_cookies(self, _cookies: list[dict[str, object]]) -> None:
+            return None
+
+        def new_page(self) -> _FakePage:
+            return _FakePage()
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> _FakeContext:
+            return _FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class _FakePlaywright:
+        chromium = object()
+
+        def __enter__(self) -> _FakePlaywright:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    fake_module = SimpleNamespace(
+        Error=_FakePlaywrightError,
+        TimeoutError=TimeoutError,
+        sync_playwright=lambda: _FakePlaywright(),
+    )
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_module)
+    monkeypatch.setattr(browser_cookie_refresh, "launch_browser", lambda *_args, **_kwargs: _FakeBrowser())
+
+    is_valid, reason = browser_cookie_refresh.validate_browser_cookie_session(
+        cookies={"sessionid": "stale-session", "csrftoken": "csrf"},
+        validation_url="https://www.threads.com/",
+        cookie_domains=(".threads.com",),
+        required_cookie_names_any=("sessionid",),
+        required_cookie_names_all=("csrftoken",),
+    )
+
+    assert is_valid is False
+    assert reason == "validation_navigation_failed:_FakePlaywrightError"
+
+
+def test_validate_browser_cookie_session_rejects_http_error_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeResponse:
+        status = 404
+
+    class _FakeLocator:
+        def inner_text(self, **_kwargs: object) -> str:
+            return ""
+
+    class _FakePage:
+        url = "https://www.threads.com/@bravotv"
+
+        def goto(self, *_args: object, **_kwargs: object) -> _FakeResponse:
+            return _FakeResponse()
+
+        def wait_for_timeout(self, _timeout_ms: int) -> None:
+            return None
+
+        def locator(self, _selector: str) -> _FakeLocator:
+            return _FakeLocator()
+
+    class _FakeContext:
+        def add_cookies(self, _cookies: list[dict[str, object]]) -> None:
+            return None
+
+        def new_page(self) -> _FakePage:
+            return _FakePage()
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> _FakeContext:
+            return _FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class _FakePlaywright:
+        chromium = object()
+
+        def __enter__(self) -> _FakePlaywright:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    fake_module = SimpleNamespace(
+        Error=Exception,
+        TimeoutError=TimeoutError,
+        sync_playwright=lambda: _FakePlaywright(),
+    )
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_module)
+    monkeypatch.setattr(browser_cookie_refresh, "launch_browser", lambda *_args, **_kwargs: _FakeBrowser())
+
+    is_valid, reason = browser_cookie_refresh.validate_browser_cookie_session(
+        cookies={"sessionid": "stale-session", "csrftoken": "csrf"},
+        validation_url="https://www.threads.com/@bravotv",
+        cookie_domains=(".threads.com",),
+        required_cookie_names_any=("sessionid",),
+        required_cookie_names_all=("csrftoken",),
+    )
+
+    assert is_valid is False
+    assert reason == "validation_http_status:404"
 
 
 def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatch, tmp_path: Path) -> None:

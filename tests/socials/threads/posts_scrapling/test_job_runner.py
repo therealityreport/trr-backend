@@ -11,6 +11,7 @@ from trr_backend.socials.threads.posts_scrapling.persistence import PersistedThr
 
 class _FakeLifecycle:
     def __init__(self) -> None:
+        self.heartbeat_calls: list[dict[str, Any]] = []
         self.progress_calls: list[dict[str, Any]] = []
         self.finish_calls: list[dict[str, Any]] = []
         self.finalize_calls: list[str] = []
@@ -19,7 +20,8 @@ class _FakeLifecycle:
     def new_job_progress_state(self) -> dict[str, Any]:
         return {}
 
-    def touch_job_heartbeat(self, *_args: Any, **_kwargs: Any) -> bool:
+    def touch_job_heartbeat(self, *args: Any, **kwargs: Any) -> bool:
+        self.heartbeat_calls.append({"args": args, "kwargs": kwargs})
         return True
 
     def emit_job_progress(self, **kwargs: Any) -> bool:
@@ -232,6 +234,50 @@ def test_threads_job_runner_marks_cancelled_job(
     assert metadata["activity"]["phase"] == "cancelled"
     assert "raw-session-secret" not in repr(metadata)
     assert "raw-csrf-secret" not in repr(metadata)
+
+
+def test_threads_job_runner_retries_transient_threads_500_warmup_error(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FailingFetcher:
+        runtime_metadata = {"transport": "warmup", "request_count": 4}
+
+        async def warmup(self, _account_handle: str) -> None:
+            raise RuntimeError(
+                "HTTPSConnectionPool(host='www.threads.com', port=443): Max retries exceeded "
+                "with url: /@thetraitorsus (Caused by ResponseError('too many 500 error responses'))"
+            )
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            raise AssertionError("fetch_posts should not run after warmup fails")
+
+        async def aclose(self) -> None:
+            return None
+
+    _install_common_fakes(monkeypatch, jr, fetcher=_FailingFetcher())
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "thetraitorsus"},
+        },
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    metadata = finish["metadata"]
+    assert finish["status"] == "retrying"
+    assert finish["last_error_code"] == "threads_posts_transient_transport_error"
+    assert metadata["retryable"] is True
+    assert metadata["error_class"] == "RuntimeError"
 
 
 def test_threads_job_runner_marks_cancelled_run(

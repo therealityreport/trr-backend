@@ -614,13 +614,49 @@ def test_instagram_fetchable_comments_sql_allows_aliases_without_fb_comment_coun
     assert "candidate_rows.raw_data" in fetchable_comments
 
 
-def test_instagram_reported_comments_sql_treats_canonical_zero_as_authoritative() -> None:
+def test_instagram_reported_comments_sql_prefers_post_detail_counts_over_zero_column() -> None:
     reported_comments = " ".join(social_repo._instagram_reported_comments_sql("p").split()).lower()
 
-    assert "coalesce(p.comments_count, greatest(" in reported_comments
+    assert "greatest(coalesce(p.comments_count, 0)," in reported_comments
     assert "nullif(p.comments_count, 0)" not in reported_comments
     assert "p.raw_data" in reported_comments
-    assert "greatest(coalesce(p.comments_count, 0)" not in reported_comments
+    assert "-> 'metrics' ->> 'comments_count'" in reported_comments
+    assert "coalesce(p.comments_count, greatest(" not in reported_comments
+
+
+def test_comments_coverage_instagram_uses_post_detail_reported_comments(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    start_dt = datetime(2026, 1, 1, tzinfo=UTC)
+    end_dt = datetime(2026, 1, 8, tzinfo=UTC)
+
+    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda *_args, **_kwargs: False)
+
+    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+        captured["sql"] = " ".join(sql.split()).lower()
+        captured["params"] = params
+        return {
+            "posts_scanned": 2,
+            "stale_posts_count": 1,
+            "saved_comments": 5,
+            "reported_comments": 149,
+        }
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    payload = social_repo._comments_coverage_for_platform(
+        "season-1",
+        platform="instagram",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        source_scope="network",
+        target_accounts_by_platform={"instagram": {"thetraitorsus"}},
+    )
+
+    reported_comments = " ".join(social_repo._instagram_reported_comments_sql("p").split()).lower()
+    assert f"({reported_comments})::bigint as reported_comments" in captured["sql"]
+    assert "greatest(0, coalesce(p.comments_count, 0))::bigint as reported_comments" not in captured["sql"]
+    assert captured["params"] == ["season-1", start_dt, end_dt, ["thetraitorsus"]]
+    assert payload["reported_comments"] == 149
 
 
 def test_instagram_comment_breakdown_formats_peacock_coauthor_fixture() -> None:
@@ -2280,18 +2316,17 @@ def test_default_targets_include_rhoslc_aliases() -> None:
 
     defaults = _default_targets(context)
     assert defaults
-    assert {"instagram", "tiktok", "twitter", "youtube", "facebook", "threads"} <= {
-        str(item.get("platform") or "") for item in defaults
+    assert {str(item.get("platform") or "") for item in defaults} == {
+        "instagram",
+        "threads",
     }
+    assert {"instagram", "threads"} <= {str(item.get("platform") or "") for item in defaults}
     accounts_by_platform = {
         str(item.get("platform") or ""): {str(account).lower() for account in item.get("accounts", [])}
         for item in defaults
     }
     assert accounts_by_platform["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert accounts_by_platform["tiktok"] == {"bravotv", "bravowwhl"}
-    assert accounts_by_platform["twitter"] == {"bravotv", "bravowwhl"}
-    assert accounts_by_platform["youtube"] == {"bravo", "wwhl"}
-    assert accounts_by_platform["threads"] == {"bravotv", "bravowwhl"}
+    assert accounts_by_platform["threads"] == {"bravotv", "bravodailydish", "bravowwhl"}
     hashtag_hit = False
     for target in defaults:
         hashtags = [str(item).lower().lstrip("#") for item in target.get("hashtags", [])]
@@ -3531,7 +3566,9 @@ def test_get_worker_auth_capabilities_requires_valid_instagram_graphql_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        social_repo, "_load_instagram_cookies", lambda: {"sessionid": "fresh-session", "csrftoken": "x"}
+        social_repo,
+        "_load_instagram_cookies_from_sources",
+        lambda: {"sessionid": "fresh-session", "csrftoken": "x"},
     )
     monkeypatch.setattr(
         social_repo,
@@ -3720,6 +3757,11 @@ def test_probe_remote_auth_health_reports_facebook_safe_structure_flags(
 def test_probe_remote_auth_health_reports_threads_safe_structure_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", raising=False)
+    monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.delenv("DECODO_USERNAME", raising=False)
+    monkeypatch.delenv("DECODO_PASSWORD", raising=False)
+    monkeypatch.delenv("DECODO_GATEWAY", raising=False)
     monkeypatch.setattr(
         social_repo,
         "_load_threads_cookies_from_sources",
@@ -3739,9 +3781,47 @@ def test_probe_remote_auth_health_reports_threads_safe_structure_flags(
         "reason": "checkpoint_required",
         "has_sessionid": True,
         "has_csrftoken": True,
+        "threads_posts_proxy_ready": False,
+        "threads_posts_proxy_fingerprint": "none",
+        "threads_posts_proxy_provider": None,
+        "decodo_username_present": False,
+        "decodo_password_present": False,
+        "decodo_gateway_present": False,
     }
     assert "threads-session-secret" not in repr(payload)
     assert "threads-csrf-secret" not in repr(payload)
+
+
+def test_probe_remote_auth_health_reports_threads_proxy_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("DECODO_USERNAME", "decodo-user")
+    monkeypatch.setenv("DECODO_PASSWORD", "decodo-password")
+    monkeypatch.setenv("DECODO_GATEWAY", "proxy.example:7000")
+    monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setattr(
+        social_repo,
+        "_load_threads_cookies_from_sources",
+        lambda: {"sessionid": "threads-session-secret", "csrftoken": "threads-csrf-secret"},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_validate_threads_cookie_health",
+        lambda _cookies: (True, None),
+    )
+
+    payload = social_repo.probe_remote_auth_health("threads")
+
+    assert payload["ready"] is True
+    assert payload["threads_posts_proxy_ready"] is True
+    assert payload["threads_posts_proxy_fingerprint"] == "proxy.example:7000:decodo"
+    assert payload["threads_posts_proxy_provider"] == "decodo"
+    assert payload["decodo_username_present"] is True
+    assert payload["decodo_password_present"] is True
+    assert payload["decodo_gateway_present"] is True
+    assert "decodo-user" not in repr(payload)
+    assert "decodo-password" not in repr(payload)
 
 
 def test_probe_remote_auth_health_rejects_unsupported_platform() -> None:
@@ -4066,6 +4146,68 @@ def test_load_threads_cookies_refreshes_invalid_cookie_pair(monkeypatch) -> None
 
     assert cookies["sessionid"] == "fresh-session"
     assert cookies["csrftoken"] == "fresh-csrf"
+
+
+def test_validate_threads_cookie_health_checks_profile_page(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_validate_browser_cookie_session(**kwargs):
+        captured.update(kwargs)
+        return True, None
+
+    monkeypatch.setattr(
+        "trr_backend.socials.browser_cookie_refresh.validate_browser_cookie_session",
+        _fake_validate_browser_cookie_session,
+    )
+    monkeypatch.setattr(social_repo, "_threads_cookie_validation_cache", None)
+
+    is_valid, reason = social_repo._validate_threads_cookie_health({"sessionid": "s", "csrftoken": "c"})
+
+    assert is_valid is True
+    assert reason is None
+    assert captured["validation_url"] == "https://www.threads.com/@threads"
+    assert "Page Not Found" in captured["invalid_body_patterns"]
+
+
+def test_load_threads_cookies_refreshes_with_instagram_credentials_when_threads_credentials_missing(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_THREADS_COOKIES_JSON", '{"sessionid":"stale-session","csrftoken":"stale-csrf"}')
+    monkeypatch.delenv("SOCIAL_THREADS_COOKIE_AUTO_REFRESH", raising=False)
+    monkeypatch.delenv("SOCIAL_AUTH_THREADS_USERNAME", raising=False)
+    monkeypatch.delenv("SOCIAL_AUTH_THREADS_PASSWORD", raising=False)
+    monkeypatch.setenv("SOCIAL_AUTH_INSTAGRAM_USERNAME", "operator@example.com")
+    monkeypatch.setenv("SOCIAL_AUTH_INSTAGRAM_PASSWORD", "secret")
+    monkeypatch.setattr(
+        social_repo,
+        "_validate_threads_cookie_health",
+        lambda cookies: (
+            cookies.get("sessionid") == "fresh-session" and cookies.get("csrftoken") == "fresh-csrf",
+            None
+            if cookies.get("sessionid") == "fresh-session" and cookies.get("csrftoken") == "fresh-csrf"
+            else "expired",
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_refresh_threads_cookies",
+        lambda _reason=None: {"sessionid": "fresh-session", "csrftoken": "fresh-csrf"},
+    )
+
+    cookies = social_repo._load_threads_cookies()
+
+    assert cookies["sessionid"] == "fresh-session"
+    assert cookies["csrftoken"] == "fresh-csrf"
+
+
+def test_load_threads_cookies_drops_invalid_cookie_pair_when_refresh_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("SOCIAL_THREADS_COOKIES_JSON", '{"sessionid":"stale-session","csrftoken":"stale-csrf"}')
+    monkeypatch.delenv("SOCIAL_THREADS_COOKIE_AUTO_REFRESH", raising=False)
+    monkeypatch.delenv("SOCIAL_AUTH_THREADS_USERNAME", raising=False)
+    monkeypatch.delenv("SOCIAL_AUTH_THREADS_PASSWORD", raising=False)
+    monkeypatch.setattr(social_repo, "_validate_threads_cookie_health", lambda _cookies: (False, "expired"))
+
+    assert social_repo._load_threads_cookies() == {}
 
 
 def test_upsert_instagram_post_persists_metadata_and_hosted_urls(monkeypatch) -> None:
@@ -4895,7 +5037,7 @@ def test_ingest_season_persists_youtube_hybrid_controls(monkeypatch: pytest.Monk
     assert all(config["youtube_source_mode"] == "api_only" for config in created_job_configs)
 
 
-@pytest.mark.parametrize("platform", ["instagram", "tiktok", "twitter"])
+@pytest.mark.parametrize("platform", ["instagram", "threads"])
 def test_ingest_season_enforces_bravo_core_accounts_when_no_override(
     monkeypatch: pytest.MonkeyPatch,
     platform: str,
@@ -4959,10 +5101,7 @@ def test_ingest_season_enforces_bravo_core_accounts_when_no_override(
 
     expected_accounts = {
         "instagram": ["bravodailydish", "bravotv", "bravowwhl"],
-        "tiktok": ["bravotv", "bravowwhl"],
-        "twitter": ["bravotv", "bravowwhl"],
-        "threads": ["bravotv", "bravowwhl"],
-        "youtube": ["bravo", "bravotv", "wwhl"],
+        "threads": ["bravodailydish", "bravotv", "bravowwhl"],
     }.get(platform, ["bravotv"])
     assert payload["queued_or_started_jobs"] == len(expected_accounts)
     assert sorted(created_job_accounts) == expected_accounts
@@ -5740,7 +5879,7 @@ def test_get_targets_uses_existing_rows_without_season_context_lookup(monkeypatc
             "platform": "youtube",
             "source_scope": "bravo",
             "timezone": "America/New_York",
-            "accounts": ["bravo", "wwhl"],
+            "accounts": ["bravo"],
             "hashtags": [],
             "keywords": ["rhoslc"],
             "is_active": True,
@@ -5809,7 +5948,7 @@ def test_get_targets_enforces_rhoslc_hashtag_floor_on_existing_rows_for_non_inst
 
     payload = get_targets(season_id, source_scope="bravo")
 
-    assert payload["targets"][0]["accounts"] == ["bravo", "wwhl"]
+    assert payload["targets"][0]["accounts"] == ["bravo"]
     assert payload["targets"][0]["hashtags"] == ["RHOSLC", "RealHousewivesofSaltLakeCity"]
 
 
@@ -9135,6 +9274,8 @@ def test_launch_social_account_catalog_backfill_instagram_defaults_selected_task
         "enqueued_job_count": 0,
     }
     assert len(catalog_calls) == 1
+    assert catalog_calls[0]["selected_tasks"] == ["post_details", "comments", "media"]
+    assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "comments", "media"]
     assert catalog_calls[0]["details_refresh_skip_detail_fetch"] is False
     assert catalog_calls[0]["details_refresh_force_detail_fetch"] is False
     assert catalog_calls[0]["details_refresh_skip_media_followups"] is False
@@ -9268,6 +9409,7 @@ def test_launch_social_account_catalog_backfill_tiktok_runs_all_selected_tasks_i
     assert payload["selected_tasks"] == ["post_details", "comments", "media"]
     assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
     assert payload["attached_followups"] == {}
+    assert payload["stage_graph"]["comments"]["status"] == "queued"
     assert len(catalog_calls) == 1
     assert catalog_calls[0]["selected_tasks"] == ["post_details", "comments", "media"]
     assert catalog_calls[0]["effective_selected_tasks"] == ["post_details", "comments", "media"]
@@ -9277,6 +9419,7 @@ def test_launch_social_account_catalog_backfill_tiktok_runs_all_selected_tasks_i
     assert catalog_calls[0]["tiktok_direct_comment_api_override"] is True
     assert merged_config_updates[-1]["selected_tasks"] == ["post_details", "comments", "media"]
     assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details", "comments", "media"]
+    assert merged_config_updates[-1]["stage_graph"]["comments"]["status"] == "queued"
 
 
 def test_launch_social_account_catalog_backfill_twitter_enables_comments_in_posts_stage(
@@ -9315,6 +9458,7 @@ def test_launch_social_account_catalog_backfill_twitter_enables_comments_in_post
     assert payload["selected_tasks"] == ["post_details", "comments", "media"]
     assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
     assert payload["attached_followups"] == {}
+    assert payload["stage_graph"]["comments"]["status"] == "queued"
     assert len(catalog_calls) == 1
     assert catalog_calls[0]["platform"] == "twitter"
     assert catalog_calls[0]["account_handle"] == "thetraitorsus"
@@ -9323,6 +9467,7 @@ def test_launch_social_account_catalog_backfill_twitter_enables_comments_in_post
     assert catalog_calls[0]["details_refresh_skip_media_followups"] is False
     assert merged_config_updates[-1]["selected_tasks"] == ["post_details", "comments", "media"]
     assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details", "comments", "media"]
+    assert merged_config_updates[-1]["stage_graph"]["comments"]["status"] == "queued"
 
 
 def test_launch_social_account_catalog_backfill_threads_enables_comments_in_posts_stage(
@@ -9416,12 +9561,14 @@ def test_launch_social_account_catalog_backfill_youtube_forces_post_details_for_
     assert payload["effective_selected_tasks"] == ["post_details", "comments", "media"]
     assert payload["post_details_skipped_reason"] == "forced_for_comments"
     assert payload["attached_followups"] == {}
+    assert payload["stage_graph"]["comments"]["status"] == "queued"
     assert len(catalog_calls) == 1
     assert catalog_calls[0]["launch_group_id"] == "launch-group-youtube"
     assert catalog_calls[0]["details_refresh_skip_detail_fetch"] is False
     assert catalog_calls[0]["details_refresh_skip_media_followups"] is False
     assert merged_config_updates[-1]["selected_tasks"] == ["comments", "media"]
     assert merged_config_updates[-1]["effective_selected_tasks"] == ["post_details", "comments", "media"]
+    assert merged_config_updates[-1]["stage_graph"]["comments"]["status"] == "queued"
 
 
 def test_threads_post_fetch_targets_prefer_stored_numeric_pk() -> None:
@@ -12606,8 +12753,11 @@ def test_reserve_social_account_catalog_launch_reopens_cursor_after_lock_query(
             self.label = label
             self.closed = False
 
+    pool_names: list[str] = []
+
     @contextmanager
-    def _fake_db_connection(**_kwargs):
+    def _fake_db_connection(*, pool_name: str = "default", **_kwargs):
+        pool_names.append(pool_name)
         yield fake_conn
 
     @contextmanager
@@ -12652,6 +12802,7 @@ def test_reserve_social_account_catalog_launch_reopens_cursor_after_lock_query(
         "catalog-start-lock:instagram:thetraitorsus",
         "catalog-start-lock:instagram:thetraitorsus",
     ]
+    assert pool_names == ["social_control"]
 
 
 def test_start_social_account_catalog_backfill_existing_run_defers_initial_dispatch(
@@ -12734,12 +12885,12 @@ def test_target_accounts_by_platform_uses_direct_targets_query(monkeypatch) -> N
 
     assert captured["params"] == [season_id, "bravo"]
     assert "from social.season_targets" in str(captured["sql"]).lower()
-    assert payload["youtube"] == {"bravo", "wwhl"}
+    assert payload["youtube"] == {"bravo"}
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
-    assert payload["twitter"] == {"bravotv", "bravowwhl"}
+    assert payload["tiktok"] == set()
+    assert payload["twitter"] == set()
     assert payload["facebook"] == {"default_fb"}
-    assert payload["threads"] == {"default_threads", "bravotv", "bravowwhl"}
+    assert payload["threads"] == {"default_threads", "bravotv", "bravodailydish", "bravowwhl"}
 
 
 def test_target_accounts_by_platform_does_not_override_explicit_platform_rows(monkeypatch) -> None:
@@ -12778,12 +12929,12 @@ def test_target_accounts_by_platform_does_not_override_explicit_platform_rows(mo
 
     payload = social_repo._target_accounts_by_platform(season_id, source_scope="bravo")
 
-    assert payload["youtube"] == {"bravo", "wwhl"}
+    assert payload["youtube"] == {"bravo"}
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
-    assert payload["twitter"] == {"bravotv", "bravowwhl"}
+    assert payload["tiktok"] == set()
+    assert payload["twitter"] == set()
     assert payload["facebook"] == set()
-    assert payload["threads"] == {"default_threads", "bravotv", "bravowwhl"}
+    assert payload["threads"] == {"default_threads", "bravotv", "bravodailydish", "bravowwhl"}
 
 
 def test_target_accounts_by_platform_enforces_rhoslc_instagram_account_floor(monkeypatch) -> None:
@@ -12816,9 +12967,9 @@ def test_target_accounts_by_platform_enforces_rhoslc_instagram_account_floor(mon
     payload = social_repo._target_accounts_by_platform(season_id, source_scope="bravo")
 
     assert payload["instagram"] == {"bravotv", "bravodailydish", "bravowwhl"}
-    assert payload["tiktok"] == {"bravotv", "bravowwhl"}
-    assert payload["twitter"] == {"bravotv", "bravowwhl"}
-    assert payload["threads"] == {"bravotv", "bravowwhl"}
+    assert payload["tiktok"] == set()
+    assert payload["twitter"] == set()
+    assert payload["threads"] == {"bravotv", "bravodailydish", "bravowwhl"}
 
 
 def test_put_targets_enforces_bravo_core_platform_accounts_on_write(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -17315,6 +17466,7 @@ def test_classify_shared_catalog_rows_queues_unknown_hashtag(monkeypatch: pytest
     )
     monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(social_repo, "_fetch_account_hashtag_review_rows", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "_list_matchable_seasons", lambda **_kwargs: [])
 
     def _fake_queue(**kwargs: Any) -> dict[str, Any]:
         queued_hashtags.append(str(kwargs["hashtag"]))
@@ -17377,6 +17529,112 @@ def test_classify_shared_catalog_rows_skips_resolved_non_show_review(monkeypatch
     assert counts == {"assigned": 0, "ambiguous": 0, "needs_review": 0, "unassigned": 1}
     assert updates[0]["assignment_status"] == "unassigned"
     assert updates[0]["candidate_matches"] == []
+
+
+def test_classify_shared_catalog_rows_reuses_existing_review_queue_suggestions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updates: list[dict[str, Any]] = []
+    queued: list[dict[str, Any]] = []
+    heartbeats: list[None] = []
+
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_shared_catalog_rows",
+        lambda *_args, **_kwargs: [{"id": "catalog-row-5", "source_id": "source-5", "hashtags": ["TheTraitorsUS"]}],
+    )
+    monkeypatch.setattr(social_repo, "_fetch_social_account_profile_assignment_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_account_hashtag_review_rows",
+        lambda **_kwargs: [
+            {
+                "normalized_hashtag": "thetraitorsus",
+                "review_status": "pending",
+                "suggested_show_ids": ["show-existing"],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_list_matchable_seasons",
+        lambda **_kwargs: pytest.fail("existing review hashtags should not scan all target seasons"),
+    )
+
+    def _fake_queue(**kwargs: Any) -> dict[str, Any]:
+        queued.append(kwargs)
+        return {
+            "id": "queue-1",
+            "review_status": "pending",
+            "suggested_show_ids": kwargs.get("suggested_show_ids") or [],
+        }
+
+    monkeypatch.setattr(social_repo, "_upsert_account_hashtag_review_queue", _fake_queue)
+    monkeypatch.setattr(
+        social_repo,
+        "_update_shared_catalog_assignment",
+        lambda **kwargs: updates.append(kwargs),
+    )
+
+    counts = social_repo._classify_shared_catalog_rows(
+        run_id="run-1",
+        platform="instagram",
+        source_scope="network",
+        account_handle="thetraitorsus",
+        source_ids=["source-5"],
+        heartbeat_cb=lambda: heartbeats.append(None),
+    )
+
+    assert counts == {"assigned": 0, "ambiguous": 0, "needs_review": 1, "unassigned": 0}
+    assert queued[0]["suggested_show_ids"] == ["show-existing"]
+    assert updates[0]["assignment_status"] == "needs_review"
+    assert len(heartbeats) >= 4
+
+
+def test_get_social_account_catalog_review_queue_casts_suggested_show_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    show_id = "46f8a52f-b608-4a45-afd1-f719508ad0bf"
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        social_repo,
+        "_assert_social_account_profile_exists",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_fetch_account_hashtag_review_rows",
+        lambda **_kwargs: [
+            {
+                "id": "queue-1",
+                "normalized_hashtag": "rhop",
+                "display_hashtag": "#RHOP",
+                "review_status": "pending",
+                "usage_count": 4,
+                "sample_post_ids": [],
+                "sample_source_ids": [],
+                "suggested_show_ids": [show_id],
+                "first_seen_at": None,
+                "last_seen_at": None,
+            }
+        ],
+    )
+
+    def _fake_fetch_all(sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"id": show_id, "name": "The Real Housewives of Potomac", "slug": "rhop"}]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    result = social_repo.get_social_account_catalog_review_queue("instagram", "bravotv")
+
+    assert "where id = any(%s::uuid[])" in captured["sql"]
+    assert captured["params"] == [[show_id]]
+    assert result["items"][0]["suggested_shows"] == [
+        {"show_id": show_id, "show_name": "The Real Housewives of Potomac", "show_slug": "rhop"}
+    ]
 
 
 def test_put_targets_enforces_rhoslc_hashtag_floor_on_all_platforms(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -18285,8 +18543,11 @@ def test_weekly_daily_activity_indexes_by_calendar_day_not_elapsed_hours(monkeyp
 
 
 def test_week_detail_instagram_includes_thumbnail_url(monkeypatch) -> None:
+    captured_sql: dict[str, str] = {}
+
     def _fake_fetch_all(sql: str, params: list[object]) -> list[dict[str, object]]:
-        if "from social.instagram_posts p" in sql:
+        if "from social.instagram_posts p" in sql and "p.shortcode as source_id" in sql:
+            captured_sql["posts_sql"] = sql
             return [
                 {
                     "id": "post-1",
@@ -18393,6 +18654,10 @@ def test_week_detail_instagram_includes_thumbnail_url(monkeypatch) -> None:
     assert post["child_posts_data"][1]["slide_index"] == 1
     assert post["child_posts_data"][1]["tagged_users_detail"][0]["username"] == "slide_tagged"
     assert post["child_posts_data"][1]["tagged_users_detail"][0]["tag_x"] == 0.2
+    normalized_posts_sql = " ".join(captured_sql["posts_sql"].split()).lower()
+    reported_comments = " ".join(social_repo._instagram_reported_comments_sql("p").split()).lower()
+    assert f"({reported_comments}) as comments_count" in normalized_posts_sql
+    assert "coalesce(p.comments_count, 0) as comments_count" not in normalized_posts_sql
 
 
 def test_instagram_cover_source_detects_custom_cover_hint() -> None:
@@ -18443,9 +18708,13 @@ def test_rows_for_platform_instagram_uses_schema_safe_thumbnail_expr(monkeypatch
 
     assert rows == []
     sql = captured_sql.get("sql", "")
+    normalized_sql = " ".join(sql.split()).lower()
+    reported_comments = " ".join(social_repo._instagram_reported_comments_sql("p").split()).lower()
     assert "p.hosted_thumbnail_url" not in sql
     assert "to_jsonb(p) ->> 'hosted_thumbnail_url'" in sql
     assert "to_jsonb(p) -> 'hosted_media_urls' ->> 0" in sql
+    assert f"({reported_comments})::bigint as reported_comments" in normalized_sql
+    assert "greatest(0, coalesce(p.comments_count, 0))::bigint as reported_comments" not in normalized_sql
 
 
 def test_platform_thumbnail_expr_tiktok_prefers_thumbnail_before_hosted_media_fallback() -> None:
@@ -22497,6 +22766,122 @@ def test_batch_upsert_instagram_comments_preserves_ranked_duplicate_metadata(
     assert captured_batches[0][0]["cursor_payload"]["phase_observations"] == ["ranked", "headload"]
 
 
+def test_batch_upsert_instagram_comments_savepoints_media_enqueue_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram.scraper import InstagramComment
+
+    social_repo._instagram_comment_has_profile_pic = None
+    social_repo._instagram_comment_has_verified = None
+    social_repo._instagram_comment_has_media = None
+    social_repo._instagram_comment_has_hosted_media = None
+    social_repo._instagram_comment_has_media_mirror_status = None
+    social_repo._instagram_comment_has_media_mirror_error = None
+    social_repo._instagram_comment_metadata_column_cache.clear()
+    savepoint_events: list[tuple[str, str]] = []
+
+    comment = InstagramComment(
+        comment_id="comment-1",
+        text="top level image",
+        username="viewer",
+        user_id="user-1",
+        created_at=1_775_000_000,
+        date_time="2026-04-01 10:00:00",
+        likes=3,
+        is_reply=False,
+        parent_comment_id=None,
+        reply_count=0,
+        media_urls=["https://images.example/top-gift.gif"],
+    )
+
+    def _fake_upsert_many(
+        _table: str,
+        batch: list[dict[str, Any]],
+        *,
+        conflict_col: list[str],
+        conn: object | None = None,
+        include_inserted_flag: bool = False,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": f"row-{item['comment_id']}",
+                "comment_id": item["comment_id"],
+                "post_id": item["post_id"],
+                "__trr_inserted": include_inserted_flag,
+            }
+            for item in batch
+        ]
+
+    monkeypatch.setattr(social_repo, "_pg_upsert_many", _fake_upsert_many)
+    monkeypatch.setattr(social_repo, "_load_instagram_comment_write_baseline", lambda _payloads, **_kwargs: {})
+    monkeypatch.setattr(social_repo, "_comment_lifecycle_supported", lambda table: table == "instagram_comments")
+    monkeypatch.setattr(
+        social_repo,
+        "_column_exists",
+        lambda _schema, _table, column, **_kwargs: (
+            column
+            in {
+                "media_urls",
+                "media_mirror_status",
+                "media_mirror_error",
+                "parent_comment_external_id",
+                "reply_depth",
+                "source_snapshot_type",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_platform_comment_media_mirror_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("mirror enqueue failed")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_create_savepoint",
+        lambda _conn, name: savepoint_events.append(("create", name)),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_rollback_to_savepoint",
+        lambda _conn, name: savepoint_events.append(("rollback", name)),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_release_savepoint",
+        lambda _conn, name: savepoint_events.append(("release", name)),
+    )
+
+    context = SeasonContext(
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+    stats = social_repo._new_comment_persist_stats()
+
+    written = social_repo._batch_upsert_instagram_comments(
+        context,
+        job_id="job-1",
+        run_id="run-1",
+        account="bravotv",
+        post_id="post-1",
+        comments=[comment],
+        persist_stats=stats,
+        conn=object(),
+    )
+
+    assert written == 1
+    assert stats["comments_upserted"] == 1
+    assert stats["comment_media_mirror_jobs_enqueued"] == 0
+    assert stats["comment_media_mirror_job_enqueue_errors"] == 1
+    assert savepoint_events == [
+        ("create", "instagram_comment_media_mirror_1"),
+        ("rollback", "instagram_comment_media_mirror_1"),
+        ("release", "instagram_comment_media_mirror_1"),
+    ]
+
+
 def test_upsert_tiktok_comment_tree_without_run_id_preserves_last_seen_run(monkeypatch) -> None:
     captured_payload: dict[str, object] = {}
 
@@ -23514,6 +23899,9 @@ def test_set_job_running_clears_stale_error_fields(monkeypatch: pytest.MonkeyPat
     assert "error_message = null" in sql_text
     assert "last_error_code = null" in sql_text
     assert "last_error_class = null" in sql_text
+    assert "shared_account_discovery" in sql_text
+    assert "shared_account_posts" in sql_text
+    assert "active.status = 'running'" in sql_text
     assert captured_sql["params"] == ["worker-1", "job-1"]
 
 
@@ -24139,6 +24527,25 @@ def test_execute_run_comments_stage_does_not_claim_posts_when_comments_empty(mon
     assert result["id"] == "run-1"
 
 
+def test_list_candidate_jobs_for_modal_dispatch_interleaves_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(query: str, params: list[Any]) -> list[dict[str, Any]]:
+        captured["query"] = query
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+
+    assert social_repo._list_candidate_jobs_for_modal_dispatch(run_id=None, limit=50) == []
+
+    query = " ".join(str(captured["query"]).split()).lower()
+    assert "row_number() over" in query
+    assert "partition by coalesce(run_id::text, '')" in query
+    assert "order by queue_rank asc, priority asc, created_at asc" in query
+    assert captured["params"] == [None, None, 50]
+
+
 def test_dispatch_due_social_jobs_modal_dispatches_eligible_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
     monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
@@ -24211,6 +24618,42 @@ def test_dispatch_due_social_jobs_modal_dispatches_eligible_jobs(monkeypatch: py
     assert dispatch_calls == [("job-1", "posts"), ("job-2", "comments")]
     assert any(update[1].get("remote_invocation_id") == "call-job-1" for update in metadata_updates)
     assert dispatcher_heartbeats
+
+
+def test_dispatch_due_social_jobs_honors_pause_after_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+
+    dispatcher_heartbeats: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(social_repo, "_relation_exists", lambda relation_name: relation_name == "social.scrape_runs")
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {"config": {"pause_after_current": True}},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_touch_modal_social_dispatcher_heartbeat",
+        lambda **kwargs: dispatcher_heartbeats.append(dict(kwargs)) or {},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "recover_dispatch_blocked_no_progress_jobs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("paused dispatch should not recover jobs")),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_modal_social_dispatch_resolution",
+        lambda: (_ for _ in ()).throw(AssertionError("paused dispatch should not resolve Modal")),
+    )
+
+    result = social_repo.dispatch_due_social_jobs(run_id="run-1", limit=2)
+
+    assert result == {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "pause_after_current"}
+    assert dispatcher_heartbeats[0]["metadata_updates"]["last_dispatch_blocked_reason"] == "pause_after_current"
 
 
 def test_dispatch_due_social_jobs_fails_closed_when_modal_resolution_is_unavailable(
@@ -24369,10 +24812,10 @@ def test_dispatch_due_social_jobs_catalog_mode_honors_platform_cap(monkeypatch: 
         social_repo,
         "_current_modal_dispatch_running_counts",
         lambda: (
-            {social_repo.SHARED_ACCOUNT_POSTS_STAGE: 4},
-            {(social_repo.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): 4},
-            {"run-catalog": 4},
-            {("run-catalog", social_repo.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): 4},
+            {social_repo.SHARED_ACCOUNT_POSTS_STAGE: 1},
+            {(social_repo.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): 1},
+            {"run-catalog": 1},
+            {("run-catalog", social_repo.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): 1},
         ),
     )
     monkeypatch.setattr(social_repo, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
@@ -24389,6 +24832,87 @@ def test_dispatch_due_social_jobs_catalog_mode_honors_platform_cap(monkeypatch: 
 
     assert result["dispatched_job_ids"] == ["job-x"]
     assert dispatched_job_ids == ["job-x"]
+
+
+def test_dispatch_due_social_jobs_catalog_mode_skips_same_active_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM", "2")
+
+    candidates = [
+        {
+            "id": "job-daily-queued",
+            "run_id": "run-catalog",
+            "platform": "instagram",
+            "job_type": social_repo.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "config": {
+                "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+                "account": "bravodailydish",
+                "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            },
+            "metadata": {},
+        },
+        {
+            "id": "job-tv-queued",
+            "run_id": "run-catalog",
+            "platform": "instagram",
+            "job_type": social_repo.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "config": {
+                "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+                "account": "bravotv",
+                "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            },
+            "metadata": {},
+        },
+    ]
+    dispatched_job_ids: list[str] = []
+
+    monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_modal_social_dispatch_resolution",
+        lambda: {
+            "resolved": True,
+            "reason": None,
+            "app_name": "trr-backend-jobs",
+            "function_name": "run_social_job",
+        },
+    )
+    monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_list_candidate_jobs_for_modal_dispatch",
+        lambda *, run_id=None, limit=200: list(candidates),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_current_modal_dispatch_running_counts",
+        lambda: (
+            {social_repo.SHARED_ACCOUNT_POSTS_STAGE: 1},
+            {(social_repo.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): 1},
+            {"run-existing": 1},
+            {("run-existing", social_repo.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): 1},
+            {(social_repo.SHARED_ACCOUNT_POSTS_STAGE, "instagram"): {"bravodailydish"}},
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})
+    monkeypatch.setattr(
+        social_repo,
+        "dispatch_social_job",
+        lambda *, job_id, stage=None: (
+            dispatched_job_ids.append(job_id) or {"dispatched": True, "reason": None, "call_id": f"call-{job_id}"}
+        ),
+    )
+
+    result = social_repo.dispatch_due_social_jobs(run_id="run-catalog", limit=2)
+
+    assert result["dispatched_job_ids"] == ["job-tv-queued"]
+    assert dispatched_job_ids == ["job-tv-queued"]
 
 
 def test_dispatch_due_social_jobs_catalog_mode_honors_run_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -24624,6 +25148,73 @@ def test_dispatch_due_social_jobs_skips_redispatch_when_modal_call_is_pending(
     assert isinstance(payload["lease_expires_at"], datetime)
 
 
+def test_touch_job_dispatch_metadata_does_not_refresh_worker_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_sql: list[str] = []
+
+    def _fake_fetch_one(sql: str, params: list[Any]) -> dict[str, Any]:
+        captured_sql.append(" ".join(sql.split()).lower())
+        if sql.lstrip().lower().startswith("select metadata"):
+            return {"metadata": {}}
+        return {"id": params[-1]}
+
+    monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+
+    social_repo._touch_job_dispatch_metadata(
+        "00000000-0000-0000-0000-000000000001",
+        dispatch_backend="modal",
+        remote_invocation_status="pending",
+        remote_invocation_checked_at=datetime(2026, 3, 22, 9, 45, tzinfo=UTC),
+    )
+
+    assert len(captured_sql) == 2
+    update_sql = captured_sql[1]
+    assert "update social.scrape_jobs" in update_sql
+    assert "heartbeat_at" not in update_sql
+
+
+def test_mark_claimed_modal_dispatch_running_clears_pending_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updates: list[tuple[str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(
+        social_repo,
+        "_touch_job_dispatch_metadata",
+        lambda job_id, **kwargs: updates.append((job_id, dict(kwargs))),
+    )
+
+    social_repo._mark_claimed_modal_dispatch_running(
+        {
+            "id": "job-claimed",
+            "metadata": {
+                "dispatch": {
+                    "dispatch_backend": "modal",
+                    "dispatch_requested_at": "2026-03-22T09:41:23.000Z",
+                    "dispatch_attempt_count": 2,
+                    "remote_invocation_id": "fc-pending",
+                    "remote_invocation_status": "pending",
+                    "remote_pending_since": "2026-03-22T09:41:23.000Z",
+                    "remote_blocked_reason": "modal_capacity_pending",
+                }
+            },
+        }
+    )
+
+    assert len(updates) == 1
+    job_id, payload = updates[0]
+    assert job_id == "job-claimed"
+    assert payload["dispatch_backend"] == "modal"
+    assert payload["dispatch_requested_at"] == datetime(2026, 3, 22, 9, 41, 23, tzinfo=UTC)
+    assert payload["dispatch_attempt_count"] == 2
+    assert payload["remote_invocation_id"] == "fc-pending"
+    assert payload["remote_invocation_status"] == "running"
+    assert isinstance(payload["remote_invocation_checked_at"], datetime)
+    assert payload["remote_pending_since"] is None
+    assert payload["remote_blocked_reason"] is None
+
+
 def test_dispatch_due_social_jobs_redispatches_retrying_unknown_modal_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -24804,6 +25395,102 @@ def test_dispatch_due_social_jobs_redispatches_terminal_modal_call_without_coold
 
     assert result["dispatched_job_ids"] == ["job-terminal-call"]
     assert dispatched_job_ids == ["job-terminal-call"]
+
+
+def test_dispatch_due_social_jobs_redispatches_refreshed_terminal_modal_call_without_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "1")
+    monkeypatch.setenv("TRR_JOB_PLANE_MODE", "remote")
+    monkeypatch.setenv("TRR_REMOTE_EXECUTOR", "modal")
+    monkeypatch.setenv("TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("SOCIAL_MODAL_DISPATCH_RETRY_DELAY_SECONDS", "600")
+
+    now = datetime.now(UTC)
+    candidates = [
+        {
+            "id": "job-terminal-after-refresh",
+            "run_id": "run-1",
+            "platform": "youtube",
+            "job_type": social_repo.SHARED_ACCOUNT_POSTS_JOB_TYPE,
+            "status": "queued",
+            "priority": 85,
+            "created_at": now - timedelta(minutes=10),
+            "available_at": now - timedelta(minutes=5),
+            "config": {
+                "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+                "account": "bravo",
+                "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            },
+            "metadata": {
+                "dispatch": {
+                    "dispatch_backend": "modal",
+                    "dispatch_requested_at": now.isoformat(),
+                    "dispatch_attempt_count": 2,
+                    "remote_invocation_id": "fc-terminal-after-refresh",
+                    "remote_invocation_status": "unknown",
+                    "remote_invocation_checked_at": None,
+                    "lease_expires_at": (now + timedelta(minutes=10)).isoformat(),
+                }
+            },
+        }
+    ]
+    dispatched_job_ids: list[str] = []
+    metadata_updates: list[tuple[str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(social_repo, "recover_dispatch_blocked_no_progress_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "recover_failed_instagram_comments_capacity_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(social_repo, "recover_stale_unclaimed_dispatched_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_modal_social_dispatch_resolution",
+        lambda: {
+            "resolved": True,
+            "reason": None,
+            "app_name": "trr-backend-jobs",
+            "function_name": "run_social_posts_job",
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_list_candidate_jobs_for_modal_dispatch",
+        lambda *, run_id=None, limit=200: list(candidates),
+    )
+    monkeypatch.setattr(social_repo, "_current_modal_dispatch_running_counts", lambda: ({}, {}, {}, {}, {}))
+    monkeypatch.setattr(
+        social_repo,
+        "inspect_modal_function_call",
+        lambda _call_id: {
+            "function_call_id": "fc-terminal-after-refresh",
+            "status": "failed",
+            "raw_status": "failed",
+            "task_id": None,
+            "checked_at": now.isoformat(),
+            "reason": "modal_failure",
+            "nonterminal": False,
+            "terminal": True,
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_touch_job_dispatch_metadata",
+        lambda job_id, **kwargs: metadata_updates.append((job_id, dict(kwargs))),
+    )
+    monkeypatch.setattr(social_repo, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        social_repo,
+        "dispatch_social_job",
+        lambda *, job_id, stage=None: (
+            dispatched_job_ids.append(job_id) or {"dispatched": True, "call_id": f"call-{job_id}"}
+        ),
+    )
+
+    result = social_repo.dispatch_due_social_jobs(run_id="run-1", limit=1)
+
+    assert result["dispatched_job_ids"] == ["job-terminal-after-refresh"]
+    assert dispatched_job_ids == ["job-terminal-after-refresh"]
+    assert any(update["remote_invocation_status"] == "failed" for _job_id, update in metadata_updates)
+    assert metadata_updates[-1][1]["remote_invocation_id"] == "call-job-terminal-after-refresh"
 
 
 def test_recover_stale_unclaimed_dispatched_jobs_requeues_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -25368,6 +26055,43 @@ def test_recover_failed_instagram_comments_capacity_jobs_requeues_matching_failu
     assert finalized == [(run_id, True)]
 
 
+def test_recover_failed_media_mirror_transient_jobs_requeues_http_500_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finalized: list[tuple[str, bool]] = []
+    captured_params: list[list[object]] = []
+    captured_sql: list[str] = []
+    run_id = "11111111-1111-1111-1111-111111111111"
+
+    def _fake_fetch_all(_sql: str, params: list[object]) -> list[dict[str, object]]:
+        captured_sql.append(_sql)
+        captured_params.append(list(params))
+        return [{"id": "job-media-1", "run_id": run_id, "platform": "instagram", "status": "retrying"}]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        social_repo,
+        "_finalize_run_status",
+        lambda recovered_run_id, force_recompute=False: finalized.append((recovered_run_id, force_recompute)) or {},
+    )
+
+    rows = social_repo.recover_failed_media_mirror_transient_jobs(run_id=run_id, limit=3)
+
+    assert rows == [{"id": "job-media-1", "run_id": run_id, "platform": "instagram", "status": "retrying"}]
+    assert captured_params[0] == [
+        social_repo.INSTAGRAM_MEDIA_MIRROR_STAGE,
+        social_repo.COMMENT_MEDIA_MIRROR_STAGE,
+        run_id,
+        run_id,
+        3,
+    ]
+    assert "download_failed:%%http_500" in captured_sql[0]
+    assert "completed_at = null" in captured_sql[0]
+    assert "claimed_at = null" in captured_sql[0]
+    assert "recover_failed_media_mirror_transient_jobs" in captured_sql[0]
+    assert finalized == [(run_id, True)]
+
+
 def test_claim_and_process_social_job_dispatches_follow_up_work(monkeypatch: pytest.MonkeyPatch) -> None:
     claimed_job = {
         "id": "job-1",
@@ -25636,7 +26360,7 @@ def test_get_worker_health_exposes_remote_instagram_auth_summary(
     assert payload["remote_auth_capabilities"]["tiktok"]["ready"] is False
     assert payload["remote_auth_capabilities"]["twitter"]["ready"] is False
     assert payload["remote_auth_capabilities"]["facebook"]["ready"] is False
-    assert payload["remote_auth_capabilities"]["threads"]["ready"] is False
+    assert "threads" not in payload["remote_auth_capabilities"]
     assert payload["remote_auth_capabilities"]["tiktok"]["missing_hints"] == [
         "SOCIAL_TIKTOK_COOKIES_JSON|SOCIAL_TIKTOK_COOKIES_FILE|TIKTOK_COOKIES_JSON|TIKTOK_COOKIES_FILE"
     ]
@@ -25829,6 +26553,60 @@ def test_build_modal_executor_health_payload_uses_remote_probe_when_worker_auth_
     assert readiness["platform_remote_auth_detail"] == {"phase": "remote_probe", "has_sessionid": True}
     assert payload["remote_auth_capabilities"]["instagram"]["ready"] is True
     assert payload["remote_auth_capabilities"]["instagram"]["probe_source"] == "modal_remote_auth_probe"
+
+
+def test_build_modal_executor_health_payload_treats_threads_auth_as_optional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "_query_worker_health",
+        lambda: {
+            "healthy": False,
+            "healthy_workers": 0,
+            "fresh_workers": 0,
+            "stale_workers": 0,
+            "stale_hidden_count": 0,
+            "active_workers": 0,
+            "total_workers": 0,
+            "workers": [
+                {
+                    "worker_id": social_repo._modal_social_dispatcher_worker_id(),
+                    "is_fresh": True,
+                    "metadata": {"dispatch_enabled": True, "active_invocations": 1},
+                }
+            ],
+            "remote_auth_capabilities": {},
+        },
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_modal_social_dispatch_resolution",
+        lambda: {"resolved": True, "reason": None, "function_name": "run_social_job"},
+    )
+    monkeypatch.setattr(social_repo, "_oldest_queued_age_seconds", lambda: 0)
+    monkeypatch.setattr(social_repo, "_stale_running_count", lambda: 0)
+    monkeypatch.setattr(social_repo, "modal_dispatch_enabled", lambda: True)
+    monkeypatch.setattr(
+        social_repo,
+        "_probe_modal_remote_auth_health",
+        lambda platform: {
+            "platform": platform,
+            "ready": False,
+            "reason": "login_prompt_detected",
+            "detail": {"phase": "remote_probe"},
+        },
+    )
+
+    payload = social_repo._build_modal_executor_health_payload(reason="modal_executor_ready", platform="threads")
+
+    readiness = payload["shared_account_backfill_readiness"]
+    assert readiness["ready"] is True
+    assert readiness["reason"] is None
+    assert readiness["platform"] == "threads"
+    assert readiness["platform_remote_auth_ready"] is True
+    assert readiness["platform_remote_auth_detail"] is None
+    assert payload["remote_auth_capabilities"]["threads"] == {}
 
 
 def test_build_worker_health_alerts_reports_dispatcher_and_auth_failures(
@@ -28695,6 +29473,7 @@ def test_run_platform_media_mirror_stage_instagram_shared_post_looks_up_by_post_
         }
 
     monkeypatch.setattr(social_repo.pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_platform_posts_has_column", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_instagram_posts_has_column", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(social_repo, "_platform_post_source_urls", lambda *_args, **_kwargs: ("", []))
@@ -31504,8 +32283,8 @@ def test_shared_instagram_account_execution_uses_db_advisory_lock(monkeypatch: p
             yield
 
     @contextmanager
-    def _fake_db_read_connection(*, label: str = "read"):
-        calls.append(("db_read_connection", (label,)))
+    def _fake_db_read_connection(*, label: str = "read", pool_name: str = "default"):
+        calls.append(("db_read_connection", (label, pool_name)))
         yield object()
 
     @contextmanager
@@ -31529,7 +32308,7 @@ def test_shared_instagram_account_execution_uses_db_advisory_lock(monkeypatch: p
         calls.append(("inside", ()))
 
     queries = [item for item in calls if item[0] == "query"]
-    assert ("db_read_connection", ("instagram-account-lock:bravotv",)) in calls
+    assert ("db_read_connection", ("instagram-account-lock:bravotv", "social_control")) in calls
     assert any("pg_try_advisory_lock" in item[1][0] for item in queries)
     assert any("pg_advisory_unlock" in item[1][0] for item in queries)
     assert ("inside", ()) in calls
@@ -31552,8 +32331,8 @@ def test_shared_instagram_account_execution_retries_when_db_lock_is_unavailable(
             yield
 
     @contextmanager
-    def _fake_db_read_connection(*, label: str = "read"):
-        del label
+    def _fake_db_read_connection(*, label: str = "read", pool_name: str = "default"):
+        del label, pool_name
         yield object()
 
     @contextmanager
@@ -31583,11 +32362,67 @@ def test_shared_instagram_account_execution_retries_when_db_lock_is_unavailable(
     assert exc_info.value.retryable is True
 
 
+def test_shared_instagram_account_execution_heartbeats_while_waiting_for_db_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    heartbeat_payloads: list[dict[str, Any]] = []
+    sleep_calls: list[float] = []
+    lock_attempts = iter([{"locked": False}, {"locked": True}, {"unlocked": True}])
+
+    class _FakeManager:
+        def __init__(self, *, platform: str, cookie_domains: tuple[str, ...]) -> None:
+            assert platform == "instagram"
+            assert cookie_domains == (".instagram.com",)
+
+        def resolve_account_id(self, account_id: str | None = None, *, fallback_account_id: str | None = None) -> str:
+            return str(account_id or fallback_account_id or "instagram")
+
+        @contextmanager
+        def execution_lock(self, account_id: str | None = None, *, fallback_account_id: str | None = None):
+            del account_id, fallback_account_id
+            yield
+
+    @contextmanager
+    def _fake_db_read_connection(*, label: str = "read", pool_name: str = "default"):
+        del label, pool_name
+        yield object()
+
+    @contextmanager
+    def _fake_db_cursor(*, conn: Any | None = None, label: str = "write-cursor"):
+        del conn, label
+        yield object()
+
+    def _fake_fetch_one_with_cursor(cur: Any, query: str, params: list[Any] | None = None) -> dict[str, Any]:
+        del cur, query, params
+        return next(lock_attempts)
+
+    import trr_backend.socials.account_browser_sessions as browser_sessions_module
+
+    monkeypatch.setattr(browser_sessions_module, "AccountBrowserSessionManager", _FakeManager)
+    monkeypatch.setattr(social_repo.pg, "db_read_connection", _fake_db_read_connection)
+    monkeypatch.setattr(social_repo.pg, "db_cursor", _fake_db_cursor)
+    monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", _fake_fetch_one_with_cursor)
+    monkeypatch.setattr(social_repo.time_module, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    with social_repo._shared_instagram_account_execution(
+        "bravotv",
+        heartbeat_cb=heartbeat_payloads.append,
+    ):
+        pass
+
+    assert [payload["phase"] for payload in heartbeat_payloads] == [
+        "account_lock_wait",
+        "account_lock_acquired",
+    ]
+    assert heartbeat_payloads[0]["lock_attempt"] == 1
+    assert sleep_calls == [0.0]
+
+
 def test_discover_instagram_cursor_partitions_uses_public_scraper(monkeypatch: pytest.MonkeyPatch) -> None:
     acquired_accounts: list[str] = []
 
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         acquired_accounts.append(account_handle)
         yield account_handle
 
@@ -31784,7 +32619,7 @@ def test_scrape_shared_instagram_posts_partitioned_uses_authenticated_fallback(
     acquired_accounts: list[str] = []
 
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         acquired_accounts.append(account_handle)
         yield account_handle
 
@@ -31853,7 +32688,7 @@ def test_scrape_shared_instagram_posts_partitioned_prefers_authenticated_transpo
     fetch_calls: list[dict[str, Any]] = []
 
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         yield account_handle
 
     class _SharedScraper:
@@ -31922,7 +32757,7 @@ def test_scrape_shared_instagram_posts_partitioned_treats_string_none_cursor_end
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         yield account_handle
 
     class _SharedScraper:
@@ -31982,7 +32817,7 @@ def test_discover_instagram_cursor_partitions_retries_rate_limits_with_cooldown(
     fetch_attempts = {"count": 0}
 
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         yield account_handle
 
     class _FakeScraper:
@@ -32052,7 +32887,7 @@ def test_scrape_shared_instagram_posts_partitioned_retries_rate_limits_with_cool
     fetch_attempts = {"count": 0}
 
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         yield account_handle
 
     class _FakeScraper:
@@ -32122,7 +32957,7 @@ def test_scrape_shared_instagram_posts_uses_public_scraper(monkeypatch: pytest.M
     acquired_accounts: list[str] = []
 
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         acquired_accounts.append(account_handle)
         yield account_handle
 
@@ -33234,6 +34069,23 @@ def test_get_run_progress_snapshot_modal_runtime_pin_mismatch_uses_semantic_matc
     payload = social_repo.get_run_progress_snapshot(season_id, run_id, recent_log_limit=10)
 
     assert payload["worker_runtime"]["runtime_version_pin_mismatch"] is False
+
+
+def test_runtime_version_satisfies_generic_modal_label_but_not_stale_concrete_label() -> None:
+    observed_runtime = {
+        "label": "modal:main · im-Zq51cvHJXXsJVBJKbRpajb",
+        "execution_backend": "modal",
+        "modal_image": "im-Zq51cvHJXXsJVBJKbRpajb",
+    }
+
+    assert social_repo._runtime_version_satisfies_requirement(
+        {"label": "modal", "execution_backend": "modal"},
+        observed_runtime,
+    )
+    assert not social_repo._runtime_version_satisfies_requirement(
+        {"label": "modal:main · im-old", "execution_backend": "modal"},
+        observed_runtime,
+    )
 
 
 def test_get_run_progress_snapshot_modal_runtime_created_by_local_does_not_report_false_drift_or_mismatch(
@@ -37486,6 +38338,90 @@ def test_resolve_authoritative_catalog_runtime_version_uses_fresh_healthy_modal_
     assert runtime_version["execution_backend"] == "modal"
 
 
+def test_resolve_authoritative_catalog_runtime_version_ignores_non_social_modal_dispatchers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "_query_worker_health",
+        lambda **_kwargs: {
+            "workers": [
+                {
+                    "worker_id": "modal:reddit-dispatcher",
+                    "is_fresh": True,
+                    "is_healthy": True,
+                    "last_seen_at": datetime(2026, 4, 20, 12, 10, tzinfo=UTC),
+                    "metadata": {
+                        "dispatcher_name": "reddit",
+                        "execution_backend_canonical": "modal",
+                        "runtime_version": {
+                            "execution_backend": "modal",
+                            "modal_image": "im-old",
+                            "label": "modal:main · im-old",
+                        },
+                    },
+                },
+                {
+                    "worker_id": "modal:social-dispatcher",
+                    "is_fresh": True,
+                    "is_healthy": True,
+                    "last_seen_at": datetime(2026, 4, 20, 12, 5, tzinfo=UTC),
+                    "metadata": {
+                        "dispatcher_name": "social",
+                        "execution_backend_canonical": "modal",
+                        "runtime_version": {
+                            "execution_backend": "modal",
+                            "modal_function": "run_social_job",
+                            "label": "modal",
+                        },
+                    },
+                },
+            ]
+        },
+    )
+
+    runtime_version = social_repo._resolve_authoritative_catalog_runtime_version(required_execution_backend="modal")
+
+    assert runtime_version["execution_backend"] == "modal"
+    assert runtime_version["label"] == "modal"
+    assert runtime_version.get("modal_image") is None
+
+
+def test_resolve_authoritative_catalog_runtime_version_strips_unversioned_modal_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        social_repo,
+        "_query_worker_health",
+        lambda **_kwargs: {
+            "workers": [
+                {
+                    "worker_id": "modal:social-dispatcher",
+                    "is_fresh": True,
+                    "is_healthy": True,
+                    "last_seen_at": datetime(2026, 4, 20, 12, 5, tzinfo=UTC),
+                    "metadata": {
+                        "dispatcher_name": "social",
+                        "execution_backend_canonical": "modal",
+                        "runtime_version": {
+                            "execution_backend": "modal",
+                            "modal_image": "im-stale-env",
+                            "modal_function": "run_social_job",
+                            "label": "modal:main · im-stale-env",
+                        },
+                    },
+                },
+            ]
+        },
+    )
+
+    runtime_version = social_repo._resolve_authoritative_catalog_runtime_version(required_execution_backend="modal")
+
+    assert runtime_version["execution_backend"] == "modal"
+    assert runtime_version["label"] == "modal"
+    assert runtime_version.get("modal_image") is None
+
+
 def test_resolve_authoritative_catalog_runtime_version_modal_returns_unknown_without_fresh_healthy_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -38349,7 +39285,7 @@ def test_discover_instagram_cursor_partitions_invokes_partition_callback(
     page_num = 0
 
     @contextmanager
-    def _fake_account_execution(account_handle: str):
+    def _fake_account_execution(account_handle: str, **_kwargs: Any):
         yield account_handle
 
     class _FakeScraper:
@@ -38862,6 +39798,95 @@ def test_run_shared_account_posts_stage_fails_catalog_details_refresh_when_expec
     assert meta["completion_missing_posts"] == 5
 
 
+def test_run_shared_account_posts_stage_fails_threads_fallback_when_expected_total_exceeds_saved_posts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_scrape_shared_posts_for_account",
+        lambda **_kwargs: (
+            [{"source_id": f"threads-{index}"} for index in range(5)],
+            {
+                "source": "playwright_profile_discovery",
+                "posts_checked": 6,
+                "matched_posts": 5,
+                "persist_counters": {"posts_upserted": 5, "comments_upserted": 0},
+            },
+        ),
+    )
+
+    with pytest.raises(social_repo.SharedStageRuntimeError) as exc_info:
+        social_repo._run_shared_account_posts_stage(
+            run_id="55555555-5555-5555-5555-555555555555",
+            platform="threads",
+            source_scope="bravo",
+            account_handle="bravotv",
+            config={
+                "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+                "platform": "threads",
+                "source_scope": "bravo",
+                "account": "bravotv",
+                "expected_total_posts": 1324,
+                "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+            },
+            job_id="66666666-6666-6666-6666-666666666666",
+        )
+
+    assert exc_info.value.error_code == "catalog_incomplete"
+    assert exc_info.value.retryable is True
+    meta = exc_info.value.runtime_metadata["retrieval_meta"]
+    assert meta["completion_failure_reason"] == "threads_fallback_missing_catalog_posts"
+    assert meta["expected_total_posts"] == 1324
+    assert meta["completion_missing_posts"] == 1318
+
+
+def test_run_shared_account_posts_stage_accepts_complete_threads_playwright_profile_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(social_repo, "_emit_job_progress", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_scrape_shared_posts_for_account",
+        lambda **_kwargs: (
+            [{"source_id": f"threads-{index}"} for index in range(654)],
+            {
+                "source": "playwright_profile_discovery",
+                "posts_checked": 654,
+                "matched_posts": 654,
+                "profile_discovery_complete": True,
+                "playwright_discovery": {
+                    "graphql_response_pages": 60,
+                    "graphql_has_next_page": False,
+                },
+                "persist_counters": {"posts_upserted": 654, "comments_upserted": 0},
+            },
+        ),
+    )
+
+    posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
+        run_id="55555555-5555-5555-5555-555555555555",
+        platform="threads",
+        source_scope="bravo",
+        account_handle="bravotv",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "threads",
+            "source_scope": "bravo",
+            "account": "bravotv",
+            "expected_total_posts": 1324,
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        job_id="66666666-6666-6666-6666-666666666666",
+    )
+
+    assert posts_count == 654
+    assert comments_count == 0
+    assert metadata["retrieval_meta"]["profile_discovery_complete"] is True
+    assert metadata["retrieval_meta"]["completion_missing_posts"] == 670
+
+
 def test_run_shared_account_posts_stage_tolerates_tiktok_empty_body_near_complete_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -39253,6 +40278,59 @@ def test_scrape_shared_tiktok_posts_hydrates_selected_catalog_tasks(
     assert progress_events[-1]["phase"] == "persist_catalog_posts"
 
 
+def test_hydrate_shared_tiktok_catalog_post_times_out_comment_fetch_without_failing_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTikTokScraper:
+        comments_auth_failed = False
+        last_comment_fetch_reason = ""
+
+        def _set_comment_failure_reason(self, reason: str) -> None:
+            self.last_comment_fetch_reason = reason
+
+        def fetch_comments(self, _video_id: str, **_kwargs: Any) -> list[Any]:
+            raise social_repo._SharedTikTokCommentFetchTimeoutError("timed out")
+
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo,
+        "_upsert_tiktok_post",
+        lambda *_args, **_kwargs: {"id": "post-1", "comments_count": 12},
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_load_tiktok_comment_coverage_for_post",
+        lambda *_args, **_kwargs: {"active_comments": 0, "missing_comments": 0, "total_comments": 0},
+    )
+    monkeypatch.setattr(social_repo, "_apply_shared_tiktok_catalog_assignment_to_post", lambda **_kwargs: None)
+
+    counters: dict[str, int] = {}
+    comment_fail_reasons: Counter[str] = Counter()
+    row = social_repo._hydrate_shared_tiktok_catalog_post(
+        scraper=FakeTikTokScraper(),
+        run_id="run-1",
+        account_handle="thetraitorsus",
+        config={
+            "source_scope": "bravo",
+            "selected_tasks": ["post_details", "comments"],
+            "effective_selected_tasks": ["post_details", "comments"],
+            "tiktok_comments_in_posts_stage": True,
+            "tiktok_comment_fetch_timeout_seconds": 5,
+        },
+        job_id="job-1",
+        post=SimpleNamespace(video_id="video-1", comments=12),
+        catalog_row={"comments_count": 12},
+        counters=counters,
+        comment_fail_reasons=comment_fail_reasons,
+    )
+
+    assert row == {"id": "post-1", "comments_count": 12}
+    assert counters["comment_errors"] == 1
+    assert counters["incomplete_comment_fetches"] == 1
+    assert counters["comments_mark_missing_skipped"] == 1
+    assert comment_fail_reasons == Counter({"comment_fetch_timeout": 1})
+
+
 def test_hydrate_shared_tiktok_catalog_post_skips_already_complete_comments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -39631,7 +40709,7 @@ def test_run_shared_account_discovery_stage_enqueues_tiktok_empty_body_transport
     assert create_calls[0]["config"]["recovery_depth"] == 1
     assert create_calls[0]["config"]["expected_total_posts"] == 4444
     assert create_calls[0]["config"]["completion_target_posts"] == 3277
-    assert create_calls[0]["max_attempts"] == 1
+    assert create_calls[0]["max_attempts"] == 3
     assert best_known_calls[0]["materialized_total_posts"] == 3277
     assert best_known_calls[0]["catalog_total_posts"] == 0
     assert best_known_calls[0]["allow_live_refresh"] is False
@@ -41062,6 +42140,62 @@ def test_run_shared_account_posts_stage_surfaces_instagram_cursor_auth_failures(
     assert exc_info.value.runtime_metadata["retrieval_meta"]["error_status_code"] == 401
 
 
+def test_run_shared_account_posts_stage_touches_heartbeat_when_progress_update_is_throttled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress_updates: list[dict[str, Any]] = []
+    heartbeat_touches: list[dict[str, Any]] = []
+
+    def fake_emit_job_progress(**kwargs: Any) -> bool:
+        progress_updates.append(kwargs)
+        return bool(kwargs.get("force"))
+
+    def fake_scrape_shared_posts_for_account(**kwargs: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        progress_cb = kwargs.get("progress_cb")
+        assert progress_cb is not None
+        progress_cb(
+            {
+                "phase": "fetch_tiktok_comment_replies_request",
+                "scraped_comments": 0,
+                "comments_upserted": 0,
+                "current_source_id": "video-1",
+            }
+        )
+        return [], {"posts_checked": 0, "persist_counters": {"posts_upserted": 0, "comments_upserted": 0}}
+
+    monkeypatch.setattr(social_repo, "_emit_job_progress", fake_emit_job_progress)
+    monkeypatch.setattr(social_repo, "_scrape_shared_posts_for_account", fake_scrape_shared_posts_for_account)
+    monkeypatch.setattr(
+        social_repo,
+        "_touch_job_heartbeat",
+        lambda job_id, **kwargs: heartbeat_touches.append({"job_id": job_id, **kwargs}) or True,
+    )
+    monkeypatch.setattr(social_repo, "_touch_shared_account_source", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_shared_account_expected_total_posts_from_config", lambda *_args, **_kwargs: 0)
+
+    posts_count, comments_count, metadata = social_repo._run_shared_account_posts_stage(
+        run_id="run-1",
+        platform="tiktok",
+        source_scope="bravo",
+        account_handle="bravotv",
+        config={
+            "stage": social_repo.SHARED_ACCOUNT_POSTS_STAGE,
+            "platform": "tiktok",
+            "source_scope": "bravo",
+            "account": "bravotv",
+            "pipeline_ingest_mode": social_repo.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE,
+        },
+        job_id="job-1",
+        worker_id="modal:test",
+    )
+
+    assert posts_count == 0
+    assert comments_count == 0
+    assert metadata["activity"]["phase"] == "shared_account_posts_end"
+    assert any(update["force"] is False for update in progress_updates)
+    assert heartbeat_touches == [{"job_id": "job-1", "worker_id": "modal:test"}]
+
+
 def test_shared_account_retry_config_updates_prefers_authenticated_frontier_for_cursor_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -41126,6 +42260,18 @@ def test_shared_account_prefers_partitioned_backfill_recovery_allows_only_single
         )
         is False
     )
+
+
+def test_shared_account_database_capacity_errors_do_not_need_discovery_recovery() -> None:
+    assert social_repo._shared_account_error_is_database_capacity(
+        "DatabaseServiceUnavailableError",
+        "connection failed",
+    )
+    assert social_repo._shared_account_error_is_database_capacity(
+        "RuntimeError",
+        "FATAL: (EMAXCONNSESSION) max clients reached in session mode",
+    )
+    assert not social_repo._shared_account_error_is_database_capacity("RuntimeError", "cursor exhausted")
 
 
 def test_resolve_social_job_stale_seconds_uses_longer_shared_stage_defaults(
@@ -42209,6 +43355,39 @@ def test_claim_next_jobs_filters_runtime_pinned_jobs_to_matching_runtime(
     assert "required_runtime_version" in sql
     assert "j.config->'required_runtime_version'" in sql or "coalesce(j.config->'required_runtime_version'" in sql
     assert "abc123def456" in str(params)
+
+
+def test_claim_next_jobs_allows_generic_modal_runtime_label_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_all(sql: str, params: list[object]):
+        captured["sql"] = sql
+        captured["params"] = list(params)
+        return []
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(social_repo, "_resolve_run_in_flight_cap", lambda: 4)
+    monkeypatch.setattr(
+        social_repo,
+        "_resolve_authoritative_catalog_runtime_version",
+        lambda **_kwargs: {
+            "modal_image": "im-fast",
+            "modal_environment": "main",
+            "modal_function": "run_social_job",
+            "execution_backend": "modal",
+            "label": "modal:main · im-fast",
+        },
+    )
+
+    social_repo._claim_next_jobs(worker_id="modal:w1", limit=1)
+
+    sql = str(captured["sql"]).lower()
+    params = list(captured["params"])
+
+    assert "lower(j.config->'required_runtime_version'->>'label') in ('modal', 'local')" in sql
+    assert params.count("modal") >= 2
 
 
 def test_claim_next_jobs_binds_run_id_before_runtime_label(monkeypatch: pytest.MonkeyPatch) -> None:
