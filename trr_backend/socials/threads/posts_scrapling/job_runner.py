@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -51,6 +53,27 @@ class ThreadsPostsScraplingCancelledError(Exception):
 
 
 ThreadsPostsScraplingCancelled = ThreadsPostsScraplingCancelledError
+
+_OPERATION_TIMEOUT_SECONDS_DEFAULT = 240.0
+_OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 30.0
+_TRANSIENT_ERROR_SNIPPETS = (
+    "too many 429",
+    "too many 500",
+    "too many 502",
+    "too many 503",
+    "too many 504",
+    "500 error responses",
+    "502 error responses",
+    "503 error responses",
+    "504 error responses",
+    "max retries exceeded",
+    "read timed out",
+    "connection aborted",
+    "connection reset",
+    "connection refused",
+    "temporarily unavailable",
+    "timeout",
+)
 
 _SENSITIVE_KEY_PARTS = (
     "api_proxy_url",
@@ -109,6 +132,37 @@ def _safe_auth_context(session: Any) -> dict[str, Any]:
         "has_sessionid": bool(raw_cookies.get("sessionid")),
         "has_csrftoken": bool(raw_cookies.get("csrftoken")),
     }
+
+
+def _resolve_operation_timeout_seconds() -> float:
+    raw_value = str(os.getenv("SOCIAL_THREADS_POSTS_SCRAPLING_OPERATION_TIMEOUT_SECONDS") or "").strip()
+    if not raw_value:
+        return _OPERATION_TIMEOUT_SECONDS_DEFAULT
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return _OPERATION_TIMEOUT_SECONDS_DEFAULT
+    if parsed <= 0:
+        return 0.0
+    return min(max(parsed, 5.0), 900.0)
+
+
+def _resolve_operation_heartbeat_interval_seconds() -> float:
+    raw_value = str(os.getenv("SOCIAL_THREADS_POSTS_SCRAPLING_HEARTBEAT_INTERVAL_SECONDS") or "").strip()
+    if not raw_value:
+        return _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT
+    return min(max(parsed, 1.0), 120.0)
+
+
+def _transient_exception_error_code(exc: BaseException) -> str | None:
+    normalized = f"{exc.__class__.__name__}: {exc}".strip().lower()
+    if any(snippet in normalized for snippet in _TRANSIENT_ERROR_SNIPPETS):
+        return "threads_posts_transient_transport_error"
+    return None
 
 
 def _raise_if_cancelled(
@@ -318,6 +372,41 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
         def _fetcher_runtime_metadata() -> dict[str, Any]:
             return _safe_runtime_metadata(dict(getattr(fetcher, "runtime_metadata", {}) or {}))
 
+        async def _await_operation_with_heartbeat(awaitable: Any, *, phase: str) -> Any:
+            nonlocal fetcher_metadata
+            task = asyncio.create_task(awaitable)
+            started_at = time.monotonic()
+            timeout_seconds = _resolve_operation_timeout_seconds()
+            heartbeat_interval_seconds = _resolve_operation_heartbeat_interval_seconds()
+            while True:
+                elapsed = time.monotonic() - started_at
+                if timeout_seconds > 0:
+                    remaining = timeout_seconds - elapsed
+                    if remaining <= 0:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                        fetcher_metadata = _fetcher_runtime_metadata()
+                        raise ThreadsPostsScraplingRuntimeError(
+                            f"Threads posts operation timed out while {phase} for @{account_handle}.",
+                            error_code=f"threads_posts_{phase}_timeout",
+                            retryable=True,
+                            runtime_metadata={
+                                **fetcher_metadata,
+                                "phase": phase,
+                                "operation_timeout_seconds": timeout_seconds,
+                            },
+                        )
+                    wait_seconds = min(heartbeat_interval_seconds, remaining)
+                else:
+                    wait_seconds = heartbeat_interval_seconds
+                done, _pending = await asyncio.wait({task}, timeout=wait_seconds)
+                if task in done:
+                    return task.result()
+                fetcher_metadata = _fetcher_runtime_metadata()
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
+
         try:
             fetcher_metadata = _fetcher_runtime_metadata()
             _raise_if_cancelled(
@@ -325,12 +414,15 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 run_id=run_id,
                 runtime_metadata={**fetcher_metadata, "auth_context": auth_metadata},
             )
-            await fetcher.warmup(account_handle)
+            await _await_operation_with_heartbeat(fetcher.warmup(account_handle), phase="warmup")
             fetcher_metadata = _fetcher_runtime_metadata()
             lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
-            result = await fetcher.fetch_posts(account_handle, max_pages=max_pages)
+            result = await _await_operation_with_heartbeat(
+                fetcher.fetch_posts(account_handle, max_pages=max_pages),
+                phase="fetch_posts",
+            )
             pages_fetched = 1
             fetcher_metadata = _fetcher_runtime_metadata()
             stop_reason = str(result.fetch_reason or fetcher_metadata.get("stop_reason") or "").strip() or None
@@ -347,7 +439,10 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                     max_pages=max_pages,
                     fast_mode=fast_mode,
                 )
-                legacy_posts = legacy_scraper.scrape(legacy_config)
+                legacy_posts = await _await_operation_with_heartbeat(
+                    asyncio.to_thread(legacy_scraper.scrape, legacy_config),
+                    phase="legacy_scraper",
+                )
                 legacy_runtime = _safe_runtime_metadata(dict(getattr(legacy_scraper, "runtime_metadata", {}) or {}))
                 legacy_runtime["fallback_to_legacy"] = True
                 fetcher_metadata = _safe_runtime_metadata(
@@ -476,9 +571,10 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
         terminal_error_message = str(exc)
     except Exception as exc:  # noqa: BLE001
         runtime_error_code = str(getattr(exc, "error_code", "") or "").strip().lower()
-        error_code = runtime_error_code or "threads_posts_scrapling_failed"
+        transient_error_code = _transient_exception_error_code(exc)
+        error_code = runtime_error_code or transient_error_code or "threads_posts_scrapling_failed"
         error_class = str(getattr(exc, "error_class", "") or exc.__class__.__name__).strip()
-        retryable = bool(getattr(exc, "retryable", False))
+        retryable = bool(getattr(exc, "retryable", False)) or bool(transient_error_code)
         attempt_count = int(job.get("attempt_count") or 1)
         max_attempts = int(job.get("max_attempts") or 1)
         can_retry = retryable and attempt_count < max_attempts
@@ -507,6 +603,7 @@ def run_threads_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | Non
                 extra={
                     "error_code": error_code,
                     "error_class": error_class,
+                    "retryable": retryable,
                 },
             ),
             last_error_code=error_code,

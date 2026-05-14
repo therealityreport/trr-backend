@@ -222,6 +222,33 @@ def _shared_catalog_comments_requested(config: Mapping[str, Any] | None) -> bool
     return any(str(task or "").strip().lower() == "comments" for task in (selected or []))
 
 
+def _shared_catalog_comment_anchor_source_ids(config: Mapping[str, Any] | None) -> tuple[str, ...]:
+    metadata = _metadata_dict(config)
+    raw_value = metadata.get("comment_anchor_source_ids")
+    if isinstance(raw_value, Mapping):
+        platform_value = None
+        for key, value in raw_value.items():
+            if str(key or "").strip().lower() in {"twitter", "x"}:
+                platform_value = value
+                break
+        raw_value = platform_value
+    if isinstance(raw_value, str):
+        candidates: Sequence[Any] = [raw_value]
+    elif isinstance(raw_value, Sequence):
+        candidates = raw_value
+    else:
+        candidates = []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        source_id = str(candidate or "").strip()
+        if not source_id or source_id in seen:
+            continue
+        seen.add(source_id)
+        normalized.append(source_id)
+    return tuple(normalized)
+
+
 def _shared_catalog_comment_limit(config: Mapping[str, Any] | None) -> int | None:
     metadata = _metadata_dict(config)
     for key in ("max_comments_per_post", "catalog_max_comments_per_post"):
@@ -691,7 +718,14 @@ def _persist_tweet_interactions(
             quote.is_quote = True
             if not getattr(quote, "quoted_tweet_id", None):
                 quote.quoted_tweet_id = tweet_id
+            should_emit_quote_progress = quote_index == 1 or quote_index % 25 == 0 or quote_index == len(quotes)
             if str(getattr(quote, "quoted_tweet_id", "") or "") != tweet_id:
+                if should_emit_quote_progress:
+                    _emit_interaction_progress(
+                        index=index,
+                        tweet_id=tweet_id,
+                        phase="filter_twitter_quotes",
+                    )
                 continue
             if not str(getattr(quote, "twitter_context_role", "") or "").strip():
                 quote.twitter_context_role = "quote"
@@ -706,7 +740,7 @@ def _persist_tweet_interactions(
             stats["quotes_fetched"] += 1
             if row:
                 stats["quotes_upserted"] += 1
-            if quote_index == 1 or quote_index % 25 == 0 or quote_index == len(quotes):
+            if should_emit_quote_progress:
                 _emit_interaction_progress(
                     index=index,
                     tweet_id=tweet_id,
@@ -894,46 +928,82 @@ def scrape_shared_twitter_posts(
     scraper = _build_scraper(deps)
     date_start, date_end, full_history_requested = _resolve_window(deps=deps, config=config)
     max_pages = _resolve_max_pages(deps=deps, config=config, full_history_requested=full_history_requested)
+    targeted_anchor_ids = _shared_catalog_comment_anchor_source_ids(config)
 
-    scrape_config = deps.scrape_config_factory(
-        query=f"from:{account_handle}",
-        date_start=date_start,
-        date_end=date_end,
-        include_replies=False,
-        include_links=True,
-        delay_seconds=0.35,
-        max_pages=max_pages,
-    )
-    posts = list(scraper.scrape(scrape_config, progress_cb=progress_cb))
-    retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
-    catalog_posts = [tweet for tweet in posts if not bool(getattr(tweet, "is_reply", False))]
-    if _catalog_seeded_fallback_needed(
-        deps=deps,
-        config=config,
-        catalog_posts=catalog_posts,
-        retrieval_meta=retrieval_meta,
+    if (
+        deps.shared_catalog_mode(config)
+        and _shared_catalog_comments_requested(config)
+        and targeted_anchor_ids
+        and deps.load_existing_catalog_posts is not None
     ):
+        retrieval_meta: dict[str, Any] = {
+            "retrieval_mode": "catalog_seeded_anchor_targets",
+            "stop_reason": "catalog_seeded_anchor_targets",
+            "catalog_seeded_anchor_source_ids": list(targeted_anchor_ids),
+            "complete": True,
+            "retryable": False,
+        }
         seeded_posts = _load_catalog_seeded_posts(
             deps=deps,
             run_id=run_id,
             account_handle=account_handle,
-            date_start=scrape_config.date_start,
-            date_end=scrape_config.date_end,
+            date_start=date_start,
+            date_end=date_end,
             config=config,
             retrieval_meta=retrieval_meta,
             progress_cb=progress_cb,
         )
+        posts = list(seeded_posts)
+        catalog_posts = list(seeded_posts)
+        retrieval_meta["catalog_seeded_anchor_source_ids"] = list(targeted_anchor_ids)
         if seeded_posts:
-            posts = seeded_posts
-            catalog_posts = seeded_posts
+            retrieval_meta["catalog_seeded_targeted_anchors"] = True
+            retrieval_meta["retrieval_mode"] = "catalog_seeded_anchor_targets"
+            retrieval_meta["stop_reason"] = "catalog_seeded_anchor_targets"
         elif retrieval_meta.get("catalog_seeded_fallback_checked"):
-            retrieval_meta["catalog_seeded_empty_window"] = True
-            retrieval_meta["retrieval_mode"] = "catalog_seeded_empty_window"
-            retrieval_meta["stop_reason"] = "catalog_seeded_empty_window"
-            retrieval_meta["error_code"] = None
-            retrieval_meta["error_class"] = None
-            retrieval_meta["retryable"] = False
-            retrieval_meta["complete"] = True
+            retrieval_meta["catalog_seeded_empty_anchor_targets"] = True
+            retrieval_meta["retrieval_mode"] = "catalog_seeded_empty_anchor_targets"
+            retrieval_meta["stop_reason"] = "catalog_seeded_empty_anchor_targets"
+    else:
+        scrape_config = deps.scrape_config_factory(
+            query=f"from:{account_handle}",
+            date_start=date_start,
+            date_end=date_end,
+            include_replies=False,
+            include_links=True,
+            delay_seconds=0.35,
+            max_pages=max_pages,
+        )
+        posts = list(scraper.scrape(scrape_config, progress_cb=progress_cb))
+        retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+        catalog_posts = [tweet for tweet in posts if not bool(getattr(tweet, "is_reply", False))]
+        if _catalog_seeded_fallback_needed(
+            deps=deps,
+            config=config,
+            catalog_posts=catalog_posts,
+            retrieval_meta=retrieval_meta,
+        ):
+            seeded_posts = _load_catalog_seeded_posts(
+                deps=deps,
+                run_id=run_id,
+                account_handle=account_handle,
+                date_start=scrape_config.date_start,
+                date_end=scrape_config.date_end,
+                config=config,
+                retrieval_meta=retrieval_meta,
+                progress_cb=progress_cb,
+            )
+            if seeded_posts:
+                posts = seeded_posts
+                catalog_posts = seeded_posts
+            elif retrieval_meta.get("catalog_seeded_fallback_checked"):
+                retrieval_meta["catalog_seeded_empty_window"] = True
+                retrieval_meta["retrieval_mode"] = "catalog_seeded_empty_window"
+                retrieval_meta["stop_reason"] = "catalog_seeded_empty_window"
+                retrieval_meta["error_code"] = None
+                retrieval_meta["error_class"] = None
+                retrieval_meta["retryable"] = False
+                retrieval_meta["complete"] = True
 
     if deps.shared_catalog_mode(config):
         rows = _persist_shared_catalog_posts(

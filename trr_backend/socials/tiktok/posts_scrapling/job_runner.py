@@ -7,7 +7,9 @@ Keeps yt-dlp as independent co-primary — this lane is an alternative path.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -56,6 +58,33 @@ class TikTokPostsScraplingCancelledError(Exception):
 
 
 TikTokPostsScraplingCancelled = TikTokPostsScraplingCancelledError
+
+_OPERATION_TIMEOUT_SECONDS_DEFAULT = 240.0
+_OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 30.0
+
+
+def _resolve_operation_timeout_seconds() -> float:
+    raw_value = str(os.getenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_OPERATION_TIMEOUT_SECONDS") or "").strip()
+    if not raw_value:
+        return _OPERATION_TIMEOUT_SECONDS_DEFAULT
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return _OPERATION_TIMEOUT_SECONDS_DEFAULT
+    if parsed <= 0:
+        return 0.0
+    return min(max(parsed, 5.0), 900.0)
+
+
+def _resolve_operation_heartbeat_interval_seconds() -> float:
+    raw_value = str(os.getenv("SOCIAL_TIKTOK_POSTS_SCRAPLING_HEARTBEAT_INTERVAL_SECONDS") or "").strip()
+    if not raw_value:
+        return _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT
+    return min(max(parsed, 1.0), 120.0)
 
 
 def _raise_if_cancelled(
@@ -190,13 +219,51 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
         def _fetcher_runtime_metadata() -> dict[str, Any]:
             return dict(getattr(fetcher, "runtime_metadata", {}) or {})
 
+        async def _await_operation_with_heartbeat(awaitable: Any, *, phase: str) -> Any:
+            nonlocal fetcher_metadata
+            task = asyncio.create_task(awaitable)
+            started_at = time.monotonic()
+            timeout_seconds = _resolve_operation_timeout_seconds()
+            heartbeat_interval_seconds = _resolve_operation_heartbeat_interval_seconds()
+            while True:
+                elapsed = time.monotonic() - started_at
+                if timeout_seconds > 0:
+                    remaining = timeout_seconds - elapsed
+                    if remaining <= 0:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                        fetcher_metadata = _fetcher_runtime_metadata()
+                        raise TikTokPostsScraplingRuntimeError(
+                            f"TikTok posts operation timed out while {phase} for @{account_handle}.",
+                            error_code=f"tiktok_posts_{phase}_timeout",
+                            retryable=True,
+                            runtime_metadata={
+                                **fetcher_metadata,
+                                "phase": phase,
+                                "operation_timeout_seconds": timeout_seconds,
+                            },
+                        )
+                    wait_seconds = min(heartbeat_interval_seconds, remaining)
+                else:
+                    wait_seconds = heartbeat_interval_seconds
+                done, _pending = await asyncio.wait({task}, timeout=wait_seconds)
+                if task in done:
+                    return task.result()
+                fetcher_metadata = _fetcher_runtime_metadata()
+                lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
+                _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
+
         try:
-            await fetcher.warmup(account_handle)
+            await _await_operation_with_heartbeat(fetcher.warmup(account_handle), phase="warmup")
             fetcher_metadata = _fetcher_runtime_metadata()
             lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
-            sec_uid = await fetcher.resolve_sec_uid(account_handle)
+            sec_uid = await _await_operation_with_heartbeat(
+                fetcher.resolve_sec_uid(account_handle),
+                phase="resolve_sec_uid",
+            )
             fetcher_metadata = _fetcher_runtime_metadata()
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
             cursor: str | None = None
@@ -205,7 +272,10 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
                 fetcher_metadata = _fetcher_runtime_metadata()
                 _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
-                result = await fetcher.fetch_posts_page(sec_uid=sec_uid, cursor=cursor)
+                result = await _await_operation_with_heartbeat(
+                    fetcher.fetch_posts_page(sec_uid=sec_uid, cursor=cursor),
+                    phase="fetch_posts_page",
+                )
                 fetcher_metadata = _fetcher_runtime_metadata()
                 last_cursor = str(result.cursor or "").strip() or None
 

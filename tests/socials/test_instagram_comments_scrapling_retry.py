@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -2926,6 +2926,36 @@ def test_advisory_api_pacing_stops_when_cooldown_exceeds_deadline(tmp_path: Path
     assert result["error"] is None
     sleep_mock.assert_called_once()
     assert sleep_mock.call_args.args[0] == pytest.approx(0.01, abs=0.01)
+
+
+def test_advisory_api_pacing_uses_social_control_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+
+    calls: list[tuple[str, str]] = []
+
+    class FakeCursor:
+        def execute(self, _sql: str, _params: Any = None) -> None:
+            return None
+
+    @contextmanager
+    def fake_db_connection(*, label: str, pool_name: str = "default"):
+        calls.append((label, pool_name))
+        yield object()
+
+    @contextmanager
+    def fake_db_cursor(*, conn: Any = None, label: str = "write-cursor"):
+        del conn, label
+        yield FakeCursor()
+
+    monkeypatch.setattr(pg, "db_connection", fake_db_connection)
+    monkeypatch.setattr(pg, "db_cursor", fake_db_cursor)
+
+    result = _try_advisory_lock_pace(key="advisory-pool", delay_seconds=0.0, deadline=None)
+
+    assert result["acquired"] is True
+    assert result["paced"] is True
+    assert result["error"] is None
+    assert calls == [("instagram-comments-rate-limit-advisory", "social_control")]
 
 
 # ---------------------------------------------------------------------------

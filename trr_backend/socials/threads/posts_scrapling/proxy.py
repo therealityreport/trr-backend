@@ -47,8 +47,13 @@ def select_threads_posts_proxy() -> ThreadsPostsProxyConfig | None:
         )
 
     provider = str(os.getenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER") or "").strip().lower()
+    if provider in {"0", "false", "none", "off", "disabled"}:
+        return None
+    decodo_creds = _decodo_env()
+    if not provider and decodo_creds:
+        provider = "decodo"
     if provider in {"decodo", "smartproxy"}:
-        creds = _decodo_env()
+        creds = decodo_creds
         if creds:
             username, password, gateway = creds
             browser_dict = {

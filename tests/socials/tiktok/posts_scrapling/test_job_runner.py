@@ -11,6 +11,7 @@ from trr_backend.socials.tiktok.posts_scrapling.persistence import PersistedTikT
 
 class _FakeLifecycle:
     def __init__(self) -> None:
+        self.heartbeat_calls: list[dict[str, Any]] = []
         self.progress_calls: list[dict[str, Any]] = []
         self.finish_calls: list[dict[str, Any]] = []
         self.finalize_calls: list[str] = []
@@ -19,7 +20,8 @@ class _FakeLifecycle:
     def new_job_progress_state(self) -> dict[str, Any]:
         return {}
 
-    def touch_job_heartbeat(self, *_args, **_kwargs) -> bool:
+    def touch_job_heartbeat(self, *args, **kwargs) -> bool:
+        self.heartbeat_calls.append({"args": args, "kwargs": kwargs})
         return True
 
     def emit_job_progress(self, **kwargs) -> bool:
@@ -233,6 +235,55 @@ def test_tiktok_job_runner_records_retryable_error_metadata(
         "phase": "failed",
         "last_progress_at": "2026-05-05T00:00:00+00:00",
     }
+
+
+def test_tiktok_job_runner_times_out_stalled_fetch_with_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    import asyncio
+
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    class _SlowFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 3}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def resolve_sec_uid(self, _account_handle: str) -> str:
+            return "SEC_UID"
+
+        async def fetch_posts_page(self, *, sec_uid: str, cursor: str | None = None) -> SimpleNamespace:
+            del sec_uid, cursor
+            await asyncio.sleep(10)
+            raise AssertionError("fetch should be cancelled by the operation timeout")
+
+        async def aclose(self) -> None:
+            return None
+
+    _install_common_fakes(monkeypatch, jr, fetcher=_SlowFetcher())
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+    monkeypatch.setattr(jr, "_resolve_operation_timeout_seconds", lambda: 0.01)
+    monkeypatch.setattr(jr, "_resolve_operation_heartbeat_interval_seconds", lambda: 0.001)
+
+    jr.run_tiktok_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "run-1",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "bravotv"},
+        },
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    metadata = finish["metadata"]
+    assert finish["status"] == "retrying"
+    assert finish["last_error_code"] == "tiktok_posts_fetch_posts_page_timeout"
+    assert metadata["runtime_metadata"]["phase"] == "fetch_posts_page"
+    assert fake_lifecycle.heartbeat_calls
 
 
 def test_tiktok_job_runner_records_cancelled_job_metadata(

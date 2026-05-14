@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -914,7 +915,33 @@ def _shared_instagram_account_lock_wait_seconds() -> float:
     return 15.0
 
 
-def _shared_instagram_account_execution(account_handle: str):
+def _shared_instagram_account_lock_heartbeat(
+    progress_cb: Callable[[dict[str, Any]], None] | None,
+) -> Callable[[dict[str, Any]], None] | None:
+    if progress_cb is None:
+        return None
+
+    def _emit(payload: dict[str, Any]) -> None:
+        progress_cb(
+            {
+                "phase": "account_lock_wait",
+                "pages_scanned": 0,
+                "posts_checked": 0,
+                "matched_posts": 0,
+                "saved_posts": 0,
+                **payload,
+            }
+        )
+
+    return _emit
+
+
+@contextmanager
+def _shared_instagram_account_execution(
+    account_handle: str,
+    *,
+    heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
+):
     from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 
     browser_sessions = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
@@ -928,7 +955,7 @@ def _shared_instagram_account_execution(account_handle: str):
         # long-running scrapes do not trip idle_in_transaction_session_timeout.
         # Retry with backoff instead of failing immediately, so concurrent jobs
         # for the same account wait for the lock rather than all failing.
-        with pg.db_read_connection(label=lock_label) as conn:
+        with pg.db_read_connection(label=lock_label, pool_name="social_control") as conn:
             max_lock_attempts = _shared_instagram_account_lock_max_attempts()
             wait_seconds = _shared_instagram_account_lock_wait_seconds()
             lock_acquired = False
@@ -946,6 +973,25 @@ def _shared_instagram_account_execution(account_handle: str):
                     lock_acquired = True
                     break
                 if attempt < max_lock_attempts - 1:
+                    if heartbeat_cb is not None:
+                        try:
+                            heartbeat_cb(
+                                {
+                                    "phase": "account_lock_wait",
+                                    "account": resolved_account,
+                                    "lock_key": lock_key,
+                                    "lock_attempt": attempt + 1,
+                                    "lock_max_attempts": max_lock_attempts,
+                                    "lock_wait_seconds": wait_seconds,
+                                }
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "[instagram-account-lock] heartbeat callback failed for account=%s lock=%s",
+                                resolved_account,
+                                lock_key,
+                                exc_info=True,
+                            )
                     logger.info(
                         "[instagram-account-lock] lock busy, retrying in %.0fs (attempt %d/%d) account=%s",
                         wait_seconds,
@@ -966,6 +1012,22 @@ def _shared_instagram_account_execution(account_handle: str):
                     },
                 )
             logger.info("[instagram-account-lock] acquired account=%s lock=%s", resolved_account, lock_key)
+            if heartbeat_cb is not None:
+                try:
+                    heartbeat_cb(
+                        {
+                            "phase": "account_lock_acquired",
+                            "account": resolved_account,
+                            "lock_key": lock_key,
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[instagram-account-lock] acquired heartbeat callback failed for account=%s lock=%s",
+                        resolved_account,
+                        lock_key,
+                        exc_info=True,
+                    )
             try:
                 yield resolved_account
             finally:
@@ -1043,7 +1105,11 @@ def _discover_instagram_cursor_partitions(
         "_fetch_shared_instagram_graphql_page",
         _fetch_shared_instagram_graphql_page,
     )
-    with _context_manager_from_callable(account_execution, account_handle):
+    with _context_manager_from_callable(
+        account_execution,
+        account_handle,
+        heartbeat_cb=_shared_instagram_account_lock_heartbeat(progress_cb),
+    ):
         public_scraper = build_scraper(browser_account_id=account_handle)
         auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
         # Avoid the public web_profile_info endpoint here; on Modal it frequently
@@ -1234,7 +1300,11 @@ def _scrape_shared_instagram_posts_partitioned(
         "_fetch_shared_instagram_graphql_page",
         _fetch_shared_instagram_graphql_page,
     )
-    with _context_manager_from_callable(account_execution, account_handle):
+    with _context_manager_from_callable(
+        account_execution,
+        account_handle,
+        heartbeat_cb=_shared_instagram_account_lock_heartbeat(progress_cb),
+    ):
         public_scraper = build_scraper(browser_account_id=account_handle)
         auth_allowed, _auth_reason = auth_validation(config)
         auth_scraper = build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
@@ -1644,7 +1714,11 @@ def _scrape_shared_instagram_post_details_refresh(
     stale_metadata_age = _instagram_detail_refresh_stale_metadata_age(config)
     write_batch_size = _instagram_detail_refresh_write_batch_size(config)
     media_followups_enabled = not dry_run and not bool(config.get("details_refresh_skip_media_followups"))
-    with _context_manager_from_callable(account_execution, account_handle):
+    with _context_manager_from_callable(
+        account_execution,
+        account_handle,
+        heartbeat_cb=_shared_instagram_account_lock_heartbeat(progress_cb),
+    ):
         auth_allowed, _auth_reason = auth_validation(config)
         scraper = (
             build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
@@ -2161,7 +2235,11 @@ def _scrape_shared_instagram_posts(
         _shared_instagram_frontier_auth_validation,
     )
     upsert_instagram_post = _room_callable("_upsert_instagram_post", _upsert_instagram_post)
-    with _context_manager_from_callable(account_execution, account_handle):
+    with _context_manager_from_callable(
+        account_execution,
+        account_handle,
+        heartbeat_cb=_shared_instagram_account_lock_heartbeat(progress_cb),
+    ):
         auth_allowed, _auth_reason = auth_validation(config)
         scraper = (
             build_scraper(authenticated=True, browser_account_id=account_handle) if auth_allowed else None
@@ -2269,6 +2347,7 @@ _LOCAL_ROOM_NAMES = {
     "_shared_instagram_account_lock_max_attempts",
     "_shared_instagram_account_lock_wait_seconds",
     "_shared_instagram_account_execution",
+    "_shared_instagram_account_lock_heartbeat",
     "_fetch_shared_instagram_graphql_posts_page",
     "_discover_instagram_cursor_partitions",
     "_scrape_shared_instagram_posts_partitioned",
@@ -2300,6 +2379,7 @@ __all__ = [
     "_shared_instagram_account_lock_max_attempts",
     "_shared_instagram_account_lock_wait_seconds",
     "_shared_instagram_account_execution",
+    "_shared_instagram_account_lock_heartbeat",
     "_fetch_shared_instagram_graphql_posts_page",
     "_discover_instagram_cursor_partitions",
     "_scrape_shared_instagram_posts_partitioned",

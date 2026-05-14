@@ -44,19 +44,36 @@ from trr_backend.socials.instagram.constants import (
     PROFILE_INFO_URL as IG_PROFILE_INFO_URL,
 )
 from trr_backend.socials.instagram.constants import (
+    PROFILE_PAGE_CONTENT_DOC_IDS as IG_PROFILE_PAGE_CONTENT_DOC_IDS,
+)
+from trr_backend.socials.instagram.constants import (
+    PROFILE_PAGE_CONTENT_FRIENDLY_NAME as IG_PROFILE_PAGE_CONTENT_FRIENDLY_NAME,
+)
+from trr_backend.socials.instagram.constants import (
+    PROFILE_PAGE_CONTENT_ROOT_FIELD_NAME as IG_PROFILE_PAGE_CONTENT_ROOT_FIELD_NAME,
+)
+from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_DOC_IDS as IG_PROFILE_POSTS_DOC_IDS,
 )
 from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_FAST_PAGE_SIZE as IG_PROFILE_POSTS_FAST_PAGE_SIZE,
 )
 from trr_backend.socials.instagram.constants import (
+    PROFILE_POSTS_FRIENDLY_NAME as IG_PROFILE_POSTS_FRIENDLY_NAME,
+)
+from trr_backend.socials.instagram.constants import (
     PROFILE_POSTS_PAGE_SIZE as IG_PROFILE_POSTS_PAGE_SIZE,
 )
 from trr_backend.socials.instagram.constants import (
+    PROFILE_POSTS_ROOT_FIELD_NAME as IG_PROFILE_POSTS_ROOT_FIELD_NAME,
+)
+from trr_backend.socials.instagram.constants import (
+    QUERY_TYPE_GRAPHQL_PROFILE_PAGE_CONTENT,
     QUERY_TYPE_GRAPHQL_PROFILE_POSTS,
     QUERY_TYPE_LEGACY,
     QUERY_TYPE_PROFILE_INFO,
     resolve_comment_sort_order,
+    resolve_profile_page_content_doc_ids,
 )
 from trr_backend.socials.instagram.constants import (
     WEB_X_ASBD_ID as IG_WEB_X_ASBD_ID,
@@ -384,7 +401,12 @@ class InstagramScraper:
     POST_INFO_URL = IG_POST_INFO_URL
     COMMENTS_URL = IG_COMMENTS_URL
     COMMENT_REPLIES_URL = IG_COMMENT_REPLIES_URL
+    PROFILE_PAGE_CONTENT_DOC_IDS = IG_PROFILE_PAGE_CONTENT_DOC_IDS
+    PROFILE_PAGE_CONTENT_FRIENDLY_NAME = IG_PROFILE_PAGE_CONTENT_FRIENDLY_NAME
+    PROFILE_PAGE_CONTENT_ROOT_FIELD_NAME = IG_PROFILE_PAGE_CONTENT_ROOT_FIELD_NAME
     PROFILE_POSTS_DOC_IDS = IG_PROFILE_POSTS_DOC_IDS
+    PROFILE_POSTS_FRIENDLY_NAME = IG_PROFILE_POSTS_FRIENDLY_NAME
+    PROFILE_POSTS_ROOT_FIELD_NAME = IG_PROFILE_POSTS_ROOT_FIELD_NAME
     WEB_X_ASBD_ID = IG_WEB_X_ASBD_ID
     PROFILE_POSTS_PAGE_SIZE = IG_PROFILE_POSTS_PAGE_SIZE
     PROFILE_POSTS_FAST_PAGE_SIZE = IG_PROFILE_POSTS_FAST_PAGE_SIZE
@@ -393,6 +415,7 @@ class InstagramScraper:
     _PROFILE_PAGE_SPIN_R_RE = re.compile(r'"__spin_r":(?P<token>\d+)')
     _PROFILE_PAGE_SPIN_B_RE = re.compile(r'"__spin_b":"(?P<token>[^"]+)"')
     _PROFILE_PAGE_SPIN_T_RE = re.compile(r'"__spin_t":(?P<token>\d+)')
+    _PROFILE_PAGE_S_RE = re.compile(r'"__s":"(?P<token>[^"]+)"')
     _PROFILE_PAGE_HSI_RE = re.compile(r'"hsi":"?(?P<token>\d+)"?')
     _PROFILE_PAGE_HS_RE = re.compile(r'"(?:haste_session|__hs)":"(?P<token>[^"]+)"')
 
@@ -865,6 +888,186 @@ class InstagramScraper:
                 ids.append(doc_id)
         return ids
 
+    def _profile_page_content_doc_ids(self) -> list[str]:
+        override = (os.getenv("INSTAGRAM_PROFILE_PAGE_CONTENT_DOC_ID") or "").strip()
+        ids: list[str] = []
+        if override:
+            ids.append(override)
+        for doc_id in resolve_profile_page_content_doc_ids():
+            if doc_id not in ids:
+                ids.append(doc_id)
+        return ids
+
+    @staticmethod
+    def _user_dict_from_profile_content_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping):
+            return {}
+        user = data.get("user")
+        if isinstance(user, Mapping):
+            return dict(user)
+        root_user = data.get(InstagramScraper.PROFILE_PAGE_CONTENT_ROOT_FIELD_NAME)
+        if isinstance(root_user, Mapping):
+            return dict(root_user)
+        return {}
+
+    @staticmethod
+    def _profile_user_id_from_payload(payload: Mapping[str, Any] | None) -> str | None:
+        user = InstagramScraper._user_dict_from_profile_content_payload(payload)
+        user_id = str(user.get("id") or user.get("pk") or "").strip()
+        return user_id or None
+
+    @staticmethod
+    def _profile_user_id_from_posts_payload(payload: Mapping[str, Any] | None) -> str | None:
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        connection = data.get(InstagramScraper.PROFILE_POSTS_ROOT_FIELD_NAME) if isinstance(data, Mapping) else None
+        edges = connection.get("edges") if isinstance(connection, Mapping) else None
+        if not isinstance(edges, list):
+            return None
+        for edge in edges:
+            node = edge.get("node") if isinstance(edge, Mapping) else None
+            if not isinstance(node, Mapping):
+                continue
+            for value in (
+                node.get("user"),
+                node.get("owner"),
+                node.get("owner_id"),
+                node.get("ownerId"),
+            ):
+                if isinstance(value, Mapping):
+                    user_id = str(value.get("id") or value.get("pk") or "").strip()
+                else:
+                    user_id = str(value or "").strip()
+                if user_id:
+                    return user_id
+        return None
+
+    def resolve_profile_user_id_graphql(
+        self,
+        username: str,
+        *,
+        delay: float = 0.0,
+        request_timeout: tuple[int, int] | float | None = None,
+    ) -> str | None:
+        """Resolve an Instagram numeric user id using the profile-posts GraphQL call from the web page."""
+        posts_payload = self.fetch_posts_graphql(
+            username,
+            None,
+            delay,
+            request_timeout=request_timeout,
+            fast_mode=True,
+            allow_browser_fallback=False,
+            page_size=12,
+        )
+        return self._profile_user_id_from_posts_payload(posts_payload)
+
+    def fetch_profile_page_content_graphql(
+        self,
+        username: str,
+        user_id: str | None = None,
+        delay: float = 0.0,
+        *,
+        request_timeout: tuple[int, int] | float | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch profile metadata using the PolarisProfilePageContentQuery shape captured from Instagram web."""
+        self._ensure_active_identity()
+        self._rate_controller.before_query(
+            QUERY_TYPE_GRAPHQL_PROFILE_PAGE_CONTENT,
+            base_delay=delay,
+            fast_mode=True,
+        )
+        timeout = request_timeout or self.request_timeout
+        resolved_user_id = str(user_id or "").strip() or self.resolve_profile_user_id_graphql(
+            username,
+            delay=0.0,
+            request_timeout=timeout,
+        )
+        if not resolved_user_id:
+            self.last_retrieval_meta.update(
+                {
+                    "profile_page_content_error": "missing_profile_user_id",
+                    "profile_page_content_transport": "requests_enriched",
+                }
+            )
+            return None
+
+        page_context = self._warm_profile_request_context(username, timeout=timeout)
+        request_cookies = self._request_cookies()
+        viewer_id = str(request_cookies.get("ds_user_id") or self.cookies.get("ds_user_id") or "0")
+        variables = {
+            "enable_integrity_filters": True,
+            "id": resolved_user_id,
+            "__relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider": True,
+            "__relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider": False,
+            "__relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider": False,
+            "__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider": True,
+        }
+        data = {
+            "av": viewer_id,
+            "__d": "www",
+            "__user": viewer_id,
+            "__a": "1",
+            "__req": "1",
+            "__comet_req": "7",
+            "fb_api_caller_class": "RelayModern",
+            "fb_api_req_friendly_name": self.PROFILE_PAGE_CONTENT_FRIENDLY_NAME,
+            "variables": json.dumps(variables),
+            "server_timestamps": "true",
+        }
+        data.update(self._graphql_form_runtime_fields(page_context=page_context, request_cookies=request_cookies))
+
+        headers = self._get_headers(f"https://www.instagram.com/{username}/")
+        headers["content-type"] = "application/x-www-form-urlencoded"
+        headers["x-fb-friendly-name"] = self.PROFILE_PAGE_CONTENT_FRIENDLY_NAME
+        headers["x-root-field-name"] = self.PROFILE_PAGE_CONTENT_ROOT_FIELD_NAME
+        headers["x-asbd-id"] = str(os.getenv("INSTAGRAM_WEB_X_ASBD_ID") or self.WEB_X_ASBD_ID)
+        headers["x-ig-max-touch-points"] = "0"
+        lsd_token = str(page_context.get("lsd") or request_cookies.get("lsd") or "").strip()
+        if lsd_token:
+            headers["x-fb-lsd"] = lsd_token
+        bloks_version = str(
+            os.getenv("INSTAGRAM_WEB_BLOKS_VERSION_ID") or page_context.get("bloks_version") or ""
+        ).strip()
+        if bloks_version:
+            headers["x-bloks-version-id"] = bloks_version
+
+        for doc_id in self._profile_page_content_doc_ids():
+            data["doc_id"] = doc_id
+            try:
+                payload = self._request_client.post_form_json(
+                    self.GRAPHQL_URL,
+                    query_type=QUERY_TYPE_GRAPHQL_PROFILE_PAGE_CONTENT,
+                    headers=headers,
+                    cookies=request_cookies,
+                    data=data,
+                    timeout=timeout,
+                    sender=self._post,
+                )
+            except (InstagramRequestFailure, requests.exceptions.RequestException) as exc:
+                self.last_retrieval_meta.update(
+                    {
+                        "profile_page_content_error": str(getattr(exc, "error_code", "") or exc),
+                        "profile_page_content_doc_id": doc_id,
+                        "profile_page_content_transport": "requests_enriched",
+                    }
+                )
+                continue
+
+            user = self._user_dict_from_profile_content_payload(payload)
+            if user:
+                data_payload = dict(payload.get("data") or {})
+                data_payload.setdefault("user", user)
+                payload = {**payload, "data": data_payload}
+                self.last_retrieval_meta.update(
+                    {
+                        "profile_page_content_user_id": str(user.get("id") or user.get("pk") or resolved_user_id),
+                        "profile_page_content_doc_id": doc_id,
+                        "profile_page_content_transport": "requests_enriched",
+                    }
+                )
+                return payload
+        return None
+
     def _resolve_graphql_cursor_retry_attempts(self, cursor: str | None) -> int:
         default_attempts = 3 if cursor else 2
         raw = (os.getenv("SOCIAL_INSTAGRAM_CURSOR_RETRY_ATTEMPTS") or "").strip()
@@ -1044,7 +1247,7 @@ class InstagramScraper:
                           __req: "1",
                           __comet_req: "7",
                           fb_api_caller_class: "RelayModern",
-                          fb_api_req_friendly_name: "PolarisProfilePostsTabContentQuery_connection",
+                          fb_api_req_friendly_name: "PolarisProfilePostsQuery",
                           variables: JSON.stringify({
                             after: cursor,
                             before: null,
@@ -1057,7 +1260,9 @@ class InstagramScraper:
                             },
                             first: count,
                             last: null,
-                            username
+                            username,
+                            "__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider": true,
+                            "__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider": false
                           }),
                           server_timestamps: "true",
                           doc_id: docId,
@@ -1068,8 +1273,9 @@ class InstagramScraper:
                           credentials: "include",
                           headers: {
                             "content-type": "application/x-www-form-urlencoded",
-                            "x-fb-friendly-name": "PolarisProfilePostsTabContentQuery_connection",
+                            "x-fb-friendly-name": "PolarisProfilePostsQuery",
                             "x-asbd-id": asbdId,
+                            "x-root-field-name": "xdt_api__v1__feed__user_timeline_graphql_connection",
                             ...(lsd ? { "x-fb-lsd": lsd } : {})
                           },
                           body: form.toString()
@@ -1553,6 +1759,9 @@ class InstagramScraper:
         spin_t_match = self._PROFILE_PAGE_SPIN_T_RE.search(html)
         if spin_t_match:
             context["spin_t"] = str(spin_t_match.group("token") or "").strip()
+        web_session_match = self._PROFILE_PAGE_S_RE.search(html)
+        if web_session_match:
+            context["web_session_id"] = str(web_session_match.group("token") or "").strip()
         hsi_match = self._PROFILE_PAGE_HSI_RE.search(html)
         if hsi_match:
             context["hsi"] = str(hsi_match.group("token") or "").strip()
@@ -2747,6 +2956,8 @@ class InstagramScraper:
                 "first": resolved_page_size,
                 "last": None,
                 "username": username,
+                "__relay_internal__pv__PolarisImmersiveFeedChainingEnabledrelayprovider": True,
+                "__relay_internal__pv__PolarisAIGMAccountLabelEnabledrelayprovider": False,
             }
 
             data = {
@@ -2757,7 +2968,7 @@ class InstagramScraper:
                 "__req": "1",
                 "__comet_req": "7",
                 "fb_api_caller_class": "RelayModern",
-                "fb_api_req_friendly_name": "PolarisProfilePostsTabContentQuery_connection",
+                "fb_api_req_friendly_name": self.PROFILE_POSTS_FRIENDLY_NAME,
                 "variables": json.dumps(variables),
                 "server_timestamps": "true",
             }
@@ -2765,7 +2976,8 @@ class InstagramScraper:
 
             headers = self._get_headers(f"https://www.instagram.com/{username}/")
             headers["content-type"] = "application/x-www-form-urlencoded"
-            headers["x-fb-friendly-name"] = "PolarisProfilePostsTabContentQuery_connection"
+            headers["x-fb-friendly-name"] = self.PROFILE_POSTS_FRIENDLY_NAME
+            headers["x-root-field-name"] = self.PROFILE_POSTS_ROOT_FIELD_NAME
             headers["x-asbd-id"] = str(os.getenv("INSTAGRAM_WEB_X_ASBD_ID") or self.WEB_X_ASBD_ID)
             lsd_token = str(page_context.get("lsd") or request_cookies.get("lsd") or "").strip()
             if lsd_token:
@@ -2789,7 +3001,7 @@ class InstagramScraper:
                         timeout=timeout,
                         sender=self._post,
                     )
-                    connection = payload.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+                    connection = payload.get("data", {}).get(self.PROFILE_POSTS_ROOT_FIELD_NAME, {})
                     if connection:
                         self.last_retrieval_meta["graphql_cursor"] = str(cursor or "").strip() or None
                         self.last_retrieval_meta["retrieval_mode"] = "graphql_requests_enriched"

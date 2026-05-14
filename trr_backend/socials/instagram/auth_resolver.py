@@ -438,7 +438,7 @@ def _validation_username(session_account_id: str | None, *, caller_context: str 
     normalized_context = str(caller_context or "").strip().lstrip("@")
     if _looks_like_handle(normalized_context):
         return normalized_context.lower()
-    return (session_account_id or "bravotv").lower()
+    return str(session_account_id or "").strip().lstrip("@").lower()
 
 
 def _validate_cookies_via_graphql(

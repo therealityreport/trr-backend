@@ -25,7 +25,7 @@ def is_queue_enabled() -> bool:
 
 
 def get_worker_auth_capabilities() -> dict[str, Any]:
-    instagram_cookies = _core._load_instagram_cookies()
+    instagram_cookies = _core._load_instagram_cookies_from_sources()
     tiktok_cookies = _core._load_tiktok_cookies()
     twitter_cookies, twitter_bearer = _core._load_twitter_auth()
     twikit_creds = _core._load_twikit_credentials(twitter_cookies)

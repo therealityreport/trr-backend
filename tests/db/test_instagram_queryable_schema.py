@@ -6,6 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = REPO_ROOT / "supabase/migrations/20260428145222_instagram_queryable_profile_schema.sql"
 COMMENT_PHASE_MIGRATION = REPO_ROOT / "supabase/migrations/20260505173000_instagram_comment_api_phase_metadata.sql"
+SNAPSHOT_MIGRATION = REPO_ROOT / "supabase/migrations/20260513123000_socialblade_following_snapshots.sql"
 
 
 def _read_sql() -> str:
@@ -22,6 +23,14 @@ def _read_comment_phase_sql() -> str:
 
 def _normalized_comment_phase_sql() -> str:
     return re.sub(r"\s+", " ", _read_comment_phase_sql().lower())
+
+
+def _read_snapshot_sql() -> str:
+    return SNAPSHOT_MIGRATION.read_text(encoding="utf-8")
+
+
+def _normalized_snapshot_sql() -> str:
+    return re.sub(r"\s+", " ", _read_snapshot_sql().lower())
 
 
 def _table_body(table_name: str) -> str:
@@ -175,6 +184,39 @@ def test_new_profile_raw_tables_are_service_role_only() -> None:
         sql,
     )
     assert "service-role-only" in sql
+
+
+def test_socialblade_and_following_snapshot_tables_are_service_role_only() -> None:
+    sql = _normalized_snapshot_sql()
+
+    for table in (
+        "pipeline.socialblade_growth_snapshots",
+        "social.instagram_profile_following_snapshots",
+        "social.instagram_profile_relationship_snapshot_items",
+    ):
+        assert f"create table if not exists {table}" in sql
+        assert f"alter table {table} enable row level security;" in sql
+        assert table in re.search(
+            r"grant all privileges on table (?P<tables>.*?) to service_role;",
+            sql,
+        ).group("tables")
+        assert table in re.search(
+            r"revoke all on table (?P<tables>.*?) from public, anon, authenticated;",
+            sql,
+        ).group("tables")
+
+    assert "source_is_complete boolean not null default false" in sql
+    assert "is_present boolean not null" in sql
+    assert "socialblade_growth_snapshots_platform_account_scraped_idx" in sql
+    assert "instagram_profile_following_snapshots_owner_observed_idx" in sql
+    assert "instagram_relationship_snapshot_items_snapshot_present_rank_idx" in sql
+
+
+def test_snapshot_migration_does_not_seed_account_source_data() -> None:
+    sql = _normalized_snapshot_sql()
+
+    assert "insert into social.shared_account_sources" not in sql
+    assert "update social.shared_account_sources" not in sql
 
 
 def test_comment_alignment_columns_and_indexes_are_guarded() -> None:

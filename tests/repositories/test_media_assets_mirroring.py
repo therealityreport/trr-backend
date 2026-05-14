@@ -322,7 +322,19 @@ def test_download_and_upload_redacts_signed_instagram_cdn_urls() -> None:
 
 def test_is_retryable_mirror_reason_strips_nested_prefixes() -> None:
     assert social_repo._is_retryable_mirror_reason("download_failed:ytdlp_fallback_failed:http_503") is True  # noqa: SLF001
+    assert social_repo._is_retryable_mirror_reason("media[0]:download_failed:http_500") is True  # noqa: SLF001
+    assert social_repo._is_retryable_mirror_reason("thumbnail:download_failed:http_502") is True  # noqa: SLF001
     assert social_repo._is_retryable_mirror_reason("invalid_source_url") is False  # noqa: SLF001
+
+
+def test_classify_job_error_marks_media_mirror_http_500_retryable() -> None:
+    error_code, error_class, retryable = social_repo._classify_job_error(  # noqa: SLF001
+        RuntimeError("media[0]:download_failed:http_500")
+    )
+
+    assert error_code == "transient_error"
+    assert error_class == "RuntimeError"
+    assert retryable is True
 
 
 def test_ensure_media_mirror_s3_ready_requires_write_access(monkeypatch) -> None:

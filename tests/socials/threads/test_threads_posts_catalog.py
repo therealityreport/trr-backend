@@ -214,6 +214,29 @@ def test_threads_posts_catalog_builds_scrape_config_from_env_and_limits(
     assert captured["config"].max_pages is None
 
 
+def test_threads_posts_catalog_shared_mode_is_uncapped_by_default() -> None:
+    captured: dict[str, Any] = {}
+
+    class _CapturingScraper(_FakeThreadsScraper):
+        def scrape(self, config: Any, *, progress_cb=None) -> list[Any]:
+            del progress_cb
+            captured["config"] = config
+            return []
+
+    scraper = _CapturingScraper([], {"pages_scanned": 0, "posts_checked": 0}, cookies={})
+    persistence = _FakeSharedCatalogPersistence()
+
+    scrape_shared_threads_posts(
+        run_id="run-1",
+        account_handle="bravotv",
+        config={"pipeline_ingest_mode": "shared_account_catalog_backfill"},
+        job_id="job-1",
+        dependencies=_posts_catalog_dependencies(scraper=scraper, persistence=persistence),
+    )
+
+    assert captured["config"].max_pages is None
+
+
 def test_threads_posts_catalog_non_shared_mode_uses_legacy_post_upsert() -> None:
     post = SimpleNamespace(
         post_id="post-2",

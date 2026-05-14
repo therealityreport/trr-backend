@@ -666,7 +666,7 @@ def _classify_unavailable_instagram_comment_gap(
                 """
             select
               count(*) filter (where coalesce(c.is_missing, false) = true)::int as classified_missing_comments,
-              max(p.season_id::text) as season_id,
+              min(p.season_id::text) as season_id,
               max(
                 ltrim(lower(coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '')), '@')
               ) as source_account,
@@ -1020,7 +1020,7 @@ def _load_expected_comment_counts(
     reported_comments_expr = (
         fetchable_comments_sql("p") if callable(fetchable_comments_sql) else repo._instagram_reported_comments_sql("p")
     )
-    # For coauthor posts (e.g. @peacock owner / @thetraitorsus collaborator),
+    # For coauthor posts where the owner differs from the requested account,
     # the row materialized under the collaborator's profile commonly has
     # comments_count = 0 because the metric lives on the owner's row. Filtering
     # to lower(p.source_account) = profile_account would silently zero out

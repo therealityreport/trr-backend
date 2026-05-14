@@ -76,24 +76,51 @@ def test_single_refresh_runs_sync_pipeline_in_threadpool(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
     monkeypatch.setattr(router_module, "run_in_threadpool", fake_run_in_threadpool)
+    monkeypatch.setattr(
+        router_module,
+        "_scrape_socialblade_person_page",
+        lambda handle: {"username": handle, "stats_refreshed": True},
+    )
+
+    def fake_attach(payload, *, handle: str, platform: str, source: str, source_scope: str, enabled: bool):
+        captured["sidecar"] = {
+            "payload": payload,
+            "handle": handle,
+            "platform": platform,
+            "source": source,
+            "source_scope": source_scope,
+        }
+        assert enabled is True
+        return {**payload, "instagram_following_scrape": {"status": "completed"}}
+
+    monkeypatch.setattr(service_module, "attach_instagram_following_scrape", fake_attach)
 
     client = TestClient(app)
     response = client.post(
         "/api/v1/admin/people/person-1/socialblade/refresh",
-        json={"handle": "heathergay", "force": True},
+        json={"handle": "heathergay", "force": True, "sourceScope": "creator"},
     )
 
     assert response.status_code == 200
     assert response.json()["refresh_status"] == "refreshed"
     assert captured["threadpool_func"] is fake_refresh_and_persist_socialblade
     assert captured["threadpool_args"] == ()
+    scraper = captured["threadpool_kwargs"].pop("scraper")
+    assert callable(scraper)
     assert captured["threadpool_kwargs"] == {
         "person_id": "person-1",
         "handle": "heathergay",
         "platform": "instagram",
-        "scraper": router_module._scrape_socialblade_person_page,
         "source": "person_page",
         "force": True,
+    }
+    assert scraper("heathergay")["instagram_following_scrape"] == {"status": "completed"}
+    assert captured["sidecar"] == {
+        "payload": {"username": "heathergay", "stats_refreshed": True},
+        "handle": "heathergay",
+        "platform": "instagram",
+        "source": "person_page",
+        "source_scope": "creator",
     }
 
 
@@ -250,6 +277,74 @@ def test_batch_refresh_dedupes_and_skips_fresh_rows(monkeypatch: pytest.MonkeyPa
     assert payload["errors"] == []
 
 
+def test_batch_refresh_cast_comparison_passes_source_scope_to_local_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.routers.admin_socialblade as router_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
+    monkeypatch.setattr(service_module, "queue_refresh_decision", lambda **kwargs: ("accepted", None, None))
+    monkeypatch.setattr(
+        router_module,
+        "_scrape_socialblade_person_page",
+        lambda handle: {"username": handle, "stats_refreshed": True},
+    )
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        captured["refresh_kwargs"] = kwargs
+        return {
+            **kwargs["scraper"](kwargs["handle"]),
+            "refresh_status": "refreshed",
+            "scraped_at": "2026-05-13T08:00:00Z",
+        }
+
+    def fake_attach(payload, *, handle: str, platform: str, source: str, source_scope: str, enabled: bool):
+        captured["sidecar"] = {
+            "payload": payload,
+            "handle": handle,
+            "platform": platform,
+            "source": source,
+            "source_scope": source_scope,
+            "enabled": enabled,
+        }
+        return {**payload, "instagram_following_scrape": {"status": "completed", "source_scope": source_scope}}
+
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(service_module, "attach_instagram_following_scrape", fake_attach)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/people/socialblade/refresh-batch",
+        json={
+            "source": "cast_comparison",
+            "source_scope": "creator",
+            "force": True,
+            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] == [
+        {
+            "personId": "person-1",
+            "handle": "networkofficial",
+            "refreshStatus": "refreshed",
+            "scrapedAt": "2026-05-13T08:00:00Z",
+        }
+    ]
+    assert captured["sidecar"] == {
+        "payload": {"username": "networkofficial", "stats_refreshed": True},
+        "handle": "networkofficial",
+        "platform": "instagram",
+        "source": "cast_comparison",
+        "source_scope": "creator",
+        "enabled": True,
+    }
+
+
 def test_account_socialblade_read_route_uses_platform_handle_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     import trr_backend.repositories.socialblade_growth as repository_module
 
@@ -399,11 +494,22 @@ def test_account_socialblade_refresh_route_uses_visible_retry_without_login_fall
     def fake_refresh_and_persist_socialblade(**kwargs):
         return kwargs["scraper"](kwargs["handle"])
 
+    def fake_attach(payload, *, handle: str, platform: str, source: str, source_scope: str, enabled: bool):
+        captured["sidecar"] = {
+            "handle": handle,
+            "platform": platform,
+            "source": source,
+            "source_scope": source_scope,
+            "enabled": enabled,
+        }
+        return {**payload, "instagram_following_scrape": {"status": "completed"}}
+
     async def fake_run_in_threadpool(func, /, *args, **kwargs):
         return func(*args, **kwargs)
 
     monkeypatch.setattr(scraper_module, "scrape_socialblade", fake_scrape_socialblade)
     monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(service_module, "attach_instagram_following_scrape", fake_attach)
     monkeypatch.setattr(router_module, "run_in_threadpool", fake_run_in_threadpool)
 
     client = TestClient(app)
@@ -419,6 +525,13 @@ def test_account_socialblade_refresh_route_uses_visible_retry_without_login_fall
         "platform": "instagram",
         "allow_login_fallback": False,
         "allow_visible_browser_retry": True,
+    }
+    assert captured["sidecar"] == {
+        "handle": "thetraitorsus",
+        "platform": "instagram",
+        "source": "account_page",
+        "source_scope": "network",
+        "enabled": True,
     }
 
 
@@ -441,3 +554,46 @@ def test_batch_refresh_respects_season_run_kill_switch(monkeypatch: pytest.Monke
     assert payload["accepted"] == []
     assert payload["errors"] == []
     assert payload["skipped"] == [{"personId": "person-1", "handle": "lisabarlow14", "reason": "auto_refresh_disabled"}]
+
+
+def test_batch_refresh_season_run_dispatches_following_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.modal_dispatch as modal_dispatch_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(service_module, "socialblade_auto_refresh_enabled", lambda: True)
+    monkeypatch.setattr(
+        service_module,
+        "queue_refresh_decision",
+        lambda **kwargs: ("accepted", None, None),
+    )
+
+    def fake_dispatch_socialblade_scrape(**kwargs):
+        captured.update(kwargs)
+        return {"dispatched": True, "call_id": "fc-123"}
+
+    monkeypatch.setattr(modal_dispatch_module, "dispatch_socialblade_scrape", fake_dispatch_socialblade_scrape)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/people/socialblade/refresh-batch",
+        json={
+            "source": "season_run",
+            "sourceScope": "creator",
+            "force": True,
+            "items": [{"personId": "person-1", "handle": "NetworkOfficial"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] == [{"personId": "person-1", "handle": "networkofficial", "callId": "fc-123"}]
+    assert captured == {
+        "person_id": "person-1",
+        "handle": "networkofficial",
+        "source": "season_run",
+        "force": True,
+        "platform": "instagram",
+        "scrape_following": True,
+        "source_scope": "creator",
+    }

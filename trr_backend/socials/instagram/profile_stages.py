@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 import trr_backend.socials.social_season_analytics_impl as _core
@@ -143,11 +145,20 @@ def _fetch_instagram_following_rows(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     scraper = _instagram_profile_scraper(config, account_handle=account_handle)
     delay_seconds = float(config.get("delay_seconds") or 0)
-    profile_payload = scraper.fetch_profile_info(
-        account_handle,
-        delay=delay_seconds,
-        request_timeout=(10, 30),
-    )
+    profile_payload = None
+    fetch_profile_page_content = getattr(scraper, "fetch_profile_page_content_graphql", None)
+    if callable(fetch_profile_page_content):
+        profile_payload = fetch_profile_page_content(
+            account_handle,
+            delay=delay_seconds,
+            request_timeout=(10, 30),
+        )
+    if not isinstance(profile_payload, Mapping) or not profile_payload:
+        profile_payload = scraper.fetch_profile_info(
+            account_handle,
+            delay=delay_seconds,
+            request_timeout=(10, 30),
+        )
     user = _metadata_dict(_metadata_dict(profile_payload or {}).get("data")).get("user")
     user = user if isinstance(user, Mapping) else {}
     user_id = str(user.get("id") or user.get("pk") or "").strip()
@@ -158,6 +169,12 @@ def _fetch_instagram_following_rows(
             retryable=True,
             runtime_metadata={"profile_payload": _metadata_dict(profile_payload or {})},
         )
+    try:
+        page_context = scraper._get_profile_page_context_cache_entry(account_handle)  # noqa: SLF001
+    except Exception:
+        page_context = {}
+    if not isinstance(page_context, Mapping):
+        page_context = {}
     max_pages = max(1, min(_normalize_non_negative_int(config.get("max_pages")) or 1, 25))
     page_size = max(1, min(_normalize_non_negative_int(config.get("page_size")) or 50, 200))
     max_relationships = max(1, min(_normalize_non_negative_int(config.get("max_relationships")) or page_size, 5000))
@@ -170,11 +187,37 @@ def _fetch_instagram_following_rows(
         if cursor:
             params["max_id"] = cursor
         url = f"https://www.instagram.com/api/v1/friendships/{user_id}/following/"
+        request_cookies = scraper._request_cookies()  # noqa: SLF001
+        headers = scraper._get_headers(f"https://www.instagram.com/{account_handle}/")  # noqa: SLF001
+        headers["x-asbd-id"] = str(os.getenv("INSTAGRAM_WEB_X_ASBD_ID") or getattr(scraper, "WEB_X_ASBD_ID", "359341"))
+        headers["x-ig-max-touch-points"] = "0"
+        spin_r = str(page_context.get("spin_r") or "").strip()
+        if spin_r:
+            headers["x-instagram-ajax"] = spin_r
+        lsd_token = str(page_context.get("lsd") or request_cookies.get("lsd") or "").strip()
+        if lsd_token:
+            headers["x-fb-lsd"] = lsd_token
+        web_session_id = str(
+            os.getenv("INSTAGRAM_WEB_SESSION_ID")
+            or os.getenv("SOCIAL_INSTAGRAM_WEB_SESSION_ID")
+            or page_context.get("web_session_id")
+            or ""
+        ).strip()
+        if web_session_id:
+            headers["x-web-session-id"] = web_session_id
+        ig_www_claim = str(
+            os.getenv("INSTAGRAM_WEB_IG_WWW_CLAIM")
+            or os.getenv("SOCIAL_INSTAGRAM_IG_WWW_CLAIM")
+            or request_cookies.get("ig_www_claim")
+            or ""
+        ).strip()
+        if ig_www_claim:
+            headers["x-ig-www-claim"] = ig_www_claim
         payload = scraper._request_client.get_json(  # noqa: SLF001
             url,
             query_type="profile_following",
-            headers=scraper._get_headers(f"https://www.instagram.com/{account_handle}/"),  # noqa: SLF001
-            cookies=scraper._request_cookies(),  # noqa: SLF001
+            headers=headers,
+            cookies=request_cookies,
             params=params,
             timeout=(10, 30),
             sender=scraper._get,  # noqa: SLF001
@@ -192,7 +235,8 @@ def _fetch_instagram_following_rows(
             cursor = next_cursor
             break
         cursor = next_cursor
-    return rows[:max_relationships], {
+    returned_rows = rows[:max_relationships]
+    return returned_rows, {
         "profile_payload": _metadata_dict(profile_payload or {}),
         "profile_id": user_id,
         "pages_fetched": page_count,
@@ -200,6 +244,8 @@ def _fetch_instagram_following_rows(
         "has_more": has_more,
         "max_pages": max_pages,
         "max_relationships": max_relationships,
+        "rows_fetched": len(returned_rows),
+        "profile_following_count": _instagram_profile_following_count_from_payload(profile_payload),
     }
 
 
@@ -228,6 +274,7 @@ def _run_instagram_profile_following_stage(
         source_cursor=str(fetch_meta.get("next_cursor") or "") or None,
         job_id=job_id,
         run_id=run_id,
+        snapshot_metadata=fetch_meta,
     )
     metadata = {
         "stage": INSTAGRAM_PROFILE_FOLLOWING_STAGE,
@@ -236,6 +283,9 @@ def _run_instagram_profile_following_stage(
         "relationship_type": "following",
         "relationships_fetched": len(rows),
         "relationships_upserted": result.get("rows_upserted"),
+        "relationships_missing": result.get("rows_missing"),
+        "snapshot_id": result.get("snapshot_id"),
+        "source_is_complete": result.get("source_is_complete"),
         "relationship_mismatches": result.get("mismatches") or [],
         "retrieval_meta": fetch_meta,
         "activity": {"phase": "instagram_profile_following_end"},
@@ -316,6 +366,313 @@ def _instagram_profile_execute(
     conn: Any | None = None,
 ) -> None:
     pg.execute(sql, list(params), conn=conn)
+
+
+def _instagram_profile_snapshot_tables_ready(*, conn: Any | None = None) -> bool:
+    try:
+        return all(
+            [
+                _instagram_profile_tables_ready(conn=conn),
+                _column_exists("social", "instagram_profile_following_snapshots", "owner_profile_id", conn=conn),
+                _column_exists(
+                    "social",
+                    "instagram_profile_relationship_snapshot_items",
+                    "following_snapshot_id",
+                    conn=conn,
+                ),
+            ]
+        )
+    except Exception:
+        logger.debug("[instagram] Profile following snapshot tables are not ready", exc_info=True)
+        return False
+
+
+def _instagram_following_snapshot_is_complete(snapshot_metadata: Mapping[str, Any] | None) -> bool:
+    if not isinstance(snapshot_metadata, Mapping) or not snapshot_metadata:
+        return False
+    next_cursor = str(snapshot_metadata.get("next_cursor") or "").strip()
+    if bool(snapshot_metadata.get("has_more")) or next_cursor:
+        return False
+    pages_fetched = _coerce_instagram_completeness_count(snapshot_metadata.get("pages_fetched"))
+    max_pages = _coerce_instagram_completeness_count(snapshot_metadata.get("max_pages"))
+    if pages_fetched is not None and max_pages is not None and max_pages > 0 and pages_fetched >= max_pages:
+        return False
+    rows_fetched = _first_instagram_completeness_count(
+        snapshot_metadata,
+        "rows_fetched",
+        "relationships_fetched",
+    )
+    max_relationships = _coerce_instagram_completeness_count(snapshot_metadata.get("max_relationships"))
+    if (
+        rows_fetched is not None
+        and max_relationships is not None
+        and max_relationships > 0
+        and rows_fetched >= max_relationships
+    ):
+        return False
+    profile_following_count = _first_instagram_completeness_count(
+        snapshot_metadata,
+        "profile_following_count",
+        "profile_follows_count",
+        "following_count",
+        "follows_count",
+    )
+    if profile_following_count is None:
+        profile_following_count = _instagram_profile_following_count_from_payload(
+            snapshot_metadata.get("profile_payload")
+        )
+    if profile_following_count is not None and rows_fetched is not None and profile_following_count > rows_fetched:
+        return False
+    return True
+
+
+def _first_instagram_completeness_count(metadata: Mapping[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        parsed = _coerce_instagram_completeness_count(metadata.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _coerce_instagram_completeness_count(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Mapping):
+        for key in ("count", "total_count"):
+            parsed = _coerce_instagram_completeness_count(value.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+    if isinstance(value, (int, float)):
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    text = str(value or "").strip()
+    if not text or not re.fullmatch(r"[0-9][0-9,\s]*", text):
+        return None
+    parsed = int(re.sub(r"[^0-9]", "", text))
+    return parsed if parsed >= 0 else None
+
+
+def _instagram_profile_following_count_from_payload(profile_payload: Any) -> int | None:
+    payload = _metadata_dict(profile_payload or {})
+    data = _metadata_dict(payload.get("data"))
+    user = data.get("user") if isinstance(data.get("user"), Mapping) else payload.get("user")
+    if not isinstance(user, Mapping):
+        user = payload
+    for key in ("follows_count", "following_count", "followsCount", "edge_follow"):
+        parsed = _coerce_instagram_completeness_count(user.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _instagram_relationship_identity_key(row: Mapping[str, Any]) -> tuple[str, str] | None:
+    related_user_id = str(row.get("related_user_id") or "").strip()
+    if related_user_id:
+        return ("user", related_user_id)
+    normalized_username = _normalize_account_handle(
+        row.get("related_normalized_username") or row.get("related_username")
+    )
+    if normalized_username:
+        return ("username", normalized_username)
+    return None
+
+
+def _safe_instagram_following_snapshot_meta(snapshot_metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snapshot_metadata, Mapping):
+        return {}
+    return {key: value for key, value in dict(snapshot_metadata).items() if key != "profile_payload"}
+
+
+def _create_instagram_profile_following_snapshot(
+    *,
+    owner_row: Mapping[str, Any],
+    source_scope: str,
+    observed_at: Any,
+    relationships_fetched: int,
+    relationships_upserted: int,
+    relationships_missing: int,
+    source_is_complete: bool,
+    snapshot_metadata: Mapping[str, Any] | None,
+    job_id: str | None,
+    run_id: str | None,
+    conn: Any | None,
+) -> dict[str, Any] | None:
+    owner_profile_id = str(owner_row.get("id") or "").strip()
+    owner_username = _normalize_account_handle(owner_row.get("username") or owner_row.get("normalized_username"))
+    if not owner_profile_id or not owner_username:
+        return None
+    safe_meta = _safe_instagram_following_snapshot_meta(snapshot_metadata)
+    payload = {
+        "owner_profile_id": owner_profile_id,
+        "owner_instagram_profile_id": owner_row.get("profile_id"),
+        "owner_username": owner_username,
+        "owner_normalized_username": owner_username,
+        "source_scope": source_scope,
+        "observed_at": observed_at,
+        "relationships_fetched": max(0, int(relationships_fetched)),
+        "relationships_upserted": max(0, int(relationships_upserted)),
+        "relationships_missing": max(0, int(relationships_missing)),
+        "source_is_complete": bool(source_is_complete),
+        "pages_fetched": safe_meta.get("pages_fetched"),
+        "has_more": safe_meta.get("has_more"),
+        "next_cursor": safe_meta.get("next_cursor"),
+        "max_pages": safe_meta.get("max_pages"),
+        "max_relationships": safe_meta.get("max_relationships"),
+        "retrieval_meta": safe_meta,
+        "last_scrape_job_id": job_id,
+        "last_scrape_run_id": run_id,
+    }
+    adapted = _adapt_payload_json_values(payload)
+    columns = list(adapted)
+    return _instagram_profile_execute_one(
+        f"""
+        insert into social.instagram_profile_following_snapshots ({", ".join(columns)})
+        values ({", ".join(["%s"] * len(columns))})
+        returning id::text as id
+        """,
+        list(adapted.values()),
+        conn=conn,
+        label="instagram_profile_following_snapshot_insert",
+    )
+
+
+def _insert_instagram_profile_relationship_snapshot_item(
+    *,
+    snapshot_id: str,
+    relationship_row_id: str | None,
+    row: Mapping[str, Any],
+    is_present: bool,
+    observed_at: Any,
+    job_id: str | None,
+    run_id: str | None,
+    conn: Any | None,
+) -> None:
+    related_normalized_username = _normalize_account_handle(
+        row.get("related_normalized_username") or row.get("related_username")
+    )
+    related_username = str(row.get("related_username") or related_normalized_username or "").strip()
+    if not related_username:
+        return
+    payload = {
+        "following_snapshot_id": snapshot_id,
+        "relationship_row_id": relationship_row_id,
+        "owner_profile_id": row.get("owner_profile_id"),
+        "owner_instagram_profile_id": row.get("owner_instagram_profile_id"),
+        "owner_username": row.get("owner_username"),
+        "owner_normalized_username": row.get("owner_normalized_username"),
+        "relationship_type": "following",
+        "related_user_id": row.get("related_user_id"),
+        "related_username": related_username,
+        "related_normalized_username": related_normalized_username,
+        "related_full_name": row.get("related_full_name"),
+        "related_is_private": row.get("related_is_private"),
+        "related_is_verified": row.get("related_is_verified"),
+        "related_profile_pic_url": row.get("related_profile_pic_url"),
+        "hosted_related_profile_pic_url": row.get("hosted_related_profile_pic_url"),
+        "is_present": bool(is_present),
+        "source_rank": row.get("source_rank"),
+        "source_page_ordinal": row.get("source_page_ordinal"),
+        "source_cursor": row.get("source_cursor"),
+        "raw_data": dict(row.get("raw_data") or {}),
+        "observed_at": observed_at,
+        "last_scrape_job_id": job_id,
+        "last_scrape_run_id": run_id,
+    }
+    adapted = _adapt_payload_json_values(payload)
+    columns = list(adapted)
+    _instagram_profile_execute_one(
+        f"""
+        insert into social.instagram_profile_relationship_snapshot_items ({", ".join(columns)})
+        values ({", ".join(["%s"] * len(columns))})
+        on conflict do nothing
+        returning id::text
+        """,
+        list(adapted.values()),
+        conn=conn,
+        label="instagram_profile_relationship_snapshot_item_insert",
+    )
+
+
+def _active_instagram_profile_relationship_rows(
+    *,
+    owner_profile_id: str,
+    conn: Any | None,
+) -> list[dict[str, Any]]:
+    return _instagram_profile_fetch_all(
+        """
+        select
+          id::text as id,
+          owner_profile_id::text as owner_profile_id,
+          owner_instagram_profile_id,
+          owner_username,
+          owner_normalized_username,
+          relationship_type,
+          related_user_id,
+          related_username,
+          related_normalized_username,
+          related_full_name,
+          related_is_private,
+          related_is_verified,
+          related_profile_pic_url,
+          hosted_related_profile_pic_url,
+          raw_data,
+          source_page_ordinal,
+          source_cursor,
+          source_rank
+        from social.instagram_profile_relationships
+        where owner_profile_id = %s::uuid
+          and relationship_type = 'following'
+          and coalesce(is_missing, false) = false
+        """,
+        [owner_profile_id],
+        conn=conn,
+        label="instagram_profile_relationship_active_rows",
+    )
+
+
+def _mark_instagram_profile_relationship_missing(
+    *,
+    relationship_row_id: str,
+    observed_at: Any,
+    job_id: str | None,
+    run_id: str | None,
+    conn: Any | None,
+) -> dict[str, Any] | None:
+    return _instagram_profile_execute_one(
+        """
+        update social.instagram_profile_relationships
+        set
+          is_missing = true,
+          missing_at = coalesce(missing_at, %s),
+          last_scrape_job_id = %s,
+          last_scrape_run_id = %s,
+          updated_at = %s
+        where id = %s::uuid
+        returning
+          id::text as id,
+          owner_profile_id::text as owner_profile_id,
+          owner_instagram_profile_id,
+          owner_username,
+          owner_normalized_username,
+          relationship_type,
+          related_user_id,
+          related_username,
+          related_normalized_username,
+          related_full_name,
+          related_is_private,
+          related_is_verified,
+          related_profile_pic_url,
+          hosted_related_profile_pic_url,
+          raw_data,
+          source_page_ordinal,
+          source_cursor,
+          source_rank
+        """,
+        [observed_at, job_id, run_id, observed_at, relationship_row_id],
+        conn=conn,
+        label="instagram_profile_relationship_mark_missing",
+    )
 
 
 def _instagram_profile_parse_about_timestamp(about_raw: Mapping[str, Any], *keys: str) -> datetime | None:
@@ -674,6 +1031,7 @@ def persist_instagram_profile_relationships(
     source_page_ordinal: int | None = None,
     job_id: str | None = None,
     run_id: str | None = None,
+    snapshot_metadata: Mapping[str, Any] | None = None,
     conn: Any | None = None,
 ) -> dict[str, Any]:
     if not _instagram_profile_tables_ready(conn=conn):
@@ -706,6 +1064,8 @@ def persist_instagram_profile_relationships(
         source_page_ordinal=source_page_ordinal,
     )
     rows_upserted = 0
+    present_rows: list[dict[str, Any]] = []
+    observed_keys: set[tuple[str, str]] = set()
     now = _now_utc()
     for relationship in result.relationships:
         related_normalized_username = _normalize_account_handle(relationship.related_username)
@@ -736,6 +1096,7 @@ def persist_instagram_profile_relationships(
             "last_scrape_run_id": run_id,
             "updated_at": now,
         }
+        row_id: str | None = None
         existing = _instagram_profile_fetch_one(
             """
             select id
@@ -765,7 +1126,7 @@ def persist_instagram_profile_relationships(
         if existing:
             adapted = _adapt_payload_json_values(payload)
             columns = list(adapted)
-            _instagram_profile_execute_one(
+            updated = _instagram_profile_execute_one(
                 f"""
                 update social.instagram_profile_relationships
                 set {", ".join(f"{column} = %s" for column in columns)}
@@ -776,11 +1137,12 @@ def persist_instagram_profile_relationships(
                 conn=conn,
                 label="instagram_profile_relationship_update",
             )
+            row_id = str((updated or {}).get("id") or existing.get("id") or "").strip() or None
         else:
             insert_payload = {"first_seen_at": now, "created_at": now, **payload}
             adapted = _adapt_payload_json_values(insert_payload)
             columns = list(adapted)
-            _instagram_profile_execute_one(
+            inserted = _instagram_profile_execute_one(
                 f"""
                 insert into social.instagram_profile_relationships ({", ".join(columns)})
                 values ({", ".join(["%s"] * len(columns))})
@@ -790,11 +1152,75 @@ def persist_instagram_profile_relationships(
                 conn=conn,
                 label="instagram_profile_relationship_insert",
             )
+            row_id = str((inserted or {}).get("id") or "").strip() or None
+        key = _instagram_relationship_identity_key(payload)
+        if key:
+            observed_keys.add(key)
+        present_rows.append({"relationship_row_id": row_id, **payload})
         rows_upserted += 1
+    source_is_complete = _instagram_following_snapshot_is_complete(snapshot_metadata)
+    missing_rows: list[dict[str, Any]] = []
+    if source_is_complete:
+        for active_row in _active_instagram_profile_relationship_rows(owner_profile_id=owner_profile_id, conn=conn):
+            key = _instagram_relationship_identity_key(active_row)
+            if key is None or key in observed_keys:
+                continue
+            missing_row = _mark_instagram_profile_relationship_missing(
+                relationship_row_id=str(active_row.get("id") or ""),
+                observed_at=now,
+                job_id=job_id,
+                run_id=run_id,
+                conn=conn,
+            )
+            if missing_row:
+                missing_rows.append(missing_row)
+    snapshot_id: str | None = None
+    if _instagram_profile_snapshot_tables_ready(conn=conn):
+        snapshot = _create_instagram_profile_following_snapshot(
+            owner_row=owner_row,
+            source_scope=_normalize_instagram_profile_source_scope(source_scope),
+            observed_at=now,
+            relationships_fetched=len(result.relationships),
+            relationships_upserted=rows_upserted,
+            relationships_missing=len(missing_rows),
+            source_is_complete=source_is_complete,
+            snapshot_metadata=snapshot_metadata,
+            job_id=job_id,
+            run_id=run_id,
+            conn=conn,
+        )
+        snapshot_id = str((snapshot or {}).get("id") or "").strip() or None
+        if snapshot_id:
+            for present_row in present_rows:
+                relationship_row_id = str(present_row.pop("relationship_row_id", "") or "").strip() or None
+                _insert_instagram_profile_relationship_snapshot_item(
+                    snapshot_id=snapshot_id,
+                    relationship_row_id=relationship_row_id,
+                    row=present_row,
+                    is_present=True,
+                    observed_at=now,
+                    job_id=job_id,
+                    run_id=run_id,
+                    conn=conn,
+                )
+            for missing_row in missing_rows:
+                _insert_instagram_profile_relationship_snapshot_item(
+                    snapshot_id=snapshot_id,
+                    relationship_row_id=str(missing_row.get("id") or "").strip() or None,
+                    row=missing_row,
+                    is_present=False,
+                    observed_at=now,
+                    job_id=job_id,
+                    run_id=run_id,
+                    conn=conn,
+                )
     return {
         "owner_username": normalized_owner,
         "relationship_type": "following",
         "rows_upserted": rows_upserted,
+        "rows_missing": len(missing_rows),
+        "snapshot_id": snapshot_id,
+        "source_is_complete": source_is_complete,
         "mismatches": [asdict(mismatch) for mismatch in result.mismatches],
         "page_info": result.page_info,
     }

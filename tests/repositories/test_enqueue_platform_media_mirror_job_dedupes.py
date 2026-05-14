@@ -42,9 +42,10 @@ def test_enqueue_platform_media_mirror_job_is_global_across_runs_for_same_post(m
 
     monkeypatch.setattr(social_repo.pg, "db_cursor", _fake_db_cursor)
     monkeypatch.setattr(social_repo.pg, "fetch_one_with_cursor", _fake_fetch_one_with_cursor)
-    monkeypatch.setattr(social_repo, "_platform_post_needs_media_mirror", lambda _platform, _row: True)
+    monkeypatch.setattr(social_repo, "_platform_post_needs_media_mirror", lambda _platform, _row, **_kwargs: True)
     monkeypatch.setattr(social_repo, "_update_platform_post_media_mirror_fields", lambda **_kwargs: None)
     monkeypatch.setattr(social_repo, "_increment_run_counters_on_job_create", lambda **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_run_allows_followup_job_enqueue", lambda _run_id, **_kwargs: True)
     monkeypatch.setattr(social_repo, "is_queue_enabled", lambda: True)
 
     context = social_repo.SeasonContext(  # noqa: SLF001
@@ -83,3 +84,35 @@ def test_enqueue_platform_media_mirror_job_is_global_across_runs_for_same_post(m
     assert db_calls[0][0] == "insert"
     assert any(call[0] == "lookup" for call in db_calls)
     assert len({job_id for job_id in created_ids if job_id}) == 1
+
+
+def test_enqueue_platform_media_mirror_job_skips_cancelled_parent_run(monkeypatch) -> None:
+    monkeypatch.setattr(social_repo, "_platform_post_needs_media_mirror", lambda _platform, _row, **_kwargs: True)
+    monkeypatch.setattr(social_repo, "_run_allows_followup_job_enqueue", lambda _run_id, **_kwargs: False)
+    monkeypatch.setattr(
+        social_repo,
+        "_insert_job_with_conflict_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not enqueue")),
+    )
+
+    context = social_repo.SeasonContext(  # noqa: SLF001
+        season_id="season-1",
+        show_id="show-1",
+        show_name="Test Show",
+        season_number=6,
+        anchor_date=date(2025, 1, 1),
+    )
+
+    assert (
+        social_repo._enqueue_platform_media_mirror_job(  # noqa: SLF001
+            context,
+            platform="instagram",
+            run_id="11111111-1111-1111-1111-111111111111",
+            source_scope="bravo",
+            account="bravotv",
+            post_row={"id": "post-1", "shortcode": "abc123"},
+            week_index=None,
+            parent_job_id=None,
+        )
+        is None
+    )

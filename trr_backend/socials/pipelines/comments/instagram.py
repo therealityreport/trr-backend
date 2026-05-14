@@ -990,9 +990,12 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           or ({reply_depth_expr}) > 0
         )
     """
-    reported_comments_expr = "greatest(coalesce(p.comments_count, 0), 0)"
-    facebook_comments_expr = "greatest(coalesce(p.fb_comment_count, 0), 0)"
-    catalog_reported_comments_expr = "greatest(coalesce(p.comments_count, 0), 0)"
+    reported_comments_expr = _instagram_fetchable_comments_sql("p")
+    facebook_comments_expr = _instagram_external_facebook_comments_sql("p")
+    catalog_reported_comments_expr = _instagram_fetchable_comments_sql(
+        "p",
+        fb_comment_count_expr="null::text",
+    )
     catalog_facebook_comments_expr = "0"
     accounted_comments_sql = (
         "coalesce(saved_comment_counts.saved_parent_comments, 0) + "
@@ -1038,7 +1041,7 @@ def _instagram_social_account_incomplete_comment_target_shortcodes(
           where m.collaborator_handle = %s
             and lower(p.source_account) <> %s
             and nullif(p.source_id, '') is not null
-            and coalesce(p.comments_count, 0) > 0
+            and {catalog_reported_comments_expr} > 0
         ),
         """
         deduped_rows_sql = """
@@ -1583,7 +1586,7 @@ def start_social_account_comments_scrape(
     lock_label = f"comments-scrape-lock:{normalized_platform}:{normalized_account[:48]}"
     run_id: str | None = None
     payload: dict[str, Any] | None = None
-    with pg.db_connection(label=lock_label) as lock_conn:
+    with pg.db_connection(label=lock_label, pool_name="social_control") as lock_conn:
         with pg.db_cursor(conn=lock_conn, label=lock_label) as cur:
             lock_row = pg.fetch_one_with_cursor(cur, "select pg_try_advisory_lock(%s) as locked", [lock_key]) or {}
         if not bool(lock_row.get("locked")):

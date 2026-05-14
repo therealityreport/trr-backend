@@ -301,12 +301,13 @@ def scrape_shared_threads_posts(
     deps = dependencies or ThreadsPostsCatalogDependencies()
     config = config or {}
     scraper = deps.scraper_factory(cookies=dict(deps.load_cookies() or {}))
+    post_limit = deps.shared_stage_post_limit(config, default=0)
     scrape_config = deps.scrape_config_factory(
         username=account_handle,
         date_start=deps.coerce_dt(config.get("date_start")),
         date_end=deps.coerce_dt(config.get("date_end")),
         delay_seconds=_resolve_threads_delay_seconds(),
-        max_pages=deps.shared_stage_post_limit(config, default=5),
+        max_pages=post_limit if post_limit and post_limit > 0 else None,
     )
     posts = list(scraper.scrape(scrape_config, progress_cb=progress_cb))
     retrieval_meta = dict(getattr(scraper, "last_retrieval_meta", {}) or {})

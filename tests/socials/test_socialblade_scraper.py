@@ -6,9 +6,11 @@ from trr_backend.socials.socialblade.scraper import (
     SocialBladeEndpointError,
     _build_profile_stats_from_user_payload,
     _build_total_followers_chart_from_daily_deltas,
+    _build_total_followers_chart_from_total_rows,
     _extract_profile_stats_from_body_text,
     _followers_chart_from_table,
     _history_rows_to_metrics,
+    _merge_followers_charts,
     _normalize_table_data,
     _page_access_denied,
     _scrape_socialblade_in_context,
@@ -167,6 +169,7 @@ def test_socialblade_profile_url_switches_route_by_platform() -> None:
         _socialblade_profile_url("instagram", "lisabarlow14") == "https://socialblade.com/instagram/user/lisabarlow14"
     )
     assert _socialblade_profile_url("facebook", "bravotv") == "https://socialblade.com/facebook/user/bravotv"
+    assert _socialblade_profile_url("tiktok", "bravotv") == "https://socialblade.com/tiktok/user/bravotv"
     assert _socialblade_profile_url("youtube", "facebookapp") == "https://socialblade.com/youtube/handle/facebookapp"
     assert _socialblade_profile_url("youtube", "UCabc123") == "https://socialblade.com/youtube/channel/UCabc123"
 
@@ -202,6 +205,41 @@ def test_build_profile_stats_from_user_payload_formats_ranks() -> None:
         "sb_rank": "38,982nd",
         "followers_rank": "139,823rd",
         "engagement_rate_rank": "45,085th",
+    }
+
+
+def test_build_profile_stats_from_tiktok_payload_uses_likes_as_third_metric() -> None:
+    stats, rankings = _build_profile_stats_from_user_payload(
+        {
+            "followers": "4.2M",
+            "following": 432,
+            "likes": "122.5M",
+            "engagement_rate": 4.125,
+            "average_likes": 12345.6,
+            "average_comments": 789.1,
+            "grade": "A-",
+            "ranks": {
+                "sb": 120,
+                "followers": 650,
+                "engagement_rate": 88,
+            },
+        },
+        platform="tiktok",
+    )
+
+    assert stats == {
+        "followers": 4200000,
+        "following": 432,
+        "media_count": 122500000,
+        "engagement_rate": "4.12%",
+        "average_likes": pytest.approx(12345.6),
+        "average_comments": pytest.approx(789.1),
+    }
+    assert rankings == {
+        "grade": "A-",
+        "sb_rank": "120th",
+        "followers_rank": "650th",
+        "engagement_rate_rank": "88th",
     }
 
 
@@ -259,6 +297,46 @@ def test_history_rows_to_metrics_builds_totals_and_deltas() -> None:
     }
 
 
+def test_history_rows_to_metrics_labels_tiktok_likes_history() -> None:
+    metrics = _history_rows_to_metrics(
+        [
+            {
+                "date": "2026-05-12T00:00:00.000Z",
+                "followers": 1_000_000,
+                "following": 400,
+                "likes": 10_000_000,
+            },
+            {
+                "date": "2026-05-13T00:00:00.000Z",
+                "followers": 1_000_500,
+                "following": 401,
+                "likes": 10_002_000,
+            },
+        ],
+        limit=60,
+        platform="tiktok",
+    )
+
+    assert metrics["headers"] == [
+        "Date",
+        "Followers Delta",
+        "Followers Total",
+        "Following Delta",
+        "Following Total",
+        "Likes Delta",
+        "Likes Total",
+    ]
+    assert metrics["data"][-1] == {
+        "Date": "2026-05-13",
+        "Followers Delta": "500",
+        "Followers Total": "1,000,500",
+        "Following Delta": "1",
+        "Following Total": "401",
+        "Likes Delta": "2000",
+        "Likes Total": "10,002,000",
+    }
+
+
 def test_build_total_followers_chart_from_daily_deltas_reconstructs_totals() -> None:
     chart = _build_total_followers_chart_from_daily_deltas(
         150,
@@ -276,6 +354,27 @@ def test_build_total_followers_chart_from_daily_deltas_reconstructs_totals() -> 
         "data": [
             {"date": "2026-03-16", "followers": 145},
             {"date": "2026-03-17", "followers": 150},
+        ],
+    }
+
+
+def test_build_total_followers_chart_from_total_rows_uses_daily_total_points() -> None:
+    chart = _build_total_followers_chart_from_total_rows(
+        [
+            {"date": "2026-03-16T00:00:00.000Z", "followers": "145"},
+            {"date": "2026-03-17T00:00:00.000Z", "followers": 150},
+            {"date": "2026-03-17T12:00:00.000Z", "followers": "151"},
+        ],
+    )
+
+    assert chart == {
+        "frequency": "daily",
+        "metric": "total_followers",
+        "total_data_points": 2,
+        "date_range": {"from": "2026-03-16", "to": "2026-03-17"},
+        "data": [
+            {"date": "2026-03-16", "followers": 145},
+            {"date": "2026-03-17", "followers": 151},
         ],
     }
 
@@ -300,6 +399,45 @@ def test_followers_chart_from_table_accepts_spaced_weekday_dates() -> None:
         "data": [
             {"date": "2026-04-11", "followers": 171945},
             {"date": "2026-04-12", "followers": 171999},
+        ],
+    }
+
+
+def test_merge_followers_charts_uses_sixty_day_table_to_extend_stale_chart() -> None:
+    stale_chart = {
+        "frequency": "daily",
+        "metric": "total_followers",
+        "total_data_points": 2,
+        "date_range": {"from": "2026-01-11", "to": "2026-04-24"},
+        "data": [
+            {"date": "2026-01-11", "followers": 40237},
+            {"date": "2026-04-24", "followers": 172238},
+        ],
+    }
+    table_chart = _followers_chart_from_table(
+        {
+            "headers": ["Date", "Followers Total"],
+            "data": [
+                {"Date": "2026-04-13", "Followers Total": "172,029"},
+                {"Date": "2026-04-24", "Followers Total": "172,238"},
+                {"Date": "2026-05-13", "Followers Total": "172,666"},
+            ],
+        },
+        metric_label="Followers",
+    )
+
+    merged = _merge_followers_charts(stale_chart, table_chart)
+
+    assert merged == {
+        "frequency": "daily",
+        "metric": "total_followers",
+        "total_data_points": 4,
+        "date_range": {"from": "2026-01-11", "to": "2026-05-13"},
+        "data": [
+            {"date": "2026-01-11", "followers": 40237},
+            {"date": "2026-04-13", "followers": 172029},
+            {"date": "2026-04-24", "followers": 172238},
+            {"date": "2026-05-13", "followers": 172666},
         ],
     }
 
@@ -409,6 +547,61 @@ def test_scrape_socialblade_uses_visible_browser_retry_when_scrapling_page_data_
         "history_source": "visible_browser",
         "stats_refreshed": True,
     }
+
+
+def test_scrape_socialblade_logs_in_and_retries_when_history_is_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    def fake_run_scrapling(_handle: str, cookies: object, *, platform: str):
+        calls.append(cookies)
+        if len(calls) == 1:
+            return {
+                "username": "thetraitorsus",
+                "platform": platform,
+                "history_source": "page_trpc_capture",
+                "stats_refreshed": True,
+                "daily_channel_metrics_60day": {
+                    "period": "Last 31 Days",
+                    "row_count": 31,
+                    "data": [],
+                },
+            }
+        return {
+            "username": "thetraitorsus",
+            "platform": platform,
+            "history_source": "authenticated_api",
+            "stats_refreshed": True,
+            "daily_channel_metrics_60day": {
+                "period": "Last 60 Days",
+                "row_count": 60,
+                "data": [],
+            },
+        }
+
+    monkeypatch.setenv("SOCIALBLADE_EMAIL", "operator@example.com")
+    monkeypatch.setenv("SOCIALBLADE_PASSWORD", "password")
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._run_scrapling_socialblade_fetch",
+        fake_run_scrapling,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._refresh_socialblade_cookies_via_login",
+        lambda: {"cf_clearance": "fresh", "session": "logged-in"},
+    )
+
+    payload = scrape_socialblade(
+        "thetraitorsus",
+        {"cf_clearance": "stale"},
+        platform="instagram",
+        allow_login_fallback=True,
+        allow_visible_browser_retry=False,
+    )
+
+    assert payload["history_source"] == "authenticated_api"
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 60
+    assert calls == [{"cf_clearance": "stale"}, {"cf_clearance": "fresh", "session": "logged-in"}]
 
 
 def test_scrape_context_retries_search_challenge_in_visible_shared_browser(

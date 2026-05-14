@@ -31,6 +31,7 @@ for _name, _value in _core.__dict__.items():
 _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
+SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME_DEFAULT = "instagram"
 
 
 def _sync_core_overrides() -> None:
@@ -87,7 +88,13 @@ def _instagram_cookie_auto_refresh_enabled() -> bool:
 
 
 def _instagram_cookie_validation_username() -> str:
-    return (os.getenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME") or "").strip() or "bravotv"
+    explicit = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME") or "").strip().lstrip("@")
+    if explicit:
+        return explicit.lower()
+    fallback = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_FALLBACK_USERNAME") or "").strip().lstrip(
+        "@"
+    ) or SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME_DEFAULT
+    return fallback.lower()
 
 
 def _load_instagram_cookies_from_sources() -> dict[str, str]:
@@ -221,6 +228,20 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
     from trr_backend.socials.instagram import InstagramScraper
 
     validation_username = _instagram_cookie_validation_username()
+    if not validation_username:
+        result = {
+            "valid": True,
+            "reason": "validation_username_unset_schema_only",
+            "detail": _instagram_cookie_validation_detail(
+                phase="schema",
+                message=(
+                    "Instagram cookies include required session fields, but no validation username is configured."
+                ),
+            ),
+        }
+        _instagram_cookie_validation_cache = (now, fingerprint, dict(result))
+        return dict(result)
+
     result: dict[str, Any]
     try:
         scraper = InstagramScraper(

@@ -14,6 +14,14 @@ from trr_backend.db import pg
 logger = logging.getLogger(__name__)
 _PLATFORM_RE = re.compile(r"[^a-z]")
 _HANDLE_RE = re.compile(r"[^a-zA-Z0-9._-]")
+_REFRESH_METADATA_KEYS = (
+    "history_source",
+    "profile_stats_labels",
+    "chart_metric_label",
+    "socialblade_url",
+    "fallback_chain",
+    "runtime_metadata",
+)
 
 
 def _build_previous_run_snapshot(data: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -51,6 +59,12 @@ def normalize_socialblade_account_handle(handle: str | None) -> str:
 def socialblade_growth_table_exists() -> bool:
     """Return whether the SocialBlade growth table exists in the current database."""
     row = pg.fetch_one("SELECT to_regclass('pipeline.socialblade_growth_data') AS relation_name")
+    return bool(row and row.get("relation_name"))
+
+
+def socialblade_growth_snapshots_table_exists() -> bool:
+    """Return whether the immutable SocialBlade snapshot table exists."""
+    row = pg.fetch_one("SELECT to_regclass('pipeline.socialblade_growth_snapshots') AS relation_name")
     return bool(row and row.get("relation_name"))
 
 
@@ -144,6 +158,74 @@ def upsert_growth_data(
     return _row_to_response(rows[0])
 
 
+def insert_growth_snapshot(
+    person_id: str | None,
+    handle: str,
+    data: dict[str, Any],
+    *,
+    platform: str = "instagram",
+    growth_data_id: str | None = None,
+    source: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Insert an immutable SocialBlade scrape snapshot."""
+    normalized_platform = normalize_socialblade_platform(platform)
+    normalized_handle = normalize_socialblade_account_handle(handle)
+    if not normalized_handle:
+        raise ValueError("SocialBlade snapshot requires a valid account handle.")
+    rows = pg.execute_returning(
+        """
+        insert into pipeline.socialblade_growth_snapshots (
+          growth_data_id,
+          person_id,
+          platform,
+          account_handle,
+          instagram_handle,
+          scraped_at,
+          stats_refreshed,
+          profile_stats,
+          rankings,
+          daily_channel_metrics_60day,
+          daily_total_followers_chart,
+          raw_response,
+          snapshot_source,
+          refresh_source,
+          refresh_forced
+        )
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        returning
+          id::text as id,
+          growth_data_id::text as growth_data_id,
+          platform,
+          account_handle,
+          scraped_at
+        """,
+        [
+            growth_data_id,
+            person_id,
+            normalized_platform,
+            normalized_handle,
+            normalized_handle if normalized_platform == "instagram" else None,
+            data.get("scraped_at", datetime.now(tz=UTC).isoformat()),
+            bool(data.get("stats_refreshed", False)),
+            Json(data.get("profile_stats", {})),
+            Json(data.get("rankings", {})),
+            Json(data.get("daily_channel_metrics_60day", {})),
+            Json(data.get("daily_total_followers_chart")),
+            Json(data),
+            source,
+            source,
+            bool(force),
+        ],
+    )
+    if not rows:
+        raise RuntimeError("SocialBlade snapshot insert returned no rows")
+    row = dict(rows[0])
+    scraped_at_raw = row.get("scraped_at")
+    row["scraped_at"] = scraped_at_raw.isoformat() if hasattr(scraped_at_raw, "isoformat") else scraped_at_raw
+    return row
+
+
 def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> dict[str, Any]:
     """Merge fresh scrape data with existing data.
 
@@ -168,6 +250,8 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
     existing_previous_run = existing.get("previous_run")
     if isinstance(existing_previous_run, dict) and existing_previous_run:
         merged["previous_run"] = existing_previous_run
+    if "instagram_following_scrape" in fresh:
+        merged["instagram_following_scrape"] = fresh.get("instagram_following_scrape")
 
     if stats_refreshed:
         previous_run = _build_previous_run_snapshot(existing)
@@ -181,6 +265,9 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
             "daily_channel_metrics_60day",
             existing.get("daily_channel_metrics_60day", {}),
         )
+        for key in _REFRESH_METADATA_KEYS:
+            if key in fresh:
+                merged[key] = fresh.get(key)
 
     fresh_chart = fresh.get("daily_total_followers_chart")
     existing_chart = existing.get("daily_total_followers_chart")
@@ -248,6 +335,7 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
             freshness_status = "unknown"
 
     return {
+        "row_id": str(row.get("id") or "").strip() or None,
         "username": account_handle,
         "account_handle": account_handle,
         "platform": platform,
@@ -261,6 +349,7 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
         "daily_total_followers_chart": row.get("daily_total_followers_chart"),
         "chart_metric_label": raw_response.get("chart_metric_label"),
         "socialblade_url": raw_response.get("socialblade_url"),
+        "instagram_following_scrape": raw_response.get("instagram_following_scrape"),
         "previous_run": previous_run,
         "freshness_status": freshness_status,
         "is_stale": is_stale,

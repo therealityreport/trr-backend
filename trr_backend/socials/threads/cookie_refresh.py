@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 _SPEC = SimpleLoginSpec(
     login_url="https://www.threads.com/login",
-    validation_url="https://www.threads.com/",
+    validation_url="https://www.threads.com/@threads",
     cookie_domains=(".threads.com", "www.threads.com", ".instagram.com"),
     username_selectors=(
         'input[autocomplete="username"]',
@@ -24,7 +24,7 @@ _SPEC = SimpleLoginSpec(
     required_cookie_names_any=("sessionid",),
     required_cookie_names_all=("csrftoken",),
     invalid_url_markers=("/login",),
-    invalid_body_patterns=(r"Log in with your Instagram account", r"Continue with Instagram"),
+    invalid_body_patterns=(r"Log in with your Instagram account", r"Continue with Instagram", r"Page Not Found"),
     post_login_button_patterns=(r"^Not now$",),
     pre_login_button_patterns=(r"Continue with Instagram", r"Log in with Instagram"),
 )

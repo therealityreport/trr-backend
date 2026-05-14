@@ -42,8 +42,11 @@ def _scrape_socialblade_person_page(handle: str) -> dict[str, Any]:
 
 
 class SocialBladeRefreshRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     handle: str
     force: bool = False
+    source_scope: str = Field(default="network", alias="sourceScope")
 
 
 class SocialBladeBatchRefreshItem(BaseModel):
@@ -59,6 +62,7 @@ class SocialBladeBatchRefreshRequest(BaseModel):
     items: list[SocialBladeBatchRefreshItem]
     source: str
     force: bool = False
+    source_scope: str = Field(default="network", alias="sourceScope")
 
 
 @router.get("/{person_id}/socialblade")
@@ -94,20 +98,32 @@ async def refresh_socialblade_data(
     """Trigger a fresh SocialBlade scrape, preferring the local shared-browser path."""
     from trr_backend.socials.socialblade.service import (
         SocialBladeRefreshError,
+        normalize_socialblade_source_scope,
         refresh_and_persist_socialblade,
         sanitize_socialblade_handle,
+        scrape_socialblade_then_following,
     )
 
     safe_handle = sanitize_socialblade_handle(body.handle)
     if not safe_handle:
         raise HTTPException(status_code=400, detail="Invalid handle")
+    try:
+        source_scope = normalize_socialblade_source_scope(body.source_scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         return await run_in_threadpool(
             refresh_and_persist_socialblade,
             person_id=person_id,
             handle=safe_handle,
-            scraper=_scrape_socialblade_person_page,
+            scraper=lambda normalized_handle: scrape_socialblade_then_following(
+                _scrape_socialblade_person_page,
+                normalized_handle,
+                source="person_page",
+                source_scope=source_scope,
+                platform="instagram",
+            ),
             source="person_page",
             force=body.force,
             platform="instagram",
@@ -128,15 +144,21 @@ async def refresh_socialblade_data_batch(
     from trr_backend.modal_dispatch import dispatch_socialblade_scrape
     from trr_backend.socials.socialblade.service import (
         SocialBladeRefreshError,
+        normalize_socialblade_source_scope,
         queue_refresh_decision,
         refresh_and_persist_socialblade,
         sanitize_socialblade_handle,
+        scrape_socialblade_then_following,
         socialblade_auto_refresh_enabled,
     )
 
     source = body.source.strip().lower()
     if source not in {"cast_comparison", "season_run"}:
         raise HTTPException(status_code=400, detail="Invalid source")
+    try:
+        source_scope = normalize_socialblade_source_scope(body.source_scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if source == "season_run" and not socialblade_auto_refresh_enabled():
         return {
@@ -215,7 +237,13 @@ async def refresh_socialblade_data_batch(
                     refresh_and_persist_socialblade,
                     person_id=item.person_id,
                     handle=safe_handle,
-                    scraper=_scrape_socialblade_person_page,
+                    scraper=lambda normalized_handle: scrape_socialblade_then_following(
+                        _scrape_socialblade_person_page,
+                        normalized_handle,
+                        source=source,
+                        source_scope=source_scope,
+                        platform="instagram",
+                    ),
                     source=source,
                     force=body.force,
                     platform="instagram",
@@ -245,6 +273,9 @@ async def refresh_socialblade_data_batch(
             handle=safe_handle,
             source=source,
             force=body.force,
+            platform="instagram",
+            scrape_following=True,
+            source_scope=source_scope,
         )
         if not dispatch_result.get("dispatched"):
             errors.append(
@@ -268,6 +299,7 @@ async def refresh_socialblade_data_batch(
         "SocialBlade batch refresh evaluated",
         extra={
             "source": source,
+            "source_scope": source_scope,
             "force": body.force,
             "requested_count": len(body.items),
             "accepted_count": len(accepted),

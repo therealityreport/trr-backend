@@ -38,6 +38,8 @@ from trr_backend.socials._scrapling_http_utils import (
 from .auth import SOCIALBLADE_STEALTH_USER_AGENT
 
 logger = logging.getLogger("socials.socialblade.fetcher")
+_SOCIALBLADE_HISTORY_LIMIT = 60
+_TRPC_CAPTURE_PLATFORMS = frozenset({"instagram", "tiktok"})
 
 
 def _build_nav_headers(referer: str) -> dict[str, str]:
@@ -103,10 +105,13 @@ class SocialBladeScraplingFetcher:
         from trr_backend.socials.socialblade.scraper import (
             _build_profile_stats_from_user_payload,
             _build_total_followers_chart_from_daily_deltas,
+            _build_total_followers_chart_from_total_rows,
+            _default_profile_stat_labels,
             _extract_profile_stats_from_body_text,
             _followers_chart_from_table,
             _format_scrape_failure_message,
             _history_rows_to_metrics,
+            _merge_followers_charts,
             _normalize_table_data,
             _page_access_denied,
             _socialblade_profile_url,
@@ -136,28 +141,54 @@ class SocialBladeScraplingFetcher:
         history_source = "unavailable"
         profile_labels: dict[str, str] = {}
 
-        if self._platform == "instagram":
-            captured_payload = self._extract_captured_instagram_payload(html)
+        if self._platform in _TRPC_CAPTURE_PLATFORMS:
+            captured_payload = self._extract_captured_platform_payload(html, platform=self._platform)
             captured_user = captured_payload.get("user") if isinstance(captured_payload, dict) else None
             captured_history_rows = captured_payload.get("history_rows") if isinstance(captured_payload, dict) else None
             captured_daily_deltas = captured_payload.get("daily_deltas") if isinstance(captured_payload, dict) else None
-            if isinstance(captured_user, dict) and isinstance(captured_history_rows, list):
-                stats, rankings = _build_profile_stats_from_user_payload(captured_user)
-                metrics = _history_rows_to_metrics(captured_history_rows, limit=len(captured_history_rows))
-                if isinstance(captured_daily_deltas, list):
-                    chart_data = _build_total_followers_chart_from_daily_deltas(
-                        stats["followers"],
-                        captured_daily_deltas,
+            captured_daily_total_rows = (
+                captured_payload.get("daily_total_rows") if isinstance(captured_payload, dict) else None
+            )
+            captured_payload_available = isinstance(captured_user, dict) and isinstance(captured_history_rows, list)
+
+            def apply_captured_payload() -> None:
+                nonlocal stats, rankings, metrics, chart_data, history_source
+                stats, rankings = _build_profile_stats_from_user_payload(captured_user, platform=self._platform)
+                metrics = _history_rows_to_metrics(
+                    captured_history_rows,
+                    limit=len(captured_history_rows),
+                    platform=self._platform,
+                )
+                table_chart = _followers_chart_from_table(metrics, metric_label="Followers")
+                if isinstance(captured_daily_total_rows, list):
+                    chart_data = _merge_followers_charts(
+                        _build_total_followers_chart_from_total_rows(captured_daily_total_rows),
+                        table_chart,
                     )
+                elif isinstance(captured_daily_deltas, list):
+                    chart_data = _merge_followers_charts(
+                        _build_total_followers_chart_from_daily_deltas(
+                            stats["followers"],
+                            captured_daily_deltas,
+                        ),
+                        table_chart,
+                    )
+                else:
+                    chart_data = table_chart
                 history_source = "page_trpc_capture"
                 self._last_transport = "scrapling_page_trpc_capture"
-                self._fallback_chain.append("instagram_page_trpc_capture")
+                self._fallback_chain.append(f"{self._platform}_page_trpc_capture")
+
+            if captured_payload_available and len(captured_history_rows) >= _SOCIALBLADE_HISTORY_LIMIT:
+                apply_captured_payload()
             else:
+                if captured_payload_available:
+                    self._fallback_chain.append(f"{self._platform}_page_trpc_capture_short")
                 try:
                     stats, rankings, metrics, chart_data = await self._scrape_authenticated_api(safe_handle, sb_url)
                     history_source = "authenticated_api"
                     self._last_transport = "httpx_after_scrapling_warmup"
-                    self._fallback_chain.append("instagram_trpc_http")
+                    self._fallback_chain.append(f"{self._platform}_trpc_http")
                 except Exception as exc:  # noqa: BLE001
                     authenticated_api_error = exc
                     logger.info(
@@ -165,24 +196,20 @@ class SocialBladeScraplingFetcher:
                         extra={"handle": safe_handle, "platform": self._platform},
                         exc_info=True,
                     )
+                    if captured_payload_available:
+                        apply_captured_payload()
 
         if not stats or not rankings:
             stats, rankings, profile_labels = _extract_profile_stats_from_body_text(body_text, self._platform)
         if not profile_labels:
-            profile_labels = {
-                "followers": "Followers",
-                "following": "Following",
-                "media_count": "Media Count",
-                "engagement_rate": "Engagement Rate",
-                "average_likes": "Average Likes",
-                "average_comments": "Average Comments",
-                "chart_metric_label": "Followers" if self._platform != "youtube" else "Subscribers",
-            }
+            profile_labels = _default_profile_stat_labels(self._platform)
 
         if not metrics:
             table_data = self._extract_table_data(html)
             metrics = _normalize_table_data(table_data, body_text)
             if metrics.get("row_count"):
+                if history_source == "unavailable":
+                    history_source = "table_fallback"
                 self._fallback_chain.append("html_table_fallback")
                 self._last_transport = "html_table_fallback"
 
@@ -251,20 +278,23 @@ class SocialBladeScraplingFetcher:
             url,
             headless=self._headless,
             network_idle=False,
-            load_dom=self._platform == "instagram",
+            load_dom=self._platform in _TRPC_CAPTURE_PLATFORMS,
             disable_resources=False,
             cookies=self._cookies,
             extra_headers=_build_nav_headers(url),
-            page_action=self._capture_instagram_page_trpc if self._platform == "instagram" else None,
+            page_action=self._capture_platform_page_trpc if self._platform in _TRPC_CAPTURE_PLATFORMS else None,
             timeout=self._timeout_ms,
             retries=1,
             retry_delay=1.0,
         )
 
-    async def _capture_instagram_page_trpc(self, page: Any) -> None:
+    async def _capture_platform_page_trpc(self, page: Any) -> None:
+        from trr_backend.socials.socialblade.scraper import _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT
+
         await page.evaluate(
-            """async () => {
+            """async ({ platform, chartLimit }) => {
                 const captureId = "trr-socialblade-capture";
+                const platformKey = String(platform || "").toLowerCase();
                 document.getElementById(captureId)?.remove();
                 const nextDataElement = document.querySelector("#__NEXT_DATA__");
                 if (!nextDataElement?.textContent) {
@@ -273,7 +303,7 @@ class SocialBladeScraplingFetcher:
                 const nextData = JSON.parse(nextDataElement.textContent);
                 const queries = nextData?.props?.pageProps?.trpcState?.json?.queries || [];
                 const user = queries.find(
-                    query => query?.queryKey?.[0]?.[0] === "instagram" && query?.queryKey?.[0]?.[1] === "user"
+                    query => query?.queryKey?.[0]?.[0] === platformKey && query?.queryKey?.[0]?.[1] === "user"
                 )?.state?.data;
                 const id = user?.id;
                 if (!id) {
@@ -282,15 +312,27 @@ class SocialBladeScraplingFetcher:
                 const encodeInput = value => encodeURIComponent(JSON.stringify(value));
                 const endpoints = {
                     history60:
-                        "/api/trpc/instagram.user,instagram.history?batch=1&input=" +
+                        `/api/trpc/${platformKey}.user,${platformKey}.history?batch=1&input=` +
                         encodeInput({
                             "0": { json: { id } },
                             "1": { json: { id, limit: 60 } },
                         }),
                     dailyDeltas:
-                        "/api/trpc/instagram.monthly?batch=1&input=" +
+                        `/api/trpc/${platformKey}.monthly?batch=1&input=` +
                         encodeInput({
                             "0": { json: { id, period: "daily" } },
+                        }),
+                    dailyTotalChart:
+                        `/api/trpc/${platformKey}.monthly?batch=1&input=` +
+                        encodeInput({
+                            "0": {
+                                json: {
+                                    id,
+                                    limit: chartLimit,
+                                    period: "daily",
+                                    type: "total",
+                                },
+                            },
                         }),
                 };
                 const capture = { user, responses: {} };
@@ -308,8 +350,12 @@ class SocialBladeScraplingFetcher:
                 element.type = "application/json";
                 element.textContent = JSON.stringify(capture);
                 document.body.appendChild(element);
-            }"""
+            }""",
+            {"platform": self._platform, "chartLimit": _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT},
         )
+
+    async def _capture_instagram_page_trpc(self, page: Any) -> None:
+        await self._capture_platform_page_trpc(page)
 
     async def _fetch_trpc_result(self, endpoint: str, *, referer: str, index: int | None = None) -> Any:
         from trr_backend.socials.socialblade.scraper import (
@@ -360,42 +406,56 @@ class SocialBladeScraplingFetcher:
         referer: str,
     ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any], dict[str, Any] | None]:
         from trr_backend.socials.socialblade.scraper import (
+            _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT,
             _build_profile_stats_from_user_payload,
-            _build_total_followers_chart_from_daily_deltas,
+            _build_total_followers_chart_from_total_rows,
+            _default_profile_stat_labels,
+            _followers_chart_from_table,
             _history_rows_to_metrics,
+            _merge_followers_charts,
         )
 
         profile = await self._search_profile(handle, referer=referer)
         creator_id = str(profile.get("id") or "").strip()
         user_payload = await self._fetch_user(creator_id, referer=referer)
-        stats, rankings = _build_profile_stats_from_user_payload(user_payload)
+        stats, rankings = _build_profile_stats_from_user_payload(user_payload, platform=self._platform)
         history_rows = await self._fetch_history(creator_id, referer=referer, limit=60)
-        metrics = _history_rows_to_metrics(history_rows, limit=60)
-        daily_deltas = await self._fetch_period_deltas(creator_id, referer=referer, period="daily")
-        chart_data = _build_total_followers_chart_from_daily_deltas(stats["followers"], daily_deltas)
+        metrics = _history_rows_to_metrics(history_rows, limit=60, platform=self._platform)
+        daily_total_rows = await self._fetch_daily_total_rows(
+            creator_id,
+            referer=referer,
+            limit=_SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT,
+        )
+        chart_data = _merge_followers_charts(
+            _build_total_followers_chart_from_total_rows(daily_total_rows),
+            _followers_chart_from_table(
+                metrics,
+                metric_label=_default_profile_stat_labels(self._platform)["chart_metric_label"],
+            ),
+        )
         return stats, rankings, metrics, chart_data
 
     async def _search_profile(self, handle: str, *, referer: str) -> dict[str, Any]:
-        endpoint = "/api/trpc/instagram.search?input=" + quote(
+        endpoint = f"/api/trpc/{self._platform}.search?input=" + quote(
             json.dumps({"json": {"query": handle}}, separators=(",", ":"))
         )
         result = await self._fetch_trpc_result(endpoint, referer=referer)
         profile = result.get("platformResult") if isinstance(result, dict) else None
         if not isinstance(profile, dict) or not str(profile.get("id") or "").strip():
-            raise RuntimeError(f"SocialBlade could not resolve @{handle}")
+            raise RuntimeError(f"SocialBlade could not resolve {self._platform}/@{handle}")
         return profile
 
     async def _fetch_user(self, creator_id: str, *, referer: str) -> dict[str, Any]:
-        endpoint = "/api/trpc/instagram.user?input=" + quote(
+        endpoint = f"/api/trpc/{self._platform}.user?input=" + quote(
             json.dumps({"json": {"id": creator_id}}, separators=(",", ":"))
         )
         result = await self._fetch_trpc_result(endpoint, referer=referer)
         if not isinstance(result, dict):
-            raise RuntimeError("SocialBlade user endpoint returned an unexpected payload")
+            raise RuntimeError(f"SocialBlade {self._platform} user endpoint returned an unexpected payload")
         return result
 
     async def _fetch_history(self, creator_id: str, *, referer: str, limit: int) -> list[dict[str, Any]]:
-        endpoint = "/api/trpc/instagram.user,instagram.history?batch=1&input=" + quote(
+        endpoint = f"/api/trpc/{self._platform}.user,{self._platform}.history?batch=1&input=" + quote(
             json.dumps(
                 {
                     "0": {"json": {"id": creator_id}},
@@ -406,7 +466,7 @@ class SocialBladeScraplingFetcher:
         )
         result = await self._fetch_trpc_result(endpoint, referer=referer, index=1)
         if not isinstance(result, list):
-            raise RuntimeError("SocialBlade history endpoint returned an unexpected payload")
+            raise RuntimeError(f"SocialBlade {self._platform} history endpoint returned an unexpected payload")
         return result
 
     async def _fetch_period_deltas(
@@ -416,12 +476,39 @@ class SocialBladeScraplingFetcher:
         referer: str,
         period: str,
     ) -> list[dict[str, Any]]:
-        endpoint = "/api/trpc/instagram.monthly?batch=1&input=" + quote(
+        endpoint = f"/api/trpc/{self._platform}.monthly?batch=1&input=" + quote(
             json.dumps({"0": {"json": {"id": creator_id, "period": period}}}, separators=(",", ":"))
         )
         result = await self._fetch_trpc_result(endpoint, referer=referer, index=0)
         if not isinstance(result, list):
-            raise RuntimeError(f"SocialBlade {period} endpoint returned an unexpected payload")
+            raise RuntimeError(f"SocialBlade {self._platform} {period} endpoint returned an unexpected payload")
+        return result
+
+    async def _fetch_daily_total_rows(
+        self,
+        creator_id: str,
+        *,
+        referer: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        endpoint = f"/api/trpc/{self._platform}.monthly?batch=1&input=" + quote(
+            json.dumps(
+                {
+                    "0": {
+                        "json": {
+                            "id": creator_id,
+                            "limit": limit,
+                            "period": "daily",
+                            "type": "total",
+                        }
+                    }
+                },
+                separators=(",", ":"),
+            )
+        )
+        result = await self._fetch_trpc_result(endpoint, referer=referer, index=0)
+        if not isinstance(result, list):
+            raise RuntimeError(f"SocialBlade {self._platform} daily total endpoint returned an unexpected payload")
         return result
 
     @staticmethod
@@ -473,6 +560,11 @@ class SocialBladeScraplingFetcher:
 
     @staticmethod
     def _extract_captured_instagram_payload(html: str) -> dict[str, Any]:
+        return SocialBladeScraplingFetcher._extract_captured_platform_payload(html, platform="instagram")
+
+    @staticmethod
+    def _extract_captured_platform_payload(html: str, *, platform: str) -> dict[str, Any]:
+        del platform
         if not html:
             return {}
         soup = BeautifulSoup(html, "html.parser")
@@ -505,10 +597,12 @@ class SocialBladeScraplingFetcher:
             user = captured.get("user") if isinstance(captured.get("user"), dict) else None
         history_rows = unwrap_response("history60", index=1)
         daily_deltas = unwrap_response("dailyDeltas", index=0)
+        daily_total_rows = unwrap_response("dailyTotalChart", index=0)
         return {
             "user": user,
             "history_rows": history_rows,
             "daily_deltas": daily_deltas,
+            "daily_total_rows": daily_total_rows,
         }
 
     @staticmethod

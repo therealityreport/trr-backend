@@ -424,6 +424,46 @@ def test_shared_catalog_hydrates_twitter_comments_uncapped_by_default() -> None:
     }
 
 
+def test_shared_catalog_emits_progress_while_filtering_off_root_quotes() -> None:
+    root = _tweet("root", username="TheTraitorsUS")
+    root.replies = 0
+    root.quotes = 60
+    quotes: list[Tweet] = []
+    for index in range(60):
+        quote = _tweet(f"quote-{index}", username="critic")
+        quote.is_quote = True
+        quote.quoted_tweet_id = "other-root"
+        quotes.append(quote)
+    scraper = FakeTwitterScraper([root], quotes_by_tweet_id={"root": quotes})
+    persistence = FakeCatalogPersistenceAdapter()
+    progress_events: list[dict[str, Any]] = []
+
+    rows, retrieval_meta = scrape_shared_twitter_posts(
+        run_id="run-1",
+        account_handle="TheTraitorsUS",
+        config={
+            "pipeline_ingest_mode": SHARED_MODE,
+            "catalog_action_scope": "full_history",
+            "twitter_comments_in_posts_stage": True,
+        },
+        job_id="job-1",
+        progress_cb=progress_events.append,
+        dependencies=_dependencies(scraper=scraper, persistence=persistence),
+    )
+
+    assert [row["tweet_id"] for row in rows] == ["root"]
+    assert [call["tweet"].tweet_id for call in persistence.legacy_upsert_calls] == ["root"]
+    assert retrieval_meta["quote_stats"] == {
+        "quotes_fetched": 0,
+        "quotes_upserted": 0,
+        "quote_errors": 0,
+    }
+    filter_events = [event for event in progress_events if event.get("phase") == "filter_twitter_quotes"]
+    assert len(filter_events) == 4
+    assert {event["current_source_id"] for event in filter_events} == {"root"}
+    assert {event["posts_checked"] for event in filter_events} == {1}
+
+
 @pytest.mark.parametrize(
     ("error_code", "stop_reason"),
     [
@@ -496,6 +536,57 @@ def test_shared_catalog_seeds_existing_catalog_posts_when_search_window_has_no_u
     assert retrieval_meta["error_class"] is None
     assert retrieval_meta["retryable"] is False
     assert retrieval_meta["complete"] is True
+    assert retrieval_meta["persist_counters"] == {
+        "posts_upserted": 1,
+        "catalog_posts_upserted": 1,
+        "materialized_posts_upserted": 1,
+        "comments_upserted": 1,
+    }
+
+
+def test_shared_catalog_uses_seeded_anchor_targets_without_search() -> None:
+    root = _tweet("target-root", username="TheTraitorsUS")
+    root.replies = 4
+    reply = _tweet("reply-1", username="viewer", is_reply=True)
+    scraper = FakeTwitterScraper(
+        [_tweet("should-not-search", username="TheTraitorsUS")],
+        replies_by_tweet_id={"target-root": [reply]},
+    )
+    persistence = FakeCatalogPersistenceAdapter()
+    loader_calls: list[dict[str, Any]] = []
+
+    def _load_existing_catalog_posts(**kwargs) -> list[Tweet]:
+        loader_calls.append(kwargs)
+        return [root]
+
+    rows, retrieval_meta = scrape_shared_twitter_posts(
+        run_id="run-1",
+        account_handle="TheTraitorsUS",
+        config={
+            "pipeline_ingest_mode": SHARED_MODE,
+            "catalog_action_scope": "bounded_window",
+            "date_start": "2026-01-20T00:00:00Z",
+            "date_end": "2026-01-21T00:00:00Z",
+            "twitter_comments_in_posts_stage": True,
+            "comment_anchor_source_ids": {"twitter": ["target-root"]},
+        },
+        job_id="job-1",
+        dependencies=_dependencies(
+            scraper=scraper,
+            persistence=persistence,
+            load_existing_catalog_posts=_load_existing_catalog_posts,
+        ),
+    )
+
+    assert scraper.scrape_calls == []
+    assert [row["tweet_id"] for row in rows] == ["target-root"]
+    assert len(loader_calls) == 1
+    assert loader_calls[0]["config"]["comment_anchor_source_ids"] == {"twitter": ["target-root"]}
+    assert [call["tweet"].tweet_id for call in persistence.legacy_upsert_calls] == ["target-root", "reply-1"]
+    assert retrieval_meta["catalog_seeded_targeted_anchors"] is True
+    assert retrieval_meta["catalog_seeded_anchor_source_ids"] == ["target-root"]
+    assert retrieval_meta["retrieval_mode"] == "catalog_seeded_anchor_targets"
+    assert retrieval_meta["stop_reason"] == "catalog_seeded_anchor_targets"
     assert retrieval_meta["persist_counters"] == {
         "posts_upserted": 1,
         "catalog_posts_upserted": 1,

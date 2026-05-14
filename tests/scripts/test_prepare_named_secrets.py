@@ -15,6 +15,10 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret() -> None:
             "SOCIAL_TWITTER_COOKIES_JSON": '{"cookies": []}',
             "SOCIALBLADE_EMAIL": "ops@example.com",
             "SOCIALBLADE_PASSWORD": "secret",
+            "SOCIAL_INSTAGRAM_IG_WWW_CLAIM": "claim-token",
+            "SOCIAL_INSTAGRAM_WEB_SESSION_ID": "session-fragment",
+            "INSTAGRAM_WEB_BLOKS_VERSION_ID": "bloks-version",
+            "INSTAGRAM_WEB_X_ASBD_ID": "359341",
         }
     )
 
@@ -26,6 +30,10 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret() -> None:
         "SOCIAL_TWITTER_COOKIES_JSON": '{"cookies": []}',
         "SOCIALBLADE_EMAIL": "ops@example.com",
         "SOCIALBLADE_PASSWORD": "secret",
+        "SOCIAL_INSTAGRAM_IG_WWW_CLAIM": "claim-token",
+        "SOCIAL_INSTAGRAM_WEB_SESSION_ID": "session-fragment",
+        "INSTAGRAM_WEB_BLOKS_VERSION_ID": "bloks-version",
+        "INSTAGRAM_WEB_X_ASBD_ID": "359341",
     }
 
 
@@ -36,7 +44,12 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
     assert result["TRR_JOB_PLANE_MODE"] == "remote"
     assert result["TRR_REMOTE_EXECUTOR"] == "modal"
     assert result["TRR_DB_POOL_MINCONN"] == "1"
-    assert result["TRR_DB_POOL_MAXCONN"] == "4"
+    assert result["TRR_DB_POOL_MAXCONN"] == "1"
+    assert result["TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"] == "1"
+    assert result["TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN"] == "1"
+    assert result["TRR_DB_POOL_CLOSE_AFTER_RETURN"] == "1"
+    assert result["TRR_DB_POOL_ACQUIRE_ATTEMPTS"] == "30"
+    assert result["TRR_DB_POOL_ACQUIRE_SLEEP_MS"] == "200"
     assert (
         result["TRR_MODAL_RUNTIME_SECRET_NAME"]
         == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_RUNTIME_SECRET_NAME"]
@@ -52,9 +65,16 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
         result["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
         == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
     )
-    assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "12"
-    assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "8"
-    assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "8"
+    assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "5"
+    assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "5"
+    assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "2"
+    assert result["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
+    assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "2"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "2"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "file_lock"
+    assert result["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
+    assert result["SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS"] == "180"
+    assert result["SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING"] == "false"
 
 
 def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
@@ -70,7 +90,7 @@ def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
 
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
     assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
-    assert result["TRR_DB_POOL_MAXCONN"] == "4"
+    assert result["TRR_DB_POOL_MAXCONN"] == "1"
 
 
 def test_apply_runtime_overrides_can_be_disabled() -> None:

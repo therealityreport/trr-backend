@@ -15,9 +15,28 @@ def test_select_threads_posts_proxy_prefers_explicit_urls(monkeypatch: pytest.Mo
     assert proxy.fingerprint == "proxy.test:8080:explicit"
 
 
-def test_select_threads_posts_proxy_does_not_default_to_decodo(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_select_threads_posts_proxy_defaults_to_decodo_when_credentials_exist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_URLS", raising=False)
     monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", raising=False)
+    monkeypatch.setenv("DECODO_USERNAME", "user")
+    monkeypatch.setenv("DECODO_PASSWORD", "secret")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+
+    proxy = select_threads_posts_proxy()
+
+    assert proxy is not None
+    assert proxy.api_proxy_url == "http://user:secret@gate.decodo.com:7000"
+    assert proxy.browser_proxy == {
+        "server": "http://gate.decodo.com:7000",
+        "username": "user",
+        "password": "secret",
+    }
+    assert proxy.fingerprint == "gate.decodo.com:7000:decodo"
+
+
+def test_select_threads_posts_proxy_respects_explicit_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SOCIAL_THREADS_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_THREADS_POSTS_PROXY_PROVIDER", "none")
     monkeypatch.setenv("DECODO_USERNAME", "user")
     monkeypatch.setenv("DECODO_PASSWORD", "secret")
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")

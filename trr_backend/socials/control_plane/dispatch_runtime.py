@@ -368,6 +368,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         if legacy._job_requires_trusted_local_worker_lane(job_config, platform=platform):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
+        terminal_remote_invocation = False
         if existing_remote_invocation_id:
             refreshed_lease_expires_at = legacy._now_utc() + timedelta(
                 seconds=legacy._resolve_stale_seconds_for_job(
@@ -417,13 +418,27 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                     }
                 else:
                     continue
-        if legacy._dispatch_request_is_fresh(job):
+            else:
+                terminal_remote_invocation = True
+                job_dispatch = {
+                    **job_dispatch,
+                    "remote_invocation_status": inspection_status,
+                    "remote_invocation_checked_at": inspection.get("checked_at"),
+                    "remote_blocked_reason": str(inspection.get("reason") or "").strip() or None,
+                }
+        if not terminal_remote_invocation and legacy._dispatch_request_is_fresh(job):
             continue
         if running_by_stage.get(stage, 0) >= legacy._modal_dispatch_stage_global_cap(stage):
             continue
         candidate_account = legacy._resolve_dispatch_account_handle(job_config)
         sp_key = (stage, platform)
         existing_accounts = active_accounts_by_stage_platform.get(sp_key, set())
+        if (
+            candidate_account
+            and stage in {legacy.SHARED_ACCOUNT_DISCOVERY_STAGE, legacy.SHARED_ACCOUNT_POSTS_STAGE}
+            and candidate_account in existing_accounts
+        ):
+            continue
         prospective_accounts = existing_accounts | {candidate_account} if candidate_account else existing_accounts
         effective_cap = legacy._modal_dispatch_effective_platform_cap(
             stage,
@@ -606,6 +621,7 @@ def claim_and_process_social_job(*, job_id: str, worker_id: str) -> dict[str, An
             "job": legacy._load_current_job_row(job_id),
         }
     _mark_claimed_runs_running([claimed])
+    legacy._mark_claimed_modal_dispatch_running(claimed)
     result = _call_extracted_override("process_claimed_job", process_claimed_job, claimed, worker_id=worker_id)
     run_id = str(claimed.get("run_id") or "").strip() or None
     _call_extracted_override("dispatch_due_social_jobs", dispatch_due_social_jobs, run_id=run_id, limit=1)

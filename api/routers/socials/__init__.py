@@ -4279,20 +4279,32 @@ def _refresh_social_account_profile_socialblade(
         refresh_socialblade_cookies,
     )
     from trr_backend.socials.socialblade.scraper import scrape_socialblade
-    from trr_backend.socials.socialblade.service import refresh_and_persist_socialblade
+    from trr_backend.socials.socialblade.service import (
+        refresh_and_persist_socialblade,
+        scrape_socialblade_then_following,
+    )
 
     refresh_socialblade_cookies("account_page_refresh", allow_headless_fallback=False)
     cookies = load_socialblade_cookies_from_sources()
-    return refresh_and_persist_socialblade(
-        person_id=None,
-        platform=normalized_platform,
-        handle=safe_handle,
-        scraper=lambda normalized_handle: scrape_socialblade(
+
+    def _scrape_account(normalized_handle: str) -> dict[str, Any]:
+        return scrape_socialblade(
             normalized_handle,
             cookies,
             platform=normalized_platform,
             allow_login_fallback=False,
             allow_visible_browser_retry=normalized_platform == "instagram",
+        )
+
+    return refresh_and_persist_socialblade(
+        person_id=None,
+        platform=normalized_platform,
+        handle=safe_handle,
+        scraper=lambda normalized_handle: scrape_socialblade_then_following(
+            _scrape_account,
+            normalized_handle,
+            platform=normalized_platform,
+            source="account_page",
         ),
         source="account_page",
         force=force,

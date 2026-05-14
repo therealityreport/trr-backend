@@ -270,12 +270,10 @@ def run_repair(
     steps: list[dict[str, Any]] = []
 
     try:
-        validation_payload = _parse_last_json_line(
-            _run_command(
-                _refresh_command(python_command=python_command, force=False),
-                timeout_seconds=VALIDATE_LOCAL_TIMEOUT_SECONDS,
-            ).stdout,
+        validation_payload, _validation_rc = _run_json_command_allow_failure(
+            _refresh_command(python_command=python_command, force=False),
             step_name="validate_local",
+            timeout_seconds=VALIDATE_LOCAL_TIMEOUT_SECONDS,
         )
     except Exception as exc:  # noqa: BLE001
         steps.append({"name": "validate_local", "status": "failed", "error": type(exc).__name__})
@@ -313,12 +311,10 @@ def run_repair(
         )
 
         try:
-            validation_payload = _parse_last_json_line(
-                _run_command(
-                    _refresh_command(python_command=python_command, force=False),
-                    timeout_seconds=VALIDATE_LOCAL_TIMEOUT_SECONDS,
-                ).stdout,
+            validation_payload, _validation_after_refresh_rc = _run_json_command_allow_failure(
+                _refresh_command(python_command=python_command, force=False),
                 step_name="validate_local_after_refresh",
+                timeout_seconds=VALIDATE_LOCAL_TIMEOUT_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001
             steps.append({"name": "validate_local_after_refresh", "status": "failed", "error": type(exc).__name__})
