@@ -396,3 +396,34 @@ def test_modal_fingerprint_changes_when_shared_instagram_scrapling_session_chang
     second = cli.build_modal_fingerprint(repo_root)
 
     assert first != second
+
+
+def test_modal_fingerprint_changes_when_socialblade_scraper_changes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "TRR-Backend"
+    for relative_path in (
+        "trr_backend/modal_jobs.py",
+        "trr_backend/socials/socialblade/scraper.py",
+    ):
+        path = repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{relative_path}: v1\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli.prepare_named_secrets, "_load_source_env", lambda _path: {})
+    monkeypatch.setattr(cli.prepare_named_secrets, "_split_env", lambda _env: ({}, {}))
+    monkeypatch.setattr(
+        cli.prepare_named_secrets,
+        "_apply_runtime_overrides",
+        lambda values, *, disabled=False: values,
+    )
+
+    first = cli.build_modal_fingerprint(repo_root)
+    (repo_root / "trr_backend/socials/socialblade/scraper.py").write_text(
+        "socialblade scraper: v2\n",
+        encoding="utf-8",
+    )
+    second = cli.build_modal_fingerprint(repo_root)
+
+    assert first != second

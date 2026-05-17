@@ -11,7 +11,7 @@ import sys
 from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -31,46 +31,48 @@ def _log(msg: str) -> None:
 
 
 _JS_EXTRACT_TABLE = """(() => {
-    const table = document.querySelector("table");
-    if (!table) return null;
-    const rows = [...table.querySelectorAll("tr")];
-    if (rows.length === 0) return null;
     const datePattern = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\\s*\\d{4}-\\d{2}-\\d{2}$/;
-    const headers = [...rows[0].querySelectorAll("th,td")]
-        .map(cell => cell.textContent.trim())
-        .filter(Boolean);
-    if (headers.length === 0) return null;
-    const normalizedHeaders = headers.map(header => header.toLowerCase());
-    const isMetricSummaryTable =
-        normalizedHeaders.length === 4 &&
-        normalizedHeaders[0] === "date" &&
-        normalizedHeaders.includes("following") &&
-        (
-            normalizedHeaders.includes("followers") ||
-            normalizedHeaders.includes("subscribers") ||
-            normalizedHeaders.includes("likes")
-        );
     const titleCase = value => value.replace(/\\b\\w/g, letter => letter.toUpperCase());
-    const expandedHeaders = isMetricSummaryTable
-        ? [
-            "Date",
-            `${titleCase(headers[1])} Delta`,
-            `${titleCase(headers[1])} Total`,
-            `${titleCase(headers[2])} Delta`,
-            `${titleCase(headers[2])} Total`,
-            `${titleCase(headers[3])} Delta`,
-            `${titleCase(headers[3])} Total`,
-        ]
-        : headers;
-    const data = rows.slice(1)
-        .map(row => [...row.querySelectorAll("td")].map(td => td.textContent.trim()))
-        .filter(
-            cells =>
-                cells.length >= expandedHeaders.length &&
-                datePattern.test((cells[0] || "").replace(/^\\s+|\\s+$/g, ""))
-        )
-        .map(cells => Object.fromEntries(expandedHeaders.map((header, index) => [header, cells[index] || ""])));
-    return { headers: expandedHeaders, data };
+    for (const table of [...document.querySelectorAll("table")]) {
+        const rows = [...table.querySelectorAll("tr")];
+        if (rows.length === 0) continue;
+        const headers = [...rows[0].querySelectorAll("th,td")]
+            .map(cell => cell.textContent.trim())
+            .filter(Boolean);
+        if (headers.length === 0) continue;
+        const normalizedHeaders = headers.map(header => header.toLowerCase());
+        const isMetricSummaryTable =
+            normalizedHeaders.length === 4 &&
+            normalizedHeaders[0] === "date" &&
+            normalizedHeaders.includes("following") &&
+            (
+                normalizedHeaders.includes("followers") ||
+                normalizedHeaders.includes("subscribers") ||
+                normalizedHeaders.includes("likes")
+            );
+        const expandedHeaders = isMetricSummaryTable
+            ? [
+                "Date",
+                `${titleCase(headers[1])} Delta`,
+                `${titleCase(headers[1])} Total`,
+                `${titleCase(headers[2])} Delta`,
+                `${titleCase(headers[2])} Total`,
+                `${titleCase(headers[3])} Delta`,
+                `${titleCase(headers[3])} Total`,
+            ]
+            : headers;
+        if ((expandedHeaders[0] || "").toLowerCase() !== "date") continue;
+        const data = rows.slice(1)
+            .map(row => [...row.querySelectorAll("td")].map(td => td.textContent.trim()))
+            .filter(
+                cells =>
+                    cells.length >= expandedHeaders.length &&
+                    datePattern.test((cells[0] || "").replace(/^\\s+|\\s+$/g, ""))
+            )
+            .map(cells => Object.fromEntries(expandedHeaders.map((header, index) => [header, cells[index] || ""])));
+        if (data.length > 0) return { headers: expandedHeaders, data };
+    }
+    return null;
 })()"""
 
 
@@ -107,6 +109,17 @@ _PLATFORM_ROUTE_SEGMENTS = {
     "tiktok": "user",
     "youtube": "handle",
 }
+_KNOWN_PROFILE_URL_HOST_PREFIXES = (
+    "www.",
+    "socialblade.com/",
+    "instagram.com/",
+    "threads.net/",
+    "tiktok.com/",
+    "youtube.com/",
+    "youtu.be/",
+    "facebook.com/",
+    "fb.com/",
+)
 _PROFILE_STAT_LABELS = {
     "instagram": {
         "followers": ("Followers",),
@@ -165,11 +178,13 @@ def _parse_metric_number(value: str) -> int:
     rendered = str(value or "").strip().replace(",", "")
     if not rendered:
         return 0
-    match = re.search(r"(-?\d+(?:\.\d+)?)\s*([kmb])?$", rendered, re.IGNORECASE)
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*([kmb])\b", rendered, re.IGNORECASE)
     if not match:
-        return _parse_int(rendered)
+        match = re.search(r"(-?\d+(?:\.\d+)?)", rendered)
+    if not match:
+        return 0
     amount = float(match.group(1))
-    suffix = str(match.group(2) or "").lower()
+    suffix = str(match.group(2) if len(match.groups()) >= 2 and match.group(2) else "").lower()
     multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(suffix, 1)
     return int(round(amount * multiplier))
 
@@ -245,13 +260,69 @@ def _page_access_denied(body_text: str) -> bool:
 
 def _socialblade_profile_url(platform: str, handle: str) -> str:
     normalized_platform = str(platform or "instagram").strip().lower()
-    normalized_handle = str(handle or "").strip().lstrip("@")
+    normalized_handle = _normalize_socialblade_profile_handle(normalized_platform, handle)
+    if normalized_platform == "youtube" and normalized_handle.startswith(("channel/", "user/", "c/", "handle/")):
+        return f"https://socialblade.com/youtube/{normalized_handle}"
     if normalized_platform == "youtube" and normalized_handle.upper().startswith("UC"):
         return f"https://socialblade.com/youtube/channel/{normalized_handle}"
     if normalized_platform == "youtube" and normalized_handle.startswith(("user/", "c/")):
         return f"https://socialblade.com/youtube/{normalized_handle}"
     route_segment = _PLATFORM_ROUTE_SEGMENTS.get(normalized_platform, "user")
     return f"https://socialblade.com/{normalized_platform}/{route_segment}/{normalized_handle}"
+
+
+def _normalize_socialblade_profile_handle(platform: str, handle: str) -> str:
+    rendered = str(handle or "").strip()
+    lowered = rendered.lower()
+    if "://" not in rendered and lowered.startswith(_KNOWN_PROFILE_URL_HOST_PREFIXES):
+        rendered = f"https://{rendered}"
+
+    parsed = urlparse(rendered)
+    if not parsed.netloc:
+        return _clean_socialblade_handle(platform, rendered)
+
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    segments = [unquote(segment).strip() for segment in parsed.path.split("/") if segment.strip()]
+    if not segments:
+        return ""
+
+    if host.endswith("socialblade.com"):
+        if platform == "youtube" and len(segments) >= 3 and segments[1].lower() in {"channel", "user", "c", "handle"}:
+            return f"{segments[1].lower()}/{_clean_socialblade_handle(platform, segments[2])}"
+        if len(segments) >= 3 and segments[1].lower() in {"user", "handle", "channel", "c"}:
+            return _clean_socialblade_handle(platform, segments[2])
+        return _clean_socialblade_handle(platform, segments[-1])
+
+    if host.endswith(("instagram.com", "threads.net")):
+        return _clean_socialblade_handle(platform, segments[0])
+
+    if host.endswith("tiktok.com"):
+        tiktok_handle = next((segment for segment in segments if segment.startswith("@")), segments[0])
+        return _clean_socialblade_handle(platform, tiktok_handle)
+
+    if host.endswith(("youtube.com", "youtu.be")):
+        first = segments[0].lower()
+        if platform == "youtube" and first in {"channel", "user", "c", "handle"} and len(segments) >= 2:
+            return f"{first}/{_clean_socialblade_handle(platform, segments[1])}"
+        return _clean_socialblade_handle(platform, segments[0])
+
+    if host.endswith(("facebook.com", "fb.com")):
+        if segments[0].lower() == "profile.php":
+            facebook_handle = str((parse_qs(parsed.query).get("id") or [""])[0]).strip()
+        else:
+            facebook_handle = segments[0]
+        return _clean_socialblade_handle(platform, facebook_handle)
+
+    return _clean_socialblade_handle(platform, segments[-1])
+
+
+def _clean_socialblade_handle(platform: str, value: str) -> str:
+    rendered = str(value or "").strip().lstrip("@")
+    if platform == "youtube" and rendered.upper().startswith("UC"):
+        return re.sub(r"[^a-zA-Z0-9._-]", "", rendered)
+    return re.sub(r"[^a-zA-Z0-9._-]", "", rendered.lower())
 
 
 def _label_value_after(lines: list[str], labels: tuple[str, ...]) -> tuple[str, str]:
@@ -629,11 +700,19 @@ def _has_socialblade_login_credentials() -> bool:
 
 def _should_retry_in_visible_shared_browser(error: Exception | None) -> bool:
     if isinstance(error, SocialBladeEndpointError):
+        if error.status in {401, 403}:
+            return True
         if error.status == 412 and ".monthly" in error.endpoint:
             return True
         if error.status == 403 and "instagram.search" in error.endpoint:
             return True
     rendered = str(error or "").lower()
+    if any(marker in rendered for marker in _ACCESS_DENIED_PATTERNS):
+        return True
+    if "access-denied" in rendered or "cloudflare" in rendered and "1020" in rendered:
+        return True
+    if re.search(r"\b(?:http\s*)?(?:401|403)\b", rendered) and "socialblade" in rendered:
+        return True
     if ".monthly" in rendered and "http 412" in rendered:
         return True
     if "incomplete profile stats or daily metrics data" in rendered:
@@ -676,13 +755,73 @@ def _socialblade_payload_needs_login_retry(payload: dict[str, Any] | None) -> bo
     except (TypeError, ValueError):
         chart_points = 0
     period = str(metrics.get("period") or "").strip()
-    if 0 < row_count < _SOCIALBLADE_AUTHENTICATED_HISTORY_LIMIT:
-        return True
-    if row_count >= _SOCIALBLADE_AUTHENTICATED_HISTORY_LIMIT and 0 < chart_points <= row_count:
-        return True
     if re.search(r"\b(?:14|30|31)\s+days\b", period, re.IGNORECASE):
         return True
+    if chart_points > row_count:
+        return False
+    runtime_metadata = payload.get("runtime_metadata")
+    control_updates = runtime_metadata.get("capture_control_updates") if isinstance(runtime_metadata, dict) else None
+    selected_expected_chart_controls = (
+        isinstance(control_updates, dict)
+        and str(control_updates.get("last60Days") or "") in {"selected", "already_selected"}
+        and str(control_updates.get("daily") or "") in {"selected", "already_selected"}
+        and str(control_updates.get("total") or "") in {"selected", "already_selected"}
+    )
+    if row_count > 0 and chart_points > 0 and selected_expected_chart_controls:
+        return False
+    if 0 < row_count < _SOCIALBLADE_AUTHENTICATED_HISTORY_LIMIT:
+        return True
+    if row_count >= _SOCIALBLADE_AUTHENTICATED_HISTORY_LIMIT:
+        return False
     return False
+
+
+def _socialblade_payload_has_complete_page_capture(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("history_source") or "").strip() != "page_trpc_capture":
+        return False
+    metrics = payload.get("daily_channel_metrics_60day")
+    if not isinstance(metrics, dict):
+        return False
+    try:
+        return int(metrics.get("row_count") or 0) >= _SOCIALBLADE_AUTHENTICATED_HISTORY_LIMIT
+    except (TypeError, ValueError):
+        return False
+
+
+def _socialblade_payload_has_authenticated_seed_session(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    runtime_metadata = payload.get("runtime_metadata")
+    return bool(isinstance(runtime_metadata, dict) and runtime_metadata.get("seed_has_socialblade_session"))
+
+
+def _mark_payload_as_degraded_attempt(payload: dict[str, Any], error: Exception) -> dict[str, Any]:
+    """Keep partial scrape evidence when the authenticated retry cannot complete."""
+    degraded = dict(payload)
+    if _socialblade_payload_has_complete_page_capture(degraded):
+        runtime_metadata = degraded.get("runtime_metadata") if isinstance(degraded.get("runtime_metadata"), dict) else {}
+        degraded["runtime_metadata"] = {
+            **runtime_metadata,
+            "login_retry_failed": True,
+            "login_retry_error": str(error),
+        }
+        return degraded
+    metrics = degraded.get("daily_channel_metrics_60day")
+    row_count = 0
+    if isinstance(metrics, dict):
+        try:
+            row_count = int(metrics.get("row_count") or 0)
+        except (TypeError, ValueError):
+            row_count = 0
+    if str(degraded.get("history_source") or "").strip() == "page_trpc_capture" and row_count < (
+        _SOCIALBLADE_AUTHENTICATED_HISTORY_LIMIT
+    ):
+        degraded["history_source"] = "page_trpc_capture_short"
+    degraded["stats_refreshed"] = False
+    degraded["error"] = _format_scrape_failure_message(error)
+    return degraded
 
 
 def _build_profile_stats_from_user_payload(
@@ -840,6 +979,13 @@ def _scrape_socialblade_in_context(
 
         body_text = _extract_body_text(page)
         if _page_access_denied(body_text):
+            if allow_visible_browser_retry:
+                _log("SocialBlade page was blocked by Cloudflare; retrying through visible shared Chrome session...")
+                return scrape_socialblade_with_shared_browser_session(
+                    handle,
+                    platform=platform,
+                    playwright=playwright,
+                )
             raise RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)")
 
         chart_data = None
@@ -1025,8 +1171,10 @@ def scrape_socialblade(
     """
     _log(f"Scraping SocialBlade for {platform} @{handle}")
     attempted_login_fallback = False
+    first_payload: dict[str, Any] | None = None
     try:
         payload = _run_scrapling_socialblade_fetch(handle, cookies, platform=platform)
+        first_payload = payload
         if (
             platform in {"instagram", "tiktok"}
             and allow_login_fallback
@@ -1035,13 +1183,25 @@ def scrape_socialblade(
         ):
             metrics = payload.get("daily_channel_metrics_60day") if isinstance(payload, dict) else {}
             row_count = metrics.get("row_count") if isinstance(metrics, dict) else None
+            if (
+                _modal_runtime_disallows_visible_socialblade_login()
+                and _socialblade_payload_has_authenticated_seed_session(payload)
+            ):
+                _log(
+                    "SocialBlade scrape returned short authenticated history "
+                    f"({row_count or 0} rows) in Modal; keeping seeded-session table result."
+                )
+                return payload
             _log(
                 "SocialBlade scrape returned short history "
                 f"({row_count or 0} rows); logging in and retrying authenticated scrape..."
             )
             attempted_login_fallback = True
-            refreshed_cookies = _refresh_socialblade_cookies_via_login()
-            payload = _run_scrapling_socialblade_fetch(handle, refreshed_cookies, platform=platform)
+            try:
+                refreshed_cookies = _refresh_socialblade_cookies_via_login()
+                payload = _run_scrapling_socialblade_fetch(handle, refreshed_cookies, platform=platform)
+            except Exception as login_exc:  # noqa: BLE001
+                return _mark_payload_as_degraded_attempt(payload, login_exc)
         return payload
     except Exception as exc:  # noqa: BLE001
         candidate_error = exc.__cause__ if getattr(exc, "__cause__", None) is not None else exc
@@ -1075,6 +1235,9 @@ def scrape_socialblade(
                     )
                 raise login_exc from exc
 
+        if attempted_login_fallback and first_payload:
+            return _mark_payload_as_degraded_attempt(first_payload, exc)
+
         raise
 
 
@@ -1085,15 +1248,18 @@ def _run_scrapling_socialblade_fetch(
     platform: str,
 ) -> dict[str, Any]:
     from trr_backend.socials.socialblade.fetcher import SocialBladeScraplingFetcher
+    from trr_backend.socials.socialblade.proxy import select_socialblade_proxy
     from trr_backend.socials.socialblade.session import resolve_socialblade_scrapling_session
 
     session = resolve_socialblade_scrapling_session(cookies)
+    proxy_config = select_socialblade_proxy(session_key=f"{platform}:{handle}")
 
     async def _run() -> dict[str, Any]:
         fetcher = SocialBladeScraplingFetcher(
             cookies=session.cookies,
             raw_cookies=session.raw_cookies,
             platform=platform,
+            proxy_config=proxy_config,
         )
         try:
             return await fetcher.scrape(handle)
@@ -1108,7 +1274,23 @@ def _run_scrapling_socialblade_fetch(
 # ---------------------------------------------------------------------------
 
 
-def _socialblade_page_is_logged_in(page: Any) -> bool:
+def _socialblade_context_has_session_cookie(context: Any) -> bool:
+    try:
+        cookies = context.cookies()
+    except Exception:  # noqa: BLE001
+        return False
+    for cookie in cookies or []:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name") or "").strip().lower()
+        value = str(cookie.get("value") or "").strip()
+        domain = str(cookie.get("domain") or "").strip().lower()
+        if name == "session" and value and "socialblade.com" in domain:
+            return True
+    return False
+
+
+def _socialblade_page_is_logged_in(page: Any, context: Any | None = None) -> bool:
     try:
         if page.locator('a[href="/logout"], a[href*="/logout"]').count():
             return True
@@ -1118,7 +1300,17 @@ def _socialblade_page_is_logged_in(page: Any) -> bool:
         body_text = _extract_body_text(page).lower()
     except Exception:  # noqa: BLE001
         body_text = ""
-    return "logout" in body_text or "log out" in body_text
+    if "logout" in body_text or "log out" in body_text:
+        return True
+    return bool(context is not None and _socialblade_context_has_session_cookie(context))
+
+
+def _modal_runtime_disallows_visible_socialblade_login() -> bool:
+    if os.getenv("MODAL_TASK_ID") or os.getenv("MODAL_ENVIRONMENT"):
+        return True
+    job_plane = str(os.getenv("TRR_JOB_PLANE_MODE") or "").strip().lower()
+    remote_executor = str(os.getenv("TRR_REMOTE_EXECUTOR") or "").strip().lower()
+    return job_plane == "remote" and remote_executor == "modal"
 
 
 def _do_login(page: Any, context: Any) -> None:
@@ -1131,7 +1323,7 @@ def _do_login(page: Any, context: Any) -> None:
     _log("Navigating to SocialBlade login page...")
     page.goto("https://socialblade.com/login", wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_timeout(2000)
-    if _socialblade_page_is_logged_in(page):
+    if _socialblade_page_is_logged_in(page, context):
         _log("SocialBlade session is already logged in")
         return
 
@@ -1162,12 +1354,8 @@ def _do_login(page: Any, context: Any) -> None:
     page.wait_for_timeout(5000)
 
     # Verify
-    is_logged_in = page.evaluate("""(() => {
-        const logoutLink = document.querySelector('a[href="/logout"]');
-        return !!logoutLink;
-    })()""")
-    if not is_logged_in:
-        raise RuntimeError("SocialBlade login failed — no logout link found after submit")
+    if not _socialblade_page_is_logged_in(page, context):
+        raise RuntimeError("SocialBlade login failed: no active session found after submit")
 
     _log("Login successful")
 
@@ -1233,14 +1421,38 @@ async def _refresh_socialblade_cookies_via_visible_login_async() -> dict[str, st
                         || /\\blog\\s*out\\b|\\blogout\\b/i.test(text);
                 })()"""
 
-            logged_in = await _cdp_send_command(
-                websocket,
-                command_id,
-                "Runtime.evaluate",
-                {"expression": build_logged_in_check(), "returnByValue": True},
-            )
-            command_id += 1
-            if not bool(((logged_in or {}).get("result") or {}).get("value")):
+            async def has_session_cookie() -> bool:
+                nonlocal command_id
+                cookie_result = await _cdp_send_command(
+                    websocket,
+                    command_id,
+                    "Network.getCookies",
+                    {"urls": ["https://socialblade.com/"]},
+                )
+                command_id += 1
+                return any(
+                    str(cookie.get("name") or "").strip().lower() == "session"
+                    and str(cookie.get("value") or "").strip()
+                    for cookie in cookie_result.get("cookies") or []
+                    if isinstance(cookie, dict)
+                )
+
+            async def is_logged_in() -> bool:
+                nonlocal command_id
+                logged_in = await _cdp_send_command(
+                    websocket,
+                    command_id,
+                    "Runtime.evaluate",
+                    {"expression": build_logged_in_check(), "returnByValue": True},
+                )
+                command_id += 1
+                if bool(((logged_in or {}).get("result") or {}).get("value")):
+                    return True
+                return await has_session_cookie()
+
+            if await is_logged_in():
+                login_completed = True
+            else:
                 fill_expression = f"""(() => {{
                     const email = {json.dumps(email)};
                     const password = {json.dumps(password)};
@@ -1307,6 +1519,10 @@ async def _refresh_socialblade_cookies_via_visible_login_async() -> dict[str, st
                     if state.get("loggedIn"):
                         turnstile_ready = True
                         break
+                    if await has_session_cookie():
+                        turnstile_ready = True
+                        login_completed = True
+                        break
                     if not state.get("present") or state.get("solved"):
                         turnstile_ready = True
                         break
@@ -1334,19 +1550,12 @@ async def _refresh_socialblade_cookies_via_visible_login_async() -> dict[str, st
                 await asyncio.sleep(6)
 
             for _ in range(12):
-                logged_in = await _cdp_send_command(
-                    websocket,
-                    command_id,
-                    "Runtime.evaluate",
-                    {"expression": build_logged_in_check(), "returnByValue": True},
-                )
-                command_id += 1
-                if bool(((logged_in or {}).get("result") or {}).get("value")):
+                if await is_logged_in():
                     login_completed = True
                     break
                 await asyncio.sleep(3)
             if not login_completed:
-                raise RuntimeError("Visible SocialBlade login failed: no logout link found after submit")
+                raise RuntimeError("Visible SocialBlade login failed: no active session found after submit")
 
             cookie_result = await _cdp_send_command(
                 websocket,
@@ -1408,6 +1617,11 @@ def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> d
         detail = str(exc).lower()
         if "turnstile" not in detail and "cloudflare" not in detail:
             raise
+        if _modal_runtime_disallows_visible_socialblade_login():
+            raise RuntimeError(
+                "Headless SocialBlade login was challenged in Modal. "
+                "Refresh SOCIALBLADE_COOKIES_JSON from a visible logged-in browser and update the Modal social secret."
+            ) from exc
         _log("Headless SocialBlade login was challenged; retrying through visible managed Chrome...")
         return _refresh_socialblade_cookies_via_visible_login()
 

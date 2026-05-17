@@ -8,10 +8,16 @@ Known long-lived SSE routes opt out via explicit path patterns.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
+
+from trr_backend.problem import (
+    build_problem_detail,
+    correlation_ids_from_scope,
+    problem_asgi_headers,
+    problem_json_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,16 +80,6 @@ def _parse_timeout_from_env() -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
-def _extract_trace_headers(scope: dict) -> list[tuple[bytes, bytes]]:
-    """Extract trace-related headers from the incoming request to forward in error responses."""
-    trace_header_names = {b"x-request-id", b"x-trace-id", b"traceparent"}
-    headers: list[tuple[bytes, bytes]] = []
-    for name, value in scope.get("headers", []):
-        if name.lower() in trace_header_names:
-            headers.append((name, value))
-    return headers
-
-
 def _is_exempt(path: str) -> bool:
     """Check if a path is exempt from timeout enforcement.
 
@@ -137,25 +133,25 @@ class RequestTimeoutMiddleware:
             )
             # Only send 504 if the response hasn't already started
             if not response_started:
-                body = json.dumps(
-                    {
-                        "detail": {
-                            "code": "REQUEST_TIMEOUT",
-                            "message": f"Request timed out after {self.timeout_seconds}s",
-                            "retryable": True,
-                        }
-                    }
-                ).encode()
-                trace_headers = _extract_trace_headers(scope)
+                trace_id, request_id = correlation_ids_from_scope(scope)
+                problem = build_problem_detail(
+                    code="REQUEST_TIMEOUT",
+                    status=504,
+                    message=f"Request timed out after {self.timeout_seconds}s",
+                    retryable=True,
+                    trace_id=trace_id,
+                    request_id=request_id,
+                    extra={
+                        "retry_after_ms": 1000,
+                        "timeout_seconds": self.timeout_seconds,
+                    },
+                )
+                body = problem_json_bytes(problem)
                 await send(
                     {
                         "type": "http.response.start",
                         "status": 504,
-                        "headers": [
-                            [b"content-type", b"application/json"],
-                            [b"content-length", str(len(body)).encode()],
-                        ]
-                        + trace_headers,
+                        "headers": problem_asgi_headers(problem, content_length=len(body), scope=scope),
                     }
                 )
                 await send(

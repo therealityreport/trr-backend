@@ -48,6 +48,10 @@ _FALLBACK_SHARED_CHROME_CDP_URLS = (
 )
 
 
+class VisibleManagedChromeProfileError(RuntimeError):
+    """Raised when the local visible managed Chrome is not the codex profile."""
+
+
 def _default_socialblade_cookie_file_path() -> Path:
     return social_repo._default_platform_cookie_file_path("socialblade")  # noqa: SLF001
 
@@ -169,9 +173,7 @@ def _is_local_visible_managed_chrome_url(cdp_url: str) -> bool:
     return parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port == 9222
 
 
-def _ensure_visible_managed_chrome_available(cdp_url: str) -> bool:
-    if _chrome_cdp_endpoint_reachable(cdp_url):
-        return False
+def _run_visible_managed_chrome_guard(cdp_url: str) -> bool:
     if not _is_local_visible_managed_chrome_url(cdp_url):
         return False
 
@@ -186,15 +188,34 @@ def _ensure_visible_managed_chrome_available(cdp_url: str) -> bool:
     env["CHROME_AGENT_DEBUG_PORT"] = "9222"
     env["CHROME_AGENT_HEADLESS"] = "0"
 
-    subprocess.run(
-        ["bash", str(launcher)],
-        check=True,
-        cwd=str(launcher.parent.parent),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        subprocess.run(
+            ["bash", str(launcher)],
+            check=True,
+            cwd=str(launcher.parent.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise VisibleManagedChromeProfileError(
+            "Visible shared Chrome is not using the expected codex@thereality.report profile. "
+            f"{detail}"
+        ) from exc
+    return True
+
+
+def _ensure_visible_managed_chrome_available(cdp_url: str) -> bool:
+    if _chrome_cdp_endpoint_reachable(cdp_url):
+        _run_visible_managed_chrome_guard(cdp_url)
+        return False
+    if not _is_local_visible_managed_chrome_url(cdp_url):
+        return False
+
+    if not _run_visible_managed_chrome_guard(cdp_url):
+        return False
     if not _chrome_cdp_endpoint_reachable(cdp_url, timeout_seconds=2.0):
         raise RuntimeError(
             "Visible shared Chrome was launched but the debugging endpoint on port 9222 is still unavailable"
@@ -379,6 +400,8 @@ def refresh_socialblade_cookies(
         auto_launched_visible_chrome = _ensure_visible_managed_chrome_available(visible_cdp_url)
         return export_socialblade_cookies_from_shared_chrome(cdp_url=visible_cdp_url)
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, VisibleManagedChromeProfileError):
+            raise
         if not allow_headless_fallback:
             raise RuntimeError(
                 _render_visible_cookie_refresh_error(

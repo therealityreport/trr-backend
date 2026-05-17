@@ -43,6 +43,7 @@ from trr_backend.observability import (
     render_metrics,
     reset_trace_id,
 )
+from trr_backend.problem import problem_response
 from trr_backend.security.jwt import (
     describe_supabase_jwt_context,
     expected_supabase_issuer,
@@ -306,7 +307,17 @@ async def database_service_unavailable_exception_handler(
         request.url.path,
         payload.get("reason"),
     )
-    return JSONResponse(status_code=503, content={"detail": payload})
+    return problem_response(
+        request,
+        code=str(payload.get("code") or "DATABASE_SERVICE_UNAVAILABLE"),
+        status=503,
+        message=str(payload.get("message") or "Database service unavailable."),
+        retryable=bool(payload.get("retryable", True)),
+        extra={
+            "reason": payload.get("reason"),
+            "retry_after_ms": payload.get("retry_after_ms"),
+        },
+    )
 
 
 @app.middleware("http")

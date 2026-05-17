@@ -28,6 +28,8 @@ def test_account_browser_session_manager_imports_storage_state_and_cookies(tmp_p
     assert paths.account_id == "bravo-tv"
     assert paths.storage_state_path.exists()
     assert paths.cookie_file_path.exists()
+    assert (paths.storage_state_path.stat().st_mode & 0o777) == 0o600
+    assert (paths.cookie_file_path.stat().st_mode & 0o777) == 0o600
     storage_state = json.loads(paths.storage_state_path.read_text(encoding="utf-8"))
     assert storage_state["cookies"][0]["name"] == "sessionid"
     assert json.loads(paths.cookie_file_path.read_text(encoding="utf-8")) == {

@@ -122,6 +122,39 @@ def test_tweet_to_payload_created_at_none_guard():
     assert payload["created_at"] is None
 
 
+def test_tweet_to_payload_writes_bookmarks_shares_and_thread_fields():
+    from trr_backend.repositories.twitter_standalone import _tweet_to_payload
+
+    tweet = _make_tweet("850")
+    tweet.bookmarks = 8
+    tweet.shares = 9
+    tweet.thread_root_tweet_id = "root-1"
+    tweet.thread_position = 2
+    tweet.is_thread_part = True
+    tweet.twitter_context_role = "audience_reply"
+
+    payload = _tweet_to_payload(tweet, scrape_query="#TEST", scraped_at="2026-01-01T00:00:00+00:00")
+
+    assert payload["bookmarks"] == 8
+    assert payload["shares"] == 9
+    assert payload["thread_root_tweet_id"] == "root-1"
+    assert payload["thread_position"] == 2
+    assert payload["is_thread_part"] is True
+    assert payload["twitter_context_role"] == "audience_reply"
+
+
+def test_tweet_to_payload_defaults_shares_to_retweets_when_missing():
+    from trr_backend.repositories.twitter_standalone import _tweet_to_payload
+
+    tweet = _make_tweet("851")
+    tweet.retweets = 7
+    tweet.shares = 0
+
+    payload = _tweet_to_payload(tweet, scrape_query="#TEST", scraped_at="2026-01-01T00:00:00+00:00")
+
+    assert payload["shares"] == 7
+
+
 def test_persist_search_records_run_and_memberships():
     from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 

@@ -535,6 +535,67 @@ def test_account_socialblade_refresh_route_uses_visible_retry_without_login_fall
     }
 
 
+def test_account_socialblade_refresh_route_allows_tiktok_visible_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.routers.socials as router_module
+    import trr_backend.socials.socialblade.auth as auth_module
+    import trr_backend.socials.socialblade.scraper as scraper_module
+    import trr_backend.socials.socialblade.service as service_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(auth_module, "refresh_socialblade_cookies", lambda *args, **kwargs: {"cf_clearance": "token"})
+    monkeypatch.setattr(auth_module, "load_socialblade_cookies_from_sources", lambda: {"cf_clearance": "token"})
+
+    def fake_scrape_socialblade(
+        handle: str,
+        cookies,
+        *,
+        platform: str,
+        allow_login_fallback: bool,
+        allow_visible_browser_retry: bool,
+    ):
+        captured["scraper"] = {
+            "handle": handle,
+            "cookies": cookies,
+            "platform": platform,
+            "allow_login_fallback": allow_login_fallback,
+            "allow_visible_browser_retry": allow_visible_browser_retry,
+        }
+        return {
+            "username": handle,
+            "account_handle": handle,
+            "platform": platform,
+            "scraped_at": "2026-04-08T12:00:00Z",
+        }
+
+    def fake_refresh_and_persist_socialblade(**kwargs):
+        return kwargs["scraper"](kwargs["handle"])
+
+    async def fake_run_in_threadpool(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(scraper_module, "scrape_socialblade", fake_scrape_socialblade)
+    monkeypatch.setattr(service_module, "refresh_and_persist_socialblade", fake_refresh_and_persist_socialblade)
+    monkeypatch.setattr(router_module, "run_in_threadpool", fake_run_in_threadpool)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/admin/socials/profiles/tiktok/@BravoTV/socialblade/refresh",
+        json={"force": True},
+    )
+
+    assert response.status_code == 200
+    assert captured["scraper"] == {
+        "handle": "bravotv",
+        "cookies": {"cf_clearance": "token"},
+        "platform": "tiktok",
+        "allow_login_fallback": False,
+        "allow_visible_browser_retry": True,
+    }
+
+
 def test_batch_refresh_respects_season_run_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     import trr_backend.socials.socialblade.service as service_module
 

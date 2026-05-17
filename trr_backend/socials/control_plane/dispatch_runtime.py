@@ -300,6 +300,21 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "queue_disabled"}
     if not legacy.is_modal_remote_executor_enabled():
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "remote_executor_not_modal"}
+    if legacy._run_pause_after_current_requested(run_id):
+        legacy._touch_modal_social_dispatcher_heartbeat(
+            metadata_updates={
+                "dispatch_enabled": True,
+                "last_dispatch_blocked_reason": "pause_after_current",
+                "last_dispatch_error": None,
+                "last_dispatch_error_code": None,
+            }
+        )
+        return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "pause_after_current"}
+    recovered_capacity = (
+        legacy.recover_failed_instagram_comments_capacity_jobs(run_id=run_id, limit=max(safe_limit, 25))
+        if run_id
+        else []
+    )
     recovered_blocked = _call_extracted_override(
         "recover_dispatch_blocked_no_progress_jobs",
         recover_dispatch_blocked_no_progress_jobs,
@@ -324,6 +339,9 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             "reason": reason,
             "recovered_dispatch_blocked_job_ids": [
                 str(row.get("id") or "").strip() for row in recovered_blocked if str(row.get("id") or "").strip()
+            ],
+            "recovered_capacity_job_ids": [
+                str(row.get("id") or "").strip() for row in recovered_capacity if str(row.get("id") or "").strip()
             ],
         }
 
@@ -359,13 +377,14 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         if len(dispatched_job_ids) >= safe_limit:
             break
         stage = legacy._job_stage_from_row(job)
+        capacity_stage = legacy._modal_dispatch_capacity_stage(stage)
         platform = legacy._normalize_platform_name(job.get("platform")) or "unknown"
         status = str(job.get("status") or "").strip().lower()
         job_run_id = str(job.get("run_id") or "").strip()
         job_config = legacy._metadata_dict(job.get("config"))
         job_dispatch = legacy._job_dispatch_metadata(job)
         job_ingest_mode = legacy._resolve_pipeline_ingest_mode(job_config.get("pipeline_ingest_mode"))
-        if legacy._job_requires_trusted_local_worker_lane(job_config, platform=platform):
+        if legacy._job_requires_dedicated_worker_lane(job_config, platform=platform):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
         terminal_remote_invocation = False
@@ -383,15 +402,19 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             )
             inspection_status = str(inspection.get("status") or "").strip().lower()
             if legacy._modal_invocation_is_nonterminal(inspection_status):
-                running_by_stage[stage] = running_by_stage.get(stage, 0) + 1
-                running_by_stage_platform[(stage, platform)] = running_by_stage_platform.get((stage, platform), 0) + 1
+                running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
+                running_by_stage_platform[(capacity_stage, platform)] = (
+                    running_by_stage_platform.get((capacity_stage, platform), 0) + 1
+                )
                 nonterminal_account = legacy._resolve_dispatch_account_handle(job_config)
                 if nonterminal_account:
-                    active_accounts_by_stage_platform.setdefault((stage, platform), set()).add(nonterminal_account)
+                    active_accounts_by_stage_platform.setdefault((capacity_stage, platform), set()).add(
+                        nonterminal_account
+                    )
                 if job_run_id:
                     running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
                     if job_ingest_mode == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
-                        key = (job_run_id, stage, platform)
+                        key = (job_run_id, capacity_stage, platform)
                         running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
                 continue
             if inspection_status == "unknown":
@@ -428,14 +451,14 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 }
         if not terminal_remote_invocation and legacy._dispatch_request_is_fresh(job):
             continue
-        if running_by_stage.get(stage, 0) >= legacy._modal_dispatch_stage_global_cap(stage):
+        if running_by_stage.get(capacity_stage, 0) >= legacy._modal_dispatch_stage_global_cap(stage):
             continue
         candidate_account = legacy._resolve_dispatch_account_handle(job_config)
-        sp_key = (stage, platform)
+        sp_key = (capacity_stage, platform)
         existing_accounts = active_accounts_by_stage_platform.get(sp_key, set())
         if (
             candidate_account
-            and stage in {legacy.SHARED_ACCOUNT_DISCOVERY_STAGE, legacy.SHARED_ACCOUNT_POSTS_STAGE}
+            and capacity_stage in {legacy.SHARED_ACCOUNT_DISCOVERY_STAGE, legacy.SHARED_ACCOUNT_POSTS_STAGE}
             and candidate_account in existing_accounts
         ):
             continue
@@ -444,6 +467,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             stage,
             platform,
             active_account_count=len(prospective_accounts) if prospective_accounts else 1,
+            job_config=job_config,
         )
         if effective_cap is not None and running_by_stage_platform.get(sp_key, 0) >= effective_cap:
             continue
@@ -510,14 +534,16 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 dispatch_blocked_first_seen_at=None,
             )
             dispatched_job_ids.append(job_id)
-            running_by_stage[stage] = running_by_stage.get(stage, 0) + 1
-            running_by_stage_platform[(stage, platform)] = running_by_stage_platform.get((stage, platform), 0) + 1
+            running_by_stage[capacity_stage] = running_by_stage.get(capacity_stage, 0) + 1
+            running_by_stage_platform[(capacity_stage, platform)] = (
+                running_by_stage_platform.get((capacity_stage, platform), 0) + 1
+            )
             if candidate_account:
-                active_accounts_by_stage_platform.setdefault((stage, platform), set()).add(candidate_account)
+                active_accounts_by_stage_platform.setdefault((capacity_stage, platform), set()).add(candidate_account)
             if job_run_id:
                 running_by_run[job_run_id] = running_by_run.get(job_run_id, 0) + 1
                 if job_ingest_mode == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE:
-                    key = (job_run_id, stage, platform)
+                    key = (job_run_id, capacity_stage, platform)
                     running_by_run_stage_platform[key] = running_by_run_stage_platform.get(key, 0) + 1
         else:
             dispatch_reason = str(dispatch_result.get("reason") or "dispatch_failed")
@@ -601,6 +627,9 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         ],
         "recovered_dispatch_blocked_job_ids": [
             str(row.get("id") or "").strip() for row in recovered_blocked if str(row.get("id") or "").strip()
+        ],
+        "recovered_capacity_job_ids": [
+            str(row.get("id") or "").strip() for row in recovered_capacity if str(row.get("id") or "").strip()
         ],
         "reason": None,
     }

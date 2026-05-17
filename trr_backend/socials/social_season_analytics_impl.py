@@ -33,7 +33,7 @@ from pathlib import Path
 from threading import Lock, Thread, current_thread, main_thread
 from types import SimpleNamespace
 from typing import Any, Literal, cast
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -2234,7 +2234,11 @@ def _build_modal_executor_health_payload(
 
 
 _schema_ready_cache: tuple[float, bool] | None = None
-_worker_health_cache: tuple[float, int | None, dict[str, Any]] | None = None
+_worker_health_cache: (
+    tuple[float, int | None, dict[str, Any]]
+    | tuple[float, int | None, tuple[bool, str | None], dict[str, Any]]
+    | None
+) = None
 _worker_health_cache_lock = Lock()
 _queue_status_cache: tuple[float, int, int, bool, bool, int, bool, bool, dict[str, Any]] | None = None
 _queue_status_cache_lock = Lock()
@@ -3340,11 +3344,29 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
             return _build_modal_executor_health_payload(reason=modal_executor_reason)
         return payload
 
+    if modal_executor_enabled:
+        return _build_modal_executor_health_payload(reason=modal_executor_reason)
+
+    executor_cache_context = (modal_executor_enabled, modal_executor_reason)
     now = time_module.monotonic()
     with _worker_health_cache_lock:
         if _worker_health_cache is not None:
-            cached_at, cached_stale_after, cached_payload = _worker_health_cache
-            if cached_stale_after == stale_after_seconds and (now - cached_at) < cache_ttl_seconds:
+            cache_entry = _worker_health_cache
+            cached_context = None
+            if len(cache_entry) == 4:
+                cached_at, cached_stale_after, cached_context, cached_payload = cache_entry
+            else:
+                cached_at, cached_stale_after, cached_payload = cache_entry
+                if (
+                    isinstance(cached_payload, Mapping)
+                    and str(cached_payload.get("executor_backend") or "").strip().lower() == "modal"
+                ):
+                    cached_context = (True, None)
+            if (
+                cached_stale_after == stale_after_seconds
+                and cached_context in {None, executor_cache_context}
+                and (now - cached_at) < cache_ttl_seconds
+            ):
                 return copy.deepcopy(cached_payload)
 
     payload = _query_worker_health(stale_after_seconds=stale_after_seconds)
@@ -3353,7 +3375,7 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     else:
         payload["alerts"] = _build_worker_health_alerts(payload)
     with _worker_health_cache_lock:
-        _worker_health_cache = (time_module.monotonic(), stale_after_seconds, payload)
+        _worker_health_cache = (time_module.monotonic(), stale_after_seconds, executor_cache_context, payload)
     return copy.deepcopy(payload)
 
 
@@ -6378,6 +6400,45 @@ def _youtube_is_short_expr(alias: str) -> str:
     return "false"
 
 
+_HOSTED_MEDIA_HEALTHY_MIRROR_STATUSES = {"mirrored", "complete", "ready", "up_to_date"}
+_HOSTED_MEDIA_BAD_REPAIR_REASON_TOKENS = (
+    "asset_wrong_content_type",
+    "wrong_content_type",
+    "hosted_content",
+    "legacy_hosted_url",
+    "legacy_host",
+    "bad_host",
+    "cdn_host",
+    "non_cdn",
+    "page_like",
+    "text/html",
+    "html",
+    "non_media",
+)
+
+
+def _hosted_media_sql_usable_condition(alias: str) -> str:
+    status_expr = f"nullif(lower(coalesce(to_jsonb({alias}) ->> 'media_mirror_status', '')), '')"
+    error_expr = f"lower(coalesce(to_jsonb({alias}) ->> 'media_mirror_error', ''))"
+    bad_error_expr = " or ".join(f"{error_expr} like '%{token}%'" for token in _HOSTED_MEDIA_BAD_REPAIR_REASON_TOKENS)
+    healthy_statuses = ", ".join(f"'{status}'" for status in sorted(_HOSTED_MEDIA_HEALTHY_MIRROR_STATUSES))
+    return f"(not ({bad_error_expr}) and (({status_expr}) in ({healthy_statuses}) or ({status_expr}) is null))"
+
+
+def _hosted_thumbnail_sql_expr(alias: str) -> str:
+    return (
+        f"(case when {_hosted_media_sql_usable_condition(alias)} "
+        f"then nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', '') end)"
+    )
+
+
+def _hosted_media_first_sql_expr(alias: str) -> str:
+    return (
+        f"(case when {_hosted_media_sql_usable_condition(alias)} "
+        f"then nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, '') end)"
+    )
+
+
 def _platform_thumbnail_expr(alias: str, platform: str) -> str:
     normalized = (platform or "").strip().lower()
     if normalized == "instagram":
@@ -6385,32 +6446,32 @@ def _platform_thumbnail_expr(alias: str, platform: str) -> str:
     if normalized == "tiktok":
         return (
             "coalesce("
-            f"nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', ''), "
+            f"{_hosted_thumbnail_sql_expr(alias)}, "
             f"nullif({alias}.thumbnail_url, ''), "
-            f"nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, '')"
+            f"{_hosted_media_first_sql_expr(alias)}"
             ")"
         )
     if normalized == "youtube":
         return (
             "coalesce("
-            f"nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', ''), "
-            f"nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, ''), "
+            f"{_hosted_thumbnail_sql_expr(alias)}, "
+            f"{_hosted_media_first_sql_expr(alias)}, "
             f"nullif({alias}.thumbnail_url, '')"
             ")"
         )
     if normalized == "twitter":
         return (
             "coalesce("
-            f"nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', ''), "
-            f"nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, ''), "
+            f"{_hosted_thumbnail_sql_expr(alias)}, "
+            f"{_hosted_media_first_sql_expr(alias)}, "
             f"nullif({alias}.media_urls ->> 0, '')"
             ")"
         )
     if normalized in {"facebook", "threads"}:
         return (
             "coalesce("
-            f"nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', ''), "
-            f"nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, ''), "
+            f"{_hosted_thumbnail_sql_expr(alias)}, "
+            f"{_hosted_media_first_sql_expr(alias)}, "
             f"nullif({alias}.thumbnail_url, ''), "
             f"nullif({alias}.media_urls ->> 0, '')"
             ")"
@@ -6419,7 +6480,10 @@ def _platform_thumbnail_expr(alias: str, platform: str) -> str:
 
 
 def _platform_hosted_media_expr(alias: str) -> str:
-    return f"coalesce(to_jsonb({alias}) -> 'hosted_media_urls', '[]'::jsonb)"
+    return (
+        f"(case when {_hosted_media_sql_usable_condition(alias)} "
+        f"then coalesce(to_jsonb({alias}) -> 'hosted_media_urls', '[]'::jsonb) else '[]'::jsonb end)"
+    )
 
 
 def _instagram_metadata_confidence_rank(source: Any) -> int:
@@ -6494,14 +6558,16 @@ def _social_account_catalog_start_lock(*, platform: str, account_handle: str, ru
 def _instagram_posts_thumbnail_expr(alias: str = "p") -> str:
     return (
         "coalesce("
-        f"nullif(to_jsonb({alias}) ->> 'hosted_thumbnail_url', ''), "
-        f"nullif(to_jsonb({alias}) -> 'hosted_media_urls' ->> 0, ''), "
+        f"{_hosted_thumbnail_sql_expr(alias)}, "
+        f"{_hosted_media_first_sql_expr(alias)}, "
         f"nullif({alias}.thumbnail_url, '')"
         ")"
     )
 
 
 def _instagram_posts_json_array_expr(alias: str, key: str) -> str:
+    if key == "hosted_media_urls":
+        return _platform_hosted_media_expr(alias)
     return f"coalesce(to_jsonb({alias}) -> '{key}', '[]'::jsonb)"
 
 
@@ -14234,6 +14300,26 @@ def _is_video_like_media_url(url: str) -> bool:
     path = parsed.path
     if "video.twimg.com" in host:
         return True
+    query = parse_qs(parsed.query)
+    if host.endswith("googlevideo.com") and path.endswith("/videoplayback"):
+        mime_values = [item for values in query.values() for item in values]
+        if any(str(item or "").strip().lower().startswith("video/") for item in mime_values):
+            return True
+    tiktok_cdn_hosts = (
+        "tiktokcdn.com",
+        "tiktokcdn-us.com",
+        "tiktokv.com",
+        "byteoversea.com",
+        "ibytedtos.com",
+    )
+    if any(host == candidate or host.endswith(f".{candidate}") for candidate in tiktok_cdn_hosts):
+        if path.endswith((".mp4", ".mov", ".m4v", ".webm")):
+            return True
+        query_values = [item for values in query.values() for item in values]
+        if any("video" in str(item or "").strip().lower() for item in query_values):
+            return True
+        if "/video/" in path or "/tos-" in path or "/obj/" in path:
+            return not path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp"))
     return path.endswith((".mp4", ".mov", ".m4v", ".webm"))
 
 
@@ -18828,6 +18914,123 @@ def _hosted_media_urls_need_content_repair(*, hosted_media_urls: list[str]) -> b
     return False
 
 
+def _media_mirror_error_has_bad_host_or_content_reason(value: Any) -> bool:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    return any(token in normalized for token in _HOSTED_MEDIA_BAD_REPAIR_REASON_TOKENS)
+
+
+def _hosted_media_has_known_bad_reason(
+    *,
+    hosted_thumbnail_url: str | None,
+    hosted_media_urls: list[str],
+    media_mirror_error: Any = None,
+) -> bool:
+    if _media_mirror_error_has_bad_host_or_content_reason(media_mirror_error):
+        return True
+    if hosted_thumbnail_url and _is_page_like_media_url(hosted_thumbnail_url):
+        return True
+    if _hosted_media_urls_need_content_repair(hosted_media_urls=hosted_media_urls):
+        return True
+    return _hosted_urls_need_cdn_host_repair(
+        hosted_thumbnail_url=str(hosted_thumbnail_url or "").strip(),
+        hosted_media_urls=hosted_media_urls,
+    )
+
+
+def _hosted_media_urls_usable_for_effective_selection(
+    platform: str,
+    post_row: Mapping[str, Any],
+    *,
+    hosted_thumbnail_url: str | None,
+    hosted_media_urls: list[str],
+) -> bool:
+    del platform
+    if not hosted_thumbnail_url and not hosted_media_urls:
+        return False
+    mirror_status = str(post_row.get("media_mirror_status") or "").strip().lower()
+    if _hosted_media_has_known_bad_reason(
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
+        media_mirror_error=post_row.get("media_mirror_error"),
+    ):
+        return False
+    return mirror_status in _HOSTED_MEDIA_HEALTHY_MIRROR_STATUSES or not mirror_status
+
+
+def _effective_hosted_media_for_selection(
+    platform: str,
+    post_row: Mapping[str, Any],
+    *,
+    hosted_thumbnail_url: str | None,
+    hosted_media_urls: list[str],
+) -> tuple[str | None, list[str]]:
+    if _hosted_media_urls_usable_for_effective_selection(
+        platform,
+        post_row,
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
+    ):
+        return hosted_thumbnail_url, hosted_media_urls
+    return None, []
+
+
+def _effective_post_media_selection(
+    platform: str,
+    post_row: Mapping[str, Any],
+    *,
+    source_thumbnail_url: str | None,
+    source_media_urls: list[str],
+    hosted_thumbnail_url: str | None,
+    hosted_media_urls: list[str],
+) -> dict[str, Any]:
+    effective_hosted_thumbnail_url, effective_hosted_media_urls = _effective_hosted_media_for_selection(
+        platform,
+        post_row,
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
+    )
+    media_urls = effective_hosted_media_urls or source_media_urls
+    thumbnail_url = (
+        effective_hosted_thumbnail_url
+        or source_thumbnail_url
+        or _select_non_video_media_url(effective_hosted_media_urls)
+        or _select_non_video_media_url(source_media_urls)
+        or (media_urls[0] if media_urls else None)
+    )
+    return {
+        "thumbnail_url": thumbnail_url,
+        "media_urls": media_urls,
+        "hosted_thumbnail_url": effective_hosted_thumbnail_url,
+        "hosted_media_urls": effective_hosted_media_urls,
+        "hosted_media_usable": bool(effective_hosted_thumbnail_url or effective_hosted_media_urls),
+    }
+
+
+def _repair_reasons_target_bad_hosted_media(repair_reasons: Sequence[Any]) -> bool:
+    normalized = {str(reason or "").strip().lower() for reason in repair_reasons or []}
+    return bool({"legacy_hosted_url", "hosted_content"} & normalized)
+
+
+def _should_quarantine_hosted_media_after_mirror_result(
+    *,
+    result: Mapping[str, Any],
+    repair_reasons: Sequence[Any],
+) -> bool:
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"failed", "partial"}:
+        return False
+    targeted_bad_hosted_media = _repair_reasons_target_bad_hosted_media(repair_reasons)
+    if targeted_bad_hosted_media:
+        return True
+    if _media_mirror_error_has_bad_host_or_content_reason(result.get("error")):
+        return True
+    if bool(result.get("retryable_error")):
+        return False
+    return False
+
+
 def _source_media_urls_need_quality_repair(*, platform: str, source_media_urls: list[str]) -> bool:
     normalized_platform = (platform or "").strip().lower()
     urls = [str(url).strip() for url in (source_media_urls or []) if str(url).strip()]
@@ -19077,7 +19280,10 @@ def _platform_post_needs_media_asset_repair(
             return True
 
     source_id = _platform_source_id(platform, post_row)
-    if normalized_platform in {"instagram", "youtube", "tiktok"}:
+    if normalized_platform == "instagram":
+        if not source_id and not source_thumbnail_url and not source_media_urls:
+            return False
+    elif normalized_platform in {"youtube", "tiktok"}:
         if not source_id:
             return False
     elif normalized_platform == "threads":
@@ -19091,10 +19297,27 @@ def _platform_post_needs_media_asset_repair(
         return False
 
     mirror_status = str(post_row.get("media_mirror_status") or "").strip().lower()
-    if normalized_platform == "instagram" and source_id:
+    hosted_media_has_bad_reason = _hosted_media_has_known_bad_reason(
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
+        media_mirror_error=post_row.get("media_mirror_error"),
+    )
+    status_marks_hosted_unhealthy = mirror_status in {"failed", "partial"} or (
+        mirror_status == "pending" and hosted_media_has_bad_reason
+    )
+    if status_marks_hosted_unhealthy and not _hosted_media_urls_usable_for_effective_selection(
+        normalized_platform,
+        post_row,
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
+    ):
+        if source_id or source_thumbnail_url or source_media_urls:
+            return True
+
+    if normalized_platform == "instagram":
         if mirror_status in {"failed", "partial", "pending"}:
             return True
-        if not source_thumbnail_url and not source_media_urls:
+        if source_id and not source_thumbnail_url and not source_media_urls:
             return True
 
     if normalized_platform in {"tiktok", "youtube"} and not hosted_media_urls:
@@ -22994,6 +23217,7 @@ def _ingest_tiktok(
                         max_comments=opts.max_comments_per_post,
                         fetch_replies=opts.fetch_replies,
                         delay=0.5,
+                        max_replies_per_comment=_effective_reply_limit(opts),
                     )
                     _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
                     fail_reason = str(
@@ -23323,6 +23547,7 @@ def _ingest_tiktok(
                             max_comments=opts.max_comments_per_post,
                             fetch_replies=opts.fetch_replies,
                             delay=0.5,
+                            max_replies_per_comment=_effective_reply_limit(opts),
                         )
                         _trim_nested_comment_replies(comments, max_replies_per_post=_effective_reply_limit(opts))
                         fail_reason = str(
@@ -27346,9 +27571,12 @@ def _run_platform_media_mirror_stage(
                     "error_message": None,
                 }
             ]
+        quarantine_failed_hosted_media = _repair_reasons_target_bad_hosted_media(repair_reasons)
         _update_platform_post_media_mirror_fields(
             platform=normalized_platform,
             post_id=post_id,
+            hosted_thumbnail_url=None if quarantine_failed_hosted_media else FIELD_UNSET,
+            hosted_media_urls=[] if quarantine_failed_hosted_media else FIELD_UNSET,
             media_mirror_status="failed",
             media_mirror_error=missing_reason,
             media_mirror_last_attempt_at=now_utc,
@@ -27425,15 +27653,26 @@ def _run_platform_media_mirror_stage(
             mirror_kwargs.pop("progress_cb", None)
             result = _mirror_platform_media_to_s3_result(context, **mirror_kwargs)
         _heartbeat()
+        quarantine_failed_hosted_media = _should_quarantine_hosted_media_after_mirror_result(
+            result=result,
+            repair_reasons=repair_reasons,
+        )
+        next_hosted_thumbnail_url: str | None | object = (
+            result.get("hosted_thumbnail_url") if result.get("hosted_thumbnail_url") is not None else FIELD_UNSET
+        )
+        next_hosted_media_urls: list[str] | object = (
+            list(result.get("hosted_media_urls") or []) if result.get("hosted_media_urls") else FIELD_UNSET
+        )
+        if quarantine_failed_hosted_media:
+            if next_hosted_thumbnail_url is FIELD_UNSET:
+                next_hosted_thumbnail_url = None
+            if next_hosted_media_urls is FIELD_UNSET:
+                next_hosted_media_urls = []
         _update_platform_post_media_mirror_fields(
             platform=normalized_platform,
             post_id=post_id,
-            hosted_thumbnail_url=(
-                result.get("hosted_thumbnail_url") if result.get("hosted_thumbnail_url") is not None else FIELD_UNSET
-            ),
-            hosted_media_urls=(
-                list(result.get("hosted_media_urls") or []) if result.get("hosted_media_urls") else FIELD_UNSET
-            ),
+            hosted_thumbnail_url=next_hosted_thumbnail_url,
+            hosted_media_urls=next_hosted_media_urls,
             media_mirror_status=str(result.get("status") or "") or None,
             media_mirror_error=str(result.get("error") or "") or None,
             media_mirror_last_attempt_at=now_utc,
@@ -27627,6 +27866,24 @@ def _run_platform_media_mirror_stage(
                     exc,
                 )
                 avatar_mirror_result = {"hosted_url": None, "status": "failed", "error": str(exc)[:240]}
+
+    if not need_media_asset_repair:
+        auxiliary_error = None
+        profile_status = str((profile_pic_result or {}).get("profile_pic_mirror_status") or "").strip().lower()
+        avatar_status = str((avatar_mirror_result or {}).get("status") or "").strip().lower()
+        if profile_status == "failed":
+            auxiliary_error = str((profile_pic_result or {}).get("profile_pic_mirror_error") or "").strip()
+        if not auxiliary_error and avatar_status == "failed":
+            auxiliary_error = str((avatar_mirror_result or {}).get("error") or "avatar_mirror_failed").strip()
+        _update_platform_post_media_mirror_fields(
+            platform=normalized_platform,
+            post_id=post_id,
+            media_mirror_status="failed" if auxiliary_error else str(result.get("status") or "up_to_date"),
+            media_mirror_error=auxiliary_error or None,
+            media_mirror_last_attempt_at=now_utc,
+            media_mirror_attempt_count=attempt_count,
+            media_mirror_last_job_id=job_id,
+        )
 
     mirrored_assets = _normalize_non_negative_int(result.get("mirrored_count"))
     source_assets = _normalize_non_negative_int(result.get("source_count"))
@@ -34560,6 +34817,8 @@ def _hydrate_shared_tiktok_catalog_post(
                 delay=_shared_tiktok_catalog_comment_delay_seconds(),
                 fast_mode=True,
                 progress_callback=_emit_comment_fetch_progress,
+                max_replies_per_comment=max_comments_per_post or None,
+                reply_fetch_deadline_seconds=comment_fetch_timeout_seconds,
             )
         fail_reason = str(
             getattr(scraper, "last_comment_fetch_reason", "") or getattr(scraper, "_last_api_fail_reason", "") or ""
@@ -41432,7 +41691,15 @@ def requeue_media_mirror_jobs(
           {media_urls_expr} as media_urls,
           coalesce(to_jsonb(p) ->> 'hosted_thumbnail_url', '') as hosted_thumbnail_url,
           coalesce(to_jsonb(p) -> 'hosted_media_urls', '[]'::jsonb) as hosted_media_urls,
-          coalesce(to_jsonb(p) ->> 'media_mirror_status', '') as media_mirror_status
+          coalesce(to_jsonb(p) ->> 'media_mirror_status', '') as media_mirror_status,
+          coalesce(to_jsonb(p) ->> 'media_mirror_error', '') as media_mirror_error,
+          coalesce(to_jsonb(p) ->> 'user_avatar_url', '') as user_avatar_url,
+          coalesce(to_jsonb(p) ->> 'hosted_user_avatar_url', '') as hosted_user_avatar_url,
+          coalesce(to_jsonb(p) ->> 'owner_profile_pic_url', '') as owner_profile_pic_url,
+          coalesce(to_jsonb(p) ->> 'hosted_owner_profile_pic_url', '') as hosted_owner_profile_pic_url,
+          coalesce(to_jsonb(p) -> 'hosted_tagged_profile_pics', '{{}}'::jsonb) as hosted_tagged_profile_pics,
+          coalesce(to_jsonb(p) -> 'asset_manifest', '{{}}'::jsonb) as asset_manifest,
+          coalesce(to_jsonb(p) -> 'raw_data', '{{}}'::jsonb) as raw_data
         from social.{table} p
         where p.season_id = %s
           {window_filter}
@@ -52544,13 +52811,23 @@ def _social_account_profile_post_item(
     thumbnail_url = _first_non_empty_str(row.get("thumbnail_url"))
     source_thumbnail_url = _first_non_empty_str(row.get("source_thumbnail_url"), thumbnail_url)
     hosted_thumbnail_url = _first_non_empty_str(row.get("hosted_thumbnail_url"))
-    media_urls = _normalize_unique_terms([*hosted_media_urls, *source_media_urls])
+    media_selection = _effective_post_media_selection(
+        normalized_platform,
+        row,
+        source_thumbnail_url=source_thumbnail_url,
+        source_media_urls=source_media_urls,
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
+    )
+    effective_hosted_media_urls = list(media_selection["hosted_media_urls"])
+    effective_hosted_thumbnail_url = media_selection["hosted_thumbnail_url"]
+    media_urls = list(media_selection["media_urls"])
     post_format = _first_non_empty_str(row.get("post_format"), row.get("media_type"))
     display_thumbnail = _build_display_thumbnail_payload(
         asset_manifest=_extract_platform_post_asset_manifest(normalized_platform, dict(row)),
-        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_thumbnail_url=effective_hosted_thumbnail_url,
         source_thumbnail_url=source_thumbnail_url,
-        hosted_media_urls=hosted_media_urls,
+        hosted_media_urls=effective_hosted_media_urls,
         source_media_urls=source_media_urls,
     )
     payload = {
@@ -52580,16 +52857,16 @@ def _social_account_profile_post_item(
         "metrics": metrics,
         **display_thumbnail,
     }
-    if thumbnail_url:
-        payload["thumbnail_url"] = thumbnail_url
+    if media_selection["thumbnail_url"]:
+        payload["thumbnail_url"] = media_selection["thumbnail_url"]
     if source_thumbnail_url:
         payload["source_thumbnail_url"] = source_thumbnail_url
-    if hosted_thumbnail_url:
-        payload["hosted_thumbnail_url"] = hosted_thumbnail_url
+    if effective_hosted_thumbnail_url:
+        payload["hosted_thumbnail_url"] = effective_hosted_thumbnail_url
     if source_media_urls:
         payload["source_media_urls"] = source_media_urls
-    if hosted_media_urls:
-        payload["hosted_media_urls"] = hosted_media_urls
+    if effective_hosted_media_urls:
+        payload["hosted_media_urls"] = effective_hosted_media_urls
     if media_urls:
         payload["media_urls"] = media_urls
     if post_format:
@@ -56986,14 +57263,32 @@ def get_social_account_catalog_post_detail(
             )
             or None
         )
-        thumbnail_url = _first_non_empty_str(
-            (detail_payload or {}).get("thumbnail_url") if detail_payload is not None else None,
-            hosted_thumbnail_url,
-            source_thumbnail_url,
-        ) or (hosted_media_urls[0] if hosted_media_urls else (source_media_urls[0] if source_media_urls else None))
-        media_urls = _as_text_list((detail_payload or {}).get("media_urls") if detail_payload is not None else [])
-        if not media_urls:
-            media_urls = hosted_media_urls or source_media_urls
+        media_selection = _effective_post_media_selection(
+            normalized_platform,
+            merged_row,
+            source_thumbnail_url=source_thumbnail_url or None,
+            source_media_urls=source_media_urls,
+            hosted_thumbnail_url=hosted_thumbnail_url,
+            hosted_media_urls=hosted_media_urls,
+        )
+        effective_hosted_thumbnail_url = media_selection["hosted_thumbnail_url"]
+        effective_hosted_media_urls = list(media_selection["hosted_media_urls"])
+        detail_media_urls = (
+            _as_text_list((detail_payload or {}).get("media_urls") if detail_payload is not None else [])
+            if media_selection["hosted_media_usable"]
+            else []
+        )
+        media_urls = detail_media_urls or list(media_selection["media_urls"])
+        thumbnail_url = (
+            (
+                _first_non_empty_str(
+                    (detail_payload or {}).get("thumbnail_url") if detail_payload is not None else None
+                )
+                if media_selection["hosted_media_usable"]
+                else None
+            )
+            or media_selection["thumbnail_url"]
+        )
         metrics = (
             dict((detail_payload or {}).get("stats") or {})
             if isinstance((detail_payload or {}).get("stats"), dict)
@@ -57034,10 +57329,10 @@ def get_social_account_catalog_post_detail(
             "season_number": _normalize_non_negative_int(merged_row.get("season_number")) or None,
             "thumbnail_url": thumbnail_url,
             "source_thumbnail_url": source_thumbnail_url or None,
-            "hosted_thumbnail_url": hosted_thumbnail_url,
+            "hosted_thumbnail_url": effective_hosted_thumbnail_url,
             "media_urls": media_urls,
             "source_media_urls": source_media_urls,
-            "hosted_media_urls": hosted_media_urls,
+            "hosted_media_urls": effective_hosted_media_urls,
             "media_asset_meta": _extract_media_asset_meta_from_raw_data(raw_data),
             "stats": metrics,
             "saved_metrics": metrics,
@@ -57100,12 +57395,18 @@ def get_social_account_catalog_post_detail(
         or str(fallback_row.get("hosted_thumbnail_url") or "").strip()
         or None
     )
-    thumbnail_url = (
-        hosted_thumbnail_url
-        or source_thumbnail_url
-        or (hosted_media_urls[0] if hosted_media_urls else (source_media_urls[0] if source_media_urls else None))
+    media_selection = _effective_post_media_selection(
+        "instagram",
+        merged_row,
+        source_thumbnail_url=source_thumbnail_url or None,
+        source_media_urls=source_media_urls,
+        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_media_urls=hosted_media_urls,
     )
-    media_urls = hosted_media_urls or source_media_urls
+    thumbnail_url = media_selection["thumbnail_url"]
+    media_urls = list(media_selection["media_urls"])
+    effective_hosted_thumbnail_url = media_selection["hosted_thumbnail_url"]
+    effective_hosted_media_urls = list(media_selection["hosted_media_urls"])
 
     metrics = _social_account_profile_metric_payload("instagram", merged_row)
     saved_comments = (
@@ -57185,14 +57486,14 @@ def get_social_account_catalog_post_detail(
         expected_comments=instagram_fetchable_comments,
         saved_comments=saved_comments,
         source_media_urls=source_media_urls,
-        hosted_media_urls=hosted_media_urls,
+        hosted_media_urls=effective_hosted_media_urls,
         source_thumbnail_url=source_thumbnail_url,
-        hosted_thumbnail_url=hosted_thumbnail_url,
+        hosted_thumbnail_url=effective_hosted_thumbnail_url,
         media_mirror_status=_infer_post_media_mirror_status(
             source_media_urls=source_media_urls,
-            hosted_media_urls=hosted_media_urls,
+            hosted_media_urls=effective_hosted_media_urls,
             source_thumbnail_url=source_thumbnail_url,
-            hosted_thumbnail_url=hosted_thumbnail_url,
+            hosted_thumbnail_url=effective_hosted_thumbnail_url,
             stored_status=str(merged_row.get("media_mirror_status") or "").strip() or None,
         ),
         media_mirror_last_job_id=str(merged_row.get("media_mirror_last_job_id") or "").strip() or None,
@@ -57248,20 +57549,20 @@ def get_social_account_catalog_post_detail(
         "season_number": _normalize_non_negative_int(merged_row.get("season_number")) or None,
         "thumbnail_url": thumbnail_url,
         "source_thumbnail_url": source_thumbnail_url,
-        "hosted_thumbnail_url": hosted_thumbnail_url,
+        "hosted_thumbnail_url": effective_hosted_thumbnail_url,
         "media_urls": media_urls,
         "source_media_urls": source_media_urls,
-        "hosted_media_urls": hosted_media_urls,
+        "hosted_media_urls": effective_hosted_media_urls,
         "media": {
             "media_type": merged_row.get("media_type"),
             "product_type": merged_row.get("product_type") or raw_data.get("product_type"),
             "post_format": str(merged_row.get("post_format") or raw_data.get("post_format") or "").strip() or None,
             "thumbnail_url": thumbnail_url,
             "source_thumbnail_url": source_thumbnail_url,
-            "hosted_thumbnail_url": hosted_thumbnail_url,
+            "hosted_thumbnail_url": effective_hosted_thumbnail_url,
             "media_urls": media_urls,
             "source_media_urls": source_media_urls,
-            "hosted_media_urls": hosted_media_urls,
+            "hosted_media_urls": effective_hosted_media_urls,
             "width": _normalize_non_negative_int(merged_row.get("original_width") or merged_row.get("width")) or None,
             "height": _normalize_non_negative_int(merged_row.get("original_height") or merged_row.get("height"))
             or None,

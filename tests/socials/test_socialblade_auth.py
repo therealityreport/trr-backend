@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import trr_backend.socials.socialblade.auth as auth_module
 
 
@@ -51,11 +53,62 @@ def test_refresh_socialblade_cookies_prefers_visible_manual_port(monkeypatch) ->
         fake_export_socialblade_cookies_from_shared_chrome,
     )
     monkeypatch.setattr(auth_module, "_socialblade_visible_chrome_cdp_url", lambda: "http://127.0.0.1:9222")
+    monkeypatch.setattr(auth_module, "_ensure_visible_managed_chrome_available", lambda _cdp_url: False)
 
     cookies = auth_module.refresh_socialblade_cookies("test-refresh", allow_headless_fallback=False)
 
     assert cookies == {"cf_clearance": "token"}
     assert captured == {"cdp_url": "http://127.0.0.1:9222"}
+
+
+def test_visible_managed_chrome_reachable_validates_codex_profile(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(auth_module, "_chrome_cdp_endpoint_reachable", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        auth_module,
+        "_visible_managed_chrome_workspace_script",
+        lambda: auth_module.Path("/tmp/fake-script"),
+    )
+    monkeypatch.setattr(auth_module.Path, "is_file", lambda self: str(self) == "/tmp/fake-script")
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["cwd"] = kwargs.get("cwd")
+        captured["env"] = {
+            "CODEX_CHROME_MODE": kwargs["env"]["CODEX_CHROME_MODE"],
+            "CODEX_CHROME_SHARED_PORT": kwargs["env"]["CODEX_CHROME_SHARED_PORT"],
+            "CHROME_AGENT_DEBUG_PORT": kwargs["env"]["CHROME_AGENT_DEBUG_PORT"],
+            "CHROME_AGENT_HEADLESS": kwargs["env"]["CHROME_AGENT_HEADLESS"],
+        }
+        return None
+
+    monkeypatch.setattr(auth_module.subprocess, "run", fake_run)
+
+    assert auth_module._ensure_visible_managed_chrome_available("http://127.0.0.1:9222") is False
+    assert captured["cmd"] == ["bash", "/tmp/fake-script"]
+    assert captured["env"] == {
+        "CODEX_CHROME_MODE": "shared",
+        "CODEX_CHROME_SHARED_PORT": "9222",
+        "CHROME_AGENT_DEBUG_PORT": "9222",
+        "CHROME_AGENT_HEADLESS": "0",
+    }
+
+
+def test_visible_managed_chrome_profile_error_blocks_headless_fallback(monkeypatch) -> None:
+    def fake_ensure(_cdp_url: str) -> bool:
+        raise auth_module.VisibleManagedChromeProfileError("wrong profile")
+
+    monkeypatch.setattr(auth_module, "_socialblade_visible_chrome_cdp_url", lambda: "http://127.0.0.1:9222")
+    monkeypatch.setattr(auth_module, "_ensure_visible_managed_chrome_available", fake_ensure)
+    monkeypatch.setattr(
+        auth_module,
+        "export_socialblade_cookies_from_shared_chrome",
+        lambda *, cdp_url=None: (_ for _ in ()).throw(AssertionError("must not export with wrong profile")),
+    )
+
+    with pytest.raises(auth_module.VisibleManagedChromeProfileError, match="wrong profile"):
+        auth_module.refresh_socialblade_cookies("test-refresh", allow_headless_fallback=True)
 
 
 def test_refresh_socialblade_cookies_auto_launches_visible_managed_chrome(monkeypatch) -> None:

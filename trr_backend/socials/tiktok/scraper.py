@@ -249,7 +249,7 @@ class TikTokScraper:
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_TIMEOUT_SECONDS = (10, 45)
-    COMMENT_REQUEST_TIMEOUT_SECONDS = 30
+    COMMENT_REQUEST_TIMEOUT_SECONDS = REQUEST_TIMEOUT_SECONDS
 
     def __init__(
         self,
@@ -333,6 +333,44 @@ class TikTokScraper:
         self.last_comment_fetch_reason = normalized
         if self._is_auth_related_failure(normalized):
             self.comments_auth_failed = True
+
+    @staticmethod
+    def _normalize_optional_non_negative_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_optional_non_negative_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _record_reply_cap_event(
+        self,
+        *,
+        reason: str,
+        comment_id: str,
+        limit: Any = None,
+        replies_fetched: int = 0,
+        pages_fetched: int = 0,
+    ) -> None:
+        events = list(self.last_comment_fetch_meta.get("reply_cap_events") or [])
+        event = {
+            "reason": str(reason or "").strip() or "reply_cap",
+            "comment_id": str(comment_id or "").strip() or None,
+            "limit": limit,
+            "replies_fetched": max(0, int(replies_fetched or 0)),
+            "pages_fetched": max(0, int(pages_fetched or 0)),
+        }
+        events.append({key: value for key, value in event.items() if value is not None})
+        self.last_comment_fetch_meta["reply_cap_events"] = events
 
     @staticmethod
     def _should_skip_api_pagination(reason: str | None) -> bool:
@@ -2294,6 +2332,9 @@ class TikTokScraper:
         *,
         fast_mode: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        max_replies_per_comment: int | None = None,
+        max_reply_pages: int | None = None,
+        reply_fetch_deadline_seconds: float | None = None,
     ) -> list["TikTokComment"]:
         """
         Fetch comments for a TikTok video including replies.
@@ -2304,6 +2345,9 @@ class TikTokScraper:
             max_comments: Maximum number of top-level comments to fetch
             fetch_replies: Whether to fetch replies to comments
             delay: Delay between API requests
+            max_replies_per_comment: Maximum replies to fetch for each top-level comment
+            max_reply_pages: Maximum reply API pages to fetch for each top-level comment
+            reply_fetch_deadline_seconds: Shared reply-fetch deadline for this video
 
         Returns:
             List of TikTokComment objects with nested replies
@@ -2320,6 +2364,23 @@ class TikTokScraper:
             }
             logger.warning("tiktok_comments_direct_api_parked video_id=%s", video_id)
             return []
+        max_replies_per_comment = self._normalize_optional_non_negative_int(max_replies_per_comment)
+        max_reply_pages = self._normalize_optional_non_negative_int(max_reply_pages)
+        normalized_reply_deadline_seconds = self._normalize_optional_non_negative_float(reply_fetch_deadline_seconds)
+        reply_deadline_at = (
+            time.monotonic() + normalized_reply_deadline_seconds
+            if normalized_reply_deadline_seconds is not None
+            else None
+        )
+        self.last_comment_fetch_meta = {
+            "retrieval_mode": "direct_api",
+            "reply_cap_events": [],
+            "reply_caps": {
+                "max_replies_per_comment": max_replies_per_comment,
+                "max_reply_pages": max_reply_pages,
+                "reply_fetch_deadline_seconds": normalized_reply_deadline_seconds,
+            },
+        }
         post_url = f"https://www.tiktok.com/@{username}/video/{video_id}" if username else ""
         logger.info(f"Fetching comments for video {video_id}")
 
@@ -2410,6 +2471,10 @@ class TikTokScraper:
                         delay,
                         fast_mode=fast_mode,
                         progress_callback=progress_callback,
+                        max_replies=max_replies_per_comment,
+                        max_pages=max_reply_pages,
+                        deadline_at=reply_deadline_at,
+                        deadline_seconds=normalized_reply_deadline_seconds,
                     )
                     comment.replies = replies
                     logger.info(f"  Comment {comment.comment_id}: {len(replies)} replies fetched")
@@ -2442,10 +2507,29 @@ class TikTokScraper:
         *,
         fast_mode: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        max_replies: int | None = None,
+        max_pages: int | None = None,
+        deadline_at: float | None = None,
+        deadline_seconds: float | None = None,
     ) -> list["TikTokComment"]:
         """Fetch replies to a specific comment."""
         replies = []
         cursor = 0
+        pages_fetched = 0
+        cap_recorded = False
+
+        def _record_cap(reason: str, *, limit: Any = None) -> None:
+            nonlocal cap_recorded
+            if cap_recorded:
+                return
+            cap_recorded = True
+            self._record_reply_cap_event(
+                reason=reason,
+                comment_id=comment_id,
+                limit=limit,
+                replies_fetched=len(replies),
+                pages_fetched=pages_fetched,
+            )
 
         def _emit_progress(phase: str, **payload: Any) -> None:
             if progress_callback is None:
@@ -2468,6 +2552,15 @@ class TikTokScraper:
                 )
 
         while True:
+            if max_replies is not None and len(replies) >= max_replies:
+                _record_cap("max_replies_per_comment", limit=max_replies)
+                break
+            if max_pages is not None and pages_fetched >= max_pages:
+                _record_cap("max_reply_pages", limit=max_pages)
+                break
+            if deadline_at is not None and time.monotonic() >= deadline_at:
+                _record_cap("reply_deadline_seconds", limit=deadline_seconds)
+                break
             self._rate_limit(delay, fast_mode=fast_mode)
 
             params = {
@@ -2519,15 +2612,25 @@ class TikTokScraper:
                     data.get("status_msg", ""),
                 )
                 break
+            pages_fetched += 1
 
             # Parse reply comments
             for reply_data in data.get("comments", []):
+                if max_replies is not None and len(replies) >= max_replies:
+                    _record_cap("max_replies_per_comment", limit=max_replies)
+                    break
                 reply = self._parse_comment(reply_data, video_id, post_url, is_reply=True, parent_id=comment_id)
                 replies.append(reply)
             _emit_progress("fetch_tiktok_comment_replies_page", cursor=cursor, replies_fetched=len(replies))
+            if max_replies is not None and len(replies) >= max_replies:
+                _record_cap("max_replies_per_comment", limit=max_replies)
+                break
 
             # Check for more pages
             if not data.get("has_more", False):
+                break
+            if max_pages is not None and pages_fetched >= max_pages:
+                _record_cap("max_reply_pages", limit=max_pages)
                 break
             cursor = data.get("cursor", 0)
             if not cursor:
@@ -2544,6 +2647,9 @@ class TikTokScraper:
         *,
         fast_mode: bool = False,
         max_workers: int | None = None,
+        max_replies_per_comment: int | None = None,
+        max_reply_pages: int | None = None,
+        reply_fetch_deadline_seconds: float | None = None,
     ) -> dict[str, list["TikTokComment"]]:
         """Fetch comments for multiple videos concurrently.
 
@@ -2554,6 +2660,9 @@ class TikTokScraper:
             delay: Base delay between requests
             fast_mode: Use aggressive rate limiting
             max_workers: Concurrency level (default from env or 3)
+            max_replies_per_comment: Maximum replies to fetch for each top-level comment
+            max_reply_pages: Maximum reply API pages to fetch for each top-level comment
+            reply_fetch_deadline_seconds: Shared reply-fetch deadline for each video
 
         Returns:
             Dict mapping video_id -> list of comments
@@ -2572,6 +2681,9 @@ class TikTokScraper:
                     fetch_replies=fetch_replies,
                     delay=delay,
                     fast_mode=fast_mode,
+                    max_replies_per_comment=max_replies_per_comment,
+                    max_reply_pages=max_reply_pages,
+                    reply_fetch_deadline_seconds=reply_fetch_deadline_seconds,
                 )
             return result
 
@@ -2592,6 +2704,9 @@ class TikTokScraper:
                     fetch_replies=fetch_replies,
                     delay=delay,
                     fast_mode=fast_mode,
+                    max_replies_per_comment=max_replies_per_comment,
+                    max_reply_pages=max_reply_pages,
+                    reply_fetch_deadline_seconds=reply_fetch_deadline_seconds,
                 )
                 return vid, comments
             except Exception as exc:

@@ -116,3 +116,26 @@ def test_explicit_proxy_rotator_passes_single_url_when_only_one_configured(monke
 
     assert config is not None
     assert captured["value"] == "http://user-one:secret-one@proxy-one.test:8000"
+
+
+def test_global_decodo_credentials_do_not_enable_comments_proxy_without_provider(monkeypatch):
+    monkeypatch.setenv("DECODO_USERNAME", "global-user")
+    monkeypatch.setenv("DECODO_PASSWORD", "global-pass")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+
+    assert comments_proxy.select_comments_proxy(session_key="bravotv") is None
+
+
+def test_explicit_decodo_provider_enables_comments_proxy(monkeypatch):
+    monkeypatch.setattr(comments_proxy, "_build_proxy_rotator", lambda selected: {"selected": selected})
+    monkeypatch.setenv("DECODO_USERNAME", "global-user")
+    monkeypatch.setenv("DECODO_PASSWORD", "global-pass")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+
+    config = comments_proxy.select_comments_proxy(session_key="bravotv")
+
+    assert config is not None
+    assert isinstance(config.browser_proxy, dict)
+    assert config.fingerprint == "gate.decodo.com:7000:decodo"

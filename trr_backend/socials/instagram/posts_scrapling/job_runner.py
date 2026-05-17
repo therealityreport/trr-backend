@@ -137,6 +137,38 @@ def _posts_pagination_stop_reason(result: Any) -> str | None:
     return None
 
 
+def _raise_if_pagination_state_persist_failed(
+    pagination_state: dict[str, Any] | None,
+    *,
+    account_handle: str,
+    direction: str,
+    runtime_metadata: dict[str, Any] | None = None,
+    listing_progress: dict[str, Any] | None = None,
+) -> None:
+    if not isinstance(pagination_state, dict):
+        return
+    reason = str(pagination_state.get("reason") or "").strip().lower()
+    if not bool(pagination_state.get("skipped")) or reason != "pagination_state_persist_failed":
+        return
+    metadata = {
+        **dict(runtime_metadata or {}),
+        "pagination_state": dict(pagination_state),
+        "pagination_checkpoint": {
+            "direction": direction,
+            "reason": reason,
+            "retryable": True,
+        },
+    }
+    if listing_progress is not None:
+        metadata["listing_progress"] = dict(listing_progress)
+    raise PostsScraplingRuntimeError(
+        f"Instagram posts pagination checkpoint could not be saved for @{account_handle}.",
+        error_code=reason,
+        retryable=True,
+        runtime_metadata=metadata,
+    )
+
+
 def _posts_proxy_session_key(
     *,
     account_handle: str,
@@ -361,7 +393,7 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     elif not reverse_stop_reason and max_pages and reverse_pages_fetched >= max_pages:
                         reverse_stop_reason = "max_pages"
 
-                    repo.persist_instagram_profile_pagination_state(
+                    reverse_pagination_state = repo.persist_instagram_profile_pagination_state(
                         run_id=run_id or None,
                         job_id=job_id,
                         account_handle=account_handle,
@@ -384,9 +416,27 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             "overlap_with_forward": overlap,
                         },
                     )
+                    _raise_if_pagination_state_persist_failed(
+                        reverse_pagination_state,
+                        account_handle=account_handle,
+                        direction="reverse",
+                        runtime_metadata={
+                            **dict(reverse_fetcher.runtime_metadata),
+                            "proxy_session_key": reverse_proxy_session_key,
+                        },
+                        listing_progress={
+                            "page_index": reverse_pages_fetched,
+                            "posts_seen": reverse_posts_fetched,
+                            "posts_upserted": reverse_posts_upserted,
+                            "stop_reason": reverse_stop_reason,
+                            "partial": reverse_stop_reason != "completed",
+                        },
+                    )
                     if reverse_stop_reason:
                         break
                     reverse_cursor = result.end_cursor
+            except PostsScraplingRuntimeError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 bidirectional_reverse_error = str(exc)
                 reverse_stop_reason = "reverse_walker_failed"
@@ -453,6 +503,19 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                         completed=False,
                         metadata={"reason": stop_reason, "listing_progress": True},
                     )
+                    _raise_if_pagination_state_persist_failed(
+                        pagination_state,
+                        account_handle=account_handle,
+                        direction="forward",
+                        runtime_metadata=_fetcher_runtime_metadata(),
+                        listing_progress={
+                            "page_index": pages_fetched,
+                            "posts_seen": posts_fetched,
+                            "posts_upserted": posts_upserted,
+                            "stop_reason": stop_reason,
+                            "partial": True,
+                        },
+                    )
                     break
                 lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
                 _raise_if_cancelled(
@@ -502,6 +565,19 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                             partial=True,
                             completed=False,
                             metadata={"fetch_reason": getattr(result, "fetch_reason", None)},
+                        )
+                        _raise_if_pagination_state_persist_failed(
+                            pagination_state,
+                            account_handle=account_handle,
+                            direction="forward",
+                            runtime_metadata={**_fetcher_runtime_metadata(), "fetch_reason": result.fetch_reason},
+                            listing_progress={
+                                "page_index": pages_fetched,
+                                "posts_seen": posts_fetched,
+                                "posts_upserted": posts_upserted,
+                                "stop_reason": stop_reason,
+                                "partial": True,
+                            },
                         )
                     raise PostsScraplingRuntimeError(
                         f"Instagram posts fetch failed for @{account_handle}.",
@@ -565,6 +641,19 @@ def run_instagram_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | N
                     metadata={
                         "fetch_reason": getattr(result, "fetch_reason", None),
                         "has_next_page": bool(result.has_next_page),
+                    },
+                )
+                _raise_if_pagination_state_persist_failed(
+                    pagination_state,
+                    account_handle=account_handle,
+                    direction="forward",
+                    runtime_metadata=_fetcher_runtime_metadata(),
+                    listing_progress={
+                        "page_index": pages_fetched,
+                        "posts_seen": posts_fetched,
+                        "posts_upserted": posts_upserted,
+                        "stop_reason": stop_reason,
+                        "partial": stop_reason != "completed",
                     },
                 )
                 lifecycle.emit_job_progress(

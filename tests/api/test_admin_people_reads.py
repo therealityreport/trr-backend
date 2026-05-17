@@ -313,13 +313,24 @@ def test_get_gallery_returns_retryable_503_on_pool_exhaustion(monkeypatch: pytes
     response = client.get("/api/v1/admin/people/person-1/gallery")
 
     assert response.status_code == 503
-    assert response.json()["detail"] == {
+    detail = response.json()["detail"]
+    assert {
+        "code": detail["code"],
+        "status": detail["status"],
+        "reason": detail["reason"],
+        "message": detail["message"],
+        "retryable": detail["retryable"],
+        "retry_after_ms": detail["retry_after_ms"],
+    } == {
         "code": "DATABASE_SERVICE_UNAVAILABLE",
+        "status": 503,
         "reason": "pool_capacity",
         "message": "Database service unavailable. Check runtime DB connectivity and pool sizing.",
         "retryable": True,
         "retry_after_ms": 1000,
     }
+    assert detail["trace_id"]
+    assert detail["request_id"]
 
 
 def test_get_gallery_preserves_non_retryable_server_errors(monkeypatch: pytest.MonkeyPatch) -> None:

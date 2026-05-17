@@ -1329,14 +1329,12 @@ def execute_values_returning(
         return []
     if conn is not None:
         with db_cursor(conn=conn) as cur:
-            execute_values(cur, query, rows)
-            result = cur.fetchall()
+            result = execute_values(cur, query, rows, fetch=True)
             return [dict(row) for row in result]
 
     def _run() -> list[dict[str, Any]]:
         with db_cursor() as cur:
-            execute_values(cur, query, rows)
-            result = cur.fetchall()
+            result = execute_values(cur, query, rows, fetch=True)
             return [dict(row) for row in result]
 
     return _run_with_transient_retry(_run)

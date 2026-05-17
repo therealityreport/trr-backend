@@ -16,8 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -40,6 +41,7 @@ from .auth import SOCIALBLADE_STEALTH_USER_AGENT
 logger = logging.getLogger("socials.socialblade.fetcher")
 _SOCIALBLADE_HISTORY_LIMIT = 60
 _TRPC_CAPTURE_PLATFORMS = frozenset({"instagram", "tiktok"})
+_DATE_PREFIX_PATTERN = re.compile(r"^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*)?\d{4}-\d{2}-\d{2}$")
 
 
 def _build_nav_headers(referer: str) -> dict[str, str]:
@@ -71,6 +73,7 @@ class SocialBladeScraplingFetcher:
         cookies: list[dict[str, Any]],
         raw_cookies: dict[str, str],
         platform: str,
+        proxy_config: Any | None = None,
         headless: bool = True,
         timeout_ms: int = 45_000,
     ) -> None:
@@ -81,7 +84,13 @@ class SocialBladeScraplingFetcher:
 
         self._cookies = list(cookies or [])
         self._raw_cookies = dict(raw_cookies or {})
+        self._seed_cookie_names = sorted(self._raw_cookies.keys())
         self._platform = str(platform or "instagram").strip().lower() or "instagram"
+        self._proxy_config = proxy_config
+        self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
+        self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
+        self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
+        self._proxy_session_mode = proxy_config.session_mode if proxy_config else "none"
         self._headless = bool(headless)
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._fetcher = StealthyFetcher()
@@ -90,15 +99,28 @@ class SocialBladeScraplingFetcher:
         self._warmup_cookie_delta: dict[str, str] = {}
         self._fallback_chain: list[str] = []
         self._last_transport = "scrapling_warmup"
+        self._capture_source = "none"
+        self._capture_control_updates: dict[str, str] = {}
+        self._captured_xhr_count = 0
+        self._captured_xhr_paths: list[str] = []
 
     @property
     def runtime_metadata(self) -> dict[str, Any]:
         return {
             "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
             "warmup_cookie_count": len(self._warmup_cookie_delta),
+            "seed_cookie_names": list(self._seed_cookie_names),
+            "seed_cookie_count": len(self._seed_cookie_names),
+            "seed_has_socialblade_session": "session" in self._seed_cookie_names,
+            "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
+            "proxy_session_mode": self._proxy_session_mode,
+            "capture_source": self._capture_source,
+            "captured_xhr_count": self._captured_xhr_count,
+            "captured_xhr_paths": list(self._captured_xhr_paths),
             "request_count": self._request_count,
             "transport": self._last_transport,
             "fallback_chain": list(self._fallback_chain),
+            "capture_control_updates": dict(self._capture_control_updates),
         }
 
     async def scrape(self, handle: str) -> dict[str, Any]:
@@ -143,13 +165,39 @@ class SocialBladeScraplingFetcher:
 
         if self._platform in _TRPC_CAPTURE_PLATFORMS:
             captured_payload = self._extract_captured_platform_payload(html, platform=self._platform)
+            captured_xhr = self._response_captured_xhr(response)
+            self._captured_xhr_count = len(captured_xhr)
+            self._captured_xhr_paths = self._captured_xhr_safe_paths(captured_xhr)
+            xhr_payload = self._extract_captured_platform_payload_from_xhr(captured_xhr, platform=self._platform)
+            captured_score = self._captured_payload_chart_score(captured_payload)
+            if captured_score > 0:
+                self._capture_source = "html_script"
+            xhr_score = self._captured_payload_chart_score(xhr_payload)
+            if xhr_score > captured_score:
+                captured_payload = xhr_payload
+                captured_score = xhr_score
+                self._capture_source = "scrapling_xhr"
             captured_user = captured_payload.get("user") if isinstance(captured_payload, dict) else None
+            captured_control_updates = (
+                captured_payload.get("control_updates") if isinstance(captured_payload, dict) else None
+            )
+            if isinstance(captured_control_updates, dict):
+                self._capture_control_updates = {
+                    str(key): str(value) for key, value in captured_control_updates.items() if value is not None
+                }
             captured_history_rows = captured_payload.get("history_rows") if isinstance(captured_payload, dict) else None
             captured_daily_deltas = captured_payload.get("daily_deltas") if isinstance(captured_payload, dict) else None
             captured_daily_total_rows = (
                 captured_payload.get("daily_total_rows") if isinstance(captured_payload, dict) else None
             )
             captured_payload_available = isinstance(captured_user, dict) and isinstance(captured_history_rows, list)
+
+            captured_history_source = (
+                "page_trpc_capture"
+                if captured_payload_available and captured_score >= _SOCIALBLADE_HISTORY_LIMIT
+                else "page_trpc_capture_short"
+            )
+            captured_fallback_step = f"{self._platform}_{captured_history_source}"
 
             def apply_captured_payload() -> None:
                 nonlocal stats, rankings, metrics, chart_data, history_source
@@ -175,11 +223,12 @@ class SocialBladeScraplingFetcher:
                     )
                 else:
                     chart_data = table_chart
-                history_source = "page_trpc_capture"
-                self._last_transport = "scrapling_page_trpc_capture"
-                self._fallback_chain.append(f"{self._platform}_page_trpc_capture")
+                history_source = captured_history_source
+                self._last_transport = f"scrapling_{captured_history_source}"
+                if captured_fallback_step not in self._fallback_chain:
+                    self._fallback_chain.append(captured_fallback_step)
 
-            if captured_payload_available and len(captured_history_rows) >= _SOCIALBLADE_HISTORY_LIMIT:
+            if captured_payload_available and captured_score >= _SOCIALBLADE_HISTORY_LIMIT:
                 apply_captured_payload()
             else:
                 if captured_payload_available:
@@ -267,6 +316,7 @@ class SocialBladeScraplingFetcher:
             base_url="https://socialblade.com",
             cookies=dict(self._raw_cookies),
             timeout=httpx.Timeout(self._timeout_ms / 1000),
+            proxy=self._api_proxy_url,
             follow_redirects=False,
             trust_env=False,
             headers={"user-agent": SOCIALBLADE_STEALTH_USER_AGENT},
@@ -281,8 +331,11 @@ class SocialBladeScraplingFetcher:
             load_dom=self._platform in _TRPC_CAPTURE_PLATFORMS,
             disable_resources=False,
             cookies=self._cookies,
+            proxy_rotator=self._proxy_rotator,
             extra_headers=_build_nav_headers(url),
             page_action=self._capture_platform_page_trpc if self._platform in _TRPC_CAPTURE_PLATFORMS else None,
+            capture_xhr=r"/api/trpc/",
+            wait=2_000 if self._platform in _TRPC_CAPTURE_PLATFORMS else 0,
             timeout=self._timeout_ms,
             retries=1,
             retry_delay=1.0,
@@ -296,19 +349,133 @@ class SocialBladeScraplingFetcher:
                 const captureId = "trr-socialblade-capture";
                 const platformKey = String(platform || "").toLowerCase();
                 document.getElementById(captureId)?.remove();
-                const nextDataElement = document.querySelector("#__NEXT_DATA__");
-                if (!nextDataElement?.textContent) {
-                    return;
+                const capture = { user: null, responses: {} };
+                const appendCapture = () => {
+                    const element = document.createElement("script");
+                    element.id = captureId;
+                    element.type = "application/json";
+                    element.textContent = JSON.stringify(capture);
+                    document.body.appendChild(element);
+                };
+                const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+                const normalizeText = value => String(value || "").replace(/\\s+/g, " ").trim();
+                const clickListboxOption = async targetOption => {
+                    const target = normalizeText(targetOption).toLowerCase();
+                    const buttons = Array.from(document.querySelectorAll('button[id*="headlessui-listbox-button"]'));
+                    for (const button of buttons) {
+                        if (normalizeText(button.textContent).toLowerCase() === target) {
+                            return "already_selected";
+                        }
+                        button.click();
+                        for (let attempt = 0; attempt < 20; attempt += 1) {
+                            const options = Array.from(
+                                document.querySelectorAll('[role="option"], li[id*="headlessui-listbox-option"]')
+                            );
+                            const option = options.find(
+                                item => normalizeText(item.textContent).toLowerCase() === target
+                            );
+                            if (option) {
+                                if (option.getAttribute("data-disabled") !== null) {
+                                    document.dispatchEvent(
+                                        new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+                                    );
+                                    return "disabled";
+                                }
+                                option.click();
+                                await sleep(1000);
+                                return "selected";
+                            }
+                            await sleep(100);
+                        }
+                        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+                    }
+                    return "missing";
+                };
+                const configureChartControls = async () => {
+                    const updates = {};
+                    updates.last60Days = await clickListboxOption("Last 60 Days");
+                    updates.daily = await clickListboxOption("Daily");
+                    updates.total = await clickListboxOption("Total");
+                    capture.control_updates = updates;
+                };
+                const readNextData = () => {
+                    const nextDataElement = document.querySelector("#__NEXT_DATA__");
+                    if (!nextDataElement?.textContent) {
+                        return null;
+                    }
+                    return JSON.parse(nextDataElement.textContent);
+                };
+                const parseInputJson = rawInput => {
+                    if (!rawInput) {
+                        return null;
+                    }
+                    const candidates = [rawInput];
+                    try {
+                        candidates.push(decodeURIComponent(rawInput));
+                    } catch {
+                    }
+                    for (const candidate of candidates) {
+                        try {
+                            return JSON.parse(candidate);
+                        } catch {
+                        }
+                    }
+                    return null;
+                };
+                const idFromTrpcUrl = rawUrl => {
+                    try {
+                        const parsed = new URL(rawUrl, window.location.origin);
+                        if (!parsed.pathname.includes(`/api/trpc/${platformKey}.`)) {
+                            return null;
+                        }
+                        const input = parseInputJson(parsed.searchParams.get("input"));
+                        const entries = Array.isArray(input) ? input : Object.values(input || {});
+                        for (const entry of entries) {
+                            const id = entry?.json?.id;
+                            if (id) {
+                                return id;
+                            }
+                        }
+                    } catch {
+                    }
+                    return null;
+                };
+                const idFromResourceEntries = () => {
+                    const resourceUrls = (performance.getEntriesByType("resource") || []).map(entry => entry.name);
+                    for (const resourceUrl of resourceUrls) {
+                        const id = idFromTrpcUrl(resourceUrl);
+                        if (id) {
+                            return id;
+                        }
+                    }
+                    return null;
+                };
+                let nextData = null;
+                for (let attempt = 0; attempt < 20; attempt += 1) {
+                    try {
+                        nextData = readNextData();
+                    } catch (error) {
+                        capture.error = `next_data_parse_failed:${String(error?.message || error)}`;
+                        appendCapture();
+                        return;
+                    }
+                    if (nextData) {
+                        break;
+                    }
+                    await sleep(500);
                 }
-                const nextData = JSON.parse(nextDataElement.textContent);
                 const queries = nextData?.props?.pageProps?.trpcState?.json?.queries || [];
                 const user = queries.find(
                     query => query?.queryKey?.[0]?.[0] === platformKey && query?.queryKey?.[0]?.[1] === "user"
                 )?.state?.data;
-                const id = user?.id;
+                capture.user = user || null;
+                const id = user?.id || idFromResourceEntries();
                 if (!id) {
+                    capture.error = nextData ? "user_id_missing" : "next_data_and_resource_id_missing";
+                    appendCapture();
                     return;
                 }
+                await configureChartControls();
                 const encodeInput = value => encodeURIComponent(JSON.stringify(value));
                 const endpoints = {
                     history60:
@@ -335,21 +502,24 @@ class SocialBladeScraplingFetcher:
                             },
                         }),
                 };
-                const capture = { user, responses: {} };
                 for (const [key, endpoint] of Object.entries(endpoints)) {
-                    const response = await fetch(endpoint, {
-                        headers: { accept: "application/json, text/plain, */*" },
-                    });
-                    capture.responses[key] = {
-                        status: response.status,
-                        text: await response.text(),
-                    };
+                    try {
+                        const response = await fetch(endpoint, {
+                            headers: { accept: "application/json, text/plain, */*" },
+                        });
+                        capture.responses[key] = {
+                            status: response.status,
+                            text: await response.text(),
+                        };
+                    } catch (error) {
+                        capture.responses[key] = {
+                            status: 0,
+                            text: "",
+                            error: String(error?.message || error),
+                        };
+                    }
                 }
-                const element = document.createElement("script");
-                element.id = captureId;
-                element.type = "application/json";
-                element.textContent = JSON.stringify(capture);
-                document.body.appendChild(element);
+                appendCapture();
             }""",
             {"platform": self._platform, "chartLimit": _SOCIALBLADE_DAILY_TOTAL_CHART_LIMIT},
         )
@@ -548,10 +718,14 @@ class SocialBladeScraplingFetcher:
                     f"{metric_headers[3]} Delta",
                     f"{metric_headers[3]} Total",
                 ]
+            if headers[0].strip().lower() != "date":
+                continue
             data: list[dict[str, str]] = []
             for row in rows[1:]:
                 cells = [cell.get_text(" ", strip=True) for cell in row.find_all("td")]
                 if len(cells) < len(headers):
+                    continue
+                if not _DATE_PREFIX_PATTERN.match(cells[0].strip()):
                     continue
                 data.append({headers[index]: cells[index] or "" for index in range(len(headers))})
             if data:
@@ -564,7 +738,6 @@ class SocialBladeScraplingFetcher:
 
     @staticmethod
     def _extract_captured_platform_payload(html: str, *, platform: str) -> dict[str, Any]:
-        del platform
         if not html:
             return {}
         soup = BeautifulSoup(html, "html.parser")
@@ -577,6 +750,51 @@ class SocialBladeScraplingFetcher:
             return {}
 
         responses = captured.get("responses") if isinstance(captured, dict) else None
+        captured_user = captured.get("user") if isinstance(captured.get("user"), dict) else None
+        control_updates = captured.get("control_updates") if isinstance(captured.get("control_updates"), dict) else None
+        return SocialBladeScraplingFetcher._extract_captured_platform_payload_from_responses(
+            responses,
+            platform=platform,
+            captured_user=captured_user,
+            control_updates=control_updates,
+        )
+
+    @staticmethod
+    def _extract_captured_platform_payload_from_xhr(captured_xhr: list[Any], *, platform: str) -> dict[str, Any]:
+        responses: dict[str, dict[str, Any]] = {}
+        for xhr in captured_xhr:
+            name = SocialBladeScraplingFetcher._captured_xhr_response_name(xhr, platform=platform)
+            if not name:
+                continue
+            response_entry = {"status": _status_code(xhr), "text": _response_text(xhr)}
+            if not response_entry["text"]:
+                continue
+            if name == "history60" and name in responses:
+                current_rows = SocialBladeScraplingFetcher._history_count_from_capture_response(
+                    responses[name],
+                    platform=platform,
+                )
+                candidate_rows = SocialBladeScraplingFetcher._history_count_from_capture_response(
+                    response_entry,
+                    platform=platform,
+                )
+                if candidate_rows < current_rows:
+                    continue
+            responses[name] = response_entry
+        return SocialBladeScraplingFetcher._extract_captured_platform_payload_from_responses(
+            responses,
+            platform=platform,
+        )
+
+    @staticmethod
+    def _extract_captured_platform_payload_from_responses(
+        responses: Any,
+        *,
+        platform: str,
+        captured_user: dict[str, Any] | None = None,
+        control_updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del platform
         if not isinstance(responses, dict):
             return {}
 
@@ -594,7 +812,9 @@ class SocialBladeScraplingFetcher:
 
         user = unwrap_response("history60", index=0)
         if not isinstance(user, dict):
-            user = captured.get("user") if isinstance(captured.get("user"), dict) else None
+            user = unwrap_response("user")
+        if not isinstance(user, dict):
+            user = captured_user
         history_rows = unwrap_response("history60", index=1)
         daily_deltas = unwrap_response("dailyDeltas", index=0)
         daily_total_rows = unwrap_response("dailyTotalChart", index=0)
@@ -603,7 +823,82 @@ class SocialBladeScraplingFetcher:
             "history_rows": history_rows,
             "daily_deltas": daily_deltas,
             "daily_total_rows": daily_total_rows,
+            "control_updates": control_updates or {},
         }
+
+    @staticmethod
+    def _history_count_from_capture_response(response_entry: dict[str, Any], *, platform: str) -> int:
+        payload = SocialBladeScraplingFetcher._extract_captured_platform_payload_from_responses(
+            {"history60": response_entry},
+            platform=platform,
+        )
+        return SocialBladeScraplingFetcher._captured_payload_history_count(payload)
+
+    @staticmethod
+    def _captured_payload_history_count(payload: Any) -> int:
+        if not isinstance(payload, dict):
+            return 0
+        rows = payload.get("history_rows")
+        return len(rows) if isinstance(rows, list) else 0
+
+    @staticmethod
+    def _captured_payload_daily_total_count(payload: Any) -> int:
+        if not isinstance(payload, dict):
+            return 0
+        rows = payload.get("daily_total_rows")
+        return len(rows) if isinstance(rows, list) else 0
+
+    @staticmethod
+    def _captured_payload_chart_score(payload: Any) -> int:
+        return max(
+            SocialBladeScraplingFetcher._captured_payload_history_count(payload),
+            SocialBladeScraplingFetcher._captured_payload_daily_total_count(payload),
+        )
+
+    @staticmethod
+    def _response_captured_xhr(response: Any) -> list[Any]:
+        captured_xhr = getattr(response, "captured_xhr", []) or []
+        try:
+            return list(captured_xhr)
+        except TypeError:
+            return []
+
+    @staticmethod
+    def _captured_xhr_safe_paths(captured_xhr: list[Any]) -> list[str]:
+        paths: list[str] = []
+        for xhr in captured_xhr[:20]:
+            url = str(getattr(xhr, "url", "") or "")
+            try:
+                path = urlparse(url).path
+            except Exception:  # noqa: BLE001
+                continue
+            if path and path not in paths:
+                paths.append(path)
+        return paths
+
+    @staticmethod
+    def _captured_xhr_response_name(xhr: Any, *, platform: str) -> str | None:
+        url = str(getattr(xhr, "url", "") or "")
+        if "/api/trpc/" not in url:
+            return None
+        try:
+            parsed = urlparse(url)
+        except Exception:  # noqa: BLE001
+            return None
+        endpoint = parsed.path.rsplit("/api/trpc/", 1)[-1]
+        platform_key = str(platform or "").strip().lower()
+        if endpoint == f"{platform_key}.user":
+            return "user"
+        if endpoint == f"{platform_key}.user,{platform_key}.history":
+            return "history60"
+        if endpoint == f"{platform_key}.monthly":
+            query = unquote(parsed.query or "")
+            compact_query = re.sub(r"\s+", "", query)
+            if '"type":"total"' in compact_query:
+                return "dailyTotalChart"
+            if '"period":"daily"' in compact_query:
+                return "dailyDeltas"
+        return None
 
     @staticmethod
     def _now_iso() -> str:

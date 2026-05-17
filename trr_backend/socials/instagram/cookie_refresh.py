@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
-from trr_backend.socials.browser_cookie_refresh import validate_browser_cookie_session
+from trr_backend.socials.browser_cookie_refresh import (
+    ensure_private_file_mode,
+    validate_browser_cookie_session,
+    write_private_json_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,18 +78,18 @@ def _cookie_payload(cookies: list[dict[str, Any]]) -> dict[str, str]:
 
 
 def _write_cookie_file(cookie_file: Path, cookies: dict[str, str]) -> None:
-    cookie_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "_cookie_refreshed_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
         **cookies,
     }
-    cookie_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json_file(cookie_file, payload)
 
 
 def read_instagram_cookie_file_metadata(cookie_file: str | Path) -> dict[str, Any]:
     target_file = Path(cookie_file).expanduser()
     if not target_file.is_file():
         return {}
+    ensure_private_file_mode(target_file)
     try:
         payload = json.loads(target_file.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
@@ -100,6 +104,7 @@ def _read_cookie_file(cookie_file: str | Path) -> dict[str, str]:
     target_file = Path(cookie_file).expanduser()
     if not target_file.is_file():
         return {}
+    ensure_private_file_mode(target_file)
     try:
         payload = json.loads(target_file.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001

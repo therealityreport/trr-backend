@@ -10,10 +10,14 @@ from trr_backend.socials.socialblade.scraper import (
     _extract_profile_stats_from_body_text,
     _followers_chart_from_table,
     _history_rows_to_metrics,
+    _mark_payload_as_degraded_attempt,
     _merge_followers_charts,
+    _modal_runtime_disallows_visible_socialblade_login,
     _normalize_table_data,
     _page_access_denied,
+    _parse_metric_number,
     _scrape_socialblade_in_context,
+    _socialblade_page_is_logged_in,
     _socialblade_profile_url,
     scrape_socialblade,
 )
@@ -164,6 +168,31 @@ def test_page_access_denied_detects_cloudflare_block() -> None:
     assert _page_access_denied("Access denied. Error reference number: 1020")
 
 
+def test_socialblade_logged_in_detection_accepts_session_cookie() -> None:
+    class DummyLocator:
+        def count(self) -> int:
+            return 0
+
+    class DummyPage:
+        def locator(self, _selector: str) -> DummyLocator:
+            return DummyLocator()
+
+        def text_content(self, _selector: str, **_kwargs):
+            return "SOCIAL BLADE Personalized Homepage"
+
+    class DummyContext:
+        def cookies(self):
+            return [{"name": "session", "value": "token", "domain": ".socialblade.com"}]
+
+    assert _socialblade_page_is_logged_in(DummyPage(), DummyContext()) is True
+
+
+def test_modal_runtime_disallows_visible_socialblade_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODAL_TASK_ID", "task-1")
+
+    assert _modal_runtime_disallows_visible_socialblade_login() is True
+
+
 def test_socialblade_profile_url_switches_route_by_platform() -> None:
     assert (
         _socialblade_profile_url("instagram", "lisabarlow14") == "https://socialblade.com/instagram/user/lisabarlow14"
@@ -172,6 +201,31 @@ def test_socialblade_profile_url_switches_route_by_platform() -> None:
     assert _socialblade_profile_url("tiktok", "bravotv") == "https://socialblade.com/tiktok/user/bravotv"
     assert _socialblade_profile_url("youtube", "facebookapp") == "https://socialblade.com/youtube/handle/facebookapp"
     assert _socialblade_profile_url("youtube", "UCabc123") == "https://socialblade.com/youtube/channel/UCabc123"
+
+
+def test_socialblade_profile_url_normalizes_full_profile_urls() -> None:
+    assert (
+        _socialblade_profile_url("instagram", "https://socialblade.com/instagram/user/LisaBarlow14?foo=1")
+        == "https://socialblade.com/instagram/user/lisabarlow14"
+    )
+    assert (
+        _socialblade_profile_url("tiktok", "https://www.tiktok.com/@BravoTV?lang=en")
+        == "https://socialblade.com/tiktok/user/bravotv"
+    )
+    assert (
+        _socialblade_profile_url("youtube", "https://www.youtube.com/channel/UCabc123")
+        == "https://socialblade.com/youtube/channel/UCabc123"
+    )
+    assert (
+        _socialblade_profile_url("facebook", "https://www.facebook.com/profile.php?id=123456789")
+        == "https://socialblade.com/facebook/user/123456789"
+    )
+
+
+def test_parse_metric_number_handles_labeled_suffix_values() -> None:
+    assert _parse_metric_number("Likes 111.4M") == 111_400_000
+    assert _parse_metric_number("111.4M Likes") == 111_400_000
+    assert _parse_metric_number("Followers for the last 14 days 1.6K") == 1_600
 
 
 def test_build_profile_stats_from_user_payload_formats_ranks() -> None:
@@ -549,6 +603,52 @@ def test_scrape_socialblade_uses_visible_browser_retry_when_scrapling_page_data_
     }
 
 
+@pytest.mark.parametrize(
+    ("error", "platform"),
+    [
+        (RuntimeError("SocialBlade blocked by Cloudflare (1020 access denied)"), "instagram"),
+        (RuntimeError("SocialBlade endpoint /api/trpc/tiktok.search returned HTTP 401"), "tiktok"),
+        (RuntimeError("SocialBlade endpoint /api/trpc/facebook.user returned HTTP 403"), "facebook"),
+    ],
+)
+def test_scrape_socialblade_uses_visible_browser_retry_for_socialblade_access_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    platform: str,
+) -> None:
+    def fake_run_scrapling(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._run_scrapling_socialblade_fetch",
+        fake_run_scrapling,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper.scrape_socialblade_with_shared_browser_session",
+        lambda handle, platform="instagram", playwright=None: {
+            "username": handle,
+            "platform": platform,
+            "history_source": "visible_browser",
+            "stats_refreshed": True,
+        },
+    )
+
+    payload = scrape_socialblade(
+        "thetraitorsus",
+        {"cf_clearance": "token"},
+        platform=platform,
+        allow_login_fallback=False,
+        allow_visible_browser_retry=True,
+    )
+
+    assert payload == {
+        "username": "thetraitorsus",
+        "platform": platform,
+        "history_source": "visible_browser",
+        "stats_refreshed": True,
+    }
+
+
 def test_scrape_socialblade_logs_in_and_retries_when_history_is_short(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -602,6 +702,176 @@ def test_scrape_socialblade_logs_in_and_retries_when_history_is_short(
     assert payload["history_source"] == "authenticated_api"
     assert payload["daily_channel_metrics_60day"]["row_count"] == 60
     assert calls == [{"cf_clearance": "stale"}, {"cf_clearance": "fresh", "session": "logged-in"}]
+
+
+def test_scrape_socialblade_keeps_seeded_modal_table_result_when_history_is_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_scrapling(_handle: str, _cookies: object, *, platform: str):
+        return {
+            "username": "bravotv",
+            "platform": platform,
+            "history_source": "table_fallback",
+            "stats_refreshed": True,
+            "runtime_metadata": {"seed_has_socialblade_session": True},
+            "daily_channel_metrics_60day": {
+                "period": "Last 14 Days",
+                "row_count": 14,
+                "data": [],
+            },
+        }
+
+    monkeypatch.setenv("MODAL_TASK_ID", "task-1")
+    monkeypatch.setenv("SOCIALBLADE_EMAIL", "operator@example.com")
+    monkeypatch.setenv("SOCIALBLADE_PASSWORD", "password")
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._run_scrapling_socialblade_fetch",
+        fake_run_scrapling,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._refresh_socialblade_cookies_via_login",
+        lambda: (_ for _ in ()).throw(AssertionError("Modal should not try visible login for seeded sessions")),
+    )
+
+    payload = scrape_socialblade(
+        "bravotv",
+        {"session": "seeded"},
+        platform="instagram",
+        allow_login_fallback=True,
+        allow_visible_browser_retry=False,
+    )
+
+    assert payload["stats_refreshed"] is True
+    assert payload["history_source"] == "table_fallback"
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 14
+    assert payload["runtime_metadata"]["seed_has_socialblade_session"] is True
+
+
+def test_scrape_socialblade_accepts_tiktok_daily_total_control_capture_without_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_scrapling(_handle: str, _cookies: object, *, platform: str):
+        return {
+            "username": "thetraitorsus",
+            "platform": platform,
+            "history_source": "page_trpc_capture_short",
+            "stats_refreshed": True,
+            "runtime_metadata": {
+                "capture_control_updates": {
+                    "last60Days": "selected",
+                    "daily": "selected",
+                    "total": "selected",
+                },
+            },
+            "daily_channel_metrics_60day": {
+                "period": "Last 60 Days",
+                "row_count": 56,
+                "data": [],
+            },
+            "daily_total_followers_chart": {
+                "frequency": "daily",
+                "metric": "total_followers",
+                "total_data_points": 56,
+                "date_range": {"from": "2026-03-19", "to": "2026-05-14"},
+                "data": [{"date": "2026-03-19", "followers": 140900}],
+            },
+        }
+
+    monkeypatch.setenv("MODAL_TASK_ID", "task-1")
+    monkeypatch.setenv("SOCIALBLADE_EMAIL", "operator@example.com")
+    monkeypatch.setenv("SOCIALBLADE_PASSWORD", "password")
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._run_scrapling_socialblade_fetch",
+        fake_run_scrapling,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._refresh_socialblade_cookies_via_login",
+        lambda: (_ for _ in ()).throw(AssertionError("verified TikTok chart controls should not require login")),
+    )
+
+    payload = scrape_socialblade(
+        "thetraitorsus",
+        {"cf_clearance": "seeded"},
+        platform="tiktok",
+        allow_login_fallback=True,
+        allow_visible_browser_retry=False,
+    )
+
+    assert payload["stats_refreshed"] is True
+    assert payload["history_source"] == "page_trpc_capture_short"
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 56
+    assert payload["daily_total_followers_chart"]["date_range"] == {"from": "2026-03-19", "to": "2026-05-14"}
+
+
+def test_scrape_socialblade_persists_degraded_attempt_when_login_retry_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_scrapling(_handle: str, _cookies: object, *, platform: str):
+        return {
+            "username": "bravotv",
+            "platform": platform,
+            "history_source": "page_trpc_capture",
+            "stats_refreshed": True,
+            "daily_channel_metrics_60day": {
+                "period": "Last 31 Days",
+                "row_count": 31,
+                "data": [],
+            },
+        }
+
+    monkeypatch.setenv("SOCIALBLADE_EMAIL", "operator@example.com")
+    monkeypatch.setenv("SOCIALBLADE_PASSWORD", "password")
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._run_scrapling_socialblade_fetch",
+        fake_run_scrapling,
+    )
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.scraper._refresh_socialblade_cookies_via_login",
+        lambda: (_ for _ in ()).throw(RuntimeError("visible Chrome CDP connection refused")),
+    )
+
+    payload = scrape_socialblade(
+        "https://www.instagram.com/bravotv/",
+        {"cf_clearance": "stale"},
+        platform="instagram",
+        allow_login_fallback=True,
+        allow_visible_browser_retry=False,
+    )
+
+    assert payload["username"] == "bravotv"
+    assert payload["stats_refreshed"] is False
+    assert payload["history_source"] == "page_trpc_capture_short"
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 31
+    assert "visible Chrome CDP connection refused" in payload["error"]
+
+
+def test_complete_page_trpc_capture_is_not_downgraded_when_login_retry_fails() -> None:
+    payload = {
+        "username": "bravotv",
+        "platform": "instagram",
+        "history_source": "page_trpc_capture",
+        "stats_refreshed": True,
+        "daily_channel_metrics_60day": {
+            "period": "Last 60 Days",
+            "row_count": 60,
+            "data": [],
+        },
+        "daily_total_followers_chart": {
+            "frequency": "daily",
+            "metric": "total_followers",
+            "total_data_points": 60,
+            "date_range": {"from": "2026-03-15", "to": "2026-05-13"},
+            "data": [],
+        },
+    }
+
+    rendered = _mark_payload_as_degraded_attempt(payload, RuntimeError("visible Chrome CDP connection refused"))
+
+    assert rendered["stats_refreshed"] is True
+    assert rendered["history_source"] == "page_trpc_capture"
+    assert rendered["daily_channel_metrics_60day"]["row_count"] == 60
+    assert rendered["runtime_metadata"]["login_retry_failed"] is True
+    assert rendered["runtime_metadata"]["login_retry_error"] == "visible Chrome CDP connection refused"
 
 
 def test_scrape_context_retries_search_challenge_in_visible_shared_browser(

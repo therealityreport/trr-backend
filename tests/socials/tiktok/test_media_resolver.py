@@ -29,6 +29,16 @@ class _FakeSession:
         return _FakeResponse(text=self._html, status_code=self._status_code)
 
 
+class _ProbeResponse:
+    def __init__(self, *, status_code: int, content_type: str, url: str | None = None) -> None:
+        self.status_code = status_code
+        self.headers = {"content-type": content_type}
+        self.url = url or "https://video.test/stream"
+
+    def close(self) -> None:
+        return None
+
+
 def test_resolve_tiktok_media_prefers_ytdlp_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         media_resolver.shutil,
@@ -243,18 +253,19 @@ def test_resolve_tiktok_media_uses_unofficial_when_watch_url_not_downloadable(
     )
 
     class _ProbeResponse:
-        def __init__(self, status_code: int) -> None:
+        def __init__(self, status_code: int, content_type: str = "video/mp4") -> None:
             self.status_code = status_code
+            self.headers = {"content-type": content_type}
 
         def close(self) -> None:
             return None
 
     def _fake_probe_get(url: str, **_kwargs):  # noqa: ANN001
         if "watch.mp4" in url:
-            return _ProbeResponse(403)
+            return _ProbeResponse(403, "text/html")
         if "unofficial.mp4" in url:
             return _ProbeResponse(206)
-        return _ProbeResponse(404)
+        return _ProbeResponse(404, "text/html")
 
     monkeypatch.setattr(media_resolver.requests, "get", _fake_probe_get)
 
@@ -269,3 +280,107 @@ def test_resolve_tiktok_media_uses_unofficial_when_watch_url_not_downloadable(
     assert result.source == "unofficial_api"
     assert result.media_urls == ["https://video.test/unofficial.mp4"]
     assert any(attempt["source"] == "watch_page_json_probe" and not attempt["success"] for attempt in result.attempts)
+
+
+def test_resolve_tiktok_media_accepts_no_suffix_video_probe_and_records_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
+    stream_url = "https://v16-webapp-prime.tiktokcdn-us.com/tos-useast5-pve/no-extension-token"
+    payload = {
+        "__DEFAULT_SCOPE__": {
+            "webapp.video-detail": {
+                "itemInfo": {
+                    "itemStruct": {
+                        "id": "12345",
+                        "video": {
+                            "playAddr": {"UrlList": [stream_url]},
+                            "cover": "https://img.test/cover.jpg",
+                        },
+                    }
+                }
+            }
+        }
+    }
+    html = (
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">' + json.dumps(payload) + "</script>"
+    )
+
+    monkeypatch.setattr(
+        media_resolver.requests,
+        "get",
+        lambda url, **_kwargs: _ProbeResponse(status_code=206, content_type="video/mp4", url=url),
+    )
+
+    result = media_resolver.resolve_tiktok_media(
+        "12345",
+        canonical_url="https://www.tiktok.com/@bravotv/video/12345",
+        session=_FakeSession(html=html),
+        allow_ytdlp=False,
+        validate_download_url=True,
+    )
+
+    assert result.source == "watch_page_json"
+    assert result.media_urls == [stream_url]
+    assert result.media_asset_meta["probe_evidence"][0]["content_type"] == "video/mp4"
+    assert result.media_asset_meta["source_assets"][0]["type"] == "video"
+    assert result.media_asset_meta["source_assets"][0]["probe"]["http_status"] == 206
+
+
+def test_resolve_tiktok_media_rejects_html_probe_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
+    stream_url = "https://v16-webapp-prime.tiktokcdn-us.com/tos-useast5-pve/no-extension-token"
+    payload = {
+        "__DEFAULT_SCOPE__": {
+            "webapp.video-detail": {
+                "itemInfo": {
+                    "itemStruct": {
+                        "id": "12345",
+                        "video": {
+                            "playAddr": {"UrlList": [stream_url]},
+                            "cover": "https://img.test/cover.jpg",
+                        },
+                    }
+                }
+            }
+        }
+    }
+    html = (
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">' + json.dumps(payload) + "</script>"
+    )
+    monkeypatch.setattr(
+        media_resolver,
+        "_resolve_with_unofficial_api",
+        lambda **_kwargs: (
+            [],
+            None,
+            media_resolver._build_attempt(  # noqa: SLF001
+                source="unofficial_api",
+                success=False,
+                reason_code="tiktok_media_not_found",
+                selected_url_count=0,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        media_resolver.requests,
+        "get",
+        lambda url, **_kwargs: _ProbeResponse(status_code=200, content_type="text/html; charset=utf-8", url=url),
+    )
+
+    result = media_resolver.resolve_tiktok_media(
+        "12345",
+        canonical_url="https://www.tiktok.com/@bravotv/video/12345",
+        session=_FakeSession(html=html),
+        allow_ytdlp=False,
+        validate_download_url=True,
+    )
+
+    assert result.media_urls == []
+    probe_attempt = next(attempt for attempt in result.attempts if attempt["source"] == "watch_page_json_probe")
+    assert probe_attempt["success"] is False
+    assert probe_attempt["reason_code"] == "download_bad_content_type"
+    assert probe_attempt["http_status"] == 200
+    assert probe_attempt["content_type"] == "text/html"

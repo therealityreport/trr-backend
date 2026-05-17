@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
-from trr_backend.scraping.url_image_scraper import ImageCandidate, extract_images_from_html, scrape_url_for_images
+import pytest
+
+from trr_backend.scraping.url_image_scraper import (
+    ImageCandidate,
+    download_and_hash_image,
+    extract_images_from_html,
+    scrape_url_for_images,
+)
 
 
 def _read_fixture(name: str) -> str:
@@ -78,6 +86,109 @@ def test_direct_image_sets_bytes_from_head(monkeypatch) -> None:
     assert result.error is None
     assert result.total_found == 1
     assert result.images[0].bytes == 999
+
+
+class _FakeImageDownloadResponse:
+    def __init__(
+        self,
+        *,
+        body_chunks: list[bytes],
+        content_type: str | None = "image/png",
+        content_length: int | None = None,
+    ) -> None:
+        self._body_chunks = body_chunks
+        self.headers = {}
+        if content_type is not None:
+            self.headers["Content-Type"] = content_type
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_content(self, chunk_size: int):  # noqa: ANN001
+        del chunk_size
+        yield from self._body_chunks
+
+    def close(self) -> None:
+        return None
+
+
+def test_download_and_hash_image_accepts_valid_image_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.scraping.url_image_scraper as scraper
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"image-bytes"
+    monkeypatch.setattr(
+        scraper.requests,
+        "get",
+        lambda *args, **kwargs: _FakeImageDownloadResponse(body_chunks=[png_bytes], content_type="image/png"),
+    )
+
+    data, sha256, content_type = download_and_hash_image("https://example.com/image.png")
+
+    assert data == png_bytes
+    assert sha256 == hashlib.sha256(png_bytes).hexdigest()
+    assert content_type == "image/png"
+
+
+def test_download_and_hash_image_rejects_html_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.scraping.url_image_scraper as scraper
+
+    monkeypatch.setattr(
+        scraper.requests,
+        "get",
+        lambda *args, **kwargs: _FakeImageDownloadResponse(
+            body_chunks=[b"<html><body>not an image</body></html>"],
+            content_type="text/html; charset=utf-8",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="asset_wrong_content_type"):
+        download_and_hash_image("https://example.com/image.jpg")
+
+
+def test_download_and_hash_image_rejects_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.scraping.url_image_scraper as scraper
+
+    monkeypatch.setattr(
+        scraper.requests,
+        "get",
+        lambda *args, **kwargs: _FakeImageDownloadResponse(
+            body_chunks=[b'{"error":"not found"}'],
+            content_type="application/json",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="asset_wrong_content_type"):
+        download_and_hash_image("https://example.com/image.jpg")
+
+
+def test_download_and_hash_image_rejects_oversized_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.scraping.url_image_scraper as scraper
+
+    monkeypatch.setattr(
+        scraper.requests,
+        "get",
+        lambda *args, **kwargs: _FakeImageDownloadResponse(
+            body_chunks=[b"\x89PNG\r\n\x1a\n", b"too-large"],
+            content_type="image/png",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="asset_too_large"):
+        download_and_hash_image("https://example.com/image.png", max_bytes=8)
+
+
+def test_download_and_hash_image_rejects_private_network_url_before_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.scraping.url_image_scraper as scraper
+
+    def fail_get(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("private URL should not be fetched")
+
+    monkeypatch.setattr(scraper.requests, "get", fail_get)
+
+    with pytest.raises(RuntimeError, match="private_network_url"):
+        download_and_hash_image("http://127.0.0.1/image.png")
 
 
 def test_extracts_heading_and_bio_context_for_article_images() -> None:

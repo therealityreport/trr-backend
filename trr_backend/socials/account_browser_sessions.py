@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -13,7 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from trr_backend.socials.browser_cookie_refresh import cookie_payload, launch_browser, write_cookie_file
+from trr_backend.socials.browser_cookie_refresh import (
+    cookie_payload,
+    ensure_private_file_mode,
+    launch_browser,
+    write_cookie_file,
+    write_private_json_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +165,7 @@ class AccountBrowserSessionManager:
                 "origins": [],
             }
         with self._lock_for(paths.account_id):
-            paths.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
-            paths.storage_state_path.write_text(
-                json.dumps(storage_state, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            write_private_json_file(paths.storage_state_path, storage_state)
             write_cookie_file(paths.cookie_file_path, cookies_payload)
         return paths
 
@@ -203,6 +204,7 @@ class AccountBrowserSessionManager:
         if user_agent:
             context_kwargs["user_agent"] = str(user_agent)
         if paths.storage_state_path.exists():
+            ensure_private_file_mode(paths.storage_state_path)
             context_kwargs["storage_state"] = str(paths.storage_state_path)
 
         with self._lock_for(paths.account_id):
@@ -241,8 +243,13 @@ class AccountBrowserSessionManager:
                 )
             finally:
                 try:
-                    paths.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
-                    context.storage_state(path=str(paths.storage_state_path))
+                    try:
+                        storage_state = context.storage_state()
+                    except TypeError:
+                        context.storage_state(path=str(paths.storage_state_path))
+                        ensure_private_file_mode(paths.storage_state_path)
+                    else:
+                        write_private_json_file(paths.storage_state_path, storage_state)
                 except Exception:  # noqa: BLE001
                     logger.debug(
                         "Failed writing storage state for %s/%s",

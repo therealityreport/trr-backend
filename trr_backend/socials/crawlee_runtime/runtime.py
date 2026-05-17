@@ -217,7 +217,7 @@ def _execute_with_internal_retry(
         crawlee_request_count=1,
         crawlee_session_pool_used=False,
     )
-    attempts = max(1, int(runtime_config.max_retries))
+    attempts = max(0, int(runtime_config.max_retries)) + 1
 
     for attempt in range(1, attempts + 1):
         try:

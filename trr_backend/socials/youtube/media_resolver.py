@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -138,10 +138,23 @@ def _stream_has_audio(fmt: dict[str, Any], mime_type: str) -> bool:
     return any(token in codecs_value for token in ("mp4a", "opus", "vorbis", "aac"))
 
 
-def _stream_has_video(fmt: dict[str, Any], mime_type: str) -> bool:
+def _url_query_mime_is_video(url: str) -> bool:
+    try:
+        parsed = parse_qs(urlparse(str(url or "")).query, keep_blank_values=True)
+    except Exception:
+        return False
+    for value in parsed.get("mime") or []:
+        if str(value or "").strip().lower().startswith("video/"):
+            return True
+    return False
+
+
+def _stream_has_video(fmt: dict[str, Any], mime_type: str, url: str = "") -> bool:
     if fmt.get("height") or fmt.get("width"):
         return True
-    return mime_type.lower().startswith("video/")
+    if mime_type.lower().startswith("video/"):
+        return True
+    return _url_query_mime_is_video(url)
 
 
 def _pick_best_stream_url(player_response: dict[str, Any]) -> tuple[list[str], str | None, dict[str, Any]]:
@@ -163,7 +176,7 @@ def _pick_best_stream_url(player_response: dict[str, Any]) -> tuple[list[str], s
         if not url:
             continue
         mime_type = str(fmt.get("mimeType") or "")
-        has_video = _stream_has_video(fmt, mime_type)
+        has_video = _stream_has_video(fmt, mime_type, url)
         if not has_video:
             continue
         has_audio = _stream_has_audio(fmt, mime_type)

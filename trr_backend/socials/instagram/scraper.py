@@ -577,6 +577,41 @@ class InstagramScraper:
             return None
         return {"http": proxy_url, "https": proxy_url}
 
+    @staticmethod
+    def _response_status_is_success(response: requests.Response) -> bool:
+        try:
+            status_code = int(getattr(response, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if status_code < 200 or status_code >= 300:
+            return False
+        content_type = str(getattr(response, "headers", {}) or {}).lower()
+        if "text/html" in content_type:
+            body_text = str(getattr(response, "text", "") or "").lower()
+            if any(
+                marker in body_text
+                for marker in (
+                    "/accounts/login",
+                    "checkpoint_required",
+                    "challenge_required",
+                    "feedback_required",
+                    "login_required",
+                )
+            ):
+                return False
+        return True
+
+    def _record_identity_success_for_response(self, response: requests.Response) -> None:
+        if not self._response_status_is_success(response):
+            return
+        if (
+            self._identity_pool_enabled
+            and self._identity_pool is not None
+            and self._active_identity is not None
+            and hasattr(self._identity_pool, "record_success")
+        ):
+            self._identity_pool.record_success(self._active_identity.session_id)
+
     def _ensure_active_identity(self) -> None:
         if not self._identity_pool_enabled:
             return
@@ -1586,13 +1621,7 @@ class InstagramScraper:
         try:
             response = self.session.get(url, **kwargs)
             self._track_response_status(response.status_code)
-            if (
-                self._identity_pool_enabled
-                and self._identity_pool is not None
-                and self._active_identity is not None
-                and hasattr(self._identity_pool, "record_success")
-            ):
-                self._identity_pool.record_success(self._active_identity.session_id)
+            self._record_identity_success_for_response(response)
             return response
         except (
             requests.exceptions.ProxyError,
@@ -1626,13 +1655,7 @@ class InstagramScraper:
         try:
             response = self.session.post(url, **kwargs)
             self._track_response_status(response.status_code)
-            if (
-                self._identity_pool_enabled
-                and self._identity_pool is not None
-                and self._active_identity is not None
-                and hasattr(self._identity_pool, "record_success")
-            ):
-                self._identity_pool.record_success(self._active_identity.session_id)
+            self._record_identity_success_for_response(response)
             return response
         except (
             requests.exceptions.ProxyError,

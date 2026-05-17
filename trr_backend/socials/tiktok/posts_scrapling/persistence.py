@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger("socials.tiktok.posts_scrapling.persistence")
@@ -56,48 +55,42 @@ class _ScraplingTikTokPostDTO:
 
 def _tiktok_item_to_post_dto(item: dict[str, Any], *, account_handle: str) -> _ScraplingTikTokPostDTO:
     """Convert raw TikTok API item to a DTO that _upsert_tiktok_post can read."""
-    stats = item.get("stats") or {}
-    author = item.get("author") or {}
-    music = item.get("music") or {}
-    video = item.get("video") or {}
+    from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
 
-    video_id = str(item.get("id") or "").strip()
-    create_time = int(item.get("createTime") or 0)
-    date_time = datetime.fromtimestamp(create_time, tz=UTC).isoformat() if create_time else ""
-
-    description = str(item.get("desc") or "")
-
-    # Extract hashtags from challenges array if present
-    challenges = item.get("challenges") or []
-    hashtags = [
-        str(c.get("title") or "").strip()
-        for c in challenges
-        if isinstance(c, dict) and str(c.get("title") or "").strip()
-    ]
-
-    username = str(author.get("uniqueId") or "").strip() or account_handle
-    thumbnail_url = str(video.get("cover") or video.get("originCover") or "").strip() or None
+    parser = TikTokScraper(cookies={})
+    parse_item = dict(item)
+    if not parse_item.get("hashtags") and isinstance(parse_item.get("challenges"), list):
+        parse_item["hashtags"] = [
+            {"name": str(challenge.get("title") or "").strip()}
+            for challenge in parse_item.get("challenges") or []
+            if isinstance(challenge, dict) and str(challenge.get("title") or "").strip()
+        ]
+    parsed = parser._parse_post_item(  # noqa: SLF001
+        parse_item,
+        TikTokScrapeConfig(username=account_handle),
+    )
 
     return _ScraplingTikTokPostDTO(
-        video_id=video_id,
-        date_time=date_time,
-        create_time=create_time,
-        description=description,
-        hashtags=hashtags,
-        mentions=[],
-        likes=int(stats.get("diggCount") or 0),
-        comments=int(stats.get("commentCount") or 0),
-        shares=int(stats.get("shareCount") or 0),
-        saves=int(stats.get("collectCount") or 0),
-        views=int(stats.get("playCount") or 0),
-        url=f"https://www.tiktok.com/@{account_handle}/video/{video_id}",
-        username=username,
-        author_nickname=str(author.get("nickname") or ""),
-        duration=int(video.get("duration") or 0),
-        music_title=str(music.get("title") or ""),
-        music_author=str(music.get("authorName") or ""),
-        user_avatar_url=str(author.get("avatarThumb") or "").strip() or None,
-        thumbnail_url=thumbnail_url,
+        video_id=parsed.video_id,
+        date_time=parsed.date_time,
+        create_time=parsed.create_time,
+        description=parsed.description,
+        hashtags=list(parsed.hashtags or []),
+        mentions=list(parsed.mentions or []),
+        likes=parsed.likes,
+        comments=parsed.comments,
+        shares=parsed.shares,
+        saves=parsed.saves,
+        views=parsed.views,
+        url=parsed.url,
+        username=parsed.username,
+        author_nickname=parsed.author_nickname,
+        duration=parsed.duration,
+        music_title=parsed.music_title,
+        music_author=parsed.music_author,
+        user_avatar_url=parsed.user_avatar_url,
+        media_urls=list(parsed.media_urls or []),
+        thumbnail_url=parsed.thumbnail_url,
         _raw_item=item,
     )
 
@@ -129,12 +122,16 @@ def persist_tiktok_posts(
             if not isinstance(item, dict):
                 _record_skip("invalid_item")
                 continue
-            video_id = str(item.get("id") or "").strip()
-            if not video_id:
+            try:
+                dto = _tiktok_item_to_post_dto(item, account_handle=account_handle)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to adapt TikTok post item via canonical parser")
+                _record_skip("adapt_failed")
+                continue
+            if not str(dto.video_id or "").strip():
                 _record_skip("missing_video_id")
                 continue
             try:
-                dto = _tiktok_item_to_post_dto(item, account_handle=account_handle)
                 repo._upsert_tiktok_post(
                     context,
                     job_id=job_id,
@@ -144,7 +141,7 @@ def persist_tiktok_posts(
                 )
                 posts_upserted += 1
             except Exception:  # noqa: BLE001
-                logger.exception("Failed to upsert TikTok post %s via canonical helper", video_id)
+                logger.exception("Failed to upsert TikTok post %s via canonical helper", dto.video_id)
                 _record_skip("upsert_failed")
 
     return PersistedTikTokPosts(

@@ -3,10 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from trr_backend.repositories import socialblade_growth as growth_repo
-from trr_backend.repositories.socialblade_growth import _row_to_response, insert_growth_snapshot, merge_chart_data
+from trr_backend.repositories.socialblade_growth import (
+    _row_to_response,
+    insert_growth_snapshot,
+    merge_chart_data,
+    normalize_socialblade_account_handle,
+)
 
 
-def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_zeroes() -> None:
+def test_merge_chart_data_records_failed_attempt_without_refreshing_reusable_timestamp() -> None:
     now = datetime.now(tz=UTC)
     previous_day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     current_day = now.strftime("%Y-%m-%d")
@@ -53,15 +58,14 @@ def test_merge_chart_data_preserves_existing_stats_when_partial_refresh_returns_
 
     merged = merge_chart_data(existing, partial_refresh)
 
-    assert merged["scraped_at"] == "2026-03-16T17:22:19.398530+00:00"
-    assert merged["stats_refreshed"] is False
+    assert merged["scraped_at"] == "2026-03-16T07:29:43Z"
+    assert merged["last_attempt_at"] == "2026-03-16T17:22:19.398530+00:00"
+    assert merged["last_attempt_stats_refreshed"] is False
+    assert merged["stats_refreshed"] is True
     assert merged["profile_stats"] == existing["profile_stats"]
     assert merged["rankings"] == existing["rankings"]
     assert merged["daily_channel_metrics_60day"] == existing["daily_channel_metrics_60day"]
-    assert merged["daily_total_followers_chart"]["data"][-1] == {
-        "date": current_day,
-        "followers": 475372,
-    }
+    assert merged["daily_total_followers_chart"] == existing["daily_total_followers_chart"]
 
 
 def test_merge_chart_data_keeps_older_history_when_fresh_window_starts_later() -> None:
@@ -208,6 +212,100 @@ def test_merge_chart_data_updates_scraper_metadata_on_full_refresh() -> None:
     assert merged["daily_channel_metrics_60day"] == {"row_count": 31}
 
 
+def test_merge_chart_data_clears_failed_attempt_metadata_on_full_refresh() -> None:
+    existing = {
+        "scraped_at": "2026-05-12T08:00:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 1500000},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {"data": [{"date": "2026-05-12", "followers": 1500000}]},
+        "last_attempt_at": "2026-05-13T08:00:00Z",
+        "last_attempt_stats_refreshed": False,
+        "last_attempt_history_source": "table_fallback",
+        "last_attempt_error": "Headless SocialBlade login was challenged in Modal",
+        "last_attempt_runtime_metadata": {"selected_proxy_fingerprint": "none"},
+    }
+    fresh = {
+        "scraped_at": "2026-05-14T08:00:00Z",
+        "stats_refreshed": True,
+        "history_source": "page_trpc_capture",
+        "profile_stats": {"followers": 1600000},
+        "rankings": {"grade": "A-"},
+        "daily_channel_metrics_60day": {"row_count": 60},
+        "daily_total_followers_chart": {"data": [{"date": "2026-05-14", "followers": 1600000}]},
+    }
+
+    merged = merge_chart_data(existing, fresh)
+
+    assert merged["stats_refreshed"] is True
+    assert merged["history_source"] == "page_trpc_capture"
+    assert "last_attempt_at" not in merged
+    assert "last_attempt_stats_refreshed" not in merged
+    assert "last_attempt_history_source" not in merged
+    assert "last_attempt_error" not in merged
+    assert "last_attempt_runtime_metadata" not in merged
+
+
+def test_merge_chart_data_preserves_wider_metrics_when_short_table_fallback_refreshes() -> None:
+    existing = {
+        "scraped_at": "2026-05-13T08:00:00Z",
+        "stats_refreshed": True,
+        "profile_stats": {"followers": 1500000},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {
+            "period": "Last 3 Days",
+            "row_count": 3,
+            "headers": ["Date", "Followers Total"],
+            "data": [
+                {"Date": "2026-05-11", "Followers Total": "1,498,000"},
+                {"Date": "2026-05-12", "Followers Total": "1,499,000"},
+                {"Date": "2026-05-13", "Followers Total": "1,500,000"},
+            ],
+        },
+        "daily_total_followers_chart": {"data": [{"date": "2026-05-13", "followers": 1500000}]},
+    }
+    fresh = {
+        "scraped_at": "2026-05-14T08:00:00Z",
+        "stats_refreshed": True,
+        "history_source": "table_fallback",
+        "profile_stats": {"followers": 1501000},
+        "rankings": {"grade": "B+"},
+        "daily_channel_metrics_60day": {
+            "period": "Last 2 Days",
+            "row_count": 2,
+            "headers": ["Date", "Followers Total"],
+            "data": [
+                {"Date": "2026-05-13", "Followers Total": "1,500,500"},
+                {"Date": "2026-05-14", "Followers Total": "1,501,000"},
+            ],
+        },
+        "daily_total_followers_chart": {"data": [{"date": "2026-05-14", "followers": 1501000}]},
+    }
+
+    merged = merge_chart_data(existing, fresh)
+
+    assert merged["daily_channel_metrics_60day"] == {
+        "period": "Last 4 Days",
+        "row_count": 4,
+        "headers": ["Date", "Followers Total"],
+        "data": [
+            {"Date": "2026-05-11", "Followers Total": "1,498,000"},
+            {"Date": "2026-05-12", "Followers Total": "1,499,000"},
+            {"Date": "2026-05-13", "Followers Total": "1,500,500"},
+            {"Date": "2026-05-14", "Followers Total": "1,501,000"},
+        ],
+    }
+
+
+def test_normalize_socialblade_account_handle_extracts_full_urls() -> None:
+    assert normalize_socialblade_account_handle("https://socialblade.com/instagram/user/TheTraitors.US") == (
+        "thetraitors.us"
+    )
+    assert normalize_socialblade_account_handle("https://www.instagram.com/BravoTV/?igsh=abc") == "bravotv"
+    assert normalize_socialblade_account_handle("https://www.tiktok.com/@BravoTV?lang=en") == "bravotv"
+
+
 def test_row_to_response_exposes_previous_run_snapshot() -> None:
     row = {
         "id": "growth-row-1",
@@ -224,6 +322,9 @@ def test_row_to_response_exposes_previous_run_snapshot() -> None:
             "chart_metric_label": "Followers",
             "socialblade_url": "https://socialblade.com/instagram/user/thetraitors.us",
             "instagram_following_scrape": {"status": "completed", "relationships_upserted": 50},
+            "last_attempt_at": "2026-04-20T12:00:00Z",
+            "last_attempt_stats_refreshed": False,
+            "last_attempt_history_source": "page_trpc_capture_short",
             "previous_run": {
                 "scraped_at": "2026-04-19T12:00:00Z",
                 "profile_stats": {"followers": 950},
@@ -241,6 +342,9 @@ def test_row_to_response_exposes_previous_run_snapshot() -> None:
         "rankings": {"grade": "B-"},
     }
     assert response["instagram_following_scrape"] == {"status": "completed", "relationships_upserted": 50}
+    assert response["last_attempt_at"] == "2026-04-20T12:00:00Z"
+    assert response["last_attempt_stats_refreshed"] is False
+    assert response["last_attempt_history_source"] == "page_trpc_capture_short"
 
 
 def test_insert_growth_snapshot_writes_immutable_row(monkeypatch) -> None:
