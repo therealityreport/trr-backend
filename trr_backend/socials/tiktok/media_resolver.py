@@ -40,6 +40,7 @@ _PROBE_HEADERS = {
     "referer": "https://www.tiktok.com/",
     "range": "bytes=0-1",
 }
+_VALID_MEDIA_CONTENT_TYPE_PREFIXES = ("image/", "video/")
 
 
 @dataclass
@@ -58,18 +59,24 @@ def _build_attempt(
     success: bool,
     reason_code: str | None = None,
     http_status: int | None = None,
+    content_type: str | None = None,
+    probe_evidence: dict[str, Any] | None = None,
     selected_url_count: int = 0,
     error: Exception | None = None,
 ) -> dict[str, Any]:
-    return {
+    attempt = {
         "source": source,
         "success": bool(success),
         "reason_code": str(reason_code or "") or None,
         "http_status": int(http_status) if isinstance(http_status, int) else None,
+        "content_type": str(content_type or "").strip() or None,
         "selected_url_count": max(0, int(selected_url_count or 0)),
         "error_type": error.__class__.__name__ if error else None,
         "error_message": (str(error)[:240] if error else None),
     }
+    if probe_evidence:
+        attempt["probe_evidence"] = {key: value for key, value in probe_evidence.items() if value is not None}
+    return attempt
 
 
 def _dedupe_urls(urls: list[str]) -> list[str]:
@@ -82,6 +89,79 @@ def _dedupe_urls(urls: list[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+def _normalize_content_type(value: Any) -> str | None:
+    content_type = str(value or "").split(";", 1)[0].strip().lower()
+    return content_type or None
+
+
+def _is_media_content_type(content_type: str | None) -> bool:
+    normalized = _normalize_content_type(content_type)
+    return bool(normalized and normalized.startswith(_VALID_MEDIA_CONTENT_TYPE_PREFIXES))
+
+
+def _probe_failure_reason(evidence: dict[str, Any]) -> str:
+    status_code = int(evidence.get("http_status") or 0)
+    if status_code in {200, 206} and not _is_media_content_type(str(evidence.get("content_type") or "")):
+        return "download_bad_content_type"
+    return "download_failed"
+
+
+def _attach_probe_evidence(
+    meta: dict[str, Any],
+    *,
+    media_url: str,
+    probe_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not probe_evidence:
+        return meta
+    probe = {key: value for key, value in probe_evidence.items() if value is not None}
+    probe["url"] = media_url
+    enriched = dict(meta or {})
+    existing_probes = list(enriched.get("probe_evidence") or [])
+    existing_probes.append(probe)
+    enriched["probe_evidence"] = existing_probes
+    source_assets: list[dict[str, Any]] = []
+    for asset in enriched.get("source_assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        normalized_asset = dict(asset)
+        if str(normalized_asset.get("url") or "").strip() == media_url:
+            normalized_asset["probe"] = probe
+        source_assets.append(normalized_asset)
+    if source_assets:
+        enriched["source_assets"] = source_assets
+    return enriched
+
+
+def _build_video_asset_meta(
+    media_url: str,
+    thumbnail_url: str | None,
+    *,
+    probe_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    meta = {
+        "selection_policy": "best_per_asset",
+        "source_assets": [
+            {
+                "url": media_url,
+                "type": "video",
+                "width": None,
+                "height": None,
+                "resolution": None,
+                "fps": None,
+                "bitrate": None,
+                "duration_seconds": None,
+            }
+        ],
+        "thumbnail_source": (
+            {"url": thumbnail_url, "type": "thumbnail", "width": None, "height": None, "resolution": None}
+            if thumbnail_url
+            else None
+        ),
+    }
+    return _attach_probe_evidence(meta, media_url=media_url, probe_evidence=probe_evidence)
 
 
 def _first_url(value: Any) -> str:
@@ -413,7 +493,8 @@ def _probe_media_url(
     media_url: str,
     *,
     timeout: tuple[int, int],
-) -> tuple[bool, int | None, Exception | None]:
+) -> tuple[bool, dict[str, Any], Exception | None]:
+    evidence: dict[str, Any] = {"url": media_url}
     try:
         response = requests.get(
             media_url,
@@ -423,13 +504,25 @@ def _probe_media_url(
             allow_redirects=True,
         )
         status_code = int(response.status_code)
+        content_type = _normalize_content_type((getattr(response, "headers", None) or {}).get("content-type"))
+        evidence.update(
+            {
+                "http_status": status_code,
+                "content_type": content_type,
+                "content_type_valid": _is_media_content_type(content_type),
+                "final_url": str(getattr(response, "url", "") or "").strip() or None,
+            }
+        )
         response.close()
-        if status_code in {200, 206}:
-            return True, status_code, None
-        return False, status_code, None
+        if status_code in {200, 206} and _is_media_content_type(content_type):
+            return True, evidence, None
+        return False, evidence, None
     except Exception as exc:  # noqa: BLE001
         status_code = int(getattr(getattr(exc, "response", None), "status_code", 0) or 0) or None
-        return False, status_code, exc
+        evidence.update(
+            {"http_status": status_code, "error_type": exc.__class__.__name__, "error_message": str(exc)[:240]}
+        )
+        return False, evidence, exc
 
 
 def _resolve_with_unofficial_api(
@@ -601,20 +694,26 @@ def resolve_tiktok_media(
                 resolution.author_avatar_url = str(ytdlp_meta.get("author_avatar_url") or "").strip() or None
                 resolution.media_asset_meta = ytdlp_meta
                 return resolution
-            ytdlp_ok, ytdlp_status, ytdlp_error = _probe_media_url(ytdlp_urls[0], timeout=(5, 15))
+            ytdlp_ok, ytdlp_probe, ytdlp_error = _probe_media_url(ytdlp_urls[0], timeout=(5, 15))
             if ytdlp_ok:
                 resolution.source = "yt_dlp_manifest"
                 resolution.media_urls = ytdlp_urls
                 resolution.thumbnail_url = ytdlp_thumb
                 resolution.author_avatar_url = str(ytdlp_meta.get("author_avatar_url") or "").strip() or None
-                resolution.media_asset_meta = ytdlp_meta
+                resolution.media_asset_meta = _attach_probe_evidence(
+                    ytdlp_meta,
+                    media_url=ytdlp_urls[0],
+                    probe_evidence=ytdlp_probe,
+                )
                 return resolution
             resolution.attempts.append(
                 _build_attempt(
                     source="yt_dlp_manifest_probe",
                     success=False,
-                    reason_code="download_failed",
-                    http_status=ytdlp_status,
+                    reason_code=_probe_failure_reason(ytdlp_probe),
+                    http_status=int(ytdlp_probe.get("http_status") or 0) or None,
+                    content_type=str(ytdlp_probe.get("content_type") or "") or None,
+                    probe_evidence=ytdlp_probe,
                     selected_url_count=0,
                     error=ytdlp_error,
                 )
@@ -654,6 +753,7 @@ def resolve_tiktok_media(
             resolution.source = "unofficial_api"
             resolution.media_urls = unofficial_urls
             resolution.thumbnail_url = unofficial_thumb
+            resolution.media_asset_meta = _build_video_asset_meta(unofficial_urls[0], unofficial_thumb)
             return resolution
         # Watch page and unofficial API both failed; try oEmbed for thumbnail.
         if not resolution.thumbnail_url and candidate_url:
@@ -696,59 +796,27 @@ def resolve_tiktok_media(
                 resolution.source = "watch_page_json"
                 resolution.media_urls = media_urls
                 resolution.thumbnail_url = thumbnail_url
-                resolution.media_asset_meta = {
-                    "selection_policy": "best_per_asset",
-                    "source_assets": [
-                        {
-                            "url": media_urls[0],
-                            "type": "video",
-                            "width": None,
-                            "height": None,
-                            "resolution": None,
-                            "fps": None,
-                            "bitrate": None,
-                            "duration_seconds": None,
-                        }
-                    ],
-                    "thumbnail_source": (
-                        {"url": thumbnail_url, "type": "thumbnail", "width": None, "height": None, "resolution": None}
-                        if thumbnail_url
-                        else None
-                    ),
-                }
+                resolution.media_asset_meta = _build_video_asset_meta(media_urls[0], thumbnail_url)
                 return resolution
-            watch_ok, watch_status, watch_error = _probe_media_url(media_urls[0], timeout=(5, 15))
+            watch_ok, watch_probe, watch_error = _probe_media_url(media_urls[0], timeout=(5, 15))
             if watch_ok:
                 resolution.source = "watch_page_json"
                 resolution.media_urls = media_urls
                 resolution.thumbnail_url = thumbnail_url
-                resolution.media_asset_meta = {
-                    "selection_policy": "best_per_asset",
-                    "source_assets": [
-                        {
-                            "url": media_urls[0],
-                            "type": "video",
-                            "width": None,
-                            "height": None,
-                            "resolution": None,
-                            "fps": None,
-                            "bitrate": None,
-                            "duration_seconds": None,
-                        }
-                    ],
-                    "thumbnail_source": (
-                        {"url": thumbnail_url, "type": "thumbnail", "width": None, "height": None, "resolution": None}
-                        if thumbnail_url
-                        else None
-                    ),
-                }
+                resolution.media_asset_meta = _build_video_asset_meta(
+                    media_urls[0],
+                    thumbnail_url,
+                    probe_evidence=watch_probe,
+                )
                 return resolution
             resolution.attempts.append(
                 _build_attempt(
                     source="watch_page_json_probe",
                     success=False,
-                    reason_code="download_failed",
-                    http_status=watch_status,
+                    reason_code=_probe_failure_reason(watch_probe),
+                    http_status=int(watch_probe.get("http_status") or 0) or None,
+                    content_type=str(watch_probe.get("content_type") or "") or None,
+                    probe_evidence=watch_probe,
                     selected_url_count=0,
                     error=watch_error,
                 )
@@ -774,59 +842,27 @@ def resolve_tiktok_media(
             resolution.source = "unofficial_api"
             resolution.media_urls = unofficial_urls
             resolution.thumbnail_url = unofficial_thumb
-            resolution.media_asset_meta = {
-                "selection_policy": "best_per_asset",
-                "source_assets": [
-                    {
-                        "url": unofficial_urls[0],
-                        "type": "video",
-                        "width": None,
-                        "height": None,
-                        "resolution": None,
-                        "fps": None,
-                        "bitrate": None,
-                        "duration_seconds": None,
-                    }
-                ],
-                "thumbnail_source": (
-                    {"url": unofficial_thumb, "type": "thumbnail", "width": None, "height": None, "resolution": None}
-                    if unofficial_thumb
-                    else None
-                ),
-            }
+            resolution.media_asset_meta = _build_video_asset_meta(unofficial_urls[0], unofficial_thumb)
             return resolution
-        unofficial_ok, unofficial_status, unofficial_error = _probe_media_url(unofficial_urls[0], timeout=(5, 15))
+        unofficial_ok, unofficial_probe, unofficial_error = _probe_media_url(unofficial_urls[0], timeout=(5, 15))
         if unofficial_ok:
             resolution.source = "unofficial_api"
             resolution.media_urls = unofficial_urls
             resolution.thumbnail_url = unofficial_thumb
-            resolution.media_asset_meta = {
-                "selection_policy": "best_per_asset",
-                "source_assets": [
-                    {
-                        "url": unofficial_urls[0],
-                        "type": "video",
-                        "width": None,
-                        "height": None,
-                        "resolution": None,
-                        "fps": None,
-                        "bitrate": None,
-                        "duration_seconds": None,
-                    }
-                ],
-                "thumbnail_source": (
-                    {"url": unofficial_thumb, "type": "thumbnail", "width": None, "height": None, "resolution": None}
-                    if unofficial_thumb
-                    else None
-                ),
-            }
+            resolution.media_asset_meta = _build_video_asset_meta(
+                unofficial_urls[0],
+                unofficial_thumb,
+                probe_evidence=unofficial_probe,
+            )
             return resolution
         resolution.attempts.append(
             _build_attempt(
                 source="unofficial_api_probe",
                 success=False,
-                reason_code="download_failed",
-                http_status=unofficial_status,
+                reason_code=_probe_failure_reason(unofficial_probe),
+                http_status=int(unofficial_probe.get("http_status") or 0) or None,
+                content_type=str(unofficial_probe.get("content_type") or "") or None,
+                probe_evidence=unofficial_probe,
                 selected_url_count=0,
                 error=unofficial_error,
             )

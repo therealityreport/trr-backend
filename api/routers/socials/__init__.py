@@ -109,6 +109,11 @@ class SocialLandingSocialBladeRowsRequest(BaseModel):
     account_handles: list[str] = Field(default_factory=list, max_length=5000)
 
 
+class SocialLandingSocialBladeProgressCountsRequest(BaseModel):
+    platforms: list[str] = Field(default_factory=list, max_length=5000)
+    account_handles: list[str] = Field(default_factory=list, max_length=5000)
+
+
 def _reddit_refresh_worker_health_payload(
     *,
     healthy: bool,
@@ -253,6 +258,73 @@ def post_social_landing_socialblade_rows(
         return {"rows": jsonable_encoder(rows)}
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to read social landing SocialBlade rows")
+        raise _to_social_read_http_exception(exc) from exc
+
+
+@router.post("/landing-socialblade-progress-counts")
+def post_social_landing_socialblade_progress_counts(
+    payload: SocialLandingSocialBladeProgressCountsRequest,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    from trr_backend.db import pg
+
+    if len(payload.platforms) != len(payload.account_handles):
+        raise HTTPException(status_code=400, detail="platforms and account_handles must have matching lengths")
+
+    targets: list[tuple[str, str]] = []
+    allowed_platforms = {"instagram", "tiktok", "twitter", "youtube", "facebook", "threads"}
+    seen: set[tuple[str, str]] = set()
+    for platform_raw, handle_raw in zip(payload.platforms, payload.account_handles, strict=True):
+        platform = str(platform_raw or "").strip().lower()
+        handle = str(handle_raw or "").strip()
+        if platform not in allowed_platforms or not handle:
+            continue
+        key = (platform, handle.lower().lstrip("@"))
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append((platform, handle))
+
+    if not targets:
+        return {"rows": []}
+
+    try:
+        rows = pg.fetch_all(
+            """
+            WITH targets AS (
+              SELECT DISTINCT
+                lower(input.platform) AS platform,
+                lower(regexp_replace(input.account_handle, '^@+', '')) AS account_handle
+              FROM unnest(%s::text[], %s::text[]) AS input(platform, account_handle)
+              WHERE input.platform IN ('instagram', 'tiktok', 'twitter', 'youtube', 'facebook', 'threads')
+                AND nullif(trim(input.account_handle), '') IS NOT NULL
+            )
+            SELECT
+              targets.platform,
+              targets.account_handle,
+              (targets.platform IN ('instagram', 'youtube', 'tiktok'))::boolean AS socialblade_supported,
+              count(growth.id)::int AS socialblade_scraped_count,
+              count(growth.id) filter (where coalesce(growth.stats_refreshed, false) = true)::int
+                AS socialblade_saved_count
+            FROM targets
+            LEFT JOIN pipeline.socialblade_growth_data growth
+              ON lower(coalesce(nullif(growth.platform, ''), 'instagram')) = targets.platform
+             AND lower(
+               regexp_replace(
+                 coalesce(nullif(growth.account_handle, ''), growth.instagram_handle, ''),
+                 '^@+',
+                 ''
+               )
+             ) = targets.account_handle
+            GROUP BY targets.platform, targets.account_handle
+            ORDER BY targets.platform ASC, targets.account_handle ASC
+            """,
+            [[platform for platform, _handle in targets], [handle for _platform, handle in targets]],
+            pool_name="social_profile",
+        )
+        return {"rows": jsonable_encoder(rows)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to read social landing SocialBlade progress counts")
         raise _to_social_read_http_exception(exc) from exc
 
 
@@ -4253,7 +4325,7 @@ def get_social_account_profile_socialblade_route(
 
     try:
         normalized_platform = sanitize_socialblade_platform(platform)
-        safe_handle = sanitize_socialblade_handle(account_handle)
+        safe_handle = sanitize_socialblade_handle(account_handle, platform=normalized_platform)
     except SocialBladeRefreshError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not safe_handle:
@@ -4293,7 +4365,7 @@ def _refresh_social_account_profile_socialblade(
             cookies,
             platform=normalized_platform,
             allow_login_fallback=False,
-            allow_visible_browser_retry=normalized_platform == "instagram",
+            allow_visible_browser_retry=normalized_platform in {"instagram", "tiktok"},
         )
 
     return refresh_and_persist_socialblade(
@@ -4326,7 +4398,7 @@ async def refresh_social_account_profile_socialblade_route(
 
     try:
         normalized_platform = sanitize_socialblade_platform(platform)
-        safe_handle = sanitize_socialblade_handle(account_handle)
+        safe_handle = sanitize_socialblade_handle(account_handle, platform=normalized_platform)
     except SocialBladeRefreshError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not safe_handle:

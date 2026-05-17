@@ -2315,6 +2315,7 @@ class TwitterScraper:
 
         try:
             for ranking_mode in ranking_modes:
+                ranking_start_count = len(replies)
                 next_cursor: str | None = None
                 ranking_page_count = 0
                 stagnant_pages = 0
@@ -2375,6 +2376,8 @@ class TwitterScraper:
                     if stagnant_pages >= 3:
                         self._set_reply_failure_reason("tweet_detail_stagnant_cursor")
                         break
+                if len(replies) == ranking_start_count:
+                    break
         except requests.exceptions.RequestException as e:
             status_code = getattr(getattr(e, "response", None), "status_code", None)
             if status_code is not None:
@@ -2403,6 +2406,21 @@ class TwitterScraper:
             if fallback_replies:
                 self.last_reply_fetch_reason = None
             return fallback_replies
+
+        if replies and self._search_hash:
+            try:
+                search_replies = self._fetch_tweet_replies_via_search(
+                    tweet_id=tweet_id,
+                    delay=delay,
+                    max_pages=search_max_pages,
+                )
+                for sr in search_replies:
+                    if sr.tweet_id not in seen_ids:
+                        seen_ids.add(sr.tweet_id)
+                        replies.append(sr)
+            except Exception:
+                pass  # SearchTimeline supplement is best-effort
+            return replies
 
         if replies:
             return replies
@@ -2511,7 +2529,8 @@ class TwitterScraper:
                     if tweet.is_quote:
                         continue
                     reply_to_id = str(tweet.reply_to_tweet_id or "").strip()
-                    if not reply_to_id:
+                    thread_root_id = str(tweet.thread_root_tweet_id or "").strip()
+                    if not reply_to_id and thread_root_id != tweet_id:
                         continue
                     if tweet.tweet_id in seen_ids:
                         continue
@@ -3430,8 +3449,12 @@ class TwitterScraper:
             and not playwright_empty_result
             and bool(graphql_failed or twikit_failure_reason or playwright_failure_reason)
         )
-        retryable = graphql_failed and not tweets and not playwright_empty_result
-        error_code = "twitter_search_fallback_exhausted" if retryable else None
+        graphql_partial_failure = graphql_failed and bool(tweets) and retrieval_mode == "graphql"
+        retryable = (graphql_failed and not tweets and not playwright_empty_result) or graphql_partial_failure
+        if graphql_partial_failure:
+            error_code = "twitter_graphql_partial_fetch_failed"
+        else:
+            error_code = "twitter_search_fallback_exhausted" if retryable else None
         complete = classify_twitter_search_complete(
             stop_reason=stop_reason,
             retryable=retryable,
@@ -3499,4 +3522,6 @@ class TwitterScraper:
         }
         if fallback_exhausted and error_code:
             self.last_retrieval_meta["error_class"] = "TwitterSearchFallbackError"
+        elif graphql_partial_failure:
+            self.last_retrieval_meta["error_class"] = "TwitterSearchPartialFailure"
         return tweets

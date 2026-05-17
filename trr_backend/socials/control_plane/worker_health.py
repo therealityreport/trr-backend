@@ -200,11 +200,29 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
             return _core._build_modal_executor_health_payload(reason=modal_executor_reason)
         return payload
 
+    if modal_executor_enabled:
+        return _core._build_modal_executor_health_payload(reason=modal_executor_reason)
+
+    executor_cache_context = (modal_executor_enabled, modal_executor_reason)
     now = _core.time_module.monotonic()
     with _core._worker_health_cache_lock:
         if _core._worker_health_cache is not None:
-            cached_at, cached_stale_after, cached_payload = _core._worker_health_cache
-            if cached_stale_after == stale_after_seconds and (now - cached_at) < cache_ttl_seconds:
+            cache_entry = _core._worker_health_cache
+            cached_context = None
+            if len(cache_entry) == 4:
+                cached_at, cached_stale_after, cached_context, cached_payload = cache_entry
+            else:
+                cached_at, cached_stale_after, cached_payload = cache_entry
+                if (
+                    isinstance(cached_payload, Mapping)
+                    and str(cached_payload.get("executor_backend") or "").strip().lower() == "modal"
+                ):
+                    cached_context = (True, None)
+            if (
+                cached_stale_after == stale_after_seconds
+                and cached_context in {None, executor_cache_context}
+                and (now - cached_at) < cache_ttl_seconds
+            ):
                 return copy.deepcopy(cached_payload)
 
     payload = _query_worker_health(stale_after_seconds=stale_after_seconds)
@@ -213,7 +231,12 @@ def get_worker_health(*, stale_after_seconds: int | None = None) -> dict[str, An
     else:
         payload["alerts"] = _core._build_worker_health_alerts(payload)
     with _core._worker_health_cache_lock:
-        _core._worker_health_cache = (_core.time_module.monotonic(), stale_after_seconds, payload)
+        _core._worker_health_cache = (
+            _core.time_module.monotonic(),
+            stale_after_seconds,
+            executor_cache_context,
+            payload,
+        )
     return copy.deepcopy(payload)
 
 

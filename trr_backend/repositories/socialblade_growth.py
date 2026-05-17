@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
 
 from psycopg2.extras import Json
 
@@ -14,6 +15,18 @@ from trr_backend.db import pg
 logger = logging.getLogger(__name__)
 _PLATFORM_RE = re.compile(r"[^a-z]")
 _HANDLE_RE = re.compile(r"[^a-zA-Z0-9._-]")
+_KNOWN_URL_HOST_PREFIXES = (
+    "www.",
+    "socialblade.com/",
+    "instagram.com/",
+    "threads.net/",
+    "tiktok.com/",
+    "youtube.com/",
+    "youtu.be/",
+    "facebook.com/",
+    "fb.com/",
+)
+_SOCIALBLADE_ROUTE_SEGMENTS = {"user", "handle", "channel", "c"}
 _REFRESH_METADATA_KEYS = (
     "history_source",
     "profile_stats_labels",
@@ -21,6 +34,13 @@ _REFRESH_METADATA_KEYS = (
     "socialblade_url",
     "fallback_chain",
     "runtime_metadata",
+)
+_FAILED_ATTEMPT_METADATA_KEYS = (
+    "last_attempt_at",
+    "last_attempt_stats_refreshed",
+    "last_attempt_history_source",
+    "last_attempt_error",
+    "last_attempt_runtime_metadata",
 )
 
 
@@ -52,8 +72,151 @@ def normalize_socialblade_platform(platform: str | None) -> str:
     return normalized or "instagram"
 
 
-def normalize_socialblade_account_handle(handle: str | None) -> str:
-    return _HANDLE_RE.sub("", str(handle or "").strip().lstrip("@").lower())
+def _is_youtube_channel_id(value: str, *, platform: str | None) -> bool:
+    rendered = str(value or "").strip()
+    if not rendered:
+        return False
+    normalized_platform = normalize_socialblade_platform(platform) if platform else ""
+    if normalized_platform == "youtube":
+        return rendered.upper().startswith("UC")
+    return rendered.startswith("UC")
+
+
+def _clean_socialblade_account_handle(value: str, *, platform: str | None = None) -> str:
+    rendered = str(value or "").strip().lstrip("@")
+    if not rendered:
+        return ""
+    if _is_youtube_channel_id(rendered, platform=platform):
+        return _HANDLE_RE.sub("", rendered)
+    return _HANDLE_RE.sub("", rendered.lower())
+
+
+def _extract_handle_from_url(value: str) -> str:
+    rendered = value.strip()
+    lowered = rendered.lower()
+    if "://" not in rendered and lowered.startswith(_KNOWN_URL_HOST_PREFIXES):
+        rendered = f"https://{rendered}"
+
+    parsed = urlparse(rendered)
+    if not parsed.netloc:
+        return value
+
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    segments = [unquote(segment).strip() for segment in parsed.path.split("/") if segment.strip()]
+    if not segments:
+        return ""
+
+    if host.endswith("socialblade.com"):
+        if len(segments) >= 3 and segments[1].lower() in _SOCIALBLADE_ROUTE_SEGMENTS:
+            return segments[2]
+        return segments[-1]
+
+    if host.endswith(("instagram.com", "threads.net")):
+        if segments[0].lower() in {"accounts", "explore", "p", "reel", "stories"}:
+            return ""
+        return segments[0]
+
+    if host.endswith("tiktok.com"):
+        return next((segment for segment in segments if segment.startswith("@")), segments[0])
+
+    if host.endswith(("youtube.com", "youtu.be")):
+        first = segments[0].lower()
+        if first in {"channel", "user", "c", "handle"} and len(segments) >= 2:
+            return segments[1]
+        return segments[0]
+
+    if host.endswith(("facebook.com", "fb.com")):
+        if segments[0].lower() == "profile.php":
+            profile_id = str((parse_qs(parsed.query).get("id") or [""])[0]).strip()
+            return profile_id
+        if segments[0].lower() in {"pages", "watch", "reel"}:
+            return segments[-1]
+        return segments[0]
+
+    return segments[-1]
+
+
+def normalize_socialblade_account_handle(handle: str | None, *, platform: str | None = None) -> str:
+    rendered = str(handle or "").strip()
+    if not rendered:
+        return ""
+    rendered = _extract_handle_from_url(rendered)
+    return _clean_socialblade_account_handle(rendered, platform=platform)
+
+
+def _failed_attempt_metadata(fresh: dict[str, Any]) -> dict[str, Any]:
+    attempted_at = fresh.get("last_attempt_at") or fresh.get("scraped_at") or datetime.now(tz=UTC).isoformat()
+    metadata: dict[str, Any] = {
+        "last_attempt_at": attempted_at,
+        "last_attempt_stats_refreshed": bool(fresh.get("stats_refreshed", False)),
+    }
+    if "history_source" in fresh:
+        metadata["last_attempt_history_source"] = fresh.get("history_source")
+    if "error" in fresh:
+        metadata["last_attempt_error"] = fresh.get("error")
+    if "runtime_metadata" in fresh:
+        metadata["last_attempt_runtime_metadata"] = fresh.get("runtime_metadata")
+    return metadata
+
+
+def _metrics_row_count(metrics: Any) -> int:
+    if not isinstance(metrics, dict):
+        return 0
+    try:
+        return int(metrics.get("row_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _metric_row_date(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    rendered = str(row.get("Date") or row.get("date") or "").strip()
+    match = re.search(r"\d{4}-\d{2}-\d{2}", rendered)
+    return match.group(0) if match else rendered[:10]
+
+
+def _merge_daily_channel_metrics(existing: Any, fresh: Any) -> dict[str, Any]:
+    if not isinstance(fresh, dict):
+        return existing if isinstance(existing, dict) else {}
+    if not isinstance(existing, dict):
+        return fresh
+
+    fresh_count = _metrics_row_count(fresh)
+    existing_count = _metrics_row_count(existing)
+    if fresh_count >= existing_count:
+        return fresh
+
+    existing_rows = existing.get("data")
+    fresh_rows = fresh.get("data")
+    if not isinstance(existing_rows, list) or not isinstance(fresh_rows, list) or not existing_rows or not fresh_rows:
+        return fresh
+
+    rows_by_date: dict[str, dict[str, Any]] = {}
+    for row in existing_rows:
+        date = _metric_row_date(row)
+        if date and isinstance(row, dict):
+            rows_by_date[date] = dict(row)
+    for row in fresh_rows:
+        date = _metric_row_date(row)
+        if date and isinstance(row, dict):
+            rows_by_date[date] = dict(row)
+
+    merged_rows = [rows_by_date[date] for date in sorted(rows_by_date)]
+    if len(merged_rows) <= fresh_count:
+        return fresh
+
+    headers = fresh.get("headers") or existing.get("headers") or []
+    return {
+        **existing,
+        **fresh,
+        "headers": headers,
+        "data": merged_rows,
+        "row_count": len(merged_rows),
+        "period": f"Last {len(merged_rows)} Days",
+    }
 
 
 def socialblade_growth_table_exists() -> bool:
@@ -71,7 +234,7 @@ def socialblade_growth_snapshots_table_exists() -> bool:
 def get_growth_data(person_id: str | None, handle: str, *, platform: str = "instagram") -> dict[str, Any] | None:
     """Fetch stored SocialBlade data for a handle, preferring the linked person row when present."""
     normalized_platform = normalize_socialblade_platform(platform)
-    normalized_handle = normalize_socialblade_account_handle(handle)
+    normalized_handle = normalize_socialblade_account_handle(handle, platform=normalized_platform)
     if not normalized_handle:
         return None
     if person_id:
@@ -120,7 +283,7 @@ def upsert_growth_data(
 ) -> dict[str, Any]:
     """Upsert merged SocialBlade data. Returns the stored row."""
     normalized_platform = normalize_socialblade_platform(platform)
-    normalized_handle = normalize_socialblade_account_handle(handle)
+    normalized_handle = normalize_socialblade_account_handle(handle, platform=normalized_platform)
     rows = pg.execute_returning(
         "INSERT INTO pipeline.socialblade_growth_data "
         "(person_id, platform, account_handle, instagram_handle, scraped_at, stats_refreshed, "
@@ -170,7 +333,7 @@ def insert_growth_snapshot(
 ) -> dict[str, Any]:
     """Insert an immutable SocialBlade scrape snapshot."""
     normalized_platform = normalize_socialblade_platform(platform)
-    normalized_handle = normalize_socialblade_account_handle(handle)
+    normalized_handle = normalize_socialblade_account_handle(handle, platform=normalized_platform)
     if not normalized_handle:
         raise ValueError("SocialBlade snapshot requires a valid account handle.")
     rows = pg.execute_returning(
@@ -232,17 +395,21 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
     Key rule: never change follower counts for dates more than 1 day old.
     Always update: profile_stats, rankings, scraped_at, 60-day table.
     """
+    stats_refreshed = bool(fresh.get("stats_refreshed", False))
     if not existing:
-        return fresh
+        if stats_refreshed:
+            return fresh
+        return {**fresh, **_failed_attempt_metadata(fresh)}
 
     now = datetime.now(tz=UTC)
     cutoff_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    stats_refreshed = bool(fresh.get("stats_refreshed", False))
 
     merged: dict[str, Any] = {
         **existing,
-        "scraped_at": fresh.get("scraped_at", existing.get("scraped_at")),
-        "stats_refreshed": stats_refreshed,
+        "scraped_at": (
+            fresh.get("scraped_at", existing.get("scraped_at")) if stats_refreshed else existing.get("scraped_at")
+        ),
+        "stats_refreshed": stats_refreshed if stats_refreshed else bool(existing.get("stats_refreshed", False)),
         "profile_stats": existing.get("profile_stats", {}),
         "rankings": existing.get("rankings", {}),
         "daily_channel_metrics_60day": existing.get("daily_channel_metrics_60day", {}),
@@ -254,6 +421,8 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
         merged["instagram_following_scrape"] = fresh.get("instagram_following_scrape")
 
     if stats_refreshed:
+        for key in _FAILED_ATTEMPT_METADATA_KEYS:
+            merged.pop(key, None)
         previous_run = _build_previous_run_snapshot(existing)
         if previous_run:
             merged["previous_run"] = previous_run
@@ -261,13 +430,16 @@ def merge_chart_data(existing: dict[str, Any] | None, fresh: dict[str, Any]) -> 
             merged.pop("previous_run", None)
         merged["profile_stats"] = fresh.get("profile_stats", existing.get("profile_stats", {}))
         merged["rankings"] = fresh.get("rankings", existing.get("rankings", {}))
-        merged["daily_channel_metrics_60day"] = fresh.get(
-            "daily_channel_metrics_60day",
-            existing.get("daily_channel_metrics_60day", {}),
+        merged["daily_channel_metrics_60day"] = _merge_daily_channel_metrics(
+            existing.get("daily_channel_metrics_60day"),
+            fresh.get("daily_channel_metrics_60day"),
         )
         for key in _REFRESH_METADATA_KEYS:
             if key in fresh:
                 merged[key] = fresh.get(key)
+    else:
+        merged.update(_failed_attempt_metadata(fresh))
+        return merged
 
     fresh_chart = fresh.get("daily_total_followers_chart")
     existing_chart = existing.get("daily_total_followers_chart")
@@ -351,6 +523,10 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
         "socialblade_url": raw_response.get("socialblade_url"),
         "instagram_following_scrape": raw_response.get("instagram_following_scrape"),
         "previous_run": previous_run,
+        "last_attempt_at": raw_response.get("last_attempt_at"),
+        "last_attempt_stats_refreshed": raw_response.get("last_attempt_stats_refreshed"),
+        "last_attempt_history_source": raw_response.get("last_attempt_history_source"),
+        "last_attempt_error": raw_response.get("last_attempt_error"),
         "freshness_status": freshness_status,
         "is_stale": is_stale,
         "age_hours": age_hours,

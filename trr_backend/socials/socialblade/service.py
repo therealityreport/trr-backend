@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 SocialBladeScraper = Callable[[str], dict[str, Any]]
 _DEFAULT_FRESHNESS_HOURS = 24
 _DEFAULT_MIN_REUSABLE_CHART_POINTS = 30
+_DEFAULT_MIN_REUSABLE_PAGE_CAPTURE_POINTS = 60
 _AUTHENTICATED_HISTORY_SOURCES = frozenset({"authenticated_api", "page_trpc_capture"})
 SUPPORTED_SOCIALBLADE_PLATFORMS = SOCIALBLADE_SUPPORTED_PLATFORMS
 INSTAGRAM_FOLLOWING_SCRAPE_ENABLED_ENV = "SOCIALBLADE_INSTAGRAM_FOLLOWING_SCRAPE_ENABLED"
@@ -35,9 +36,9 @@ class SocialBladeRefreshError(RuntimeError):
     """Raised when a SocialBlade refresh cannot be completed."""
 
 
-def sanitize_socialblade_handle(handle: str) -> str:
+def sanitize_socialblade_handle(handle: str, *, platform: str | None = None) -> str:
     """Normalize a user-supplied social account handle for SocialBlade lookups."""
-    return normalize_socialblade_account_handle(handle)
+    return normalize_socialblade_account_handle(handle, platform=platform)
 
 
 def sanitize_socialblade_platform(platform: str | None) -> str:
@@ -156,7 +157,7 @@ def attach_instagram_following_scrape(
     rendered = dict(payload or {})
     normalized_platform = sanitize_socialblade_platform(platform)
     normalized_source_scope = normalize_socialblade_source_scope(source_scope)
-    safe_handle = sanitize_socialblade_handle(handle)
+    safe_handle = sanitize_socialblade_handle(handle, platform=normalized_platform)
     annotation: dict[str, Any] = {
         "enabled": bool(enabled),
         "stage": "instagram_profile_following",
@@ -310,28 +311,48 @@ def _chart_lags_metrics(data: dict[str, Any] | None) -> bool:
     return chart_end_date < latest_metrics_date
 
 
+def _chart_point_count(data: dict[str, Any] | None) -> int:
+    chart = (data or {}).get("daily_total_followers_chart")
+    if not isinstance(chart, dict):
+        return 0
+    try:
+        return int(chart.get("total_data_points") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _metrics_row_count(data: dict[str, Any] | None) -> int:
+    metrics = (data or {}).get("daily_channel_metrics_60day")
+    if not isinstance(metrics, dict):
+        return 0
+    try:
+        return int(metrics.get("row_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def is_growth_data_fresh(
     data: dict[str, Any] | None,
     *,
     freshness_hours: int | None = None,
 ) -> bool:
     """Return whether an existing SocialBlade snapshot can be reused."""
+    if not data or not bool(data.get("stats_refreshed", False)):
+        return False
     scraped_at = get_scraped_at_datetime(data)
     if scraped_at is None:
         return False
     history_source = str((data or {}).get("history_source") or "").strip().lower()
     if history_source and history_source not in _AUTHENTICATED_HISTORY_SOURCES:
         return False
+    if history_source == "page_trpc_capture" and max(_chart_point_count(data), _metrics_row_count(data)) < (
+        _DEFAULT_MIN_REUSABLE_PAGE_CAPTURE_POINTS
+    ):
+        return False
     if _chart_lags_metrics(data):
         return False
     if not history_source:
-        chart = ((data or {}).get("daily_total_followers_chart") or {}) if isinstance(data, dict) else {}
-        points = chart.get("total_data_points") if isinstance(chart, dict) else None
-        try:
-            point_count = int(points or 0)
-        except (TypeError, ValueError):
-            point_count = 0
-        if point_count < _DEFAULT_MIN_REUSABLE_CHART_POINTS:
+        if _chart_point_count(data) < _DEFAULT_MIN_REUSABLE_CHART_POINTS:
             return False
     ttl = timedelta(hours=freshness_hours or socialblade_freshness_hours())
     return datetime.now(tz=UTC) - scraped_at <= ttl
@@ -421,7 +442,7 @@ def refresh_and_persist_socialblade(
 ) -> dict[str, Any]:
     """Run the SocialBlade scrape, preserve historical chart data, and persist the result."""
     normalized_platform = sanitize_socialblade_platform(platform)
-    safe_handle = sanitize_socialblade_handle(handle)
+    safe_handle = sanitize_socialblade_handle(handle, platform=normalized_platform)
     if not safe_handle:
         raise SocialBladeRefreshError("Invalid handle")
 
@@ -458,7 +479,7 @@ def queue_refresh_decision(
 ) -> tuple[str, dict[str, Any] | None, str | None]:
     """Classify a batch refresh item as accepted or skipped before dispatch."""
     normalized_platform = sanitize_socialblade_platform(platform)
-    safe_handle = sanitize_socialblade_handle(handle)
+    safe_handle = sanitize_socialblade_handle(handle, platform=normalized_platform)
     if not safe_handle:
         return "error", None, "Invalid handle"
 

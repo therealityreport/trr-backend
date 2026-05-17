@@ -16,6 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
+_VALID_MEDIA_CONTENT_TYPE_PREFIXES = ("image/", "video/")
 
 
 @dataclass
@@ -39,13 +40,65 @@ def _create_session() -> requests.Session:
     return session
 
 
-def _probe_media_url(url: str, *, session: requests.Session, timeout: tuple[int, int] = (5, 15)) -> bool:
-    """Verify a media URL is accessible via HEAD request."""
+def _normalize_content_type(value: Any) -> str | None:
+    content_type = str(value or "").split(";", 1)[0].strip().lower()
+    return content_type or None
+
+
+def _is_media_content_type(content_type: str | None) -> bool:
+    normalized = _normalize_content_type(content_type)
+    return bool(normalized and normalized.startswith(_VALID_MEDIA_CONTENT_TYPE_PREFIXES))
+
+
+def _attach_probe_evidence(
+    meta: dict[str, Any],
+    *,
+    probe_evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not probe_evidence:
+        return meta
+    enriched = dict(meta or {})
+    probes = [{key: value for key, value in probe.items() if value is not None} for probe in probe_evidence]
+    enriched["probe_evidence"] = probes
+    probe_by_url = {str(probe.get("url") or ""): probe for probe in probes}
+    source_assets: list[dict[str, Any]] = []
+    for asset in enriched.get("source_assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        normalized_asset = dict(asset)
+        probe = probe_by_url.get(str(normalized_asset.get("url") or ""))
+        if probe:
+            normalized_asset["probe"] = probe
+        source_assets.append(normalized_asset)
+    if source_assets:
+        enriched["source_assets"] = source_assets
+    return enriched
+
+
+def _probe_media_url(
+    url: str,
+    *,
+    session: requests.Session,
+    timeout: tuple[int, int] = (5, 15),
+) -> tuple[bool, dict[str, Any]]:
+    """Verify a media URL is accessible and has an image/video content type."""
+    evidence: dict[str, Any] = {"url": url}
     try:
         resp = session.head(url, timeout=timeout, allow_redirects=True)
-        return resp.status_code == 200
-    except Exception:
-        return False
+        status_code = int(resp.status_code)
+        content_type = _normalize_content_type((getattr(resp, "headers", None) or {}).get("content-type"))
+        evidence.update(
+            {
+                "http_status": status_code,
+                "content_type": content_type,
+                "content_type_valid": _is_media_content_type(content_type),
+                "final_url": str(getattr(resp, "url", "") or "").strip() or None,
+            }
+        )
+        return status_code == 200 and _is_media_content_type(content_type), evidence
+    except Exception as exc:  # noqa: BLE001
+        evidence.update({"error_type": exc.__class__.__name__, "error_message": str(exc)[:240]})
+        return False, evidence
 
 
 def _pick_best_image(candidates: list[dict[str, Any]]) -> str | None:
@@ -227,21 +280,22 @@ def resolve_threads_media(
                 if item_image_meta:
                     source_assets.append(item_image_meta)
 
+        probe_evidence: list[dict[str, Any]] = []
         if urls:
             # Optionally validate URLs
             if validate_urls and session:
                 validated = []
                 for url in urls:
-                    if _probe_media_url(url, session=session, timeout=timeout):
+                    probe_ok, probe = _probe_media_url(url, session=session, timeout=timeout)
+                    probe_evidence.append(probe)
+                    if probe_ok:
                         validated.append(url)
                     else:
                         logger.debug("[threads] media URL probe failed: %s", url[:80])
                 urls = validated
 
             if urls:
-                resolution.media_urls = urls
-                resolution.source = "threads_graphql_post_data"
-                resolution.media_asset_meta = {
+                meta = {
                     "selection_policy": "best_per_asset",
                     "source_assets": source_assets,
                     "thumbnail_source": (
@@ -256,10 +310,15 @@ def resolve_threads_media(
                         else None
                     ),
                 }
+                resolution.media_urls = urls
+                resolution.source = "threads_graphql_post_data"
+                resolution.media_asset_meta = _attach_probe_evidence(meta, probe_evidence=probe_evidence)
                 attempt["success"] = True
                 attempt["selected_url_count"] = len(urls)
             else:
                 attempt["reason_code"] = "threads_media_urls_not_accessible"
+                if probe_evidence:
+                    resolution.media_asset_meta = {"probe_evidence": probe_evidence}
         else:
             attempt["reason_code"] = "threads_no_media_urls_in_post"
 
@@ -287,30 +346,41 @@ def resolve_threads_media(
         # Check if there's an og_image in raw_data (from OG-tag fallback scraping)
         thumbnail = raw_data.get("og_image") or raw_data.get("thumbnail_url")
         if thumbnail:
-            resolution.media_urls = [thumbnail]
-            resolution.thumbnail_url = resolution.thumbnail_url or thumbnail
-            resolution.source = "threads_raw_data_fallback"
-            resolution.media_asset_meta = {
-                "selection_policy": "best_per_asset",
-                "source_assets": [
-                    {
-                        "url": thumbnail,
-                        "type": "image",
+            fallback_probe_evidence: list[dict[str, Any]] = []
+            fallback_accessible = True
+            if validate_urls and session:
+                fallback_accessible, fallback_probe = _probe_media_url(thumbnail, session=session, timeout=timeout)
+                fallback_probe_evidence.append(fallback_probe)
+
+            if fallback_accessible:
+                resolution.media_urls = [thumbnail]
+                resolution.thumbnail_url = resolution.thumbnail_url or thumbnail
+                resolution.source = "threads_raw_data_fallback"
+                meta = {
+                    "selection_policy": "best_per_asset",
+                    "source_assets": [
+                        {
+                            "url": thumbnail,
+                            "type": "image",
+                            "width": None,
+                            "height": None,
+                            "resolution": None,
+                        }
+                    ],
+                    "thumbnail_source": {
+                        "url": resolution.thumbnail_url,
+                        "type": "thumbnail",
                         "width": None,
                         "height": None,
                         "resolution": None,
-                    }
-                ],
-                "thumbnail_source": {
-                    "url": resolution.thumbnail_url,
-                    "type": "thumbnail",
-                    "width": None,
-                    "height": None,
-                    "resolution": None,
-                },
-            }
-            og_attempt["success"] = True
-            og_attempt["selected_url_count"] = 1
+                    },
+                }
+                resolution.media_asset_meta = _attach_probe_evidence(meta, probe_evidence=fallback_probe_evidence)
+                og_attempt["success"] = True
+                og_attempt["selected_url_count"] = 1
+            else:
+                resolution.media_asset_meta = {"probe_evidence": fallback_probe_evidence}
+                og_attempt["reason_code"] = "threads_fallback_media_url_not_accessible"
         else:
             og_attempt["reason_code"] = "threads_no_fallback_media"
 

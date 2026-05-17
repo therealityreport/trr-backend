@@ -429,6 +429,93 @@ def test_job_runner_persists_page_checkpoint_and_resumes_latest_cursor(monkeypat
     assert checkpoint_calls[-1]["completed"] is True
 
 
+def test_job_runner_retries_when_page_checkpoint_persist_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram.posts_scrapling import job_runner as jr
+    from trr_backend.socials.instagram.posts_scrapling.persistence import PersistedInstagramPosts
+
+    finish_calls: list[dict[str, Any]] = []
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1, "doc_id_used": "doc-good"}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts_page(self, _account_handle: str, *, cursor: str | None = None) -> SimpleNamespace:
+            del cursor
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=False,
+                retryable=False,
+                fetch_reason=None,
+                posts=[{"shortcode": "abc123"}],
+                has_next_page=True,
+                end_cursor="cursor-1",
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    def _fake_fetch_one(sql: str, _params: list[object] | None = None, **_kwargs: Any) -> dict[str, Any]:
+        normalized = " ".join(sql.split()).lower()
+        if "select status from social.scrape_jobs" in normalized:
+            return {"status": "running"}
+        if "select status from social.scrape_runs" in normalized:
+            return {"status": "running"}
+        return {"id": "job-1", "status": "retrying", "metadata": finish_calls[-1]["metadata"] if finish_calls else {}}
+
+    monkeypatch.setattr(
+        jr,
+        "resolve_posts_scrapling_session",
+        lambda **_kwargs: SimpleNamespace(
+            cookies={},
+            browser_account_id="thetraitorsus",
+            auth_session=SimpleNamespace(cookies={}, metadata={"source": "test"}),
+        ),
+    )
+    monkeypatch.setattr(jr, "select_posts_proxy", lambda **_kwargs: None)
+    monkeypatch.setattr(jr, "posts_proxy_feature_flags", lambda: {"page_proxy_rotation_enabled": False})
+    monkeypatch.setattr(jr, "InstagramPostsScraplingFetcher", lambda **_kwargs: _FakeFetcher())
+    monkeypatch.setattr(
+        jr,
+        "persist_instagram_posts",
+        lambda **_kwargs: PersistedInstagramPosts(posts_upserted=1, posts_skipped=0, posts_skipped_by_reason={}),
+    )
+    monkeypatch.setattr(repo, "latest_instagram_profile_pagination_state", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        repo,
+        "persist_instagram_profile_pagination_state",
+        lambda **_kwargs: {"skipped": True, "reason": "pagination_state_persist_failed"},
+    )
+    monkeypatch.setattr(repo, "_new_job_progress_state", lambda: {})
+    monkeypatch.setattr(repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_emit_job_progress", lambda **_kwargs: True)
+    monkeypatch.setattr(repo, "_finish_job", lambda job_id, **kwargs: finish_calls.append({"job_id": job_id, **kwargs}))
+    monkeypatch.setattr(repo, "_finalize_run_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repo, "_retry_backoff_seconds", lambda _attempt: 30)
+    monkeypatch.setattr(repo, "_now_utc", lambda: datetime(2026, 5, 3, tzinfo=UTC))
+    monkeypatch.setattr(repo, "instagram_posts_acceleration_flags", lambda: {"flags": {}})
+    monkeypatch.setattr(jr.pg, "fetch_one", _fake_fetch_one)
+
+    jr.run_instagram_posts_scrapling_job(
+        {
+            "id": "job-1",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "attempt_count": 1,
+            "max_attempts": 2,
+            "config": {"account": "thetraitorsus"},
+        },
+        worker_id="worker-1",
+    )
+
+    assert finish_calls[-1]["status"] == "retrying"
+    assert finish_calls[-1]["last_error_code"] == "pagination_state_persist_failed"
+    metadata = finish_calls[-1]["metadata"]
+    assert metadata["listing_progress"]["stop_reason"] == "pagination_state_persist_failed"
+    assert metadata["runtime_metadata"]["pagination_checkpoint"]["direction"] == "forward"
+
+
 def test_job_runner_rotates_page_proxy_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     from trr_backend.repositories import social_season_analytics as repo
     from trr_backend.socials.instagram.posts_scrapling import job_runner as jr

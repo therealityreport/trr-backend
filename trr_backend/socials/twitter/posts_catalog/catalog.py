@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from uuid import UUID
 
 from trr_backend.socials.twitter.scraper import TwitterScrapeConfig, TwitterScraper
 
@@ -308,6 +309,133 @@ def _load_twikit_credentials(_twitter_cookies: Mapping[str, Any] | None = None) 
     return None
 
 
+def _normalize_uuid(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return str(UUID(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _upsert_twitter_interaction_fetch_state(
+    *,
+    source_account: str,
+    root_source_id: str,
+    interaction_kind: str,
+    strategy: str = "default",
+    reported_count: int = 0,
+    saved_count_before: int = 0,
+    saved_count_after: int = 0,
+    unique_saved_delta: int = 0,
+    duplicate_count: int = 0,
+    off_root_count: int = 0,
+    pages_scanned: int = 0,
+    last_cursor: str | None = None,
+    last_ranking: str | None = None,
+    consecutive_no_new_pages: int = 0,
+    status: str = "running",
+    exhaustion_reason: str | None = None,
+    last_job_id: str | None = None,
+    last_error_code: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    from psycopg2.extras import Json
+
+    from trr_backend.db import pg
+
+    account = str(source_account or "").strip()
+    root_id = str(root_source_id or "").strip()
+    kind = str(interaction_kind or "").strip().lower()
+    normalized_strategy = str(strategy or "default").strip() or "default"
+    normalized_status = str(status or "running").strip().lower() or "running"
+    if not account or not root_id or kind not in {"reply", "quote"}:
+        return None
+
+    payload = dict(metadata or {})
+    raw_job_id = str(last_job_id or "").strip()
+    normalized_job_id = _normalize_uuid(raw_job_id)
+    if raw_job_id and normalized_job_id is None:
+        payload.setdefault("last_job_id", raw_job_id)
+
+    sql = """
+        INSERT INTO social.twitter_interaction_fetch_state (
+            source_account,
+            root_source_id,
+            interaction_kind,
+            strategy,
+            reported_count,
+            saved_count_before,
+            saved_count_after,
+            unique_saved_delta,
+            duplicate_count,
+            off_root_count,
+            pages_scanned,
+            last_cursor,
+            last_ranking,
+            consecutive_no_new_pages,
+            status,
+            exhaustion_reason,
+            last_job_id,
+            last_error_code,
+            metadata,
+            updated_at
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s::uuid, %s, %s, now()
+        )
+        ON CONFLICT (lower(source_account), root_source_id, interaction_kind, strategy)
+        DO UPDATE SET
+            reported_count = EXCLUDED.reported_count,
+            saved_count_before = EXCLUDED.saved_count_before,
+            saved_count_after = EXCLUDED.saved_count_after,
+            unique_saved_delta = EXCLUDED.unique_saved_delta,
+            duplicate_count = EXCLUDED.duplicate_count,
+            off_root_count = EXCLUDED.off_root_count,
+            pages_scanned = GREATEST(
+                social.twitter_interaction_fetch_state.pages_scanned,
+                EXCLUDED.pages_scanned
+            ),
+            last_cursor = COALESCE(EXCLUDED.last_cursor, social.twitter_interaction_fetch_state.last_cursor),
+            last_ranking = COALESCE(EXCLUDED.last_ranking, social.twitter_interaction_fetch_state.last_ranking),
+            consecutive_no_new_pages = EXCLUDED.consecutive_no_new_pages,
+            status = EXCLUDED.status,
+            exhaustion_reason = EXCLUDED.exhaustion_reason,
+            last_job_id = COALESCE(EXCLUDED.last_job_id, social.twitter_interaction_fetch_state.last_job_id),
+            last_error_code = EXCLUDED.last_error_code,
+            metadata = social.twitter_interaction_fetch_state.metadata || EXCLUDED.metadata,
+            updated_at = now()
+        RETURNING *
+    """
+    rows = pg.execute_returning(
+        sql,
+        [
+            account,
+            root_id,
+            kind,
+            normalized_strategy,
+            max(0, int(reported_count or 0)),
+            max(0, int(saved_count_before or 0)),
+            max(0, int(saved_count_after or 0)),
+            max(0, int(unique_saved_delta or 0)),
+            max(0, int(duplicate_count or 0)),
+            max(0, int(off_root_count or 0)),
+            max(0, int(pages_scanned or 0)),
+            str(last_cursor or "").strip() or None,
+            str(last_ranking or "").strip() or None,
+            max(0, int(consecutive_no_new_pages or 0)),
+            normalized_status,
+            str(exhaustion_reason or "").strip() or None,
+            normalized_job_id,
+            str(last_error_code or "").strip() or None,
+            Json(payload),
+        ],
+    )
+    return rows[0] if rows else None
+
+
 @dataclass(slots=True)
 class TwitterPostsCatalogDependencies:
     scraper_factory: Callable[..., Any] = TwitterScraper
@@ -332,6 +460,9 @@ class TwitterPostsCatalogDependencies:
     persist_shared_catalog_posts_with_progress: Callable[..., list[dict[str, Any]]] | None = None
     upsert_shared_catalog_post: Callable[..., dict[str, Any] | None] | None = None
     upsert_tweet: Callable[..., dict[str, Any] | None] | None = None
+    upsert_twitter_interaction_fetch_state: Callable[..., dict[str, Any] | None] | None = (
+        _upsert_twitter_interaction_fetch_state
+    )
 
 
 def _build_scraper(deps: TwitterPostsCatalogDependencies) -> Any:
@@ -521,6 +652,68 @@ def _interaction_page_budget_count(*, expected_count: int, comment_limit: int | 
     return min(expected, max(0, int(comment_limit or 0)))
 
 
+def _interaction_status_from_failure(*, fail_reason: str | None, fetched_count: int, expected_count: int) -> str:
+    normalized = str(fail_reason or "").strip().lower()
+    if not normalized:
+        return "completed"
+    if "429" in normalized or "rate" in normalized:
+        return "rate_limited"
+    if any(marker in normalized for marker in ("auth", "login", "401", "403", "forbidden", "cookie")):
+        return "auth_blocked"
+    if max(0, int(fetched_count or 0)) <= 0 and max(0, int(expected_count or 0)) > 0:
+        return "exhausted"
+    return "completed"
+
+
+def _record_interaction_fetch_state(
+    *,
+    deps: TwitterPostsCatalogDependencies,
+    source_account: str,
+    root_source_id: str,
+    interaction_kind: str,
+    reported_count: int = 0,
+    saved_count_before: int = 0,
+    saved_count_after: int = 0,
+    unique_saved_delta: int = 0,
+    duplicate_count: int = 0,
+    off_root_count: int = 0,
+    pages_scanned: int = 0,
+    status: str = "running",
+    exhaustion_reason: str | None = None,
+    last_error_code: str | None = None,
+    job_id: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    writer = deps.upsert_twitter_interaction_fetch_state
+    if writer is None:
+        return
+    try:
+        writer(
+            source_account=source_account,
+            root_source_id=root_source_id,
+            interaction_kind=interaction_kind,
+            reported_count=reported_count,
+            saved_count_before=saved_count_before,
+            saved_count_after=saved_count_after,
+            unique_saved_delta=unique_saved_delta,
+            duplicate_count=duplicate_count,
+            off_root_count=off_root_count,
+            pages_scanned=pages_scanned,
+            status=status,
+            exhaustion_reason=exhaustion_reason,
+            last_job_id=job_id,
+            last_error_code=last_error_code,
+            metadata=metadata or {},
+        )
+    except Exception:
+        logger.warning(
+            "Twitter interaction fetch-state write failed for %s %s",
+            interaction_kind,
+            root_source_id,
+            exc_info=True,
+        )
+
+
 def _persist_tweet_interactions(
     *,
     deps: TwitterPostsCatalogDependencies,
@@ -595,8 +788,22 @@ def _persist_tweet_interactions(
         if expected_replies <= 0 and expected_quotes <= 0:
             continue
         _emit_interaction_progress(index=index, tweet_id=tweet_id, phase="comments_fetch")
+        if expected_replies > 0:
+            _record_interaction_fetch_state(
+                deps=deps,
+                source_account=account_handle,
+                root_source_id=tweet_id,
+                interaction_kind="reply",
+                reported_count=expected_replies,
+                status="running",
+                job_id=job_id,
+                metadata={"phase": "comments_fetch", "run_id": run_id},
+            )
 
         replies: list[Any] = []
+        reply_fetch_exception = False
+        reply_fail_reason = ""
+        reply_pages_scanned = 0
         try:
 
             def _on_reply_fetch_progress(
@@ -605,11 +812,31 @@ def _persist_tweet_interactions(
                 _index: int = index,
                 _tweet_id: str = tweet_id,
             ) -> None:
+                nonlocal reply_pages_scanned
+                reply_pages_scanned = max(
+                    reply_pages_scanned,
+                    _normalize_non_negative_int(payload.get("pages_scanned")),
+                )
                 _emit_interaction_progress(
                     index=_index,
                     tweet_id=_tweet_id,
                     phase=str(payload.get("phase") or "tweet_detail_replies_page"),
                     current_comments_fetched=_normalize_non_negative_int(payload.get("comments_fetched")),
+                )
+                _record_interaction_fetch_state(
+                    deps=deps,
+                    source_account=account_handle,
+                    root_source_id=_tweet_id,
+                    interaction_kind="reply",
+                    reported_count=expected_replies,
+                    pages_scanned=reply_pages_scanned,
+                    status="running",
+                    job_id=job_id,
+                    metadata={
+                        "phase": str(payload.get("phase") or "tweet_detail_replies_page"),
+                        "comments_fetched": _normalize_non_negative_int(payload.get("comments_fetched")),
+                        "run_id": run_id,
+                    },
                 )
 
             replies = _fetch_tweet_replies(
@@ -630,16 +857,19 @@ def _persist_tweet_interactions(
                 phase="twitter_replies_fetch_done",
                 current_comments_fetched=len(replies),
             )
-            fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "").strip()
-            if fail_reason:
-                comment_fail_reasons.add(fail_reason)
+            reply_fail_reason = str(getattr(scraper, "last_reply_fetch_reason", "") or "").strip()
+            if reply_fail_reason:
+                comment_fail_reasons.add(reply_fail_reason)
                 if not replies:
                     stats["comment_errors"] += 1
         except Exception:
+            reply_fetch_exception = True
+            reply_fail_reason = "fetch_exception"
             stats["comment_errors"] += 1
             comment_fail_reasons.add("fetch_exception")
             replies = []
 
+        reply_upserted = 0
         for reply_index, reply in enumerate(replies, start=1):
             if not getattr(reply, "reply_to_tweet_id", None):
                 reply.reply_to_tweet_id = tweet_id
@@ -660,16 +890,62 @@ def _persist_tweet_interactions(
             stats["comments_fetched"] += 1
             if row:
                 stats["comments_upserted"] += 1
+                reply_upserted += 1
             if reply_index == 1 or reply_index % 25 == 0 or reply_index == len(replies):
                 _emit_interaction_progress(
                     index=index,
                     tweet_id=tweet_id,
                     phase="persist_twitter_replies",
                 )
+        if expected_replies > 0:
+            reply_status = (
+                "failed"
+                if reply_fetch_exception
+                else _interaction_status_from_failure(
+                    fail_reason=reply_fail_reason,
+                    fetched_count=len(replies),
+                    expected_count=expected_replies,
+                )
+            )
+            _record_interaction_fetch_state(
+                deps=deps,
+                source_account=account_handle,
+                root_source_id=tweet_id,
+                interaction_kind="reply",
+                reported_count=expected_replies,
+                saved_count_after=reply_upserted,
+                unique_saved_delta=reply_upserted,
+                duplicate_count=max(0, len(replies) - reply_upserted),
+                pages_scanned=max(reply_pages_scanned, _shared_catalog_progress_pages_scanned(retrieval_meta)),
+                status=reply_status,
+                exhaustion_reason=reply_fail_reason if reply_status == "exhausted" else None,
+                last_error_code=reply_fail_reason or None,
+                job_id=job_id,
+                metadata={
+                    "phase": "persist_twitter_replies",
+                    "run_id": run_id,
+                    "fetched_count": len(replies),
+                },
+            )
 
         quotes: list[Any] = []
+        quote_fetch_exception = False
+        quote_fail_reason = ""
+        quote_pages_scanned = 0
+        quote_off_root_count = 0
         try:
             _emit_interaction_progress(index=index, tweet_id=tweet_id, phase="twitter_quotes_fetch")
+            if expected_quotes > 0:
+                _record_interaction_fetch_state(
+                    deps=deps,
+                    source_account=account_handle,
+                    root_source_id=tweet_id,
+                    interaction_kind="quote",
+                    reported_count=expected_quotes,
+                    status="running",
+                    job_id=job_id,
+                    metadata={"phase": "twitter_quotes_fetch", "run_id": run_id},
+                )
 
             def _on_quote_fetch_progress(
                 payload: dict[str, Any],
@@ -677,11 +953,31 @@ def _persist_tweet_interactions(
                 _index: int = index,
                 _tweet_id: str = tweet_id,
             ) -> None:
+                nonlocal quote_pages_scanned
+                quote_pages_scanned = max(
+                    quote_pages_scanned,
+                    _normalize_non_negative_int(payload.get("pages_scanned")),
+                )
                 _emit_interaction_progress(
                     index=_index,
                     tweet_id=_tweet_id,
                     phase=str(payload.get("phase") or "twitter_quotes_fetch"),
                     current_quotes_fetched=_normalize_non_negative_int(payload.get("quotes_fetched")),
+                )
+                _record_interaction_fetch_state(
+                    deps=deps,
+                    source_account=account_handle,
+                    root_source_id=_tweet_id,
+                    interaction_kind="quote",
+                    reported_count=expected_quotes,
+                    pages_scanned=quote_pages_scanned,
+                    status="running",
+                    job_id=job_id,
+                    metadata={
+                        "phase": str(payload.get("phase") or "twitter_quotes_fetch"),
+                        "quotes_fetched": _normalize_non_negative_int(payload.get("quotes_fetched")),
+                        "run_id": run_id,
+                    },
                 )
 
             quotes = _fetch_tweet_quotes(
@@ -702,16 +998,19 @@ def _persist_tweet_interactions(
                 phase="twitter_quotes_fetch_done",
                 current_quotes_fetched=len(quotes),
             )
-            fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "").strip()
-            if fail_reason:
-                quote_fail_reasons.add(fail_reason)
+            quote_fail_reason = str(getattr(scraper, "last_quote_fetch_reason", "") or "").strip()
+            if quote_fail_reason:
+                quote_fail_reasons.add(quote_fail_reason)
                 if not quotes:
                     stats["quote_errors"] += 1
         except Exception:
+            quote_fetch_exception = True
+            quote_fail_reason = "fetch_exception"
             stats["quote_errors"] += 1
             quote_fail_reasons.add("fetch_exception")
             quotes = []
 
+        quote_upserted = 0
         for quote_index, quote in enumerate(quotes, start=1):
             quote.is_reply = False
             quote.reply_to_tweet_id = None
@@ -726,6 +1025,7 @@ def _persist_tweet_interactions(
                         tweet_id=tweet_id,
                         phase="filter_twitter_quotes",
                     )
+                quote_off_root_count += 1
                 continue
             if not str(getattr(quote, "twitter_context_role", "") or "").strip():
                 quote.twitter_context_role = "quote"
@@ -740,12 +1040,46 @@ def _persist_tweet_interactions(
             stats["quotes_fetched"] += 1
             if row:
                 stats["quotes_upserted"] += 1
+                quote_upserted += 1
             if should_emit_quote_progress:
                 _emit_interaction_progress(
                     index=index,
                     tweet_id=tweet_id,
                     phase="persist_twitter_quotes",
                 )
+        if expected_quotes > 0:
+            quote_saved_total = max(0, len(quotes) - quote_off_root_count)
+            quote_status = (
+                "failed"
+                if quote_fetch_exception
+                else _interaction_status_from_failure(
+                    fail_reason=quote_fail_reason,
+                    fetched_count=quote_saved_total,
+                    expected_count=expected_quotes,
+                )
+            )
+            _record_interaction_fetch_state(
+                deps=deps,
+                source_account=account_handle,
+                root_source_id=tweet_id,
+                interaction_kind="quote",
+                reported_count=expected_quotes,
+                saved_count_after=quote_upserted,
+                unique_saved_delta=quote_upserted,
+                duplicate_count=max(0, quote_saved_total - quote_upserted),
+                off_root_count=quote_off_root_count,
+                pages_scanned=max(quote_pages_scanned, _shared_catalog_progress_pages_scanned(retrieval_meta)),
+                status=quote_status,
+                exhaustion_reason=quote_fail_reason if quote_status == "exhausted" else None,
+                last_error_code=quote_fail_reason or None,
+                job_id=job_id,
+                metadata={
+                    "phase": "persist_twitter_quotes",
+                    "run_id": run_id,
+                    "fetched_count": len(quotes),
+                    "saved_candidate_count": quote_saved_total,
+                },
+            )
 
     if comment_fail_reasons:
         retrieval_meta["comment_fail_reasons"] = sorted(comment_fail_reasons)

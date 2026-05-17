@@ -83,6 +83,25 @@ def _bottom_cursor(value: str) -> dict[str, Any]:
     }
 
 
+def _search_timeline_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {
+                                "type": "TimelineAddEntries",
+                                "entries": entries,
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
 def test_extract_tweet_detail_replies_returns_bottom_cursor(monkeypatch) -> None:
     scraper = TwitterScraper(cookies={"auth_token": "auth", "ct0": "csrf"})
 
@@ -237,3 +256,41 @@ def test_fetch_tweet_quotes_forwards_progress_callback_to_search(monkeypatch) ->
             "tweet_id": "root",
         }
     ]
+
+
+def test_search_timeline_reply_fallback_accepts_thread_root_without_direct_reply(monkeypatch) -> None:
+    scraper = TwitterScraper(cookies={"auth_token": "auth", "ct0": "csrf"})
+
+    def _parse_tweet_result(result: dict[str, Any], _config: Any) -> Tweet:
+        tweet = _tweet(str(result["rest_id"]), reply_to=None)
+        tweet.is_reply = True
+        tweet.thread_root_tweet_id = "root"
+        tweet.is_thread_part = True
+        return tweet
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_parse_tweet_result", _parse_tweet_result)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_search",
+        lambda *_args, **_kwargs: _search_timeline_payload(
+            [
+                {
+                    "entryId": "tweet-reply-with-root",
+                    "content": {
+                        "itemContent": {
+                            "tweet_results": {
+                                "result": {
+                                    "rest_id": "reply-with-root",
+                                }
+                            }
+                        }
+                    },
+                }
+            ]
+        ),
+    )
+
+    replies = scraper._fetch_tweet_replies_via_search(tweet_id="root", delay=0, max_pages=1)
+
+    assert [reply.tweet_id for reply in replies] == ["reply-with-root"]

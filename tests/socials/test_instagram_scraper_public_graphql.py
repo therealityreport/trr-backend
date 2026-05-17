@@ -567,6 +567,70 @@ def test_request_cookies_updates_active_identity_cookie_jar(monkeypatch: pytest.
     assert scraper._active_identity.cookies["csrftoken"] == "csrf-token"
 
 
+@pytest.mark.parametrize(
+    ("status_code", "headers", "body"),
+    [
+        (429, {"Content-Type": "application/json"}, b'{"message":"rate_limited"}'),
+        (200, {"Content-Type": "text/html"}, b'<html><a href="/accounts/login/">Log in</a></html>'),
+    ],
+)
+def test_identity_pool_does_not_record_success_for_unsuccessful_response(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    headers: dict[str, str],
+    body: bytes,
+) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed"})
+    scraper._identity_pool_enabled = True
+    scraper._active_identity = type("Identity", (), {"session_id": "identity-a", "cookies": {"sessionid": "seed"}})()
+    success_calls: list[str] = []
+    request_calls: list[str] = []
+
+    class _Pool:
+        def record_success(self, session_id: str) -> None:
+            success_calls.append(session_id)
+
+        def record_request(self, session_id: str) -> None:
+            request_calls.append(session_id)
+
+    response = requests.Response()
+    response.status_code = status_code
+    response.headers.update(headers)
+    response._content = body
+
+    scraper._identity_pool = _Pool()
+    monkeypatch.setattr(scraper.session, "post", lambda *_args, **_kwargs: response)
+
+    assert scraper._post("https://www.instagram.com/graphql/query/") is response
+    assert success_calls == []
+    assert request_calls == ["identity-a"]
+
+
+def test_identity_pool_records_success_for_successful_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed"})
+    scraper._identity_pool_enabled = True
+    scraper._active_identity = type("Identity", (), {"session_id": "identity-a", "cookies": {"sessionid": "seed"}})()
+    success_calls: list[str] = []
+
+    class _Pool:
+        def record_success(self, session_id: str) -> None:
+            success_calls.append(session_id)
+
+        def record_request(self, _session_id: str) -> None:
+            return None
+
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["Content-Type"] = "application/json"
+    response._content = b'{"ok": true}'
+
+    scraper._identity_pool = _Pool()
+    monkeypatch.setattr(scraper.session, "post", lambda *_args, **_kwargs: response)
+
+    assert scraper._post("https://www.instagram.com/graphql/query/") is response
+    assert success_calls == ["identity-a"]
+
+
 def test_reset_request_session_preserves_active_identity_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = InstagramScraper(cookies={})
     scraper._identity_pool_enabled = True

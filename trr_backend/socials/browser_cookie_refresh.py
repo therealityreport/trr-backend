@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,10 +68,38 @@ def cookie_payload(cookies: list[dict[str, Any]], *, domains: tuple[str, ...]) -
     return payload
 
 
-def write_cookie_file(cookie_file: str | Path, cookies: dict[str, str]) -> None:
-    target = Path(cookie_file).expanduser()
+def ensure_private_file_mode(path: str | Path) -> None:
+    target = Path(path).expanduser()
+    if not target.exists():
+        return
+    try:
+        target.chmod(0o600)
+    except OSError:
+        logger.debug("Failed to chmod private cookie/session file %s", target, exc_info=True)
+
+
+def write_private_json_file(path: str | Path, payload: Any) -> None:
+    target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(cookies, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as handle:
+            temp_path = Path(handle.name)
+            temp_path.chmod(0o600)
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        os.replace(temp_path, target)
+        target.chmod(0o600)
+    except Exception:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def write_cookie_file(cookie_file: str | Path, cookies: dict[str, str]) -> None:
+    write_private_json_file(cookie_file, cookies)
 
 
 def _locate_first(page: Any, selectors: tuple[str, ...], *, deadline: float) -> Any:

@@ -487,6 +487,357 @@ def test_platform_post_source_urls_youtube_does_not_use_watch_url_as_thumbnail()
     assert media_urls == ["https://www.youtube.com/watch?v=vid123"]
 
 
+def test_video_like_detection_accepts_no_extension_stream_urls() -> None:
+    youtube_stream = "https://rr2---sn.example.googlevideo.com/videoplayback?mime=video%2Fmp4&expire=1770000000"
+    tiktok_stream = "https://v16-webapp-prime.tiktokcdn-us.com/video/tos/useast2a/tos-useast2a-ve-0068c001/token"
+
+    assert social_repo._is_video_like_media_url(youtube_stream) is True  # noqa: SLF001
+    assert social_repo._is_video_like_media_url(tiktok_stream) is True  # noqa: SLF001
+    assert (
+        social_repo._source_media_urls_need_quality_repair(  # noqa: SLF001
+            platform="youtube",
+            source_media_urls=[youtube_stream],
+        )
+        is False
+    )
+    assert (
+        social_repo._source_media_urls_need_quality_repair(  # noqa: SLF001
+            platform="tiktok",
+            source_media_urls=[tiktok_stream],
+        )
+        is False
+    )
+
+
+def test_effective_media_selection_ignores_failed_bad_hosted_media() -> None:
+    payload = social_repo._social_account_profile_post_item(  # noqa: SLF001
+        "youtube",
+        {
+            "id": "yt-db-1",
+            "source_id": "vid123",
+            "title": "Video",
+            "content": "caption",
+            "thumbnail_url": "https://img.test/source-thumb.jpg",
+            "source_thumbnail_url": "https://img.test/source-thumb.jpg",
+            "media_urls": ["https://video.test/source.mp4"],
+            "hosted_thumbnail_url": "https://cdn.test/stale-thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/stale-video.mp4"],
+            "media_mirror_status": "failed",
+            "media_mirror_error": "hosted_content",
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+        },
+        account_handle="bravotv",
+    )
+
+    assert payload["thumbnail_url"] == "https://img.test/source-thumb.jpg"
+    assert payload["media_urls"] == ["https://video.test/source.mp4"]
+    assert "hosted_thumbnail_url" not in payload
+    assert "hosted_media_urls" not in payload
+
+
+def test_failed_complete_youtube_hosted_media_remains_repair_eligible() -> None:
+    assert (
+        social_repo._platform_post_needs_media_mirror(  # noqa: SLF001
+            "youtube",
+            {
+                "id": "yt-db-1",
+                "source_id": "video-1",
+                "thumbnail_url": "https://img.test/source-thumb.jpg",
+                "media_urls": ["https://www.youtube.com/watch?v=video-1"],
+                "hosted_thumbnail_url": "https://cdn.test/source-thumb.jpg",
+                "hosted_media_urls": ["https://cdn.test/video-1.mp4"],
+                "media_mirror_status": "failed",
+                "media_mirror_error": "",
+                "user_avatar_url": "https://img.test/avatar.jpg",
+                "hosted_user_avatar_url": "https://cdn.test/avatar.jpg",
+                "asset_manifest": {},
+                "raw_data": {},
+            },
+        )
+        is True
+    )
+
+
+def test_instagram_missing_source_id_with_source_media_is_direct_mirror_eligible() -> None:
+    assert (
+        social_repo._platform_post_needs_media_mirror(  # noqa: SLF001
+            "instagram",
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "shortcode": "",
+                "thumbnail_url": "https://scontent.test/thumb.jpg",
+                "media_urls": ["https://scontent.test/media.jpg"],
+                "hosted_thumbnail_url": "",
+                "hosted_media_urls": [],
+                "media_mirror_status": "",
+                "media_mirror_error": "",
+                "raw_data": {},
+            },
+        )
+        is True
+    )
+
+
+def test_requeue_media_mirror_jobs_uses_full_row_and_skips_already_mirrored_youtube(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_sql: list[str] = []
+
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    monkeypatch.setattr(social_repo, "get_season_context", lambda _season_id: _season_context())
+    monkeypatch.setattr(
+        social_repo,
+        "_platform_posts_has_column",
+        lambda _platform, column, **_kwargs: column in {"media_urls", "asset_manifest", "raw_data"},
+    )
+    monkeypatch.setattr(social_repo, "_resolve_week_windows", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda: nullcontext(None))
+
+    def _fake_fetch_all(sql: str, _params: list[object]) -> list[dict[str, object]]:
+        captured_sql.append(sql)
+        return [
+            {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "source_id": "video-1",
+                "account": "Bravo",
+                "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+                "thumbnail_url": "https://img.test/source-thumb.jpg",
+                "media_urls": ["https://www.youtube.com/watch?v=video-1"],
+                "hosted_thumbnail_url": "https://cdn.test/source-thumb.jpg",
+                "hosted_media_urls": ["https://cdn.test/video-1.mp4"],
+                "media_mirror_status": "mirrored",
+                "media_mirror_error": "",
+                "user_avatar_url": "https://img.test/avatar.jpg",
+                "hosted_user_avatar_url": "https://cdn.test/avatar.jpg",
+                "owner_profile_pic_url": "",
+                "hosted_owner_profile_pic_url": "",
+                "hosted_tagged_profile_pics": {},
+                "asset_manifest": {},
+                "raw_data": {},
+            }
+        ]
+
+    monkeypatch.setattr(social_repo.pg, "fetch_all", _fake_fetch_all)
+    monkeypatch.setattr(
+        social_repo,
+        "_enqueue_platform_media_mirror_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("already mirrored row should be skipped")),
+    )
+
+    result = social_repo.requeue_media_mirror_jobs("season-1", platform="youtube")
+
+    sql = captured_sql[0].lower()
+    assert "asset_manifest" in sql
+    assert "raw_data" in sql
+    assert "user_avatar_url" in sql
+    assert result["queued_jobs"] == 0
+    assert result["skipped"] == 1
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_stale_display_variant_manifest_is_media_mirror_eligible() -> None:
+    assert (
+        social_repo._platform_post_needs_media_mirror(  # noqa: SLF001
+            "youtube",
+            {
+                "id": "yt-db-2",
+                "source_id": "video-2",
+                "thumbnail_url": "https://img.test/source-thumb.jpg",
+                "media_urls": ["https://www.youtube.com/watch?v=video-2"],
+                "hosted_thumbnail_url": "https://cdn.test/source-thumb.jpg",
+                "hosted_media_urls": ["https://cdn.test/video-2.mp4"],
+                "media_mirror_status": "mirrored",
+                "media_mirror_error": "",
+                "user_avatar_url": "https://img.test/avatar.jpg",
+                "hosted_user_avatar_url": "https://cdn.test/avatar.jpg",
+                "asset_manifest": {"display_variants_status": "failed"},
+                "raw_data": {},
+            },
+        )
+        is True
+    )
+
+
+def test_run_platform_media_mirror_stage_clears_auxiliary_only_pending_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updates: list[dict[str, object]] = []
+    hosted_avatar_updates: list[dict[str, object]] = []
+    post_id = "33333333-3333-4333-8333-333333333333"
+
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    monkeypatch.setattr(social_repo, "_touch_job_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_resolve_show_slug", lambda _context: "testshow")
+    monkeypatch.setattr(social_repo, "_resolve_post_username", lambda *_args, **_kwargs: "bravotv")
+    monkeypatch.setattr(social_repo, "_compute_daily_post_number", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(
+        social_repo,
+        "_platform_posts_has_column",
+        lambda _platform, column, **_kwargs: column
+        in {"media_urls", "asset_manifest", "raw_data", "hosted_user_avatar_url", "media_mirror_status"},
+    )
+    monkeypatch.setattr(social_repo, "_recover_platform_post_source_avatar", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        social_repo,
+        "_update_platform_post_media_mirror_fields",
+        lambda **kwargs: updates.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_update_post_hosted_avatar",
+        lambda **kwargs: hosted_avatar_updates.append(dict(kwargs)),
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_mirror_post_author_avatar_to_s3",
+        lambda **_kwargs: "https://cdn.test/avatar.jpg",
+    )
+    monkeypatch.setattr(
+        social_repo,
+        "_mirror_platform_media_to_s3_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("media assets should be up to date")),
+    )
+    monkeypatch.setattr(
+        social_repo.pg,
+        "fetch_one",
+        lambda _sql, _params: {
+            "id": post_id,
+            "source_id": "tt-video-1",
+            "thumbnail_url": "https://img.test/thumb.jpg",
+            "media_urls": ["https://video.test/main.mp4"],
+            "asset_manifest": {},
+            "post_username": "bravotv",
+            "raw_data": {},
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+            "hosted_thumbnail_url": "https://cdn.test/thumb.jpg",
+            "hosted_media_urls": ["https://cdn.test/main.mp4"],
+            "media_mirror_status": "pending",
+            "media_mirror_error": "",
+            "user_avatar_url": "https://img.test/avatar.jpg",
+            "hosted_user_avatar_url": "",
+            "owner_profile_pic_url": "",
+            "hosted_owner_profile_pic_url": "",
+            "hosted_tagged_profile_pics": {},
+        },
+    )
+
+    posts, mirrored, metadata = social_repo._run_platform_media_mirror_stage(  # noqa: SLF001
+        context=_season_context(),
+        platform="tiktok",
+        job_id="job-aux-only",
+        config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
+    )
+
+    assert posts == 1
+    assert mirrored == 2
+    assert hosted_avatar_updates == [
+        {"platform": "tiktok", "post_id": post_id, "hosted_user_avatar_url": "https://cdn.test/avatar.jpg"}
+    ]
+    assert updates[-1]["media_mirror_status"] == "up_to_date"
+    assert updates[-1]["media_mirror_error"] is None
+    assert metadata["mirror"]["status"] == "up_to_date"
+    assert metadata["avatar_mirror"]["status"] == "mirrored"
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_effective_media_selection_allows_unknown_legacy_hosted_media(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OBJECT_STORAGE_PUBLIC_BASE_URL", raising=False)
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    payload = social_repo._social_account_profile_post_item(  # noqa: SLF001
+        "facebook",
+        {
+            "id": "fb-db-1",
+            "source_id": "fb123",
+            "content": "caption",
+            "thumbnail_url": "https://img.test/source-thumb.jpg",
+            "source_thumbnail_url": "https://img.test/source-thumb.jpg",
+            "media_urls": ["https://video.test/source.mp4"],
+            "hosted_thumbnail_url": "https://legacy-cdn.test/legacy-thumb.jpg",
+            "hosted_media_urls": ["https://legacy-cdn.test/legacy-video.mp4"],
+            "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+        },
+        account_handle="bravotv",
+    )
+
+    assert payload["thumbnail_url"] == "https://legacy-cdn.test/legacy-thumb.jpg"
+    assert payload["media_urls"] == ["https://legacy-cdn.test/legacy-video.mp4"]
+    assert payload["hosted_media_urls"] == ["https://legacy-cdn.test/legacy-video.mp4"]
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
+def test_run_platform_media_mirror_stage_clears_bad_hosted_media_after_failed_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
+    social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+    try:
+        updates: list[dict[str, object]] = []
+        post_id = "00000000-0000-0000-0000-000000000111"
+
+        monkeypatch.setattr(social_repo, "_resolve_show_slug", lambda _context: "testshow")
+        monkeypatch.setattr(social_repo, "_resolve_post_username", lambda *_args, **_kwargs: "bravotv")
+        monkeypatch.setattr(social_repo, "_compute_daily_post_number", lambda *_args, **_kwargs: 1)
+        monkeypatch.setattr(social_repo, "_platform_post_has_stale_media_asset_meta", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(social_repo, "_platform_post_missing_display_variants", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(social_repo, "_recover_platform_post_source_avatar", lambda **_kwargs: None)
+        monkeypatch.setattr(social_repo, "_update_platform_post_media_asset_meta", lambda **_kwargs: None)
+        monkeypatch.setattr(
+            social_repo,
+            "_update_platform_post_media_mirror_fields",
+            lambda **kwargs: updates.append(dict(kwargs)),
+        )
+        monkeypatch.setattr(
+            social_repo.pg,
+            "fetch_one",
+            lambda _sql, _params: {
+                "id": post_id,
+                "source_id": "tt-video-1",
+                "thumbnail_url": "https://img.test/thumb.jpg",
+                "media_urls": ["https://video.test/main.mp4"],
+                "raw_data": {},
+                "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
+                "hosted_thumbnail_url": "https://cdn.test/social/tiktok/x/thumb.jpg",
+                "hosted_media_urls": ["https://cdn.test/social/tiktok/x/media-01.html"],
+                "media_mirror_status": "pending",
+                "media_mirror_error": None,
+                "user_avatar_url": "",
+                "hosted_user_avatar_url": "",
+            },
+        )
+        monkeypatch.setattr(
+            social_repo,
+            "_mirror_platform_media_to_s3_result",
+            lambda *_args, **_kwargs: {
+                "hosted_thumbnail_url": None,
+                "hosted_media_urls": [],
+                "status": "failed",
+                "error": "media[0]:asset_wrong_content_type",
+                "retryable_error": False,
+                "mirrored_count": 0,
+                "source_count": 2,
+            },
+        )
+
+        posts, mirrored, metadata = social_repo._run_platform_media_mirror_stage(  # noqa: SLF001
+            context=_season_context(),
+            platform="tiktok",
+            job_id="job-bad-hosted-repair",
+            config={"post_id": post_id, "_attempt_count": 1, "week_index": 1},
+        )
+
+        assert posts == 1
+        assert mirrored == 0
+        assert metadata["mirror"]["status"] == "failed"
+        assert updates[0]["media_mirror_status"] == "pending"
+        assert updates[-1]["media_mirror_status"] == "failed"
+        assert updates[-1]["hosted_thumbnail_url"] is None
+        assert updates[-1]["hosted_media_urls"] == []
+    finally:
+        social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
+
+
 def test_run_platform_stage_retires_youtube_comment_media_lane() -> None:
     with pytest.raises(ValueError, match="youtube_comment_media_mirror_obsolete"):
         social_repo._run_platform_stage(  # noqa: SLF001

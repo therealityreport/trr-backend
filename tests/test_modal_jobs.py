@@ -223,6 +223,9 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "2"
     assert os.environ["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "file_lock"
     assert os.environ["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
+    assert "SOCIALBLADE_PROXY_PROVIDER" not in os.environ
+    assert "SOCIALBLADE_USE_STICKY_PROXY" not in os.environ
+    assert "SOCIALBLADE_PROXY_SESSION_TTL_SECONDS" not in os.environ
     assert os.environ["SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS"] == "180"
     assert os.environ["SOCIAL_QUEUE_ENABLED"] == "true"
 

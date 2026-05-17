@@ -148,6 +148,61 @@ def test_mirror_url_to_s3_fails_for_oversized_assets(monkeypatch: pytest.MonkeyP
     assert result.error == "asset_too_large"
 
 
+def test_mirror_url_to_s3_rejects_html_body_for_video_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
+    monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.example.com")
+
+    class _FakeResponse:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):  # noqa: ANN001
+            del chunk_size
+            yield b"<!doctype html><html><body>login</body></html>"
+
+    upload_mock = MagicMock()
+    monkeypatch.setattr(s3_mirror.requests, "get", lambda *args, **kwargs: _FakeResponse())  # noqa: ARG005
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    result = s3_mirror.mirror_url_to_s3(
+        "https://example.com/video.mp4",
+        s3_client=MagicMock(),
+        bucket="bucket",
+    )
+
+    assert result.status == "failed"
+    assert result.error == "asset_wrong_content_type"
+    upload_mock.assert_not_called()
+
+
+def test_mirror_url_to_s3_rejects_private_network_url_before_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_get(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("private URL should not be fetched")
+
+    upload_mock = MagicMock()
+    monkeypatch.setattr(s3_mirror.requests, "get", fail_get)
+    monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
+
+    result = s3_mirror.mirror_url_to_s3(
+        "http://127.0.0.1/video.mp4",
+        s3_client=MagicMock(),
+        bucket="bucket",
+    )
+
+    assert result.status == "failed"
+    assert result.error == "private_network_url"
+    upload_mock.assert_not_called()
+
+
 def test_mirror_url_to_s3_rejects_non_image_bytes_for_image_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OBJECT_STORAGE_REGION", "us-east-1")
     monkeypatch.setenv("OBJECT_STORAGE_BUCKET", "bucket")
@@ -174,7 +229,7 @@ def test_mirror_url_to_s3_rejects_non_image_bytes_for_image_suffix(monkeypatch: 
     monkeypatch.setattr(s3_mirror, "upload_bytes_to_s3", upload_mock)
 
     result = s3_mirror.mirror_url_to_s3(
-        "https://images.example.com/file.jpg",
+        "https://example.com/file.jpg",
         s3_client=MagicMock(),
         bucket="bucket",
     )
@@ -495,13 +550,14 @@ def test_sha256_stability() -> None:
 
 def test_download_image_sets_referer_for_fandom(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
+    webp_bytes = b"RIFF\x0c\x00\x00\x00WEBPVP8 "
 
     def fake_get(url, headers=None, timeout=None, stream=None):  # noqa: ANN001
         captured["headers"] = headers or {}
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.headers = {"Content-Type": "image/webp"}
-        response.content = b"bytes"
+        response.content = webp_bytes
         return response
 
     monkeypatch.setattr(s3_mirror.requests, "get", fake_get)

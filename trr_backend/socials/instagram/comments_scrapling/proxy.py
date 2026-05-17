@@ -164,13 +164,19 @@ def select_comments_proxy(*, session_key: str | None = None) -> CommentsProxyCon
             session_mode="explicit_sharded" if len(explicit_urls) > 1 and session_key else "explicit",
         )
 
-    # 2. Decodo provider (default when env has credentials).
+    # 2. Explicit Decodo provider. Credentials alone are not enough because a
+    # stale residential proxy can make healthy auth cookies look blocked. The
+    # sticky comments flag remains an explicit comments-lane opt-in for Decodo.
     provider = str(os.getenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER") or "").strip().lower()
-    if provider in {"", "decodo", "smartproxy"}:
+    force_rotating_proxy = env_truthy("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", True)
+    sticky_proxy_requested = (not force_rotating_proxy) and env_truthy(
+        "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY",
+        False,
+    )
+    if provider in {"decodo", "smartproxy"} or (not provider and sticky_proxy_requested):
         creds = _decodo_env()
         if creds:
             username, password, gateway = creds
-            force_rotating_proxy = env_truthy("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", True)
             sticky_username, session_mode = apply_decodo_session_affinity(
                 username,
                 use_sticky_proxy=(

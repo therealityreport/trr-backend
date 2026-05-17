@@ -48,7 +48,7 @@ def _room_callable(name: str, local_impl: Any) -> Any:
 
 
 def _default_instagram_cookie_file_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "scripts" / "socials" / "instagram" / "instagram_cookies.json"
+    return Path(__file__).resolve().parents[3] / "scripts" / "socials" / "instagram" / "instagram_cookies.json"
 
 
 def _instagram_cookie_file_candidates() -> list[Path]:

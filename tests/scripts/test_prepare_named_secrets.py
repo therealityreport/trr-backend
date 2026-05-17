@@ -5,7 +5,12 @@ import pytest
 from scripts.modal import prepare_named_secrets as cli
 
 
-def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret() -> None:
+def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "DEFAULT_SOCIALBLADE_COOKIE_FILE", tmp_path / "missing-socialblade-cookies.json")
+
     runtime_values, social_values = cli._split_env(
         {
             "TRR_DB_URL": "postgresql://example",
@@ -73,6 +78,9 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
     assert result["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "2"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "file_lock"
     assert result["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
+    assert "SOCIALBLADE_PROXY_PROVIDER" not in result
+    assert "SOCIALBLADE_USE_STICKY_PROXY" not in result
+    assert "SOCIALBLADE_PROXY_SESSION_TTL_SECONDS" not in result
     assert result["SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS"] == "180"
     assert result["SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING"] == "false"
 
@@ -142,7 +150,8 @@ def test_apply_runtime_overrides_requires_canonical_trr_db_url() -> None:
         raise AssertionError("Expected KeyError when TRR_DB_URL is missing")
 
 
-def test_split_env_materializes_file_backed_social_auth(tmp_path) -> None:
+def test_split_env_materializes_file_backed_social_auth(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "DEFAULT_SOCIALBLADE_COOKIE_FILE", tmp_path / "missing-socialblade-cookies.json")
     cookie_file = tmp_path / "instagram-cookies.json"
     cookie_file.write_text('{\n  "sessionid": "abc123"\n}\n', encoding="utf-8")
 
@@ -174,6 +183,47 @@ def test_split_env_prefers_configured_cookie_file_over_stale_inline_json(tmp_pat
     )
 
     assert social_values["SOCIAL_INSTAGRAM_COOKIES_JSON"] == '{"sessionid":"fresh-file-session"}'
+
+
+def test_split_env_materializes_default_socialblade_cookie_file_when_inline_json_is_empty(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cookie_file = tmp_path / "socialblade-cookies.json"
+    cookie_file.write_text(
+        '{\n  "cf_clearance": "fresh-clearance",\n  "session": "fresh-session"\n}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "DEFAULT_SOCIALBLADE_COOKIE_FILE", cookie_file)
+
+    _runtime_values, social_values = cli._split_env(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "SOCIALBLADE_COOKIES_JSON": "[]",
+            "SOCIALBLADE_EMAIL": "ops@example.com",
+        }
+    )
+
+    assert social_values["SOCIALBLADE_COOKIES_JSON"] == '{"cf_clearance":"fresh-clearance","session":"fresh-session"}'
+    assert social_values["SOCIALBLADE_EMAIL"] == "ops@example.com"
+
+
+def test_split_env_preserves_non_empty_socialblade_inline_json(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cookie_file = tmp_path / "socialblade-cookies.json"
+    cookie_file.write_text('{\n  "session": "file-session"\n}\n', encoding="utf-8")
+    monkeypatch.setattr(cli, "DEFAULT_SOCIALBLADE_COOKIE_FILE", cookie_file)
+
+    _runtime_values, social_values = cli._split_env(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "SOCIALBLADE_COOKIES_JSON": '{"session":"inline-session"}',
+        }
+    )
+
+    assert social_values["SOCIALBLADE_COOKIES_JSON"] == '{"session":"inline-session"}'
 
 
 def test_split_env_raises_for_missing_file_backed_social_auth() -> None:

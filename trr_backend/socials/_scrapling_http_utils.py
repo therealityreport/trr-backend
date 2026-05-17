@@ -14,11 +14,15 @@ without triggering scrapling module-level costs.
 
 from __future__ import annotations
 
+import logging
 import os
+from http.cookies import SimpleCookie
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 def env_truthy(name: str, default: bool) -> bool:
@@ -61,7 +65,7 @@ def response_text(response: Any) -> str:
         try:
             return str(text() or "")
         except Exception:  # noqa: BLE001
-            return ""
+            text = ""
     if text:
         return str(text)
 
@@ -98,25 +102,84 @@ def safe_location(response: Any) -> str:
         return raw.split("?")[0].lower()
 
 
+def _extract_cookie_jar_values(cookies_attr: Any) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for cookie in cookies_attr.jar:
+        name = str(getattr(cookie, "name", "") or "").strip()
+        value = str(getattr(cookie, "value", "") or "")
+        if name and value:
+            result[name] = value
+    return result
+
+
+def _extract_set_cookie_header_values(response: Any) -> dict[str, str]:
+    headers = getattr(response, "headers", None) or {}
+    header_values: list[str] = []
+    try:
+        get_list = getattr(headers, "get_list", None)
+        if callable(get_list):
+            header_values.extend(str(value) for value in get_list("set-cookie") if value)
+    except Exception:  # noqa: BLE001
+        pass
+    for key in ("set-cookie", "Set-Cookie"):
+        try:
+            raw = headers.get(key) if hasattr(headers, "get") else None
+        except Exception:  # noqa: BLE001
+            raw = None
+        if raw:
+            if isinstance(raw, (list, tuple)):
+                header_values.extend(str(value) for value in raw if value)
+            else:
+                header_values.append(str(raw))
+    result: dict[str, str] = {}
+    for raw_header in header_values:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw_header)
+        except Exception:  # noqa: BLE001
+            continue
+        for name, morsel in cookie.items():
+            result[str(name)] = str(morsel.value)
+    return result
+
+
 def extract_response_cookies(response: Any) -> dict[str, str]:
     """Pull cookies from a response object. Supports dicts, .items() protocol,
     and httpx's .jar attribute."""
     cookies_attr = getattr(response, "cookies", None)
-    if cookies_attr is None:
-        return {}
     result: dict[str, str] = {}
-    try:
+    extraction_errors: list[str] = []
+    if cookies_attr is not None:
         if isinstance(cookies_attr, dict):
             for k, v in cookies_attr.items():
                 result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "items"):
-            for k, v in cookies_attr.items():
-                result[str(k)] = str(v)
-        elif hasattr(cookies_attr, "jar"):
-            for cookie in cookies_attr.jar:
-                result[str(cookie.name)] = str(cookie.value)
-    except Exception:  # noqa: BLE001
-        pass
+        if hasattr(cookies_attr, "items"):
+            try:
+                for k, v in cookies_attr.items():
+                    result[str(k)] = str(v)
+            except Exception as exc:  # noqa: BLE001
+                extraction_errors.append(f"items:{exc.__class__.__name__}")
+        if hasattr(cookies_attr, "get_dict"):
+            try:
+                for k, v in cookies_attr.get_dict().items():
+                    result[str(k)] = str(v)
+            except Exception as exc:  # noqa: BLE001
+                extraction_errors.append(f"get_dict:{exc.__class__.__name__}")
+        if hasattr(cookies_attr, "jar"):
+            try:
+                result.update(_extract_cookie_jar_values(cookies_attr))
+            except Exception as exc:  # noqa: BLE001
+                extraction_errors.append(f"jar:{exc.__class__.__name__}")
+    if not result:
+        try:
+            result.update(_extract_set_cookie_header_values(response))
+        except Exception as exc:  # noqa: BLE001
+            extraction_errors.append(f"set_cookie:{exc.__class__.__name__}")
+    if not result and extraction_errors:
+        logger.warning(
+            "response_cookie_extraction_failed sources=%s",
+            ",".join(extraction_errors),
+        )
     return result
 
 

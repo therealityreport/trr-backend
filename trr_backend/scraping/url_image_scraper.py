@@ -11,12 +11,15 @@ This module provides functionality to:
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -86,6 +89,119 @@ _IMAGE_CONTENT_TYPES = {
     "image/bmp",
     "image/tiff",
 }
+_IMAGE_DOWNLOAD_CHUNK_SIZE_BYTES = 64 * 1024
+_LOCAL_HOSTNAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+
+
+def _normalize_content_type(value: str | None) -> str:
+    return (value or "").split(";", 1)[0].strip().lower()
+
+
+def _disallowed_image_content_type(value: str | None) -> bool:
+    content_type = _normalize_content_type(value)
+    if not content_type:
+        return False
+    if content_type in {"text/html", "application/xhtml+xml", "application/json", "text/json"}:
+        return True
+    return content_type.endswith("+json")
+
+
+def _looks_like_svg(data: bytes) -> bool:
+    if not data:
+        return False
+    head = data.lstrip()[:4096].lower()
+    if head.startswith(b"<svg"):
+        return True
+    return head.startswith(b"<?xml") and b"<svg" in head
+
+
+def _sniff_image_content_type(data: bytes) -> str | None:
+    if not data:
+        return None
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if data.startswith(b"II*\x00") or data.startswith(b"MM\x00*"):
+        return "image/tiff"
+    if len(data) >= 16 and data[4:8] == b"ftyp" and (b"avif" in data[8:32] or b"avis" in data[8:32]):
+        return "image/avif"
+    if _looks_like_svg(data):
+        return "image/svg+xml"
+    return None
+
+
+def _looks_like_html_or_json_payload(data: bytes) -> bool:
+    if not data:
+        return False
+    head = data.lstrip()[:512].lower()
+    if not head:
+        return False
+    if head.startswith((b"<!doctype html", b"<html", b"<head", b"<body", b"<script")) or b"<html" in head[:128]:
+        return True
+    if head.startswith((b"{", b"[")):
+        return True
+    return False
+
+
+def _is_public_ip_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    return address.is_global
+
+
+@lru_cache(maxsize=2048)
+def _resolve_host_addresses(hostname: str, port: int) -> tuple[str, ...]:
+    infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    addresses = sorted({str(info[4][0]).split("%", 1)[0] for info in infos if info and info[4]})
+    return tuple(addresses)
+
+
+def _public_image_url_error(value: str | None) -> str | None:
+    source_url = str(value or "").strip()
+    parsed = urlparse(source_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return "invalid_source_url"
+
+    hostname = parsed.hostname.strip().strip("[]").lower()
+    if not hostname or hostname in _LOCAL_HOSTNAMES or hostname.endswith(".localhost") or hostname.endswith(".local"):
+        return "private_network_url"
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None:
+        return None if address.is_global else "private_network_url"
+
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    try:
+        addresses = _resolve_host_addresses(hostname, port)
+    except (OSError, socket.gaierror):
+        return "unresolvable_source_url"
+    if not addresses:
+        return "unresolvable_source_url"
+    if any(not _is_public_ip_address(address) for address in addresses):
+        return "private_network_url"
+    return None
+
+
+def _parse_response_content_length(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
 
 
 @dataclass
@@ -1281,6 +1397,7 @@ def download_and_hash_image(
     *,
     referer: str | None = None,
     timeout: float = 30.0,
+    max_bytes: int = 25 * 1024 * 1024,
 ) -> tuple[bytes, str, str]:
     """
     Download an image and compute its SHA256 hash.
@@ -1296,18 +1413,63 @@ def download_and_hash_image(
     Raises:
         RuntimeError: If download fails or response is empty
     """
+    source_url = str(url or "").strip()
+    url_error = _public_image_url_error(source_url)
+    if url_error:
+        raise RuntimeError(url_error)
+    try:
+        max_bytes_limit = int(max_bytes)
+    except (TypeError, ValueError):
+        max_bytes_limit = 0
+    if max_bytes_limit <= 0:
+        raise RuntimeError("invalid_max_bytes")
+
     headers = {**_DEFAULT_HEADERS}
     if referer:
         headers["referer"] = referer
 
-    resp = requests.get(url, headers=headers, timeout=timeout, stream=True)
-    resp.raise_for_status()
+    resp = requests.get(source_url, headers=headers, timeout=timeout, stream=True)
+    try:
+        resp.raise_for_status()
+        content_type = _normalize_content_type(resp.headers.get("Content-Type")) or None
+        if _disallowed_image_content_type(content_type):
+            raise RuntimeError("asset_wrong_content_type")
+        content_length = _parse_response_content_length(resp.headers.get("Content-Length"))
+        if content_length is not None and content_length > max_bytes_limit:
+            raise RuntimeError("asset_too_large")
 
-    content_type = resp.headers.get("Content-Type", "image/jpeg")
-    data = resp.content
+        chunks: list[bytes] = []
+        size_bytes = 0
+        iter_content = getattr(resp, "iter_content", None)
+        if callable(iter_content):
+            for chunk in iter_content(chunk_size=_IMAGE_DOWNLOAD_CHUNK_SIZE_BYTES):
+                if not chunk:
+                    continue
+                size_bytes += len(chunk)
+                if size_bytes > max_bytes_limit:
+                    raise RuntimeError("asset_too_large")
+                chunks.append(chunk)
+        if chunks:
+            data = b"".join(chunks)
+        else:
+            data = getattr(resp, "content", b"") or b""
+            if len(data) > max_bytes_limit:
+                raise RuntimeError("asset_too_large")
+    finally:
+        close = getattr(resp, "close", None)
+        if callable(close):
+            close()
 
     if not data:
         raise RuntimeError("Empty image response")
+    if _looks_like_html_or_json_payload(data):
+        raise RuntimeError("asset_wrong_content_type")
+
+    sniffed_content_type = _sniff_image_content_type(data[:4096])
+    if not sniffed_content_type:
+        raise RuntimeError(f"Non-image response content-type: {content_type}")
+    if content_type != sniffed_content_type:
+        content_type = sniffed_content_type
 
     sha256 = hashlib.sha256(data).hexdigest()
 

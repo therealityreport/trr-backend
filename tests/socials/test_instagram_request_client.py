@@ -70,3 +70,54 @@ def test_request_client_classifies_checkpoint_and_feedback() -> None:
 
     assert exc.value.error_code == "checkpoint_required"
     assert exc.value.retryable is False
+
+
+def test_request_client_classifies_200_html_login_before_json_parse() -> None:
+    session = requests.Session()
+    client = InstagramRequestClient(session=session)
+
+    def _fake_get(*_args, **_kwargs):
+        return _FakeResponse(
+            status_code=200,
+            headers={"content-type": "text/html"},
+            text='<html><a href="/accounts/login/">Log in</a></html>',
+        )
+
+    with pytest.raises(InstagramRequestFailure) as exc:
+        client.get_json(
+            "https://www.instagram.com/graphql/query/",
+            query_type="graphql_profile_posts",
+            headers={},
+            cookies={},
+            params={"doc_id": "1"},
+            sender=_fake_get,
+        )
+
+    assert exc.value.error_code == "redirect_login"
+    assert exc.value.status_code == 200
+    assert exc.value.retryable is False
+
+
+def test_request_client_classifies_200_html_checkpoint_before_json_parse() -> None:
+    session = requests.Session()
+    client = InstagramRequestClient(session=session)
+
+    def _fake_post(*_args, **_kwargs):
+        return _FakeResponse(
+            status_code=200,
+            headers={"content-type": "text/html"},
+            text="<html>checkpoint_required</html>",
+        )
+
+    with pytest.raises(InstagramRequestFailure) as exc:
+        client.post_form_json(
+            "https://www.instagram.com/graphql/query/",
+            query_type="graphql_profile_posts",
+            headers={},
+            cookies={},
+            data={"doc_id": "1"},
+            sender=_fake_post,
+        )
+
+    assert exc.value.error_code == "checkpoint_required"
+    assert exc.value.retryable is False

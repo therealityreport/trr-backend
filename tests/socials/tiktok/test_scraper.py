@@ -2,6 +2,7 @@
 
 import builtins
 from datetime import datetime
+from typing import Any
 
 from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
 
@@ -389,3 +390,147 @@ def test_browser_intercept_failed_browser_user_detail_does_not_classify_target_d
     assert posts == []
     assert scraper.last_retrieval_meta["intercepted_user_detail_responses"] == 0
     assert scraper.last_retrieval_meta["triage_bucket"] != "interception_target_drift"
+
+
+class _CommentApiResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = payload
+        self.status_code = 200
+        self.headers = {"content-type": "application/json"}
+        self.content = b"{}"
+        self.text = "{}"
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _CommentApiSession:
+    def __init__(self, *, comment_payload: dict[str, Any], reply_payloads: list[dict[str, Any]]) -> None:
+        self.comment_payload = comment_payload
+        self.reply_payloads = list(reply_payloads)
+        self.comment_requests = 0
+        self.reply_requests = 0
+
+    def get(self, url: str, **_kwargs) -> _CommentApiResponse:
+        if url == TikTokScraper.COMMENT_REPLIES_URL:
+            self.reply_requests += 1
+            if not self.reply_payloads:
+                raise AssertionError("unexpected extra reply request")
+            return _CommentApiResponse(self.reply_payloads.pop(0))
+        self.comment_requests += 1
+        return _CommentApiResponse(self.comment_payload)
+
+
+def _top_level_comment_payload(*, reply_count: int = 5) -> dict[str, Any]:
+    return {
+        "status_code": 0,
+        "comments": [
+            {
+                "cid": "comment-1",
+                "text": "top",
+                "create_time": 1_767_225_600,
+                "reply_comment_total": reply_count,
+                "user": {"uid": "user-1", "unique_id": "viewer1"},
+            }
+        ],
+        "has_more": False,
+    }
+
+
+def _reply_payload(reply_ids: list[str], *, has_more: bool = True, cursor: int = 50) -> dict[str, Any]:
+    return {
+        "status_code": 0,
+        "comments": [
+            {
+                "cid": reply_id,
+                "text": f"reply {reply_id}",
+                "create_time": 1_767_225_600,
+                "user": {"uid": f"user-{reply_id}", "unique_id": f"user{reply_id}"},
+            }
+            for reply_id in reply_ids
+        ],
+        "has_more": has_more,
+        "cursor": cursor,
+    }
+
+
+def _comment_scraper_with_session(session: _CommentApiSession, monkeypatch) -> TikTokScraper:
+    scraper = TikTokScraper(cookies={"sessionid": "cookie"}, direct_comment_api_enabled_override=True)
+    scraper.session = session
+    monkeypatch.setattr(scraper, "_rate_limit", lambda *_args, **_kwargs: None)
+    return scraper
+
+
+def test_tiktok_reply_fetch_respects_per_comment_cap(monkeypatch) -> None:
+    session = _CommentApiSession(
+        comment_payload=_top_level_comment_payload(reply_count=5),
+        reply_payloads=[_reply_payload(["1", "2", "3"], has_more=True, cursor=50)],
+    )
+    scraper = _comment_scraper_with_session(session, monkeypatch)
+
+    comments = scraper.fetch_comments(
+        "video-1",
+        username="bravotv",
+        max_comments=1,
+        fetch_replies=True,
+        delay=0,
+        max_replies_per_comment=2,
+        max_reply_pages=10,
+        reply_fetch_deadline_seconds=60,
+    )
+
+    assert len(comments) == 1
+    assert [reply.comment_id for reply in comments[0].replies] == ["1", "2"]
+    assert session.reply_requests == 1
+    assert scraper.last_comment_fetch_meta["reply_cap_events"][0]["reason"] == "max_replies_per_comment"
+    assert scraper.last_comment_fetch_meta["reply_cap_events"][0]["limit"] == 2
+
+
+def test_tiktok_reply_fetch_respects_page_cap(monkeypatch) -> None:
+    session = _CommentApiSession(
+        comment_payload=_top_level_comment_payload(reply_count=5),
+        reply_payloads=[_reply_payload(["1"], has_more=True, cursor=50)],
+    )
+    scraper = _comment_scraper_with_session(session, monkeypatch)
+
+    comments = scraper.fetch_comments(
+        "video-1",
+        username="bravotv",
+        max_comments=1,
+        fetch_replies=True,
+        delay=0,
+        max_replies_per_comment=10,
+        max_reply_pages=1,
+        reply_fetch_deadline_seconds=60,
+    )
+
+    assert [reply.comment_id for reply in comments[0].replies] == ["1"]
+    assert session.reply_requests == 1
+    assert scraper.last_comment_fetch_meta["reply_cap_events"][0]["reason"] == "max_reply_pages"
+    assert scraper.last_comment_fetch_meta["reply_cap_events"][0]["limit"] == 1
+
+
+def test_tiktok_reply_fetch_respects_deadline_cap(monkeypatch) -> None:
+    session = _CommentApiSession(
+        comment_payload=_top_level_comment_payload(reply_count=5),
+        reply_payloads=[_reply_payload(["1"], has_more=False, cursor=0)],
+    )
+    scraper = _comment_scraper_with_session(session, monkeypatch)
+
+    comments = scraper.fetch_comments(
+        "video-1",
+        username="bravotv",
+        max_comments=1,
+        fetch_replies=True,
+        delay=0,
+        max_replies_per_comment=10,
+        max_reply_pages=10,
+        reply_fetch_deadline_seconds=0,
+    )
+
+    assert comments[0].replies == []
+    assert session.reply_requests == 0
+    assert scraper.last_comment_fetch_meta["reply_cap_events"][0]["reason"] == "reply_deadline_seconds"

@@ -44,7 +44,12 @@ class TestRequestTimeoutMiddleware:
         assert response.status_code == 504
         body = response.json()
         assert body["detail"]["code"] == "REQUEST_TIMEOUT"
+        assert body["detail"]["status"] == 504
         assert body["detail"]["retryable"] is True
+        assert body["detail"]["trace_id"]
+        assert body["detail"]["request_id"]
+        assert response.headers.get("x-trace-id") == body["detail"]["trace_id"]
+        assert response.headers.get("x-request-id") == body["detail"]["request_id"]
 
     def test_health_endpoint_exempt(self):
         app = _make_app(timeout_seconds=0.1)
@@ -166,3 +171,4 @@ class TestRequestTimeoutMiddleware:
         response = client.get("/traced", headers={"X-Request-ID": "test-trace-123"})
         assert response.status_code == 504
         assert response.headers.get("x-request-id") == "test-trace-123"
+        assert response.json()["detail"]["request_id"] == "test-trace-123"

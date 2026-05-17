@@ -494,6 +494,7 @@ def test_instagram_cookie_refresh_writes_refresh_metadata(tmp_path: Path) -> Non
 
     assert payload["sessionid"] == "fresh-session"
     assert "_cookie_refreshed_at" in payload
+    assert (cookie_file.stat().st_mode & 0o777) == 0o600
 
 
 def test_load_cookies_from_file_strips_refresh_metadata(tmp_path: Path) -> None:

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 import mimetypes
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
@@ -38,13 +41,36 @@ _MEDIA_MIRROR_HEADERS = {
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 }
 _MEDIA_MIRROR_CHUNK_SIZE_BYTES = 64 * 1024
+_IMAGE_MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".avif", ".bmp", ".tif", ".tiff"}
+_VIDEO_MEDIA_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mpeg", ".mpg", ".ts", ".m3u8"}
+_OCTET_STREAM_CONTENT_TYPES = {"application/octet-stream", "binary/octet-stream"}
+_LOCAL_HOSTNAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
 
 
 def _is_image_content_type(value: str | None) -> bool:
     if not value:
         return False
-    content_type = value.split(";", 1)[0].strip().lower()
+    content_type = _normalize_content_type(value)
     return content_type.startswith("image/")
+
+
+def _is_video_content_type(value: str | None) -> bool:
+    if not value:
+        return False
+    return _normalize_content_type(value).startswith("video/")
+
+
+def _normalize_content_type(value: str | None) -> str:
+    return (value or "").split(";", 1)[0].strip().lower()
+
+
+def _disallowed_media_content_type(value: str | None) -> bool:
+    content_type = _normalize_content_type(value)
+    if not content_type:
+        return False
+    if content_type in {"text/html", "application/xhtml+xml", "application/json", "text/json"}:
+        return True
+    return content_type.endswith("+json")
 
 
 def _looks_like_svg(data: bytes) -> bool:
@@ -67,9 +93,148 @@ def _sniff_image_content_type(data: bytes) -> str | None:
         return "image/gif"
     if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
         return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if data.startswith(b"II*\x00") or data.startswith(b"MM\x00*"):
+        return "image/tiff"
+    if len(data) >= 16 and data[4:8] == b"ftyp" and (b"avif" in data[8:32] or b"avis" in data[8:32]):
+        return "image/avif"
     if _looks_like_svg(data):
         return "image/svg+xml"
     return None
+
+
+def _sniff_video_content_type(data: bytes) -> str | None:
+    if not data:
+        return None
+    if len(data) >= 12 and data[4:8] == b"ftyp" and not (b"avif" in data[8:32] or b"avis" in data[8:32]):
+        return "video/mp4"
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"AVI ":
+        return "video/avi"
+    return None
+
+
+def _looks_like_html_or_json_payload(data: bytes) -> bool:
+    if not data:
+        return False
+    head = data.lstrip()[:512].lower()
+    if not head:
+        return False
+    if head.startswith((b"<!doctype html", b"<html", b"<head", b"<body", b"<script")) or b"<html" in head[:128]:
+        return True
+    if head.startswith((b"{", b"[")):
+        return True
+    return False
+
+
+def _is_public_ip_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    return address.is_global
+
+
+@lru_cache(maxsize=2048)
+def _resolve_host_addresses(hostname: str, port: int) -> tuple[str, ...]:
+    infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    addresses = sorted({str(info[4][0]).split("%", 1)[0] for info in infos if info and info[4]})
+    return tuple(addresses)
+
+
+def _public_media_url_error(value: str | None) -> str | None:
+    source_url = str(value or "").strip()
+    parsed = urlparse(source_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return "invalid_source_url"
+
+    hostname = parsed.hostname.strip().strip("[]").lower()
+    if not hostname or hostname in _LOCAL_HOSTNAMES or hostname.endswith(".localhost") or hostname.endswith(".local"):
+        return "private_network_url"
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None:
+        return None if address.is_global else "private_network_url"
+
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    try:
+        addresses = _resolve_host_addresses(hostname, port)
+    except (OSError, socket.gaierror):
+        return "unresolvable_source_url"
+    if not addresses:
+        return "unresolvable_source_url"
+    if any(not _is_public_ip_address(address) for address in addresses):
+        return "private_network_url"
+    return None
+
+
+def _response_content_length_exceeds(headers: Mapping[str, Any], max_bytes: int) -> bool:
+    raw = str(headers.get("Content-Length") or "").strip()
+    if not raw:
+        return False
+    try:
+        return int(raw) > max_bytes
+    except ValueError:
+        return False
+
+
+def _read_response_bytes_with_cap(response: Any, *, max_bytes: int) -> tuple[bytes, int | None, str | None]:
+    parts: list[bytes] = []
+    size_bytes = 0
+    iterator = None
+    iter_content = getattr(response, "iter_content", None)
+    if callable(iter_content):
+        iterator = iter_content(chunk_size=_MEDIA_MIRROR_CHUNK_SIZE_BYTES)
+
+    if iterator is not None:
+        for chunk in iterator:
+            if not chunk:
+                continue
+            size_bytes += len(chunk)
+            if size_bytes > max_bytes:
+                return b"".join(parts), size_bytes, "asset_too_large"
+            parts.append(chunk)
+
+    if not parts:
+        content = getattr(response, "content", b"") or b""
+        size_bytes = len(content)
+        if size_bytes > max_bytes:
+            return b"", size_bytes, "asset_too_large"
+        parts.append(content)
+
+    data = b"".join(parts)
+    return data, len(data), None
+
+
+def _media_payload_error(*, source_url: str, content_type: str | None, data: bytes) -> str | None:
+    normalized_ct = _normalize_content_type(content_type)
+    if _disallowed_media_content_type(normalized_ct) or _looks_like_html_or_json_payload(data):
+        return "asset_wrong_content_type"
+
+    sniffed_image = _sniff_image_content_type(data[:4096])
+    sniffed_video = _sniff_video_content_type(data[:4096])
+    ext = infer_media_extension(source_url, normalized_ct)
+    is_image_ext = ext in _IMAGE_MEDIA_EXTENSIONS
+    is_video_ext = ext in _VIDEO_MEDIA_EXTENSIONS
+    is_image_declared = _is_image_content_type(normalized_ct)
+    is_video_declared = _is_video_content_type(normalized_ct)
+
+    if is_image_ext or is_image_declared:
+        return None if sniffed_image else "asset_wrong_content_type"
+    if is_video_ext or is_video_declared:
+        if sniffed_image:
+            return "asset_wrong_content_type"
+        if is_video_declared or sniffed_video or normalized_ct in _OCTET_STREAM_CONTENT_TYPES:
+            return None
+        return "asset_wrong_content_type"
+    if sniffed_image or sniffed_video:
+        return None
+    return "asset_wrong_content_type"
 
 
 def svg_rasterizer_available() -> bool:
@@ -619,22 +784,48 @@ def download_image(
     source: str,
     referer: str | None = None,
     headers: Mapping[str, str] | None = None,
+    max_bytes: int = 25 * 1024 * 1024,
 ) -> tuple[bytes, str | None]:
+    source_url = str(url or "").strip()
+    url_error = _public_media_url_error(source_url)
+    if url_error:
+        raise RuntimeError(url_error)
+    try:
+        max_bytes_limit = int(max_bytes)
+    except (TypeError, ValueError):
+        max_bytes_limit = 0
+    if max_bytes_limit <= 0:
+        raise RuntimeError("invalid_max_bytes")
+
     merged = {**_DEFAULT_HEADERS, **(headers or {})}
     if source in {"fandom", "fandom-gallery"}:
         merged["referer"] = referer or "https://real-housewives.fandom.com/"
-    resp = requests.get(url, headers=merged, timeout=(5, 30), stream=True)
-    resp.raise_for_status()
-    content_type = resp.headers.get("Content-Type")
-    data = resp.content or b""
+    resp = requests.get(source_url, headers=merged, timeout=(5, 30), stream=True)
+    try:
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type")
+        if _disallowed_media_content_type(content_type):
+            raise RuntimeError("asset_wrong_content_type")
+        if _response_content_length_exceeds(resp.headers, max_bytes_limit):
+            raise RuntimeError("asset_too_large")
+        data, _size_bytes, read_error = _read_response_bytes_with_cap(resp, max_bytes=max_bytes_limit)
+    finally:
+        close = getattr(resp, "close", None)
+        if callable(close):
+            close()
+    if read_error:
+        raise RuntimeError(read_error)
     if not data:
         raise RuntimeError("Empty image response")
-    if not _is_image_content_type(content_type):
-        sniffed = _sniff_image_content_type(data)
-        if sniffed:
-            content_type = sniffed
-        else:
-            raise RuntimeError(f"Non-image response content-type: {content_type}")
+    if _looks_like_html_or_json_payload(data):
+        raise RuntimeError("asset_wrong_content_type")
+    sniffed = _sniff_image_content_type(data[:4096])
+    if not sniffed:
+        raise RuntimeError(f"Non-image response content-type: {content_type}")
+    if not _is_image_content_type(content_type) or _normalize_content_type(content_type) != sniffed:
+        content_type = sniffed
+    else:
+        content_type = _normalize_content_type(content_type)
     return data, content_type
 
 
@@ -1030,6 +1221,18 @@ def mirror_url_to_s3(
             status="skipped",
             error="invalid_source_url",
         )
+    url_error = _public_media_url_error(source_url)
+    if url_error:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=None,
+            content_type=None,
+            size_bytes=None,
+            status="failed",
+            error=url_error,
+        )
     try:
         max_bytes_limit = int(max_bytes)
     except (TypeError, ValueError):
@@ -1074,6 +1277,28 @@ def mirror_url_to_s3(
         ) as response:
             response.raise_for_status()
             content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower() or None
+            if _disallowed_media_content_type(content_type):
+                return MirrorResult(
+                    source_url=source_url,
+                    hosted_url=None,
+                    hosted_key=None,
+                    sha256=None,
+                    content_type=content_type,
+                    size_bytes=None,
+                    status="failed",
+                    error="asset_wrong_content_type",
+                )
+            if _response_content_length_exceeds(response.headers, max_bytes_limit):
+                return MirrorResult(
+                    source_url=source_url,
+                    hosted_url=None,
+                    hosted_key=None,
+                    sha256=None,
+                    content_type=content_type,
+                    size_bytes=None,
+                    status="failed",
+                    error="asset_too_large",
+                )
             for chunk in response.iter_content(chunk_size=_MEDIA_MIRROR_CHUNK_SIZE_BYTES):
                 if not chunk:
                     continue
@@ -1183,8 +1408,21 @@ def mirror_url_to_s3(
     data = b"".join(data_parts)
     sha256 = digest.hexdigest()
     sniffed_image_content_type = _sniff_image_content_type(data[:4096])
+    sniffed_video_content_type = _sniff_video_content_type(data[:4096])
+    payload_error = _media_payload_error(source_url=source_url, content_type=content_type, data=data)
+    if payload_error:
+        return MirrorResult(
+            source_url=source_url,
+            hosted_url=None,
+            hosted_key=None,
+            sha256=sha256,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            status="failed",
+            error=payload_error,
+        )
     ext = infer_media_extension(source_url, content_type)
-    if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}:
+    if ext in _IMAGE_MEDIA_EXTENSIONS:
         if sniffed_image_content_type is None:
             return MirrorResult(
                 source_url=source_url,
@@ -1201,6 +1439,10 @@ def mirror_url_to_s3(
             ext = infer_media_extension(source_url, content_type)
     elif sniffed_image_content_type and not content_type:
         content_type = sniffed_image_content_type
+        ext = infer_media_extension(source_url, content_type)
+    elif sniffed_video_content_type and not _is_video_content_type(content_type):
+        content_type = sniffed_video_content_type
+        ext = infer_media_extension(source_url, content_type)
     key = build_shared_media_s3_key(sha256, ext)
 
     try:

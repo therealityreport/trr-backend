@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from trr_backend.socials.socialblade import service as service_module
+from trr_backend.repositories.socialblade_growth import normalize_socialblade_account_handle
 from trr_backend.socials.socialblade.service import (
     attach_instagram_following_scrape,
     is_growth_data_fresh,
     persist_scraped_payload,
+    sanitize_socialblade_handle,
     sanitize_socialblade_platform,
     socialblade_instagram_following_config,
 )
@@ -21,6 +23,7 @@ def test_is_growth_data_fresh_rejects_short_chart_without_history_source() -> No
         is_growth_data_fresh(
             {
                 "scraped_at": _recent_scrape_timestamp(),
+                "stats_refreshed": True,
                 "daily_total_followers_chart": {
                     "total_data_points": 14,
                     "date_range": {"from": "2026-03-05", "to": "2026-03-18"},
@@ -36,6 +39,7 @@ def test_is_growth_data_fresh_accepts_authenticated_api_history() -> None:
         is_growth_data_fresh(
             {
                 "scraped_at": _recent_scrape_timestamp(),
+                "stats_refreshed": True,
                 "history_source": "authenticated_api",
                 "daily_total_followers_chart": {
                     "total_data_points": 14,
@@ -47,11 +51,12 @@ def test_is_growth_data_fresh_accepts_authenticated_api_history() -> None:
     )
 
 
-def test_is_growth_data_fresh_accepts_page_trpc_capture_history() -> None:
+def test_is_growth_data_fresh_rejects_short_page_trpc_capture_history() -> None:
     assert (
         is_growth_data_fresh(
             {
                 "scraped_at": _recent_scrape_timestamp(),
+                "stats_refreshed": True,
                 "history_source": "page_trpc_capture",
                 "daily_total_followers_chart": {
                     "total_data_points": 31,
@@ -59,7 +64,46 @@ def test_is_growth_data_fresh_accepts_page_trpc_capture_history() -> None:
                 },
             }
         )
+        is False
+    )
+
+
+def test_is_growth_data_fresh_accepts_complete_page_trpc_capture_history() -> None:
+    assert (
+        is_growth_data_fresh(
+            {
+                "scraped_at": _recent_scrape_timestamp(),
+                "stats_refreshed": True,
+                "history_source": "page_trpc_capture",
+                "daily_channel_metrics_60day": {
+                    "row_count": 60,
+                    "data": [{"Date": "2026-05-13", "Followers Total": "172,666"}],
+                },
+                "daily_total_followers_chart": {
+                    "total_data_points": 60,
+                    "date_range": {"from": "2026-03-15", "to": "2026-05-13"},
+                },
+            }
+        )
         is True
+    )
+
+
+def test_is_growth_data_fresh_rejects_failed_refresh_attempt() -> None:
+    assert (
+        is_growth_data_fresh(
+            {
+                "scraped_at": _recent_scrape_timestamp(),
+                "last_attempt_at": _recent_scrape_timestamp(),
+                "stats_refreshed": False,
+                "history_source": "authenticated_api",
+                "daily_total_followers_chart": {
+                    "total_data_points": 60,
+                    "date_range": {"from": "2026-03-15", "to": "2026-05-13"},
+                },
+            }
+        )
+        is False
     )
 
 
@@ -68,6 +112,7 @@ def test_is_growth_data_fresh_rejects_chart_that_lags_metrics_table() -> None:
         is_growth_data_fresh(
             {
                 "scraped_at": _recent_scrape_timestamp(),
+                "stats_refreshed": True,
                 "history_source": "page_trpc_capture",
                 "daily_total_followers_chart": {
                     "total_data_points": 104,
@@ -95,6 +140,7 @@ def test_is_growth_data_fresh_rejects_table_fallback_history() -> None:
         is_growth_data_fresh(
             {
                 "scraped_at": _recent_scrape_timestamp(),
+                "stats_refreshed": True,
                 "history_source": "table_fallback",
                 "daily_total_followers_chart": {
                     "total_data_points": 365,
@@ -132,6 +178,22 @@ def test_socialblade_instagram_following_config_defaults_to_complete_snapshot_li
 
 def test_sanitize_socialblade_platform_accepts_tiktok() -> None:
     assert sanitize_socialblade_platform("TikTok") == "tiktok"
+
+
+def test_sanitize_socialblade_handle_extracts_full_profile_urls() -> None:
+    assert sanitize_socialblade_handle("https://socialblade.com/instagram/user/TheTraitors.US") == "thetraitors.us"
+    assert sanitize_socialblade_handle("https://www.tiktok.com/@BravoTV?lang=en") == "bravotv"
+
+
+def test_socialblade_handle_normalization_preserves_youtube_channel_ids_and_facebook_profile_ids() -> None:
+    assert sanitize_socialblade_handle("UCabcXYZ123", platform="youtube") == "UCabcXYZ123"
+    assert normalize_socialblade_account_handle(
+        "https://www.youtube.com/channel/UCabcXYZ123",
+        platform="youtube",
+    ) == "UCabcXYZ123"
+    assert sanitize_socialblade_handle("https://www.facebook.com/profile.php?id=123456789", platform="facebook") == (
+        "123456789"
+    )
 
 
 def test_attach_instagram_following_scrape_completes(monkeypatch) -> None:

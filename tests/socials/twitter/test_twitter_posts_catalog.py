@@ -160,11 +160,17 @@ def _dependencies(
     persistence: FakeCatalogPersistenceAdapter,
     captured_scraper_kwargs: dict[str, Any] | None = None,
     load_existing_catalog_posts=None,
+    interaction_state_calls: list[dict[str, Any]] | None = None,
 ) -> TwitterPostsCatalogDependencies:
     def _scraper_factory(**kwargs):
         if captured_scraper_kwargs is not None:
             captured_scraper_kwargs.update(kwargs)
         return scraper
+
+    def _record_interaction_fetch_state(**kwargs) -> dict[str, Any]:
+        if interaction_state_calls is not None:
+            interaction_state_calls.append(kwargs)
+        return kwargs
 
     return TwitterPostsCatalogDependencies(
         scraper_factory=_scraper_factory,
@@ -178,6 +184,7 @@ def _dependencies(
         persist_shared_catalog_posts_with_progress=persistence.persist_shared_catalog_posts_with_progress,
         upsert_shared_catalog_post=persistence.upsert_shared_catalog_post,
         upsert_tweet=persistence.upsert_tweet,
+        upsert_twitter_interaction_fetch_state=_record_interaction_fetch_state,
     )
 
 
@@ -375,6 +382,80 @@ def test_shared_catalog_hydrates_twitter_comments_when_selected() -> None:
     quote_progress = [event for event in progress_events if event.get("phase") == "fake_quotes_page"]
     assert quote_progress
     assert quote_progress[-1]["current_source_id"] == "root"
+
+
+def test_shared_catalog_writes_reply_interaction_fetch_state() -> None:
+    root = _tweet("root", username="TheTraitorsUS")
+    root.replies = 5
+    reply = _tweet("reply-1", username="viewer", is_reply=True)
+    scraper = FakeTwitterScraper([root], replies_by_tweet_id={"root": [reply]})
+    persistence = FakeCatalogPersistenceAdapter()
+    interaction_state_calls: list[dict[str, Any]] = []
+
+    scrape_shared_twitter_posts(
+        run_id="run-1",
+        account_handle="TheTraitorsUS",
+        config={
+            "pipeline_ingest_mode": SHARED_MODE,
+            "catalog_action_scope": "full_history",
+            "twitter_comments_in_posts_stage": True,
+        },
+        job_id="11111111-1111-1111-1111-111111111111",
+        dependencies=_dependencies(
+            scraper=scraper,
+            persistence=persistence,
+            interaction_state_calls=interaction_state_calls,
+        ),
+    )
+
+    reply_states = [call for call in interaction_state_calls if call["interaction_kind"] == "reply"]
+    assert reply_states
+    final_state = reply_states[-1]
+    assert final_state["source_account"] == "TheTraitorsUS"
+    assert final_state["root_source_id"] == "root"
+    assert final_state["reported_count"] == 5
+    assert final_state["saved_count_after"] == 1
+    assert final_state["unique_saved_delta"] == 1
+    assert final_state["duplicate_count"] == 0
+    assert final_state["status"] == "completed"
+    assert final_state["last_error_code"] is None
+
+
+def test_shared_catalog_writes_exhausted_quote_interaction_fetch_state() -> None:
+    root = _tweet("root", username="TheTraitorsUS")
+    root.replies = 0
+    root.quotes = 4
+    scraper = FakeTwitterScraper([root], quotes_by_tweet_id={"root": []})
+    scraper.last_quote_fetch_reason = "no_tweet_entries"
+    persistence = FakeCatalogPersistenceAdapter()
+    interaction_state_calls: list[dict[str, Any]] = []
+
+    scrape_shared_twitter_posts(
+        run_id="run-1",
+        account_handle="TheTraitorsUS",
+        config={
+            "pipeline_ingest_mode": SHARED_MODE,
+            "catalog_action_scope": "full_history",
+            "twitter_comments_in_posts_stage": True,
+        },
+        job_id="22222222-2222-2222-2222-222222222222",
+        dependencies=_dependencies(
+            scraper=scraper,
+            persistence=persistence,
+            interaction_state_calls=interaction_state_calls,
+        ),
+    )
+
+    quote_states = [call for call in interaction_state_calls if call["interaction_kind"] == "quote"]
+    assert quote_states
+    final_state = quote_states[-1]
+    assert final_state["root_source_id"] == "root"
+    assert final_state["reported_count"] == 4
+    assert final_state["saved_count_after"] == 0
+    assert final_state["unique_saved_delta"] == 0
+    assert final_state["status"] == "exhausted"
+    assert final_state["exhaustion_reason"] == "no_tweet_entries"
+    assert final_state["last_error_code"] == "no_tweet_entries"
 
 
 def test_shared_catalog_hydrates_twitter_comments_uncapped_by_default() -> None:

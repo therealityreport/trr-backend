@@ -20,6 +20,7 @@ from threading import RLock
 from typing import Any
 
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
+from trr_backend.socials.browser_cookie_refresh import ensure_private_file_mode
 from trr_backend.socials.instagram.cookie_refresh import (
     interactive_chrome_login,
     read_instagram_cookie_file_metadata,
@@ -239,6 +240,7 @@ def _structural_validation(cookies: dict[str, str]) -> tuple[bool, str | None]:
 def _read_cookie_file(cookie_file: Path) -> dict[str, str]:
     if not cookie_file.is_file():
         return {}
+    ensure_private_file_mode(cookie_file)
     try:
         payload = json.loads(cookie_file.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
@@ -339,8 +341,9 @@ def _select_best_candidate(candidates: list[_CookieCandidate]) -> _CookieCandida
         "repo_default_cookie_file": 1,
     }
 
-    def _score(candidate: _CookieCandidate) -> tuple[int, int, int]:
+    def _score(candidate: _CookieCandidate) -> tuple[int, int, int, int]:
         cookies = candidate.cookies
+        structurally_valid, _ = _structural_validation(cookies)
         score = 0
         if str(cookies.get("sessionid") or "").strip():
             score += 4
@@ -348,7 +351,7 @@ def _select_best_candidate(candidates: list[_CookieCandidate]) -> _CookieCandida
             score += 2
         if str(cookies.get("ds_user_id") or "").strip():
             score += 2
-        return source_priority.get(candidate.source, 0), score, len(cookies)
+        return int(structurally_valid), score, source_priority.get(candidate.source, 0), len(cookies)
 
     return max(candidates, key=_score)
 

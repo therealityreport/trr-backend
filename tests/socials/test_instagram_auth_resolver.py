@@ -111,6 +111,36 @@ def test_resolve_instagram_comments_auth_session_defaults_without_profile_graphq
     assert auth_session.metadata["comments_profile_graphql_validation"] is False
 
 
+def test_resolve_instagram_auth_session_prefers_complete_env_over_partial_browser_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "SOCIAL_INSTAGRAM_COOKIES_JSON",
+        '{"sessionid":"env-session","csrftoken":"env-csrf","ds_user_id":"123"}',
+    )
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID", "bravotv")
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path / "browser-sessions"))
+
+    manager = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
+    manager.import_bootstrapped_session("bravotv", {"sessionid": "partial-browser-session"})
+
+    auth_session = resolve_instagram_auth_session(
+        browser_account_id="bravotv",
+        caller_context="unit_test",
+        require_validation=False,
+        browser_session_manager=manager,
+    )
+
+    assert auth_session.source == "env_json"
+    assert auth_session.cookies == {
+        "sessionid": "env-session",
+        "csrftoken": "env-csrf",
+        "ds_user_id": "123",
+    }
+    assert auth_session.metadata["browser_session_used"] is False
+
+
 def test_resolve_instagram_comments_auth_session_schema_only_skips_profile_graphql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

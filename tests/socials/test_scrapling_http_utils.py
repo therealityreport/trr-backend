@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import httpx
@@ -60,6 +61,15 @@ def test_response_text_decodes_scrapling_body_bytes_when_text_is_empty():
     resp = MagicMock(text="")
     resp.body = b"<html>SocialBlade body</html>"
     assert response_text(resp) == "<html>SocialBlade body</html>"
+
+
+def test_response_text_decodes_body_when_callable_text_raises():
+    from trr_backend.socials._scrapling_http_utils import response_text
+
+    resp = MagicMock()
+    resp.text = MagicMock(side_effect=RuntimeError("text unavailable"))
+    resp.body = b"<html>challenge</html>"
+    assert response_text(resp) == "<html>challenge</html>"
 
 
 def test_status_code_reads_status_code_attr():
@@ -133,6 +143,47 @@ def test_extract_response_cookies_from_jar():
     resp = MagicMock()
     resp.cookies = mock_cookies
     assert extract_response_cookies(resp) == {"sessionid": "abc", "ttwid": "xyz"}
+
+
+def test_extract_response_cookies_falls_back_to_jar_when_items_fails():
+    from trr_backend.socials._scrapling_http_utils import extract_response_cookies
+
+    cookie_obj = MagicMock(name="jar1", spec=["name", "value"])
+    cookie_obj.name = "sessionid"
+    cookie_obj.value = "abc"
+
+    mock_cookies = MagicMock(spec=["items", "jar"])
+    mock_cookies.items = MagicMock(side_effect=RuntimeError("items unavailable"))
+    mock_cookies.jar = [cookie_obj]
+    resp = MagicMock()
+    resp.cookies = mock_cookies
+
+    assert extract_response_cookies(resp) == {"sessionid": "abc"}
+
+
+def test_extract_response_cookies_falls_back_to_set_cookie_header():
+    from trr_backend.socials._scrapling_http_utils import extract_response_cookies
+
+    resp = MagicMock()
+    resp.cookies = None
+    resp.headers = {"Set-Cookie": "sessionid=abc; Path=/; HttpOnly"}
+
+    assert extract_response_cookies(resp) == {"sessionid": "abc"}
+
+
+def test_extract_response_cookies_logs_when_sources_fail(caplog):
+    from trr_backend.socials._scrapling_http_utils import extract_response_cookies
+
+    mock_cookies = MagicMock(spec=["items"])
+    mock_cookies.items = MagicMock(side_effect=RuntimeError("items unavailable"))
+    resp = MagicMock()
+    resp.cookies = mock_cookies
+    resp.headers = {}
+
+    with caplog.at_level(logging.WARNING, logger="trr_backend.socials._scrapling_http_utils"):
+        assert extract_response_cookies(resp) == {}
+
+    assert "response_cookie_extraction_failed" in caplog.text
 
 
 def test_extract_response_cookies_returns_empty_on_none():

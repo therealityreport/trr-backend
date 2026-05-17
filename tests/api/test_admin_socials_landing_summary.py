@@ -94,6 +94,60 @@ def test_social_landing_socialblade_rows_uses_social_profile_pool(monkeypatch) -
     assert payload["rows"][0]["account_handle"] == "heathergay"
 
 
+def test_social_landing_socialblade_progress_counts_uses_social_profile_pool(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fetch_all(query, params, *, pool_name):
+        captured["query"] = query
+        captured["params"] = params
+        captured["pool_name"] = pool_name
+        return [
+            {
+                "platform": "instagram",
+                "account_handle": "heathergay",
+                "socialblade_supported": True,
+                "socialblade_scraped_count": 1,
+                "socialblade_saved_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr("trr_backend.db.pg.fetch_all", fake_fetch_all)
+
+    payload = socials.post_social_landing_socialblade_progress_counts(
+        socials.SocialLandingSocialBladeProgressCountsRequest(
+            platforms=["instagram", "twitter", "instagram"],
+            account_handles=["@heathergay", "heathergay", "@heathergay"],
+        )
+    )
+
+    assert captured["pool_name"] == "social_profile"
+    assert "FROM targets" in str(captured["query"])
+    assert "pipeline.socialblade_growth_data" in str(captured["query"])
+    assert captured["params"] == [["instagram", "twitter"], ["@heathergay", "heathergay"]]
+    assert payload["rows"][0] == {
+        "platform": "instagram",
+        "account_handle": "heathergay",
+        "socialblade_supported": True,
+        "socialblade_scraped_count": 1,
+        "socialblade_saved_count": 1,
+    }
+
+
+def test_social_landing_socialblade_progress_counts_rejects_mismatched_targets() -> None:
+    try:
+        socials.post_social_landing_socialblade_progress_counts(
+            socials.SocialLandingSocialBladeProgressCountsRequest(
+                platforms=["instagram"],
+                account_handles=[],
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        assert getattr(exc, "status_code", None) == 400
+        assert getattr(exc, "detail", None) == "platforms and account_handles must have matching lengths"
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("Expected mismatched SocialBlade progress targets to fail")
+
+
 def test_social_live_status_reuses_cached_snapshot(monkeypatch) -> None:
     calls = {"queue": 0, "operations": 0}
     monkeypatch.setattr(live_status, "_LIVE_STATUS_SNAPSHOT_CACHE", None)

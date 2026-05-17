@@ -17,6 +17,7 @@ from trr_backend.db.pg import (
     database_service_unavailable_detail,
     is_database_service_unavailable_error,
 )
+from trr_backend.problem import problem_http_exception
 from trr_backend.repositories import admin_people_reads as people_repo
 
 logger = logging.getLogger(__name__)
@@ -148,13 +149,24 @@ def _resolve_people_read_singleflight(
                 _INFLIGHT.pop(cache_key, None)
 
 
-def _to_people_read_http_exception(error: Exception) -> HTTPException:
+def _to_people_read_http_exception(error: Exception, request: Request) -> HTTPException:
     if isinstance(error, HTTPException):
         return error
     if isinstance(error, ValueError):
         return HTTPException(status_code=400, detail=str(error))
     if is_database_service_unavailable_error(error):
-        return HTTPException(status_code=503, detail=database_service_unavailable_detail(error))
+        detail = database_service_unavailable_detail(error)
+        return problem_http_exception(
+            request,
+            code=str(detail.get("code") or "DATABASE_SERVICE_UNAVAILABLE"),
+            status=503,
+            message=str(detail.get("message") or "Database service unavailable."),
+            retryable=bool(detail.get("retryable", True)),
+            extra={
+                "reason": detail.get("reason"),
+                "retry_after_ms": detail.get("retry_after_ms"),
+            },
+        )
     return HTTPException(status_code=500, detail=str(error) or "Internal server error")
 
 
@@ -178,7 +190,7 @@ def resolve_person_slug(
             loader=lambda: _resolve_person_slug_payload(slug.strip(), normalized_show_input),
         )
     except Exception as error:
-        raise _to_people_read_http_exception(error) from error
+        raise _to_people_read_http_exception(error, request) from error
     _log_read(
         "resolve-slug",
         query_count=query_count,
@@ -205,7 +217,7 @@ def get_person_detail(request: Request, person_id: str, _: InternalAdminUser = N
             loader=lambda: _get_person_detail_payload(person_id),
         )
     except Exception as error:
-        raise _to_people_read_http_exception(error) from error
+        raise _to_people_read_http_exception(error, request) from error
     _log_read(
         "detail",
         query_count=query_count,
@@ -232,7 +244,7 @@ def get_person_cover_photo(request: Request, person_id: str, _: InternalAdminUse
             loader=lambda: _get_person_cover_photo_payload(person_id),
         )
     except Exception as error:
-        raise _to_people_read_http_exception(error) from error
+        raise _to_people_read_http_exception(error, request) from error
     _log_read(
         "cover-photo",
         query_count=query_count,
@@ -281,7 +293,7 @@ def get_person_gallery(
             ),
         )
     except Exception as error:
-        raise _to_people_read_http_exception(error) from error
+        raise _to_people_read_http_exception(error, request) from error
     _log_read(
         "gallery",
         query_count=query_count,

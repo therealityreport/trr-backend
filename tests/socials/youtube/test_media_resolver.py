@@ -77,6 +77,30 @@ def test_resolve_youtube_media_falls_back_to_watch_page_streaming_data(monkeypat
     assert any(attempt["source"] == "watch_page_streaming_data" and attempt["success"] for attempt in result.attempts)
 
 
+def test_resolve_youtube_media_accepts_videoplayback_mime_query_without_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
+    stream_url = "https://rr2---sn.test/videoplayback?expire=1767225600&mime=video%2Fmp4&gir=yes"
+    html = f"""
+    <html><body>
+    <script>
+    var ytInitialPlayerResponse = {{"streamingData":{{"adaptiveFormats":[
+      {{"url":"{stream_url}","bitrate":2000}}
+    ]}},"videoDetails":{{"thumbnail":{{"thumbnails":[
+      {{"url":"https://img.test/thumb.jpg","width":480,"height":270}}
+    ]}}}}}};
+    </script>
+    </body></html>
+    """
+
+    result = media_resolver.resolve_youtube_media("abc123", session=_FakeSession(html=html))
+
+    assert result.source == "watch_page_streaming_data"
+    assert result.media_urls == [stream_url]
+    assert result.media_asset_meta["source_assets"][0]["type"] == "video"
+
+
 def test_resolve_youtube_media_falls_back_to_og_tags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     html = """

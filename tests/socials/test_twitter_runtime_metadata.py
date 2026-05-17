@@ -47,6 +47,25 @@ def _make_tweet(tweet_id: str) -> Tweet:
     )
 
 
+def _search_timeline_payload(entries: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {
+                                "type": "TimelineAddEntries",
+                                "entries": entries,
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+
 def test_scrape_runtime_metadata_tracks_final_fallback_chain(monkeypatch: pytest.MonkeyPatch) -> None:
     scraper = _make_scraper()
     monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
@@ -99,6 +118,58 @@ def test_playwright_partial_fallback_keeps_incomplete_runtime_state(monkeypatch:
     assert scraper.last_retrieval_meta["complete"] is False
     assert scraper.last_retrieval_meta["playwright_payloads_captured"] == 6
     assert scraper.runtime_metadata["transport"] == "playwright"
+    assert scraper.runtime_metadata["complete"] is False
+
+
+def test_partial_graphql_failure_after_tweets_is_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    scraper = _make_scraper()
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_parse_tweet_result", lambda *_args, **_kwargs: _make_tweet("tweet-1"))
+
+    responses = iter(
+        [
+            _search_timeline_payload(
+                [
+                    {
+                        "entryId": "tweet-1",
+                        "content": {
+                            "itemContent": {
+                                "tweet_results": {
+                                    "result": {
+                                        "rest_id": "tweet-1",
+                                    }
+                                }
+                            }
+                        },
+                    },
+                    {
+                        "entryId": "cursor-bottom-1",
+                        "content": {"value": "cursor-1"},
+                    },
+                ]
+            ),
+            None,
+        ]
+    )
+    monkeypatch.setattr(scraper, "_fetch_search", lambda *_args, **_kwargs: next(responses))
+
+    config = TwitterScrapeConfig(
+        query="from:bravotv",
+        date_start=datetime(2025, 8, 1, tzinfo=UTC),
+        date_end=datetime(2025, 8, 31, tzinfo=UTC),
+        delay_seconds=0,
+        max_pages=3,
+    )
+
+    tweets = scraper.scrape(config)
+
+    assert [tweet.tweet_id for tweet in tweets] == ["tweet-1"]
+    assert scraper.last_retrieval_meta["graphql_failed"] is True
+    assert scraper.last_retrieval_meta["retryable"] is True
+    assert scraper.last_retrieval_meta["error_code"] == "twitter_graphql_partial_fetch_failed"
+    assert scraper.last_retrieval_meta["error_class"] == "TwitterSearchPartialFailure"
+    assert scraper.last_retrieval_meta["complete"] is False
+    assert scraper.runtime_metadata["retryable"] is True
     assert scraper.runtime_metadata["complete"] is False
 
 

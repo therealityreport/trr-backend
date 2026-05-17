@@ -30,10 +30,25 @@ class InstagramRequestClient:
     def __init__(self, *, session: requests.Session) -> None:
         self.session = session
 
+    @staticmethod
+    def _html_auth_failure_code(body_text: str) -> str | None:
+        body_lower = str(body_text or "").lower()
+        if "checkpoint_required" in body_lower or "checkpoint" in body_lower:
+            return "checkpoint_required"
+        if "challenge_required" in body_lower or "challenge" in body_lower or "two_factor" in body_lower:
+            return "challenge_required"
+        if "feedback_required" in body_lower or "feedback required" in body_lower:
+            return "feedback_required"
+        if "/accounts/login" in body_lower or "accounts/login" in body_lower:
+            return "redirect_login"
+        if "login_required" in body_lower:
+            return "login_required"
+        return None
+
     def _classify_response(self, response: requests.Response) -> None:
         headers = getattr(response, "headers", {}) or {}
-        location = str(headers.get("location") or "").strip()
-        content_type = str(headers.get("content-type") or "").lower()
+        location = str(headers.get("location") or headers.get("Location") or "").strip()
+        content_type = str(headers.get("content-type") or headers.get("Content-Type") or "").lower()
         body_text = str(getattr(response, "text", "") or "")
         is_redirect = bool(getattr(response, "is_redirect", False))
 
@@ -45,6 +60,17 @@ class InstagramRequestClient:
                 response_text=body_text,
                 redirect_target=location,
             )
+
+        if response.status_code == 200 and ("text/html" in content_type or body_text.lstrip().startswith("<")):
+            html_error_code = self._html_auth_failure_code(body_text)
+            if html_error_code:
+                raise InstagramRequestFailure(
+                    html_error_code,
+                    status_code=response.status_code,
+                    retryable=False,
+                    response_text=body_text,
+                    redirect_target=location or None,
+                )
 
         if response.status_code == 429:
             raise InstagramRequestFailure(

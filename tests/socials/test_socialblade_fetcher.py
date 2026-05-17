@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 import pytest
 
 from trr_backend.socials.socialblade.fetcher import SocialBladeScraplingFetcher
+
+
+@dataclass(slots=True)
+class _DummyProxyConfig:
+    proxy_rotator: object | None = None
+    api_proxy_url: str | None = None
+    fingerprint: str = "proxy.example:8080:explicit"
+    session_mode: str = "explicit"
 
 
 class _DummyResponse:
@@ -16,11 +25,15 @@ class _DummyResponse:
         status_code: int = 200,
         cookies: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
+        url: str = "https://socialblade.com/instagram/user/thetraitorsus",
+        captured_xhr: list[object] | None = None,
     ) -> None:
         self.text = text
         self.status_code = status_code
         self.cookies = cookies or {}
         self.headers = headers or {}
+        self.url = url
+        self.captured_xhr = captured_xhr or []
 
 
 def _trpc_payload(result: object) -> str:
@@ -117,6 +130,39 @@ def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_scrip
     assert captured["url"] == "https://socialblade.com/instagram/user/thetraitorsus"
     assert "init_script" not in captured["kwargs"]
     assert callable(captured["kwargs"]["page_action"])
+    assert captured["kwargs"]["capture_xhr"] == r"/api/trpc/"
+    assert captured["kwargs"]["wait"] == 2_000
+
+
+def test_scrapling_fetcher_passes_proxy_to_browser_and_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy_rotator = object()
+    fetcher = SocialBladeScraplingFetcher(
+        cookies=[{"name": "cf_clearance", "value": "seed", "domain": ".socialblade.com"}],
+        raw_cookies={"cf_clearance": "seed"},
+        platform="instagram",
+        proxy_config=_DummyProxyConfig(proxy_rotator=proxy_rotator, api_proxy_url="http://proxy.example:8080"),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_async_fetch(url: str, **kwargs: object):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return _DummyResponse(text=SOCIALBLADE_HTML, cookies={"sbid": "warm-cookie"})
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured["httpx_kwargs"] = kwargs
+
+    monkeypatch.setattr(fetcher._fetcher, "async_fetch", fake_async_fetch)
+    monkeypatch.setattr("trr_backend.socials.socialblade.fetcher.httpx.AsyncClient", _FakeAsyncClient)
+
+    __import__("asyncio").run(fetcher._fetch_page("https://socialblade.com/instagram/user/thetraitorsus"))
+    fetcher._rebuild_http_client()
+
+    assert captured["kwargs"]["proxy_rotator"] is proxy_rotator
+    assert captured["httpx_kwargs"]["proxy"] == "http://proxy.example:8080"
+    assert fetcher.runtime_metadata["selected_proxy_fingerprint"] == "proxy.example:8080:explicit"
+    assert fetcher.runtime_metadata["proxy_session_mode"] == "explicit"
 
 
 def test_scrapling_fetcher_uses_tiktok_user_url_with_trpc_capture(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,6 +311,75 @@ def test_scrapling_fetcher_prefers_browser_captured_history_over_http_search(
     assert payload["runtime_metadata"]["fallback_chain"] == ["scrapling_warmup", "instagram_page_trpc_capture"]
 
 
+def test_scrapling_fetcher_prefers_captured_xhr_history_when_html_capture_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = _build_fetcher(platform="instagram")
+    history_rows = [
+        {
+            "date": f"{date(2026, 1, 1) + timedelta(days=index)}T00:00:00.000Z",
+            "followers": 137_168 + index,
+            "following": 27,
+            "media_count": 309 + index,
+        }
+        for index in range(60)
+    ]
+    daily_total_rows = [
+        {
+            "date": f"{date(2026, 1, 1) + timedelta(days=index)}T00:00:00.000Z",
+            "followers": 137_000 + index,
+        }
+        for index in range(75)
+    ]
+    user_payload = {
+        "id": "creator-1",
+        "followers": "137943",
+        "following": 27,
+        "media_count": 312,
+        "engagement_rate": 2.62,
+        "average_likes": 1234,
+        "average_comments": 56,
+        "grade": "B+",
+        "ranks": {"sb": 39828, "followers": 318818, "engagement_rate": 46796},
+    }
+    xhr_responses = [
+        _DummyResponse(
+            text=_trpc_batch_payload(user_payload, history_rows),
+            url="https://socialblade.com/api/trpc/instagram.user,instagram.history?batch=1&input=%7B%7D",
+        ),
+        _DummyResponse(
+            text=_trpc_batch_payload(daily_total_rows),
+            url=(
+                "https://socialblade.com/api/trpc/instagram.monthly?batch=1&input="
+                "%7B%220%22%3A%7B%22json%22%3A%7B%22id%22%3A%22creator-1%22%2C"
+                "%22limit%22%3A1096%2C%22period%22%3A%22daily%22%2C%22type%22%3A%22total%22%7D%7D%7D"
+            ),
+        ),
+    ]
+
+    async def fake_fetch_page(_url: str):
+        fetcher._request_count += 1
+        return _DummyResponse(text=SOCIALBLADE_HTML, cookies={"sbid": "warm-cookie"}, captured_xhr=xhr_responses)
+
+    async def fake_fetch_http(*_args, **_kwargs):
+        raise AssertionError("http search should not run when captured XHR has full history")
+
+    monkeypatch.setattr(fetcher, "_fetch_page", fake_fetch_page)
+    monkeypatch.setattr(fetcher, "_fetch_http", fake_fetch_http)
+
+    payload = __import__("asyncio").run(fetcher.scrape("thetraitorsus"))
+
+    assert payload["history_source"] == "page_trpc_capture"
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 60
+    assert payload["daily_total_followers_chart"]["total_data_points"] == 75
+    assert payload["runtime_metadata"]["capture_source"] == "scrapling_xhr"
+    assert payload["runtime_metadata"]["captured_xhr_count"] == 2
+    assert payload["runtime_metadata"]["captured_xhr_paths"] == [
+        "/api/trpc/instagram.user,instagram.history",
+        "/api/trpc/instagram.monthly",
+    ]
+
+
 def test_scrapling_fetcher_prefers_tiktok_page_capture_and_labels_likes_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -318,6 +433,83 @@ def test_scrapling_fetcher_prefers_tiktok_page_capture_and_labels_likes_history(
     assert payload["profile_stats"]["media_count"] == 122600000
     assert "Likes Total" in payload["daily_channel_metrics_60day"]["headers"]
     assert payload["runtime_metadata"]["fallback_chain"] == ["scrapling_warmup", "tiktok_page_trpc_capture"]
+
+
+def test_scrapling_fetcher_tiktok_keeps_full_daily_total_chart_when_history_is_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = _build_fetcher(platform="tiktok")
+    history_rows = [
+        {
+            "date": f"{date(2026, 3, 19) + timedelta(days=index)}T00:00:00.000Z",
+            "followers": 140_900 + (index * 25),
+            "following": 2,
+            "likes": 8_700_000,
+            "videos": 255 + index,
+        }
+        for index in range(56)
+    ]
+    daily_total_rows = [
+        {
+            "date": f"{date(2026, 1, 11) + timedelta(days=index)}T00:00:00.000Z",
+            "followers": 40_237 + (index * 100),
+            "following": 2,
+            "likes": 8_700_000,
+            "videos": 255,
+        }
+        for index in range(124)
+    ]
+    user_payload = {
+        "id": "tiktok-creator-1",
+        "followers": "142.3K",
+        "following": 2,
+        "likes": "8.8M",
+        "engagement_rate": 4.12,
+        "average_likes": 12345,
+        "average_comments": 678,
+        "grade": "B",
+        "ranks": {"sb": 11322, "followers": 8978, "engagement_rate": 88},
+    }
+    capture = {
+        "user": user_payload,
+        "control_updates": {
+            "last60Days": "selected",
+            "daily": "already_selected",
+            "total": "selected",
+        },
+        "responses": {
+            "history60": {"status": 200, "text": _trpc_batch_payload(user_payload, history_rows)},
+            "dailyTotalChart": {"status": 200, "text": _trpc_batch_payload(daily_total_rows)},
+        },
+    }
+    html = SOCIALBLADE_HTML.replace(
+        "</body>",
+        f'<script id="trr-socialblade-capture" type="application/json">{json.dumps(capture)}</script></body>',
+    )
+
+    async def fake_fetch_page(_url: str):
+        fetcher._request_count += 1
+        return _DummyResponse(text=html, cookies={"sbid": "warm-cookie"})
+
+    async def fake_scrape_authenticated_api(*_args, **_kwargs):
+        raise AssertionError("long daily total chart capture should avoid shorter authenticated retry")
+
+    monkeypatch.setattr(fetcher, "_fetch_page", fake_fetch_page)
+    monkeypatch.setattr(fetcher, "_scrape_authenticated_api", fake_scrape_authenticated_api)
+
+    payload = __import__("asyncio").run(fetcher.scrape("thetraitorsus"))
+
+    assert payload["history_source"] == "page_trpc_capture"
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 56
+    assert payload["daily_total_followers_chart"]["total_data_points"] == 124
+    assert payload["daily_total_followers_chart"]["date_range"] == {"from": "2026-01-11", "to": "2026-05-14"}
+    assert payload["daily_total_followers_chart"]["data"][0] == {"date": "2026-01-11", "followers": 40237}
+    assert payload["runtime_metadata"]["fallback_chain"] == ["scrapling_warmup", "tiktok_page_trpc_capture"]
+    assert payload["runtime_metadata"]["capture_control_updates"] == {
+        "last60Days": "selected",
+        "daily": "already_selected",
+        "total": "selected",
+    }
 
 
 def test_scrapling_fetcher_tries_authenticated_api_when_page_capture_is_short(
@@ -395,6 +587,59 @@ def test_scrapling_fetcher_tries_authenticated_api_when_page_capture_is_short(
     ]
 
 
+def test_scrapling_fetcher_labels_short_page_capture_as_degraded_when_auth_api_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = _build_fetcher(platform="instagram")
+    short_history_rows = [
+        {
+            "date": f"{date(2026, 4, 1) + timedelta(days=index)}T00:00:00.000Z",
+            "followers": 172_000 + index,
+            "following": 27,
+            "media_count": 427 + index,
+        }
+        for index in range(31)
+    ]
+    user_payload = {
+        "id": "creator-1",
+        "followers": "172031",
+        "following": 27,
+        "media_count": 458,
+        "engagement_rate": 2.62,
+        "average_likes": 1234,
+        "average_comments": 56,
+        "grade": "B+",
+        "ranks": {"sb": 39828, "followers": 318818, "engagement_rate": 46796},
+    }
+    capture = {
+        "user": user_payload,
+        "responses": {
+            "history60": {"status": 200, "text": _trpc_batch_payload(user_payload, short_history_rows)},
+            "dailyDeltas": {"status": 200, "text": _trpc_batch_payload([])},
+        },
+    }
+    html = SOCIALBLADE_HTML.replace(
+        "</body>",
+        f'<script id="trr-socialblade-capture" type="application/json">{json.dumps(capture)}</script></body>',
+    )
+
+    async def fake_fetch_page(_url: str):
+        fetcher._request_count += 1
+        return _DummyResponse(text=html, cookies={"sbid": "warm-cookie"})
+
+    async def fake_scrape_authenticated_api(_handle: str, _referer: str):
+        raise RuntimeError("authenticated API challenged")
+
+    monkeypatch.setattr(fetcher, "_fetch_page", fake_fetch_page)
+    monkeypatch.setattr(fetcher, "_scrape_authenticated_api", fake_scrape_authenticated_api)
+
+    payload = __import__("asyncio").run(fetcher.scrape("thetraitorsus"))
+
+    assert payload["history_source"] == "page_trpc_capture_short"
+    assert payload["daily_channel_metrics_60day"]["row_count"] == 31
+    assert payload["runtime_metadata"]["fallback_chain"] == ["scrapling_warmup", "instagram_page_trpc_capture_short"]
+
+
 def test_scrapling_fetcher_expands_socialblade_metric_table_columns() -> None:
     table = SocialBladeScraplingFetcher._extract_table_data(
         """
@@ -424,6 +669,52 @@ def test_scrapling_fetcher_expands_socialblade_metric_table_columns() -> None:
                 "Following Total": "27",
                 "Media Count Delta": "1",
                 "Media Count Total": "427",
+            }
+        ],
+    }
+
+
+def test_scrapling_fetcher_ignores_non_date_tables_before_metrics_table() -> None:
+    table = SocialBladeScraplingFetcher._extract_table_data(
+        """
+        <table>
+          <tr><th>Name</th><th>Value</th></tr>
+          <tr><td>Followers</td><td>172,666</td></tr>
+        </table>
+        <table>
+          <tr>
+            <th>Date</th>
+            <th>Followers Delta</th>
+            <th>Followers Total</th>
+            <th>Following Delta</th>
+            <th>Following Total</th>
+          </tr>
+          <tr>
+            <td>Sun 2026-05-10</td>
+            <td>10</td>
+            <td>172,600</td>
+            <td>0</td>
+            <td>27</td>
+          </tr>
+        </table>
+        """
+    )
+
+    assert table == {
+        "headers": [
+            "Date",
+            "Followers Delta",
+            "Followers Total",
+            "Following Delta",
+            "Following Total",
+        ],
+        "data": [
+            {
+                "Date": "Sun 2026-05-10",
+                "Followers Delta": "10",
+                "Followers Total": "172,600",
+                "Following Delta": "0",
+                "Following Total": "27",
             }
         ],
     }

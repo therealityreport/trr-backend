@@ -17,6 +17,7 @@ DEFAULT_SOURCE_ENV = REPO_ROOT / ".env"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / ".artifacts" / "modal-secrets"
 DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
+DEFAULT_SOCIALBLADE_COOKIE_FILE = REPO_ROOT / "scripts" / "socials" / "socialblade" / "socialblade_cookies.json"
 CANONICAL_DB_ENV = "TRR_DB_URL"
 RETIRED_DB_ENV_NAMES = ("SUPABASE_DB_URL", "DATABASE_URL")
 REMOTE_RUNTIME_EXCLUDED_ENV_NAMES = ("TRR_DB_DIRECT_URL",)
@@ -199,6 +200,29 @@ def _compact_secret_value(value: str) -> str:
         return " ".join(line.strip() for line in stripped.splitlines() if line.strip())
 
 
+def _secret_payload_has_content(value: str | None) -> bool:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return True
+    if isinstance(parsed, (list, dict, str)):
+        return bool(parsed)
+    return parsed is not None
+
+
+def _read_non_empty_secret_file(path: Path, *, env_key: str) -> str:
+    file_contents = path.read_text(encoding="utf-8").strip()
+    if not file_contents:
+        raise ValueError(
+            f"{env_key} resolved to an empty file: {path}. "
+            f"Remote Modal secrets require non-empty auth payloads."
+        )
+    return _compact_secret_value(file_contents)
+
+
 def _materialize_file_backed_social_auth(
     source_values: dict[str, str],
     social_values: dict[str, str],
@@ -216,13 +240,15 @@ def _materialize_file_backed_social_auth(
                 f"{file_env_key} points to a missing file: {resolved_path}. "
                 f"Remote Modal secrets cannot use local-only *_FILE auth paths."
             )
-        file_contents = resolved_path.read_text(encoding="utf-8").strip()
-        if not file_contents:
-            raise ValueError(
-                f"{file_env_key} resolved to an empty file: {resolved_path}. "
-                f"Remote Modal secrets require non-empty auth payloads."
-            )
-        rendered[inline_env_key] = _compact_secret_value(file_contents)
+        rendered[inline_env_key] = _read_non_empty_secret_file(resolved_path, env_key=file_env_key)
+    if (
+        not _secret_payload_has_content(rendered.get("SOCIALBLADE_COOKIES_JSON"))
+        and DEFAULT_SOCIALBLADE_COOKIE_FILE.is_file()
+    ):
+        rendered["SOCIALBLADE_COOKIES_JSON"] = _read_non_empty_secret_file(
+            DEFAULT_SOCIALBLADE_COOKIE_FILE,
+            env_key="SOCIALBLADE_COOKIES_FILE",
+        )
     return rendered
 
 
