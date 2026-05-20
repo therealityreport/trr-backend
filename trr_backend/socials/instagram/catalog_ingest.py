@@ -768,7 +768,11 @@ def _fetch_shared_instagram_graphql_page(
         preferred_transport=preferred_transport,
         allow_public_fallback=allow_public_fallback,
     ):
-        fetch_kwargs: dict[str, Any] = {"fast_mode": True}
+        fetch_kwargs: dict[str, Any] = {
+            "fast_mode": True,
+            "allow_browser_fallback": False,
+            "allow_recovery": False,
+        }
         if page_size is not None:
             fetch_kwargs["page_size"] = page_size
         data = scraper.fetch_posts_graphql(account_handle, cursor, delay_seconds, **fetch_kwargs)
@@ -2141,7 +2145,7 @@ def _scrape_shared_instagram_post_details_refresh(
         "source": "db_metrics_refresh",
         "expected_total_posts": expected_total_posts or None,
         "total_posts": progress_total_posts or None,
-        "completion_target_posts": progress_total_posts or None,
+        "completion_target_posts": all_existing_posts_count or None,
         "details_refreshed_posts": details_refreshed_posts,
         "details_refresh_views_updated": details_refresh_views_updated,
         "details_refresh_views_preserved_missing": details_refresh_views_preserved_missing,

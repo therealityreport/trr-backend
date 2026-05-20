@@ -23,7 +23,7 @@ RETIRED_DB_ENV_NAMES = ("SUPABASE_DB_URL", "DATABASE_URL")
 REMOTE_RUNTIME_EXCLUDED_ENV_NAMES = ("TRR_DB_DIRECT_URL",)
 CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_DB_POOL_MINCONN": "1",
-    "TRR_DB_POOL_MAXCONN": "1",
+    "TRR_DB_POOL_MAXCONN": "2",
     "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN": "1",
     "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN": "1",
     "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN": "1",
@@ -217,8 +217,7 @@ def _read_non_empty_secret_file(path: Path, *, env_key: str) -> str:
     file_contents = path.read_text(encoding="utf-8").strip()
     if not file_contents:
         raise ValueError(
-            f"{env_key} resolved to an empty file: {path}. "
-            f"Remote Modal secrets require non-empty auth payloads."
+            f"{env_key} resolved to an empty file: {path}. Remote Modal secrets require non-empty auth payloads."
         )
     return _compact_secret_value(file_contents)
 

@@ -18,7 +18,7 @@ from typing import Any
 import requests
 
 from trr_backend.db.pg import db_cursor
-from trr_backend.services.face_reference_embeddings import FACE_REFERENCE_EMBEDDING_CONTRACT_KEY
+from trr_backend.services.face_reference_contract import FACE_REFERENCE_EMBEDDING_CONTRACT_KEY
 
 logger = logging.getLogger(__name__)
 

@@ -45,7 +45,7 @@ def test_dry_run_prints_commands_without_execution(
     assert "python -m scripts.socials.tiktok.smoke_posts_scrapling --account bravotv --max-pages 1" in output
     assert (
         "python -m scripts.socials.youtube.scrape --channel bravo --keywords Bravo "
-        "--start 2026-04-01 --end 2026-05-05 --max-results 5"
+        "--start 2026-04-01 --end 2026-05-05 --max-results 5 --max-pages 2 --no-ytdlp-supplement"
     ) in output
 
 
@@ -92,5 +92,8 @@ def test_run_executes_selected_command_with_current_interpreter(
         "2026-05-05",
         "--max-results",
         "5",
+        "--max-pages",
+        "2",
+        "--no-ytdlp-supplement",
     )
     assert "Running youtube-posts" in capsys.readouterr().out

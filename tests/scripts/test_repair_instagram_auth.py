@@ -26,11 +26,13 @@ def test_run_repair_stops_when_local_validation_fails(monkeypatch: pytest.Monkey
         *,
         check: bool,
         capture_output: bool,
+        cwd: Path,
         text: bool,
         timeout: int | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
+        assert cwd == cli.REPO_ROOT
         assert text is True
         assert timeout is not None
         commands.append(list(command))
@@ -68,6 +70,49 @@ def test_run_repair_stops_when_local_validation_fails(monkeypatch: pytest.Monkey
     assert not any("prepare_named_secrets.py" in " ".join(command) for command in commands)
 
 
+def test_run_repair_does_not_refresh_when_validation_reports_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def _fake_run(
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        cwd: Path,
+        text: bool,
+        timeout: int | None = None,
+    ) -> cli.subprocess.CompletedProcess[str]:
+        assert check is False
+        assert capture_output is True
+        assert cwd == cli.REPO_ROOT
+        assert text is True
+        assert timeout is not None
+        commands.append(list(command))
+        return _completed(
+            stdout='{"platform":"instagram","validated":false,"reason":"checkpoint_required"}\n',
+            returncode=1,
+        )
+
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(cli, "_python_command", lambda: "/venv/bin/python")
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+
+    summary = cli.run_repair(
+        source_env=Path("/tmp/source.env"),
+        modal_environment="main",
+    )
+
+    assert summary["ok"] is False
+    assert summary["failure_reason"] == cli.MANUAL_CHECKPOINT_REQUIRED_REASON
+    assert summary["next_action"] == cli.MANUAL_CHECKPOINT_NEXT_ACTION
+    assert summary["modal_secret_apply_reached"] is False
+    assert summary["modal_deploy_reached"] is False
+    assert [step["name"] for step in summary["steps"]] == ["validate_local"]
+    assert all("--force" not in command for command in commands)
+
+
 def test_run_repair_stops_when_remote_probe_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     commands: list[list[str]] = []
 
@@ -76,11 +121,13 @@ def test_run_repair_stops_when_remote_probe_fails(monkeypatch: pytest.MonkeyPatc
         *,
         check: bool,
         capture_output: bool,
+        cwd: Path,
         text: bool,
         timeout: int | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
+        assert cwd == cli.REPO_ROOT
         assert text is True
         assert timeout is not None
         commands.append(list(command))
@@ -143,11 +190,13 @@ def test_run_repair_ignores_unrelated_missing_getty_probe_when_instagram_remote_
         *,
         check: bool,
         capture_output: bool,
+        cwd: Path,
         text: bool,
         timeout: int | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
+        assert cwd == cli.REPO_ROOT
         assert text is True
         assert timeout is not None
         commands.append(list(command))
@@ -209,11 +258,13 @@ def test_run_repair_verifies_instagram_posts_endpoint_when_account_is_supplied(
         *,
         check: bool,
         capture_output: bool,
+        cwd: Path,
         text: bool,
         timeout: int | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
+        assert cwd == cli.REPO_ROOT
         assert text is True
         assert timeout is not None
         commands.append(list(command))
@@ -282,11 +333,13 @@ def test_run_repair_blocks_browser_session_invalidated_comments_probe(
         *,
         check: bool,
         capture_output: bool,
+        cwd: Path,
         text: bool,
         timeout: int | None = None,
     ) -> cli.subprocess.CompletedProcess[str]:
         assert check in {True, False}
         assert capture_output is True
+        assert cwd == cli.REPO_ROOT
         assert text is True
         assert timeout is not None
         commands.append(list(command))

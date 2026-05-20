@@ -15,6 +15,16 @@ from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_ref
 from trr_backend.utils.env import load_env
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+MANUAL_CHECKPOINT_REASONS = {
+    "checkpoint_required",
+    "challenge_required",
+    "graphql_validation_challenge",
+    "html_challenge_or_auth_required",
+    "redirect_to_checkpoint",
+}
+MANUAL_CHECKPOINT_REASON_CODES = {
+    "recent_instagram_graphql_checkpoint_required",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +61,15 @@ def _cookie_age_days(refreshed_at: datetime | None) -> float | None:
     if refreshed_at is None:
         return None
     return max(0.0, (datetime.now(tz=UTC) - refreshed_at).total_seconds() / 86_400.0)
+
+
+def _requires_manual_checkpoint(repair_signal: dict[str, Any]) -> bool:
+    cookie_validation = repair_signal.get("cookie_validation")
+    validation_reason = ""
+    if isinstance(cookie_validation, dict):
+        validation_reason = str(cookie_validation.get("reason") or "").strip().lower()
+    reason_codes = {str(reason).strip().lower() for reason in repair_signal.get("reason_codes") or []}
+    return validation_reason in MANUAL_CHECKPOINT_REASONS or bool(reason_codes & MANUAL_CHECKPOINT_REASON_CODES)
 
 
 def run_worker(
@@ -97,6 +116,13 @@ def run_worker(
         },
     }
     if not needs_repair:
+        return payload
+
+    age_reason_codes = {"cookie_age_exceeded", "cookie_age_unknown"}
+    if _requires_manual_checkpoint(repair_signal) and not (set(trigger_reason_codes) & age_reason_codes):
+        payload["ok"] = False
+        payload["action"] = "manual_checkpoint_required"
+        payload["failure_reason"] = "manual_checkpoint_required"
         return payload
 
     if check_only:

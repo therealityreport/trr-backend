@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 import urllib.parse
 from datetime import UTC, datetime
 from typing import Any
 
-from trr_backend.socials.twitter.scraper import Tweet, TwitterScraper
+import requests
+
+from trr_backend.socials.twitter.scraper import Tweet, TwitterScrapeConfig, TwitterScraper
 
 
 def _tweet(tweet_id: str, *, reply_to: str | None = "root", is_quote: bool = False) -> Tweet:
@@ -294,3 +298,137 @@ def test_search_timeline_reply_fallback_accepts_thread_root_without_direct_reply
     replies = scraper._fetch_tweet_replies_via_search(tweet_id="root", delay=0, max_pages=1)
 
     assert [reply.tweet_id for reply in replies] == ["reply-with-root"]
+
+
+def test_search_timeline_404_latches_unavailable_after_rediscovery(monkeypatch) -> None:
+    scraper = TwitterScraper(cookies={"auth_token": "auth", "ct0": "csrf"})
+    scraper._search_hash = "stale-search"
+    scraper._detail_hash = "detail"
+    requested_urls: list[str] = []
+    rediscoveries = 0
+
+    class FakeResponse:
+        status_code = 404
+
+        def raise_for_status(self) -> None:
+            error = requests.exceptions.HTTPError("404 Client Error")
+            error.response = self
+            raise error
+
+        def json(self) -> dict[str, Any]:
+            return {}
+
+    def _get(url: str, **_kwargs: Any) -> FakeResponse:
+        requested_urls.append(url)
+        return FakeResponse()
+
+    def _discover() -> None:
+        nonlocal rediscoveries
+        rediscoveries += 1
+        scraper._search_hash = "rediscovered-search"
+        scraper._detail_hash = "detail"
+        scraper._user_by_screen_name_hash = "user"
+
+    monkeypatch.setattr(scraper.session, "get", _get)
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr(scraper, "_rate_limit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_discover_graphql_hashes", _discover)
+
+    replies = scraper._fetch_tweet_replies_via_search(tweet_id="root", delay=0, max_pages=1)
+
+    assert replies == []
+    assert scraper._search_timeline_unavailable is True
+    assert scraper.last_reply_fetch_reason == "http_404"
+    assert rediscoveries == 1
+    assert len(requested_urls) == 2
+
+
+def test_search_timeline_unavailable_skips_later_reply_and_quote_requests(monkeypatch) -> None:
+    scraper = TwitterScraper(cookies={"auth_token": "auth", "ct0": "csrf"})
+    scraper._mark_search_timeline_unavailable("http_404")
+
+    monkeypatch.setattr(
+        scraper.session,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("SearchTimeline should be skipped")),
+    )
+
+    replies = scraper._fetch_tweet_replies_via_search(tweet_id="root", delay=0, max_pages=1)
+    quotes = scraper._fetch_tweet_quotes_via_search(tweet_id="root", delay=0, max_pages=1)
+
+    assert replies == []
+    assert quotes == []
+    assert scraper.last_reply_fetch_reason == "http_404"
+    assert scraper.last_quote_fetch_reason == "http_404"
+
+
+def test_twikit_client_transaction_failure_latches_unavailable(monkeypatch) -> None:
+    created_clients = 0
+
+    class FakeTwikitClient:
+        def __init__(self, _locale: str) -> None:
+            nonlocal created_clients
+            created_clients += 1
+
+        def set_cookies(self, _cookies: dict[str, str]) -> None:
+            return None
+
+        async def search_tweet(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            raise Exception("Couldn't get KEY_BYTE indices")
+
+    fake_twikit = types.SimpleNamespace(Client=FakeTwikitClient)
+    monkeypatch.setitem(sys.modules, "twikit", fake_twikit)
+
+    scraper = TwitterScraper(twikit_credentials={"auth_token": "auth", "ct0": "csrf"})
+
+    first = scraper._search_tweets_via_twikit(query="quoted_tweet_id:root", max_pages=1, delay=0)
+    second = scraper._search_tweets_via_twikit(query="conversation_id:root", max_pages=1, delay=0)
+
+    assert first == []
+    assert second == []
+    assert scraper._twikit_search_unavailable is True
+    assert scraper._last_twikit_search_error == "twikit_client_transaction_unavailable"
+    assert created_clients == 1
+
+
+def test_from_query_fallback_tries_playwright_before_syndication(monkeypatch) -> None:
+    scraper = TwitterScraper(cookies={"auth_token": "auth", "ct0": "csrf"}, twikit_credentials={"auth": "cookie"})
+    fallback_order: list[str] = []
+
+    monkeypatch.setattr(scraper, "_ensure_auth", lambda: None)
+    monkeypatch.setattr("trr_backend.socials.twitter.scraper.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_search",
+        lambda *_args, **_kwargs: _search_timeline_payload([]),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_via_twikit",
+        lambda _config: fallback_order.append("twikit") or [],
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_search_via_playwright",
+        lambda **_kwargs: fallback_order.append("playwright") or [_tweet("playwright", reply_to=None)],
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_scrape_syndication",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("syndication should be last resort")),
+    )
+
+    tweets = scraper.scrape(
+        TwitterScrapeConfig(
+            query="from:thetraitorsus",
+            date_start=datetime(2026, 1, 1, tzinfo=UTC),
+            date_end=datetime(2026, 2, 1, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=1,
+        )
+    )
+
+    assert [tweet.tweet_id for tweet in tweets] == ["playwright"]
+    assert fallback_order == ["twikit", "playwright"]
+    assert scraper.last_retrieval_meta["retrieval_mode"] == "playwright"
+    assert scraper.last_retrieval_meta["fallback_attempts"] == ["twikit", "playwright"]

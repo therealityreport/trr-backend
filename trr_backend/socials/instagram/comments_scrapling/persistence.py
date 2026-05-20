@@ -249,21 +249,159 @@ def find_instagram_post_for_comments(
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
     normalized_account = str(account_handle or "").strip().lower().lstrip("@")
+    normalized_shortcode = str(shortcode or "").strip()
     query = """
+        with candidates as (
+          select
+            p.id::text as id,
+            p.season_id::text as season_id,
+            coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '') as account_handle,
+            p.posted_at,
+            (
+              ltrim(lower(coalesce(nullif(p.source_account, ''), '')), '@') = %s
+              or ltrim(lower(coalesce(nullif(p.username, ''), '')), '@') = %s
+              or ltrim(lower(coalesce(nullif(p.owner_username, ''), '')), '@') = %s
+            ) as direct_profile_match,
+            exists (
+              select 1
+              from jsonb_array_elements_text(
+                case
+                  when jsonb_typeof(coalesce(p.collaborators, '[]'::jsonb)) = 'array'
+                  then coalesce(p.collaborators, '[]'::jsonb)
+                  else '[]'::jsonb
+                end
+              ) as collaborator(handle)
+              where ltrim(lower(coalesce(collaborator.handle, '')), '@') = %s
+            ) as collaborator_match,
+            exists (
+              select 1
+              from jsonb_array_elements_text(
+                case
+                  when jsonb_typeof(coalesce(p.profile_tags, '[]'::jsonb)) = 'array'
+                  then coalesce(p.profile_tags, '[]'::jsonb)
+                  else '[]'::jsonb
+                end
+              ) as profile_tag(handle)
+              where ltrim(lower(coalesce(profile_tag.handle, '')), '@') = %s
+            ) as profile_tag_match
+          from social.instagram_posts p
+          where p.shortcode = %s
+        )
         select
-          p.id::text as id,
-          p.season_id::text as season_id,
-          coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '') as account_handle
-        from social.instagram_posts p
-        where p.shortcode = %s
-          and ltrim(lower(coalesce(nullif(p.source_account, ''), nullif(p.username, ''), '')), '@') = %s
-        order by p.posted_at desc nulls last, p.id desc
+          id,
+          season_id,
+          account_handle
+        from candidates
+        where direct_profile_match
+           or collaborator_match
+           or profile_tag_match
+        order by
+          case
+            when direct_profile_match then 0
+            when collaborator_match then 1
+            else 2
+          end,
+          posted_at desc nulls last,
+          id desc
         limit 1
         """
+    params = [
+        normalized_account,
+        normalized_account,
+        normalized_account,
+        normalized_account,
+        normalized_account,
+        normalized_shortcode,
+    ]
     if conn is not None:
         with pg.db_cursor(conn=conn) as cur:
-            return pg.fetch_one_with_cursor(cur, query, [shortcode, normalized_account])
-    return pg.fetch_one(query, [shortcode, normalized_account])
+            return pg.fetch_one_with_cursor(cur, query, params)
+    return pg.fetch_one(query, params)
+
+
+def _find_instagram_catalog_post_for_comments(
+    *,
+    account_handle: str,
+    shortcode: str,
+    conn: Any,
+) -> dict[str, Any] | None:
+    normalized_account = str(account_handle or "").strip().lower().lstrip("@")
+    normalized_shortcode = str(shortcode or "").strip()
+    query = """
+        with candidates as (
+          select
+            p.*,
+            (
+              ltrim(lower(coalesce(nullif(p.source_account, ''), '')), '@') = %s
+              or ltrim(lower(coalesce(nullif(p.owner_username, ''), '')), '@') = %s
+            ) as direct_profile_match,
+            exists (
+              select 1
+              from jsonb_array_elements_text(
+                case
+                  when jsonb_typeof(coalesce(p.collaborators, '[]'::jsonb)) = 'array'
+                  then coalesce(p.collaborators, '[]'::jsonb)
+                  else '[]'::jsonb
+                end
+              ) as collaborator(handle)
+              where ltrim(lower(coalesce(collaborator.handle, '')), '@') = %s
+            ) as collaborator_match,
+            exists (
+              select 1
+              from jsonb_array_elements_text(
+                case
+                  when jsonb_typeof(coalesce(p.profile_tags, '[]'::jsonb)) = 'array'
+                  then coalesce(p.profile_tags, '[]'::jsonb)
+                  else '[]'::jsonb
+                end
+              ) as profile_tag(handle)
+              where ltrim(lower(coalesce(profile_tag.handle, '')), '@') = %s
+            ) as profile_tag_match
+          from social.instagram_account_catalog_posts p
+          where p.source_id = %s
+        )
+        select
+          c.id::text as id,
+          c.source_id as source_id,
+          c.assigned_show_id::text as show_id,
+          c.assigned_season_id::text as season_id,
+          c.source_account,
+          c.posted_at,
+          c.assignment_status,
+          c.assignment_source,
+          c.candidate_matches,
+          s.season_number,
+          sh.name as show_name,
+          sh.slug as show_slug,
+          c.*
+        from candidates c
+        left join core.seasons s on s.id = c.assigned_season_id
+        left join core.shows sh on sh.id = coalesce(c.assigned_show_id, s.show_id)
+        where c.direct_profile_match
+           or c.collaborator_match
+           or c.profile_tag_match
+        order by
+          case
+            when c.direct_profile_match then 0
+            when c.collaborator_match then 1
+            else 2
+          end,
+          c.posted_at desc nulls last,
+          c.id desc
+        limit 1
+        """
+    with pg.db_cursor(conn=conn) as cur:
+        return pg.fetch_one_with_cursor(
+            cur,
+            query,
+            [
+                normalized_account,
+                normalized_account,
+                normalized_account,
+                normalized_account,
+                normalized_shortcode,
+            ],
+        )
 
 
 def _materialize_instagram_post_for_comments(
@@ -293,6 +431,12 @@ def _materialize_instagram_post_for_comments(
         conn=conn,
     )
     catalog_row = next(iter(catalog_rows or []), None)
+    if not catalog_row:
+        catalog_row = _find_instagram_catalog_post_for_comments(
+            account_handle=normalized_account,
+            shortcode=str(shortcode or "").strip(),
+            conn=conn,
+        )
     if not catalog_row:
         failure_metadata["catalog_row_found"] = False
         raise InstagramCommentsMaterializationError(

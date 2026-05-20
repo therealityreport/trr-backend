@@ -171,7 +171,7 @@ def recover_stale_unclaimed_dispatched_jobs(
           config,
           metadata
         from social.scrape_jobs
-        where status in ('queued', 'pending', 'retrying')
+        where status in ('queued', 'pending', 'retrying', 'running')
           and (%s::uuid is null or run_id = %s::uuid)
           and (%s::text is null or platform = %s::text)
           and (%s::text is null or lower(coalesce(config->>'account', '')) = %s::text)
@@ -214,7 +214,8 @@ def recover_stale_unclaimed_dispatched_jobs(
                 row,
                 lease_expires_at=refreshed_lease_expires_at,
             )
-            if legacy._modal_invocation_is_nonterminal(str(inspection.get("status") or "")):
+            inspection_status = str(inspection.get("status") or "").strip().lower()
+            if legacy._modal_invocation_is_nonterminal(inspection_status):
                 continue
 
         recovery_count = legacy._dispatch_metadata_recovery_count(dispatch) + 1
@@ -419,7 +420,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
                 continue
             if inspection_status == "unknown":
                 job_id_for_clear = str(job.get("id") or "").strip()
-                if status == "retrying" and job_id_for_clear:
+                if status in {"queued", "pending", "retrying"} and job_id_for_clear:
                     legacy._touch_job_dispatch_metadata(
                         job_id_for_clear,
                         dispatch_backend=str(job_dispatch.get("dispatch_backend") or "modal"),

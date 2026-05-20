@@ -77,6 +77,22 @@ def modal_reddit_runtime_probe_function_name() -> str:
     return str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION") or "probe_reddit_refresh_runtime").strip()
 
 
+def modal_admin_runtime_probe_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_ADMIN_RUNTIME_PROBE_FUNCTION") or "probe_admin_operation_runtime").strip()
+
+
+def modal_google_news_runtime_probe_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION") or "probe_google_news_runtime").strip()
+
+
+def modal_vision_runtime_probe_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_VISION_RUNTIME_PROBE_FUNCTION") or "probe_admin_vision_runtime").strip()
+
+
+def modal_socialblade_runtime_probe_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_SOCIALBLADE_RUNTIME_PROBE_FUNCTION") or "probe_socialblade_runtime").strip()
+
+
 def modal_social_job_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIAL_JOB_FUNCTION") or "run_social_job").strip()
 
@@ -139,6 +155,10 @@ def modal_socialblade_function_name() -> str:
     return str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
 
 
+def modal_vision_function_name() -> str:
+    return str(os.getenv("TRR_MODAL_VISION_FUNCTION") or "run_admin_vision").strip()
+
+
 def modal_app_name() -> str:
     return str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip()
 
@@ -164,6 +184,10 @@ def modal_dispatch_config() -> dict[str, Any]:
         "google_news_function": modal_google_news_function_name(),
         "reddit_refresh_function": modal_reddit_refresh_function_name(),
         "reddit_runtime_probe_function": modal_reddit_runtime_probe_function_name(),
+        "admin_runtime_probe_function": modal_admin_runtime_probe_function_name(),
+        "google_news_runtime_probe_function": modal_google_news_runtime_probe_function_name(),
+        "vision_runtime_probe_function": modal_vision_runtime_probe_function_name(),
+        "socialblade_runtime_probe_function": modal_socialblade_runtime_probe_function_name(),
         "social_job_function": modal_social_job_function_name(),
         "social_posts_job_function": modal_social_posts_job_function_name(),
         "social_media_job_function": modal_social_media_job_function_name(),
@@ -176,6 +200,7 @@ def modal_dispatch_config() -> dict[str, Any]:
             modal_social_comments_job_function_name(),
         ],
         "social_recovery_function": modal_social_recovery_function_name(),
+        "vision_function": modal_vision_function_name(),
         "socialblade_function": modal_socialblade_function_name(),
     }
 
@@ -204,6 +229,14 @@ def _classify_modal_resolution_error(error: str) -> str:
         return "modal_app_not_found"
     if "modal" in normalized and "unavailable" in normalized:
         return "modal_sdk_unavailable"
+    if "rate limit" in normalized or "rate_limit" in normalized or "429" in normalized:
+        return "modal_rate_limited"
+    if "secret" in normalized and ("not found" in normalized or "missing" in normalized):
+        return "modal_secret_missing"
+    if "database" in normalized or "pool" in normalized or "supabase" in normalized:
+        return "db_pool_pressure"
+    if "browser" in normalized or "playwright" in normalized or "chromium" in normalized:
+        return "browser_runtime_failure"
     return "modal_resolution_failed"
 
 
@@ -500,6 +533,7 @@ def _spawn_named_modal_function(
             "function_name": normalized_function,
             "modal_environment": environment_name,
             "log_label": log_label,
+            "worker_family": dispatcher_name,
             "execution_metadata": modal_execution_metadata(),
             "dispatch_config": modal_dispatch_config(),
         }
@@ -546,6 +580,7 @@ def _spawn_named_modal_function(
             "function_name": normalized_function,
             "modal_environment": environment_name,
             "log_label": log_label,
+            "worker_family": dispatcher_name,
             "execution_metadata": modal_execution_metadata(),
             "dispatch_config": modal_dispatch_config(),
         }
@@ -591,6 +626,7 @@ def _spawn_named_modal_function(
             "function_name": normalized_function,
             "modal_environment": environment_name,
             "log_label": log_label,
+            "worker_family": dispatcher_name,
             "execution_metadata": modal_execution_metadata(),
             "dispatch_config": modal_dispatch_config(),
         }
@@ -656,7 +692,16 @@ def dispatch_socialblade_scrape_sync(
     function_name = modal_socialblade_function_name()
     ready, reason = modal_dispatch_ready(function_name=function_name)
     if not ready:
-        return {"error": f"Modal not ready: {reason}", "dispatched": False}
+        return {
+            "error": f"Modal not ready: {reason}",
+            "dispatched": False,
+            "reason_code": reason,
+            "app_name": modal_app_name(),
+            "function_name": function_name,
+            "worker_family": "socialblade",
+            "execution_metadata": modal_execution_metadata(),
+            "dispatch_config": modal_dispatch_config(),
+        }
 
     app_name = modal_app_name()
     normalized_source_scope = normalize_source_scope(source_scope)
@@ -684,7 +729,16 @@ def dispatch_socialblade_scrape_sync(
             function_name,
             handle,
         )
-        return {"error": str(exc), "dispatched": False}
+        return {
+            "error": str(exc),
+            "dispatched": False,
+            "reason_code": _classify_modal_resolution_error(str(exc)),
+            "app_name": app_name,
+            "function_name": function_name,
+            "worker_family": "socialblade",
+            "execution_metadata": modal_execution_metadata(),
+            "dispatch_config": modal_dispatch_config(),
+        }
 
 
 def dispatch_socialblade_scrape(

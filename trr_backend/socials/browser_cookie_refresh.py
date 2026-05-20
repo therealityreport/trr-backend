@@ -6,17 +6,24 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SOCIAL_AUTH_CHROME_PROFILE = "codex@thereality.report"
+DEFAULT_SOCIAL_AUTH_REFRESH_MIN_INTERVAL_SECONDS = 3_600
+_PROFILE_FALSE_VALUES = {"0", "false", "off", "no"}
+
 
 @dataclass(frozen=True)
 class SimpleLoginSpec:
+    platform: str
     login_url: str
     validation_url: str
     cookie_domains: tuple[str, ...]
@@ -29,6 +36,48 @@ class SimpleLoginSpec:
     invalid_body_patterns: tuple[str, ...] = ()
     post_login_button_patterns: tuple[str, ...] = ()
     pre_login_button_patterns: tuple[str, ...] = ()
+
+
+@dataclass
+class CookieRefreshBrowserContext:
+    context: Any
+    browser: Any | None = None
+    profile_path: Path | None = None
+    user_data_dir: Path | None = None
+    profile_directory: str | None = None
+    preferences_path: Path | None = None
+
+    def close(self) -> None:
+        if self.browser is not None:
+            self.browser.close()
+            return
+        self.context.close()
+
+
+@dataclass(frozen=True)
+class ChromeProfileSelection:
+    user_data_dir: Path
+    profile_directory: str
+    preferences_path: Path
+    display_name: str
+    matched_profile: str
+    matched_email: str | None = None
+
+    @property
+    def profile_path(self) -> Path:
+        return self.user_data_dir / self.profile_directory
+
+
+class ChromeProfileNotAvailableError(RuntimeError):
+    """Raised when an auth refresh would otherwise launch a profile-less browser."""
+
+
+class ChromeProfileLockedError(ChromeProfileNotAvailableError):
+    """Raised when Chrome's profile lock would make auth refresh non-deterministic."""
+
+
+class SocialAuthRefreshRateLimitError(RuntimeError):
+    """Raised when a platform auth refresh attempt is blocked by the hard cooldown."""
 
 
 def _remaining_timeout_ms(deadline: float, *, floor_ms: int = 1_000) -> int:
@@ -52,6 +101,318 @@ def launch_browser(playwright: Any, *, headless: bool) -> Any:
         return playwright.chromium.launch(channel="chrome", **launch_kwargs)
     except Exception:
         return playwright.chromium.launch(**launch_kwargs)
+
+
+def _chrome_profile_base_dir() -> Path:
+    return Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+
+
+def _backend_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _env_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_rate_limit_platform(platform: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", str(platform or "").strip().lower()).strip("-")
+    return normalized or "unknown"
+
+
+def _social_auth_refresh_rate_limit_dir() -> Path:
+    override = str(os.getenv("SOCIAL_AUTH_REFRESH_RATE_LIMIT_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _backend_root() / ".locks" / "social-auth-refresh"
+
+
+def _social_auth_refresh_min_interval_seconds(platform: str) -> int:
+    normalized_env_platform = _normalize_rate_limit_platform(platform).replace("-", "_").upper()
+    candidates = [
+        f"SOCIAL_{normalized_env_platform}_AUTH_REFRESH_MIN_INTERVAL_SECONDS",
+        "SOCIAL_AUTH_REFRESH_MIN_INTERVAL_SECONDS",
+    ]
+    for env_key in candidates:
+        raw = str(os.getenv(env_key) or "").strip()
+        if not raw:
+            continue
+        try:
+            return max(0, int(float(raw)))
+        except ValueError:
+            logger.warning("Ignoring invalid %s=%r", env_key, raw)
+    return DEFAULT_SOCIAL_AUTH_REFRESH_MIN_INTERVAL_SECONDS
+
+
+def _read_rate_limit_timestamp(lock_file: Path) -> float | None:
+    try:
+        payload = json.loads(lock_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001
+        logger.warning("Ignoring unreadable social auth refresh rate-limit file %s", lock_file, exc_info=True)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return float(payload.get("last_attempt_monotonic"))
+    except (TypeError, ValueError):
+        return None
+
+
+def reserve_social_auth_refresh_attempt(platform: str) -> dict[str, object]:
+    """Atomically reserve a social auth refresh attempt before opening Chrome."""
+
+    normalized = _normalize_rate_limit_platform(platform)
+    interval_seconds = _social_auth_refresh_min_interval_seconds(normalized)
+    if interval_seconds <= 0 or _env_truthy(os.getenv("SOCIAL_AUTH_REFRESH_RATE_LIMIT_DISABLED")):
+        return {"reserved": False, "platform": normalized, "rate_limit_disabled": True}
+
+    rate_limit_dir = _social_auth_refresh_rate_limit_dir()
+    rate_limit_dir.mkdir(parents=True, exist_ok=True)
+    gate_dir = rate_limit_dir / f"{normalized}.lockdir"
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            gate_dir.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise SocialAuthRefreshRateLimitError(
+                    f"{normalized} auth refresh is already reserved by another process"
+                ) from None
+            time.sleep(0.1)
+
+    lock_file = rate_limit_dir / f"{normalized}.json"
+    now = time.monotonic()
+    try:
+        last_attempt = _read_rate_limit_timestamp(lock_file)
+        if last_attempt is not None:
+            elapsed = max(0.0, now - last_attempt)
+            remaining = interval_seconds - elapsed
+            if remaining > 0:
+                raise SocialAuthRefreshRateLimitError(
+                    f"{normalized} auth refresh rate-limited; retry after {int(remaining) + 1}s"
+                )
+        payload = {
+            "platform": normalized,
+            "last_attempt_monotonic": now,
+            "reserved_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+            "min_interval_seconds": interval_seconds,
+        }
+        write_private_json_file(lock_file, payload)
+        return {
+            "reserved": True,
+            "platform": normalized,
+            "lock_file": str(lock_file),
+            "min_interval_seconds": interval_seconds,
+        }
+    finally:
+        shutil.rmtree(gate_dir, ignore_errors=True)
+
+
+def resolve_social_auth_chrome_profile(platform: str | None = None, explicit_profile: str | None = None) -> str:
+    if explicit_profile and str(explicit_profile).strip():
+        return str(explicit_profile).strip()
+    normalized_platform = str(platform or "").strip().upper()
+    candidates = []
+    if normalized_platform:
+        candidates.append(f"SOCIAL_{normalized_platform}_CHROME_PROFILE")
+    candidates.extend(
+        [
+            "SOCIAL_AUTH_CHROME_PROFILE",
+            "SOCIAL_COOKIE_REFRESH_CHROME_PROFILE",
+            "CODEX_SOCIAL_AUTH_CHROME_PROFILE",
+        ]
+    )
+    for env_key in candidates:
+        value = str(os.getenv(env_key) or "").strip()
+        if value:
+            return value
+    return DEFAULT_SOCIAL_AUTH_CHROME_PROFILE
+
+
+def social_auth_requires_chrome_profile(platform: str | None = None) -> bool:
+    normalized_platform = str(platform or "").strip().upper()
+    candidates = []
+    if normalized_platform:
+        candidates.append(f"SOCIAL_{normalized_platform}_REQUIRE_CHROME_PROFILE")
+    candidates.append("SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE")
+    for env_key in candidates:
+        value = str(os.getenv(env_key) or "").strip().lower()
+        if value:
+            return value not in _PROFILE_FALSE_VALUES
+    return True
+
+
+def find_chrome_profile_dir(profile_name: str) -> Path:
+    return resolve_chrome_profile_selection(profile_name).profile_path
+
+
+def _looks_like_inner_chrome_profile_dir(path: Path) -> bool:
+    return (path / "Preferences").is_file()
+
+
+def _chrome_lock_paths(selection: ChromeProfileSelection) -> tuple[Path, ...]:
+    return (
+        selection.user_data_dir / "SingletonLock",
+        selection.user_data_dir / "SingletonCookie",
+        selection.profile_path / "SingletonLock",
+        selection.profile_path / "SingletonCookie",
+    )
+
+
+def _raise_if_chrome_profile_locked(selection: ChromeProfileSelection) -> None:
+    existing_locks = [path for path in _chrome_lock_paths(selection) if path.exists() or path.is_symlink()]
+    if not existing_locks:
+        return
+    lock_list = ", ".join(str(path) for path in existing_locks)
+    raise ChromeProfileLockedError(
+        "Chrome auth profile is locked by another Chrome process. "
+        f"profile={selection.matched_profile!r} user_data_dir={selection.user_data_dir} "
+        f"profile_directory={selection.profile_directory} locks={lock_list}. "
+        "Close Chrome for that profile or use SOCIAL_AUTH_CHROME_PROFILE to choose an unlocked test profile."
+    )
+
+
+def resolve_chrome_profile_selection(profile_name: str) -> ChromeProfileSelection:
+    chrome_base = _chrome_profile_base_dir()
+    if not chrome_base.is_dir():
+        raise ChromeProfileNotAvailableError(f"Chrome profile directory not found: {chrome_base}")
+    if _looks_like_inner_chrome_profile_dir(chrome_base):
+        raise ChromeProfileNotAvailableError(
+            f"Chrome user-data root appears to be an inner profile directory: {chrome_base}. "
+            "Use the Chrome root and --profile-directory instead."
+        )
+
+    normalized_profile = str(profile_name or "").strip().lower()
+    if not normalized_profile:
+        raise ChromeProfileNotAvailableError("Chrome profile name is empty")
+
+    for entry in chrome_base.iterdir():
+        prefs_file = entry / "Preferences"
+        if not prefs_file.is_file():
+            continue
+        try:
+            prefs = json.loads(prefs_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        raw_profile_display_name = str(prefs.get("profile", {}).get("name") or "").strip()
+        profile_display_name = raw_profile_display_name.lower()
+        account_info = prefs.get("account_info", [])
+        emails = [
+            str(account.get("email") or "").strip().lower() for account in account_info if isinstance(account, dict)
+        ]
+        if normalized_profile in {profile_display_name, *emails}:
+            matched_email = normalized_profile if normalized_profile in emails else None
+            return ChromeProfileSelection(
+                user_data_dir=chrome_base,
+                profile_directory=entry.name,
+                preferences_path=prefs_file,
+                display_name=raw_profile_display_name,
+                matched_profile=profile_name,
+                matched_email=matched_email,
+            )
+
+    raise ChromeProfileNotAvailableError(
+        f"Chrome profile '{profile_name}' not found in {chrome_base}. "
+        "Use SOCIAL_AUTH_CHROME_PROFILE or a platform-specific SOCIAL_<PLATFORM>_CHROME_PROFILE override."
+    )
+
+
+def _profile_directory_arg(profile_directory: str) -> str:
+    normalized = str(profile_directory or "").strip()
+    if not normalized:
+        raise ChromeProfileNotAvailableError("Chrome profile directory is empty")
+    return f"--profile-directory={normalized}"
+
+
+def _with_profile_directory_arg(args: list[str], profile_directory: str) -> list[str]:
+    without_existing = [arg for arg in args if not str(arg).startswith("--profile-directory")]
+    return [*without_existing, _profile_directory_arg(profile_directory)]
+
+
+def open_cookie_refresh_context(
+    playwright: Any,
+    *,
+    platform: str,
+    headless: bool,
+    viewport: dict[str, int],
+    profile_name: str | None = None,
+    user_agent: str | None = None,
+    locale: str | None = None,
+    timezone_id: str | None = None,
+    extra_args: list[str] | None = None,
+    enforce_rate_limit: bool = True,
+) -> CookieRefreshBrowserContext:
+    if enforce_rate_limit:
+        reserve_social_auth_refresh_attempt(platform)
+
+    resolved_profile = resolve_social_auth_chrome_profile(platform, profile_name)
+    require_profile = social_auth_requires_chrome_profile(platform)
+    profile_selection: ChromeProfileSelection | None = None
+    if resolved_profile:
+        try:
+            profile_selection = resolve_chrome_profile_selection(resolved_profile)
+        except ChromeProfileNotAvailableError:
+            if require_profile:
+                raise
+            logger.warning(
+                "[%s] Chrome profile %r unavailable; falling back to profile-less cookie refresh because "
+                "SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE is disabled",
+                platform,
+                resolved_profile,
+            )
+
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        *(extra_args or []),
+    ]
+    context_kwargs: dict[str, Any] = {
+        "viewport": viewport,
+    }
+    if user_agent:
+        context_kwargs["user_agent"] = user_agent
+    if locale:
+        context_kwargs["locale"] = locale
+    if timezone_id:
+        context_kwargs["timezone_id"] = timezone_id
+
+    if profile_selection is not None:
+        _raise_if_chrome_profile_locked(profile_selection)
+        launch_args = _with_profile_directory_arg(launch_args, profile_selection.profile_directory)
+        logger.info(
+            "[%s] launching Chrome auth context with profile=%s user_data_dir=%s profile_directory=%s",
+            platform,
+            resolved_profile,
+            profile_selection.user_data_dir,
+            profile_selection.profile_directory,
+        )
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_selection.user_data_dir),
+            channel="chrome",
+            headless=bool(headless),
+            args=launch_args,
+            **context_kwargs,
+        )
+        return CookieRefreshBrowserContext(
+            context=context,
+            profile_path=profile_selection.profile_path,
+            user_data_dir=profile_selection.user_data_dir,
+            profile_directory=profile_selection.profile_directory,
+            preferences_path=profile_selection.preferences_path,
+        )
+
+    if require_profile:
+        raise ChromeProfileNotAvailableError(
+            f"{platform} cookie refresh requires Chrome profile {resolved_profile!r}; refusing profile-less launch"
+        )
+
+    browser = launch_browser(playwright, headless=headless)
+    context = browser.new_context(**context_kwargs)
+    return CookieRefreshBrowserContext(context=context, browser=browser)
 
 
 def cookie_payload(cookies: list[dict[str, Any]], *, domains: tuple[str, ...]) -> dict[str, str]:
@@ -250,10 +611,29 @@ def refresh_simple_login_cookies(
     deadline = time.monotonic() + max(30, int(timeout_seconds))
     refreshed_cookies: dict[str, str] = {}
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright, headless=headless)
+        session = open_cookie_refresh_context(
+            playwright,
+            platform=spec.platform,
+            headless=headless,
+            viewport={"width": 1_440, "height": 1_600},
+        )
         try:
-            context = browser.new_context(viewport={"width": 1_440, "height": 1_600})
+            context = session.context
             page = context.new_page()
+            page.goto(
+                spec.validation_url,
+                wait_until="domcontentloaded",
+                timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
+            )
+            page.wait_for_timeout(2_000)
+            existing_cookies = cookie_payload(context.cookies(), domains=spec.cookie_domains)
+            if _has_required_authenticated_cookies(existing_cookies, spec=spec) and not _detect_invalid_login_state(
+                page,
+                spec=spec,
+            ):
+                write_cookie_file(cookie_file, existing_cookies)
+                return existing_cookies
+
             page.goto(
                 spec.login_url,
                 wait_until="domcontentloaded",
@@ -307,7 +687,7 @@ def refresh_simple_login_cookies(
         except PlaywrightTimeoutError as exc:
             raise RuntimeError("Timed out while refreshing cookies") from exc
         finally:
-            browser.close()
+            session.close()
 
     is_valid, reason = validate_browser_cookie_session(
         cookies=refreshed_cookies,

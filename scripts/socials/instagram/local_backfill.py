@@ -2,7 +2,7 @@
 """Run a local Instagram catalog backfill with interactive Chrome login support.
 
 Bypasses the API server entirely — calls the backfill pipeline directly in-process.
-If auth fails mid-scrape, the interactive Chrome login (entertainmentdatagroup@gmail.com)
+If auth fails mid-scrape, the interactive Chrome login (codex@thereality.report)
 will open a headed browser for manual login.
 
 Usage:

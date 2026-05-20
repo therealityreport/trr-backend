@@ -8,10 +8,12 @@ YouTube package importing repository surfaces back.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -265,8 +267,49 @@ def _shared_stage_post_limit(config: Mapping[str, Any] | None, *, default: int =
     return parsed
 
 
-def _coerce_dt(value: Any) -> Any:
-    return value
+def _shared_youtube_bounded_window_page_cap(
+    config: Mapping[str, Any] | None,
+    *,
+    coerce_dt: Callable[[Any], Any] | None = None,
+) -> int | None:
+    if not config:
+        return None
+    coerce = coerce_dt or _coerce_dt
+    date_start = coerce(config.get("date_start"))
+    date_end = coerce(config.get("date_end"))
+    if not isinstance(date_start, datetime) or not isinstance(date_end, datetime):
+        return None
+    try:
+        window_days = max(1, int((date_end - date_start).total_seconds() // 86400) + 1)
+    except Exception:
+        window_days = 45
+    default_cap = 6 if window_days <= 45 else 10
+    raw = str(os.getenv("SOCIAL_YOUTUBE_SHARED_BOUNDED_WINDOW_MAX_PAGES") or "").strip()
+    if raw:
+        try:
+            return max(1, min(int(raw), 50))
+        except ValueError:
+            pass
+    return default_cap
+
+
+def _coerce_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=UTC)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
 
 
 def _ytdlp_available() -> bool:
@@ -368,6 +411,23 @@ def _persist_youtube_videos(
     return rows
 
 
+def _bounded_window_no_hit_completed(retrieval_meta: Mapping[str, Any]) -> bool:
+    """Return true when a bounded channel scan checked posts but found no in-window matches."""
+    if (
+        str(retrieval_meta.get("yt_dlp_channel_fallback_skip_reason") or "").strip()
+        != "bounded_window_no_hits_after_channel_scan"
+    ):
+        return False
+    if _normalize_non_negative_int(retrieval_meta.get("continuation_failure_count")) > 0:
+        return False
+    if _normalize_non_negative_int(retrieval_meta.get("matched_posts")) > 0:
+        return False
+    return (
+        _normalize_non_negative_int(retrieval_meta.get("posts_checked")) > 0
+        or _normalize_non_negative_int(retrieval_meta.get("checked_renderers")) > 0
+    )
+
+
 def scrape_shared_youtube_posts(
     *,
     run_id: str | None,
@@ -388,7 +448,9 @@ def scrape_shared_youtube_posts(
         date_end=deps.coerce_dt(config.get("date_end")),
         delay_seconds=0.35,
         max_results=deps.shared_stage_post_limit(config),
+        max_pages=_shared_youtube_bounded_window_page_cap(config, coerce_dt=deps.coerce_dt),
         enforce_keyword_filter=False,
+        allow_ytdlp_video_enrichment=False,
         source_type=source_config["source_type"],
         playlist_id=source_config["playlist_id"],
         playlist_url=source_config["playlist_url"],
@@ -472,7 +534,10 @@ def scrape_shared_youtube_posts(
 
     if not rows and not retrieval_meta.get("error_code"):
         first_page_counts = retrieval_meta.get("first_page_counts") or {}
-        if not first_page_counts.get("videos") and not first_page_counts.get("shorts"):
+        if _bounded_window_no_hit_completed(retrieval_meta):
+            retrieval_meta["empty_result_reason"] = "bounded_window_no_hits"
+            retrieval_meta["retryable"] = False
+        elif not first_page_counts.get("videos") and not first_page_counts.get("shorts"):
             retrieval_meta["error_code"] = "youtube_empty_channel_page"
             retrieval_meta["retryable"] = True
             retrieval_meta["error_class"] = "YouTubeEmptyChannelPage"

@@ -22,6 +22,16 @@ APPLY_NAMED_SECRETS_TIMEOUT_SECONDS = 180
 DEPLOY_MODAL_TIMEOUT_SECONDS = 900
 VERIFY_REMOTE_AUTH_TIMEOUT_SECONDS = 120
 BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
+MANUAL_CHECKPOINT_REQUIRED_REASON = "manual_checkpoint_required"
+MANUAL_CHECKPOINT_NEXT_ACTION = "complete_instagram_email_checkpoint_in_profile_13"
+_MANUAL_CHECKPOINT_MARKERS = (
+    "checkpoint_required",
+    "challenge_required",
+    "graphql_validation_challenge",
+    "html_challenge_or_auth_required",
+    "redirect_to_checkpoint",
+    "warmup_auth_challenge",
+)
 
 
 def _python_command() -> str:
@@ -62,6 +72,7 @@ def _run_command(command: list[str], *, timeout_seconds: int) -> subprocess.Comp
         command,
         check=True,
         capture_output=True,
+        cwd=REPO_ROOT,
         text=True,
         timeout=timeout_seconds,
     )
@@ -77,6 +88,7 @@ def _run_json_command_allow_failure(
         command,
         check=False,
         capture_output=True,
+        cwd=REPO_ROOT,
         text=True,
         timeout=timeout_seconds,
     )
@@ -115,6 +127,17 @@ def _parse_last_json_line(stdout: str, *, step_name: str) -> dict[str, Any]:
     return payload
 
 
+def _validation_requires_manual_checkpoint(validation_payload: dict[str, Any]) -> bool:
+    reason = str(validation_payload.get("reason") or "").strip().lower()
+    detail = validation_payload.get("detail")
+    try:
+        detail_text = json.dumps(detail, sort_keys=True).lower()
+    except TypeError:
+        detail_text = str(detail or "").lower()
+    combined = f"{reason} {detail_text}"
+    return any(marker in combined for marker in _MANUAL_CHECKPOINT_MARKERS)
+
+
 def _refresh_command(*, python_command: str, force: bool) -> list[str]:
     command = [
         python_command,
@@ -125,7 +148,7 @@ def _refresh_command(*, python_command: str, force: bool) -> list[str]:
         "comments_endpoint",
     ]
     if force:
-        command.extend(["--force", "--headed"])
+        command.append("--force")
     else:
         command.append("--validate-only")
     return command
@@ -182,6 +205,7 @@ def _failed_summary(
     *,
     steps: list[dict[str, Any]],
     failure_reason: str,
+    next_action: str | None = None,
     remote_auth_probe: dict[str, Any] | None = None,
     instagram_posts_auth_probe: dict[str, Any] | None = None,
     instagram_comments_auth_probe: dict[str, Any] | None = None,
@@ -189,6 +213,9 @@ def _failed_summary(
     return {
         "ok": False,
         "failure_reason": failure_reason,
+        "next_action": next_action,
+        "modal_secret_apply_reached": any(step.get("name") == "apply_named_secrets" for step in steps),
+        "modal_deploy_reached": any(step.get("name") == "deploy_modal_app" for step in steps),
         "steps": steps,
         "remote_auth_probe": remote_auth_probe,
         "instagram_posts_auth_probe": instagram_posts_auth_probe,
@@ -291,6 +318,12 @@ def run_repair(
     )
 
     if not local_valid:
+        if _validation_requires_manual_checkpoint(validation_payload):
+            return _failed_summary(
+                steps=steps,
+                failure_reason=MANUAL_CHECKPOINT_REQUIRED_REASON,
+                next_action=MANUAL_CHECKPOINT_NEXT_ACTION,
+            )
         try:
             refresh_payload = _parse_last_json_line(
                 _run_command(
@@ -440,6 +473,8 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
             f"  Instagram comments auth probe: {'ready' if comments_probe.get('ready') else 'not ready'}{probe_reason}"
         )
     print(f"  Result: {'ok' if summary.get('ok') else 'failed'}")
+    if summary.get("next_action"):
+        print(f"  Next action: {summary['next_action']}")
 
 
 def main() -> int:

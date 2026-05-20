@@ -36,7 +36,7 @@ class _StubFunctionHandle:
         return dict(self._remote_payload or {})
 
 
-def test_expected_function_names_includes_reddit_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_expected_function_names_includes_runtime_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION", raising=False)
     monkeypatch.delenv("TRR_MODAL_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION", raising=False)
@@ -50,10 +50,15 @@ def test_expected_function_names_includes_reddit_runtime_probe(monkeypatch: pyte
     function_names = cli.expected_function_names()
 
     assert "probe_reddit_refresh_runtime" in function_names
+    assert "probe_admin_operation_runtime" in function_names
+    assert "probe_google_news_runtime" in function_names
+    assert "probe_admin_vision_runtime" in function_names
+    assert "probe_socialblade_runtime" in function_names
     assert "probe_social_remote_auth" in function_names
     assert "probe_instagram_posts_auth" in function_names
     assert "probe_instagram_comments_auth" in function_names
     assert "probe_getty_remote_access" in function_names
+    assert "purge_stale_social_worker_heartbeats" in function_names
     assert "run_social_posts_job" in function_names
     assert "run_social_media_job" in function_names
     assert "run_social_comments_job" in function_names
@@ -125,6 +130,21 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "probe_getty_remote_access": _StubFunctionHandle(
                 remote_payload={"platform": "getty", "ready": True, "reason": None}
             ),
+            "probe_admin_operation_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "admin_operations", "healthy": True, "reason": "ok"}
+            ),
+            "probe_google_news_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "google_news", "healthy": True, "reason": "ok"}
+            ),
+            "probe_reddit_refresh_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "reddit_refresh", "healthy": True, "reason": "ok"}
+            ),
+            "probe_admin_vision_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "admin_vision", "healthy": True, "reason": "ok"}
+            ),
+            "probe_socialblade_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "socialblade", "healthy": True, "reason": "ok"}
+            ),
         },
     )
 
@@ -144,12 +164,18 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
             "probe_instagram_posts_auth",
             "probe_instagram_comments_auth",
             "probe_getty_remote_access",
+            "probe_admin_operation_runtime",
+            "probe_google_news_runtime",
+            "probe_reddit_refresh_runtime",
+            "probe_admin_vision_runtime",
+            "probe_socialblade_runtime",
         ),
         probe_remote_auth_platform="instagram",
         probe_instagram_posts_auth_handle="thetraitorsus",
         probe_instagram_comments_auth_handle="thetraitorsus",
         probe_instagram_comments_auth_shortcode="DSfwXnYAaEs",
         probe_getty_remote_access=True,
+        probe_core_workers=True,
     )
 
     assert summary["ok"] is True
@@ -194,6 +220,63 @@ def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pyt
         "execution_backend": "modal",
     }
     assert summary["getty_remote_probe"] == {"platform": "getty", "ready": True, "reason": None}
+    assert [probe["worker_family"] for probe in summary["runtime_probes"]] == [
+        "admin_operations",
+        "google_news",
+        "reddit_refresh",
+        "admin_vision",
+        "socialblade",
+    ]
+
+
+def test_verify_modal_readiness_blocks_failed_core_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_QUEUE_ENABLED", "false")
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_admin_operation_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "admin_operations", "healthy": True, "reason": "ok"}
+            ),
+            "probe_google_news_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "google_news", "healthy": True, "reason": "ok"}
+            ),
+            "probe_reddit_refresh_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "reddit_refresh", "healthy": False, "reason": "reddit_oauth_missing"}
+            ),
+            "probe_admin_vision_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "admin_vision", "healthy": True, "reason": "ok"}
+            ),
+            "probe_socialblade_runtime": _StubFunctionHandle(
+                remote_payload={"worker_family": "socialblade", "healthy": True, "reason": "ok"}
+            ),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=(
+            "serve_backend_api",
+            "probe_admin_operation_runtime",
+            "probe_google_news_runtime",
+            "probe_reddit_refresh_runtime",
+            "probe_admin_vision_runtime",
+            "probe_socialblade_runtime",
+        ),
+        probe_core_workers=True,
+    )
+
+    assert summary["ok"] is False
+    assert summary["blocking_probe_failures"] == ["reddit_refresh:reddit_oauth_missing"]
 
 
 def test_verify_modal_readiness_accepts_tiktok_remote_auth_probe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -811,6 +894,7 @@ def test_main_emits_json_and_returns_nonzero_when_not_ready(
                 "probe_instagram_comments_shortcode": "",
                 "probe_getty_remote_access": True,
                 "strict_probes": False,
+                "probe_core_workers": False,
             },
         )(),
     )
@@ -873,6 +957,7 @@ def test_main_returns_zero_when_only_advisory_probe_fails_without_strict_mode(
                 "probe_instagram_comments_shortcode": "",
                 "probe_getty_remote_access": True,
                 "strict_probes": False,
+                "probe_core_workers": False,
             },
         )(),
     )
@@ -932,6 +1017,7 @@ def test_main_returns_nonzero_when_only_advisory_probe_fails_in_strict_mode(
                 "probe_instagram_comments_shortcode": "",
                 "probe_getty_remote_access": True,
                 "strict_probes": True,
+                "probe_core_workers": False,
             },
         )(),
     )
@@ -998,6 +1084,7 @@ def test_main_applies_workspace_runtime_env_before_parsing(
                 "probe_instagram_comments_shortcode": "",
                 "probe_getty_remote_access": False,
                 "strict_probes": False,
+                "probe_core_workers": False,
             },
         )(),
     )

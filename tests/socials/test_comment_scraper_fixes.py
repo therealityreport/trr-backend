@@ -14,6 +14,7 @@ import pytest
 import requests
 
 import trr_backend.socials.tiktok.scraper as tiktok_scraper_module
+from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.socials.facebook.scraper import FacebookScrapeConfig, FacebookScraper
 from trr_backend.socials.instagram.scraper import InstagramScraper
 from trr_backend.socials.instagram.scraper import ScrapeConfig as InstagramScrapeConfig
@@ -52,6 +53,49 @@ class _FakeInvalidJsonResponse:
 
     def json(self) -> dict:
         raise ValueError("empty body")
+
+
+class _SavepointCursor:
+    def __init__(self, conn: _SavepointConn) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> _SavepointCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, sql: str) -> None:
+        self._conn.statements.append(" ".join(sql.split()))
+
+
+class _SavepointConn:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def cursor(self) -> _SavepointCursor:
+        return _SavepointCursor(self)
+
+
+def test_best_effort_db_savepoint_rolls_back_optional_failure() -> None:
+    conn = _SavepointConn()
+
+    def _boom() -> None:
+        raise RuntimeError("optional reconcile failed")
+
+    ok = social_repo._run_best_effort_db_step_in_savepoint(  # noqa: SLF001
+        conn=conn,
+        savepoint_name="instagram_comment_reconcile",
+        operation=_boom,
+        log_message="expected optional failure",
+    )
+
+    assert ok is False
+    assert conn.statements == [
+        "SAVEPOINT sp_instagram_comment_reconcile",
+        "ROLLBACK TO SAVEPOINT sp_instagram_comment_reconcile",
+        "RELEASE SAVEPOINT sp_instagram_comment_reconcile",
+    ]
 
 
 def test_tiktok_fetch_comments_adds_required_aid_param(monkeypatch: pytest.MonkeyPatch) -> None:

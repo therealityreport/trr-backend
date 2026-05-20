@@ -202,7 +202,7 @@ def _ensure_instagram_posts_auth_ready_for_launch(*, account_handle: str) -> dic
 
     repair_result = refresh_platform_cookies_interactive(
         "instagram",
-        headless=False,
+        headless=True,
         timeout_seconds=300,
         account_handle=account_handle,
     )
@@ -583,6 +583,7 @@ def start_social_account_catalog_backfill(
     tiktok_comments_in_posts_stage: bool = False,
     tiktok_direct_comment_api_override: bool = False,
     twitter_comments_in_posts_stage: bool = False,
+    comment_anchor_source_ids: dict[str, list[str]] | None = None,
     selected_tasks: Sequence[Any] | None = None,
     effective_selected_tasks: Sequence[Any] | None = None,
     launch_group_id: str | None = None,
@@ -632,6 +633,7 @@ def start_social_account_catalog_backfill(
                     catalog_action=normalized_catalog_action,
                     catalog_action_scope=normalized_catalog_action_scope,
                     task_resolution_pending=False,
+                    comment_anchor_source_ids=comment_anchor_source_ids,
                 ),
                 **_catalog_stage_graph_metadata(
                     selected_tasks=[],
@@ -715,6 +717,7 @@ def start_social_account_catalog_backfill(
             "tiktok_direct_comment_api_override": tiktok_direct_comment_api_override,
             "selected_tasks": selected_tasks,
             "effective_selected_tasks": effective_selected_tasks,
+            "comment_anchor_source_ids": comment_anchor_source_ids,
             "launch_group_id": launch_group_id,
             "existing_run_id": run_id,
             "defer_initial_dispatch": not reserved_here,
@@ -767,6 +770,7 @@ def begin_social_account_catalog_backfill_launch(
     allow_local_dev_inline_bypass: bool = False,
     execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     selected_tasks: Sequence[Any] | None = None,
+    comment_anchor_source_ids: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -803,6 +807,7 @@ def begin_social_account_catalog_backfill_launch(
                 catalog_action=action_seed["catalog_action"],
                 catalog_action_scope=action_seed["catalog_action_scope"],
                 selected_tasks=normalized_selected_tasks,
+                comment_anchor_source_ids=comment_anchor_source_ids,
                 task_resolution_pending=True,
             ),
             **_catalog_stage_graph_metadata(
@@ -873,6 +878,9 @@ def finalize_social_account_catalog_backfill_launch(
     execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     selected_tasks: Sequence[Any] | None = None,
     launch_group_id: str | None = None,
+    comment_anchor_source_ids: dict[str, list[str]] | None = None,
+    catalog_action: str | None = None,
+    catalog_action_scope: str | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -900,8 +908,11 @@ def finalize_social_account_catalog_backfill_launch(
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
             execution_preference=execution_preference,
             selected_tasks=selected_tasks,
+            comment_anchor_source_ids=comment_anchor_source_ids,
             existing_catalog_run_id=run_id,
             launch_group_id_override=launch_group_id,
+            catalog_action=catalog_action,
+            catalog_action_scope=catalog_action_scope,
         )
         logger.info(
             "[catalog-launch] finalize_complete platform=%s account=%s run_id=%s total_ms=%.1f comments_run_id=%s",
@@ -940,6 +951,9 @@ def launch_social_account_catalog_backfill(
     selected_tasks: Sequence[Any] | None = None,
     existing_catalog_run_id: str | None = None,
     launch_group_id_override: str | None = None,
+    comment_anchor_source_ids: dict[str, list[str]] | None = None,
+    catalog_action: str | None = None,
+    catalog_action_scope: str | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -949,14 +963,34 @@ def launch_social_account_catalog_backfill(
     catalog_launch_ms = 0.0
     comments_launch_ms = 0.0
     normalized_selected_tasks = _normalize_social_account_catalog_backfill_selected_tasks(selected_tasks)
+    normalized_comment_anchor_source_ids, _comment_anchor_overflow_platforms = _normalize_comment_anchor_source_ids(
+        comment_anchor_source_ids,
+        allowed_platforms={normalized_platform},
+    )
+    instagram_targeted_comment_source_ids = (
+        sorted(normalized_comment_anchor_source_ids.get("instagram") or [])
+        if normalized_platform == "instagram"
+        else []
+    )
+    instagram_targeted_comments_only = bool(
+        normalized_platform == "instagram"
+        and instagram_targeted_comment_source_ids
+        and set(normalized_selected_tasks) <= {"comments"}
+    )
     normalized_execution_preference = str(execution_preference or "auto").strip().lower() or "auto"
     if normalized_execution_preference not in {"auto", "prefer_local_inline"}:
         normalized_execution_preference = "auto"
-    bounded_window_scope = (
-        "bounded_window"
-        if _catalog_backfill_has_bounded_window(date_start=date_start, date_end=date_end)
-        else "full_history"
+    action_seed = resolve_social_account_catalog_action_seed(
+        date_start=date_start,
+        date_end=date_end,
+        catalog_action=catalog_action,
+        catalog_action_scope=catalog_action_scope,
     )
+    normalized_date_start = action_seed["date_start"]
+    normalized_date_end = action_seed["date_end"]
+    normalized_catalog_action = action_seed["catalog_action"]
+    normalized_catalog_action_scope = action_seed["catalog_action_scope"]
+    bounded_window_scope = normalized_catalog_action_scope
     if normalized_platform == "tiktok":
         launch_group_id = str(launch_group_id_override or uuid4())
         effective_selected_tasks = _effective_social_account_catalog_backfill_selected_tasks(
@@ -971,14 +1005,14 @@ def launch_social_account_catalog_backfill(
             normalized_platform,
             normalized_account,
             source_scope=source_scope,
-            date_start=date_start,
-            date_end=date_end,
+            date_start=normalized_date_start,
+            date_end=normalized_date_end,
             initiated_by=initiated_by,
             inline_worker_id=inline_worker_id,
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
             execution_preference=execution_preference,
-            catalog_action="backfill",
-            catalog_action_scope=bounded_window_scope,
+            catalog_action=normalized_catalog_action,
+            catalog_action_scope=normalized_catalog_action_scope,
             details_refresh_skip_detail_fetch="post_details" not in effective_selected_tasks,
             details_refresh_skip_media_followups="media" not in effective_selected_tasks,
             tiktok_comments_in_posts_stage="comments" in effective_selected_tasks,
@@ -987,6 +1021,7 @@ def launch_social_account_catalog_backfill(
             ),
             selected_tasks=normalized_selected_tasks,
             effective_selected_tasks=effective_selected_tasks,
+            comment_anchor_source_ids=comment_anchor_source_ids,
             launch_group_id=launch_group_id,
             existing_run_id=existing_catalog_run_id,
         )
@@ -1057,6 +1092,8 @@ def launch_social_account_catalog_backfill(
             "comments_run_id": None,
             "catalog_status": str((catalog_result or {}).get("status") or "").strip() or None,
             "comments_status": None,
+            "catalog_action": normalized_catalog_action,
+            "catalog_action_scope": normalized_catalog_action_scope,
             "catalog_bootstrap_required": False,
             "comments_deferred_until_catalog_complete": False,
             "attached_followups": {},
@@ -1097,14 +1134,14 @@ def launch_social_account_catalog_backfill(
             normalized_platform,
             normalized_account,
             source_scope=source_scope,
-            date_start=date_start,
-            date_end=date_end,
+            date_start=normalized_date_start,
+            date_end=normalized_date_end,
             initiated_by=initiated_by,
             inline_worker_id=inline_worker_id,
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
             execution_preference=execution_preference,
-            catalog_action="backfill",
-            catalog_action_scope=bounded_window_scope,
+            catalog_action=normalized_catalog_action,
+            catalog_action_scope=normalized_catalog_action_scope,
             social_account_post_details_only=effective_selected_tasks == ["post_details"],
             details_refresh_skip_detail_fetch="post_details" not in effective_selected_tasks,
             details_refresh_skip_media_followups="media" not in effective_selected_tasks,
@@ -1114,6 +1151,7 @@ def launch_social_account_catalog_backfill(
             ),
             selected_tasks=normalized_selected_tasks,
             effective_selected_tasks=effective_selected_tasks,
+            comment_anchor_source_ids=comment_anchor_source_ids,
             existing_run_id=existing_catalog_run_id,
         )
         catalog_launch_ms = round((time_module.perf_counter() - catalog_launch_started_at) * 1000, 1)
@@ -1183,6 +1221,8 @@ def launch_social_account_catalog_backfill(
             "comments_run_id": None,
             "catalog_status": str((catalog_result or {}).get("status") or "").strip() or None,
             "comments_status": None,
+            "catalog_action": normalized_catalog_action,
+            "catalog_action_scope": normalized_catalog_action_scope,
             "catalog_bootstrap_required": False,
             "comments_deferred_until_catalog_complete": False,
             "attached_followups": {},
@@ -1230,8 +1270,8 @@ def launch_social_account_catalog_backfill(
             materialized_posts = _materialized_social_account_total_posts(
                 "instagram",
                 normalized_account,
-                date_start=date_start,
-                date_end=date_end,
+                date_start=normalized_date_start,
+                date_end=normalized_date_end,
             )
             coverage = {
                 "platform": "instagram",
@@ -1250,14 +1290,50 @@ def launch_social_account_catalog_backfill(
         else:
             coverage = _instagram_materialization_state(
                 normalized_account,
-                date_start=date_start,
-                date_end=date_end,
+                date_start=normalized_date_start,
+                date_end=normalized_date_end,
             )
         coverage_ms = round((time_module.perf_counter() - coverage_started_at) * 1000, 1)
         requires_catalog_bootstrap = bool(coverage.get("bootstrap_required"))
+        if instagram_targeted_comments_only:
+            requires_catalog_bootstrap = False
         effective_selected_tasks = list(normalized_selected_tasks)
+        stored_post_count = max(
+            _normalize_non_negative_int(coverage.get("materialized_posts")),
+            _normalize_non_negative_int(coverage.get("catalog_posts")),
+        )
+        if set(effective_selected_tasks) == {"post_details"} and stored_post_count > 0:
+            requires_catalog_bootstrap = False
         if "comments" in effective_selected_tasks:
-            if use_fast_existing_posts_launch_state and not requires_catalog_bootstrap:
+            if instagram_targeted_comment_source_ids:
+                target_count = len(instagram_targeted_comment_source_ids)
+                comments_shard_count = _instagram_comments_profile_shard_count(target_count)
+                target_readiness = {
+                    "status": "completed",
+                    "account_handle": normalized_account,
+                    "saved_source_ids_count": target_count,
+                    "commentable_target_count": target_count,
+                    "comments_target_source_ids_count": target_count,
+                    "sample_target_source_ids": instagram_targeted_comment_source_ids[:12],
+                    "incomplete_comment_target_count": target_count,
+                    "media_candidate_count": target_count,
+                    "detail_gap_count": 0,
+                    "can_start_comments": True,
+                    "blocker_reasons": [],
+                    "comments_blocker_reasons": [],
+                    "refresh_policy": "explicit_targets",
+                    "explicit_comment_anchor_source_ids": True,
+                    "comments_preview": {
+                        "comments_shard_count": comments_shard_count,
+                        "comments_sharding_enabled": comments_shard_count > 1,
+                        "recommended_comments_shard_count": _instagram_comments_recommended_shard_count(
+                            target_count=target_count
+                        ),
+                        "target_priority": "explicit_anchor",
+                    },
+                    "timing_ms": coverage_ms,
+                }
+            elif use_fast_existing_posts_launch_state and not requires_catalog_bootstrap:
                 materialized_count = _normalize_non_negative_int(coverage.get("materialized_posts"))
                 comments_shard_count = _instagram_comments_profile_shard_count(materialized_count)
                 target_readiness = {
@@ -1334,7 +1410,7 @@ def launch_social_account_catalog_backfill(
     )
     posts_auth_metadata: dict[str, Any] = {}
     public_posts_auth_metadata: dict[str, Any] = {}
-    if catalog_selected:
+    if catalog_selected and not catalog_details_refresh_only:
         posts_auth_metadata = _ensure_instagram_posts_auth_ready_for_launch(account_handle=normalized_account)
         public_posts_auth_metadata = _public_posts_launch_auth_metadata(posts_auth_metadata)
         if public_posts_auth_metadata.get("auth_repair_status") == "failed":
@@ -1351,6 +1427,12 @@ def launch_social_account_catalog_backfill(
                     "total_ms": round((time_module.perf_counter() - launch_started_at) * 1000, 1),
                 },
             )
+    elif catalog_selected:
+        public_posts_auth_metadata = {
+            "auth_repair_status": "skipped",
+            "auth_repair_reason": "details_refresh_only_existing_catalog",
+            "auth_repair_attempted": False,
+        }
 
     if not catalog_selected and not any(task in effective_selected_tasks for task in ("comments", "media")):
         no_work_payload = _complete_catalog_launch_no_work(
@@ -1404,14 +1486,14 @@ def launch_social_account_catalog_backfill(
             normalized_platform,
             normalized_account,
             source_scope=source_scope,
-            date_start=date_start,
-            date_end=date_end,
+            date_start=normalized_date_start,
+            date_end=normalized_date_end,
             initiated_by=initiated_by,
             inline_worker_id=inline_worker_id,
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
             execution_preference=execution_preference,
-            catalog_action="backfill",
-            catalog_action_scope=bounded_window_scope,
+            catalog_action=normalized_catalog_action,
+            catalog_action_scope=normalized_catalog_action_scope,
             social_account_post_details_only=catalog_details_refresh_only,
             details_refresh_skip_detail_fetch="post_details" not in catalog_tasks,
             details_refresh_force_detail_fetch=force_detail_fetch,
@@ -1527,7 +1609,8 @@ def launch_social_account_catalog_backfill(
                     allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
                     comments_enable_media_followups="media" in effective_selected_tasks,
                     launch_group_id=launch_group_id,
-                    skip_launch_auth_probe=bool(catalog_result),
+                    skip_launch_auth_probe=bool(catalog_result) or bool(instagram_targeted_comment_source_ids),
+                    target_source_ids=instagram_targeted_comment_source_ids or None,
                 )
             except SocialIngestConflictError as exc:
                 if exc.code == "SOCIAL_ACCOUNT_COMMENTS_LAUNCH_IN_PROGRESS":
@@ -1699,6 +1782,8 @@ def launch_social_account_catalog_backfill(
         "comments_run_id": comments_run_id,
         "catalog_status": str((catalog_result or {}).get("status") or "").strip() or None,
         "comments_status": str((comments_result or {}).get("status") or "").strip() or None,
+        "catalog_action": normalized_catalog_action,
+        "catalog_action_scope": normalized_catalog_action_scope,
         "catalog_bootstrap_required": requires_catalog_bootstrap if catalog_selected else False,
         "comments_deferred_until_catalog_complete": comments_deferred_until_catalog_complete,
         "attached_followups": attached_followups,

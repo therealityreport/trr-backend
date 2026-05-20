@@ -39,7 +39,8 @@ DEFAULT_POOL_MAXCONN = 24
 DEFAULT_SESSION_POOLER_MINCONN = 1
 DEFAULT_SESSION_POOLER_MAXCONN = 2
 DEFAULT_MODAL_SESSION_POOLER_MINCONN = 1
-DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 1
+DEFAULT_MODAL_SESSION_POOLER_MAXCONN = 2
+DEFAULT_MODAL_NAMED_SESSION_POOLER_MAXCONN = 1
 LOCAL_SESSION_POOLER_MAX_CEILING = 8
 DEFAULT_POOL_ACQUIRE_ATTEMPTS = 8
 DEFAULT_POOL_ACQUIRE_SLEEP_MS = 50
@@ -109,6 +110,12 @@ def _session_pooler_warning_maxconn(pool_name: str) -> int:
     if pool_name == "social_profile":
         return 4
     return DEFAULT_SESSION_POOLER_MAXCONN
+
+
+def _modal_session_pooler_maxconn(pool_name: str) -> int:
+    if pool_name == "default":
+        return DEFAULT_MODAL_SESSION_POOLER_MAXCONN
+    return DEFAULT_MODAL_NAMED_SESSION_POOLER_MAXCONN
 
 
 def _active_pool_ref(pool_name: str) -> tuple[ThreadedConnectionPool | None, str | None]:
@@ -341,8 +348,9 @@ def _resolve_pool_sizing(
     trr_local_dev = _env_truthy("TRR_LOCAL_DEV")
     modal_runtime = _is_modal_container_runtime()
     local_or_dev_runtime = _is_local_or_dev_runtime()
-    if session_pooler and modal_runtime and not trr_local_dev and maxconn > DEFAULT_MODAL_SESSION_POOLER_MAXCONN:
-        maxconn = DEFAULT_MODAL_SESSION_POOLER_MAXCONN
+    modal_session_pooler_maxconn = _modal_session_pooler_maxconn(pool_name)
+    if session_pooler and modal_runtime and not trr_local_dev and maxconn > modal_session_pooler_maxconn:
+        maxconn = modal_session_pooler_maxconn
         maxconn_source = "clamped:modal_session_pooler_ceiling"
         modal_session_pooler_override_clamped = True
     elif session_pooler and local_or_dev_runtime and maxconn > LOCAL_SESSION_POOLER_MAX_CEILING:
@@ -363,7 +371,7 @@ def _resolve_pool_sizing(
         "default_minconn": default_minconn,
         "default_maxconn": default_maxconn,
         "modal_default_minconn": DEFAULT_MODAL_SESSION_POOLER_MINCONN,
-        "modal_default_maxconn": DEFAULT_MODAL_SESSION_POOLER_MAXCONN,
+        "modal_default_maxconn": modal_session_pooler_maxconn,
         "minconn": minconn,
         "maxconn": maxconn,
         "requested_minconn": requested_minconn,

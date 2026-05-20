@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Open a headed Chrome browser for manual Instagram login.
 
-Uses your real Chrome profile so Instagram sees a familiar browser fingerprint.
+Uses the codex Chrome profile so Instagram sees a familiar browser fingerprint.
 Once you complete login (including any captchas/2FA), cookies are extracted
 and saved to the local cookie file.
 
 Usage:
     python scripts/socials/instagram/interactive_login.py
     python scripts/socials/instagram/interactive_login.py --push-to-modal
-    python scripts/socials/instagram/interactive_login.py --chrome-profile "entertainmentdatagroup@gmail.com"
+    python scripts/socials/instagram/interactive_login.py --chrome-profile "codex@thereality.report"
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--chrome-profile",
-        default="entertainmentdatagroup@gmail.com",
-        help="Chrome profile display name or email (default: entertainmentdatagroup@gmail.com)",
+        default="codex@thereality.report",
+        help="Chrome profile display name or email (default: codex@thereality.report)",
     )
     parser.add_argument(
         "--cookie-file",

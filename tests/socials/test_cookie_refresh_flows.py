@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -15,6 +16,11 @@ from trr_backend.socials.instagram.scraper import load_cookies_from_file
 from trr_backend.socials.threads import cookie_refresh as threads_cookie_refresh
 from trr_backend.socials.tiktok import cookie_refresh as tiktok_cookie_refresh
 from trr_backend.socials.twitter import cookie_refresh as twitter_cookie_refresh
+
+
+@pytest.fixture(autouse=True)
+def _disable_social_auth_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOCIAL_AUTH_REFRESH_RATE_LIMIT_DISABLED", "true")
 
 
 def test_tiktok_cookie_refresh_requires_authenticated_session_cookies() -> None:
@@ -48,6 +54,46 @@ def test_instagram_cookie_validation_username_uses_public_fallback_not_login_ide
 
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME", "@TheTraitorsUS")
     assert instagram_auth_runtime._instagram_cookie_validation_username() == "thetraitorsus"
+
+
+def test_instagram_cookie_health_probe_disables_repair_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed_env: dict[str, str | None] = {}
+
+    class _FakeInstagramScraper:
+        def __init__(self, **_kwargs: object) -> None:
+            self.last_retrieval_meta: dict[str, object] = {}
+
+        def fetch_posts_graphql(self, *_args: object, **_kwargs: object) -> None:
+            observed_env["auto_refresh"] = os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH")
+            observed_env["graphql_recovery_disabled"] = os.getenv("SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED")
+            observed_env["interactive_login"] = os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN")
+            self.last_retrieval_meta = {
+                "error_code": "instagram_graphql_checkpoint_required",
+                "error_message": "checkpoint_required",
+                "retrieval_transport": "requests_enriched",
+            }
+            return None
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME", "instagram")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+    monkeypatch.setattr("trr_backend.socials.instagram.InstagramScraper", _FakeInstagramScraper)
+    instagram_auth_runtime._instagram_cookie_validation_cache = None
+
+    result = instagram_auth_runtime._inspect_instagram_cookie_health(
+        {"sessionid": "stale-session", "csrftoken": "csrf", "ds_user_id": "123"}
+    )
+
+    assert result["valid"] is False
+    assert result["reason"] == "checkpoint_required"
+    assert observed_env == {
+        "auto_refresh": "false",
+        "graphql_recovery_disabled": "true",
+        "interactive_login": "false",
+    }
+    assert os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") == "true"
+    assert os.getenv("SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED") is None
+    assert os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") == "1"
 
 
 def test_threads_cookie_refresh_falls_back_to_direct_login(monkeypatch, tmp_path: Path) -> None:
@@ -194,9 +240,170 @@ def test_validate_browser_cookie_session_rejects_http_error_status(
     assert reason == "validation_http_status:404"
 
 
+def test_cookie_refresh_context_defaults_to_codex_chrome_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    profile_dir = chrome_root / "Profile 13"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Preferences").write_text(
+        json.dumps({"profile": {"name": "codex"}, "account_info": [{"email": "codex@thereality.report"}]}),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeContext:
+        def close(self) -> None:
+            captured["closed"] = True
+
+    class _FakeChromium:
+        def launch_persistent_context(self, **kwargs: object) -> _FakeContext:
+            captured.update(kwargs)
+            return _FakeContext()
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+    monkeypatch.delenv("SOCIAL_AUTH_CHROME_PROFILE", raising=False)
+    monkeypatch.delenv("SOCIAL_COOKIE_REFRESH_CHROME_PROFILE", raising=False)
+    monkeypatch.delenv("SOCIAL_TIKTOK_CHROME_PROFILE", raising=False)
+
+    session = browser_cookie_refresh.open_cookie_refresh_context(
+        SimpleNamespace(chromium=_FakeChromium()),
+        platform="tiktok",
+        headless=True,
+        viewport={"width": 100, "height": 100},
+    )
+    session.close()
+
+    assert captured["user_data_dir"] == str(chrome_root)
+    assert captured["channel"] == "chrome"
+    assert captured["headless"] is True
+    assert "--profile-directory=Profile 13" in captured["args"]
+    assert captured["closed"] is True
+
+
+def test_cookie_refresh_context_refuses_inner_profile_user_data_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    profile_dir = chrome_root / "Profile 13"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Preferences").write_text(
+        json.dumps({"profile": {"name": "codex"}, "account_info": [{"email": "codex@thereality.report"}]}),
+        encoding="utf-8",
+    )
+
+    def _bad_base_dir() -> Path:
+        return profile_dir
+
+    class _FakeChromium:
+        def launch_persistent_context(self, **_kwargs: object) -> object:
+            raise AssertionError("inner profile path should fail before launch")
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", _bad_base_dir)
+    monkeypatch.delenv("SOCIAL_AUTH_CHROME_PROFILE", raising=False)
+    monkeypatch.delenv("SOCIAL_COOKIE_REFRESH_CHROME_PROFILE", raising=False)
+
+    with pytest.raises(browser_cookie_refresh.ChromeProfileNotAvailableError, match="Chrome user-data root"):
+        browser_cookie_refresh.open_cookie_refresh_context(
+            SimpleNamespace(chromium=_FakeChromium()),
+            platform="instagram",
+            headless=True,
+            viewport={"width": 100, "height": 100},
+        )
+
+
+def test_cookie_refresh_context_refuses_locked_profile_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    profile_dir = chrome_root / "Profile 13"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Preferences").write_text(
+        json.dumps({"profile": {"name": "codex"}, "account_info": [{"email": "codex@thereality.report"}]}),
+        encoding="utf-8",
+    )
+    (chrome_root / "SingletonLock").touch()
+
+    class _FakeChromium:
+        def launch_persistent_context(self, **_kwargs: object) -> object:
+            raise AssertionError("locked Chrome profile should fail before launch")
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+    monkeypatch.delenv("SOCIAL_AUTH_CHROME_PROFILE", raising=False)
+    monkeypatch.delenv("SOCIAL_COOKIE_REFRESH_CHROME_PROFILE", raising=False)
+
+    with pytest.raises(browser_cookie_refresh.ChromeProfileLockedError, match="Chrome auth profile is locked"):
+        browser_cookie_refresh.open_cookie_refresh_context(
+            SimpleNamespace(chromium=_FakeChromium()),
+            platform="instagram",
+            headless=True,
+            viewport={"width": 100, "height": 100},
+        )
+
+
+def test_cookie_refresh_context_refuses_profileless_browser_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    chrome_root.mkdir()
+
+    class _FakeChromium:
+        def launch(self, **_kwargs: object) -> object:
+            raise AssertionError("profile-less browser should not launch")
+
+        def launch_persistent_context(self, **_kwargs: object) -> object:
+            raise AssertionError("missing profile should fail before launch")
+
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+
+    with pytest.raises(browser_cookie_refresh.ChromeProfileNotAvailableError):
+        browser_cookie_refresh.open_cookie_refresh_context(
+            SimpleNamespace(chromium=_FakeChromium()),
+            platform="tiktok",
+            headless=True,
+            viewport={"width": 100, "height": 100},
+        )
+
+
+def test_social_auth_refresh_rate_limit_blocks_repeated_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SOCIAL_AUTH_REFRESH_RATE_LIMIT_DISABLED", "false")
+    monkeypatch.setenv("SOCIAL_AUTH_REFRESH_RATE_LIMIT_DIR", str(tmp_path / "locks"))
+    monkeypatch.setenv("SOCIAL_AUTH_REFRESH_MIN_INTERVAL_SECONDS", "3600")
+
+    first = browser_cookie_refresh.reserve_social_auth_refresh_attempt("instagram")
+
+    assert first["reserved"] is True
+    with pytest.raises(browser_cookie_refresh.SocialAuthRefreshRateLimitError, match="rate-limited"):
+        browser_cookie_refresh.reserve_social_auth_refresh_attempt("instagram")
+
+
+def test_social_auth_refresh_rate_limit_is_per_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SOCIAL_AUTH_REFRESH_RATE_LIMIT_DISABLED", "false")
+    monkeypatch.setenv("SOCIAL_AUTH_REFRESH_RATE_LIMIT_DIR", str(tmp_path / "locks"))
+    monkeypatch.setenv("SOCIAL_AUTH_REFRESH_MIN_INTERVAL_SECONDS", "3600")
+
+    instagram = browser_cookie_refresh.reserve_social_auth_refresh_attempt("instagram")
+    tiktok = browser_cookie_refresh.reserve_social_auth_refresh_attempt("tiktok")
+
+    assert instagram["platform"] == "instagram"
+    assert tiktok["platform"] == "tiktok"
+
+
 def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatch, tmp_path: Path) -> None:
     writes: list[Path] = []
     imported_sessions: list[object] = []
+    monkeypatch.setenv("SOCIAL_AUTH_CHROME_PROFILE", "missing-test-profile")
+    monkeypatch.setenv("SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE", "false")
 
     class _FakePlaywrightTimeoutError(Exception):
         pass
@@ -298,6 +505,9 @@ def test_instagram_cookie_refresh_rejects_unvalidated_graphql_session(monkeypatc
 def test_instagram_cookie_refresh_preserves_challenge_error_when_browser_close_fails(
     monkeypatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setenv("SOCIAL_AUTH_CHROME_PROFILE", "missing-test-profile")
+    monkeypatch.setenv("SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE", "false")
+
     class _FakePlaywrightTimeoutError(Exception):
         pass
 
@@ -380,6 +590,8 @@ def test_instagram_cookie_refresh_preserves_challenge_error_when_browser_close_f
 def test_instagram_cookie_refresh_schema_only_skips_graphql_validator(monkeypatch, tmp_path: Path) -> None:
     writes: list[tuple[Path, dict[str, str]]] = []
     imported_sessions: list[object] = []
+    monkeypatch.setenv("SOCIAL_AUTH_CHROME_PROFILE", "missing-test-profile")
+    monkeypatch.setenv("SOCIAL_COOKIE_REFRESH_REQUIRE_CHROME_PROFILE", "false")
 
     class _FakePlaywrightTimeoutError(Exception):
         pass
@@ -600,7 +812,15 @@ def test_interactive_instagram_login_rejects_saved_session_when_graphql_fails(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    chrome_root = tmp_path / "Chrome"
+    profile_dir = chrome_root / "Profile 13"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Preferences").write_text(
+        json.dumps({"profile": {"name": "codex"}, "account_info": [{"email": "codex@thereality.report"}]}),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path))
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
     instagram_cookie_refresh._INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(  # noqa: SLF001
         "bravotv",
         {"sessionid": "saved-session", "csrftoken": "saved-csrf"},
@@ -618,15 +838,29 @@ def test_interactive_instagram_login_rejects_saved_session_when_graphql_fails(
         "_write_cookie_file",
         lambda path, cookies: writes.append((Path(path), dict(cookies))),
     )
-    monkeypatch.setattr(
-        instagram_cookie_refresh,
-        "_find_chrome_profile_dir",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("persistent Chrome launched")),
-    )
+
+    class _FakeChromium:
+        def launch_persistent_context(self, **_kwargs: object) -> object:
+            raise RuntimeError("persistent Chrome launched")
+
+    class _PlaywrightContext:
+        def __enter__(self) -> SimpleNamespace:
+            return SimpleNamespace(chromium=_FakeChromium())
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module.TimeoutError = TimeoutError
+    sync_api_module.sync_playwright = lambda: _PlaywrightContext()
+    playwright_module = ModuleType("playwright")
+    playwright_module.sync_api = sync_api_module
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
 
     with pytest.raises(RuntimeError, match="persistent Chrome launched"):
         instagram_cookie_refresh.interactive_chrome_login(
-            chrome_profile_name="unused-profile",
+            chrome_profile_name="codex@thereality.report",
             cookie_file=tmp_path / "instagram-cookies.json",
             validation_username="bravotv",
             timeout_seconds=120,
@@ -636,11 +870,106 @@ def test_interactive_instagram_login_rejects_saved_session_when_graphql_fails(
     assert writes == []
 
 
+def test_interactive_instagram_login_launches_real_profile_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    chrome_root = tmp_path / "Chrome"
+    profile_dir = chrome_root / "Profile 13"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Preferences").write_text(
+        json.dumps({"profile": {"name": "codex"}, "account_info": [{"email": "codex@thereality.report"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setattr(browser_cookie_refresh, "_chrome_profile_base_dir", lambda: chrome_root)
+    captured: dict[str, object] = {}
+    writes: list[tuple[Path, dict[str, str]]] = []
+
+    class _FakePlaywrightTimeoutError(Exception):
+        pass
+
+    class _Locator:
+        def inner_text(self, **_kwargs: object) -> str:
+            return ""
+
+    class _Page:
+        url = "https://www.instagram.com/"
+
+        def goto(self, url: str, **_kwargs: object) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def locator(self, *_args: object, **_kwargs: object) -> _Locator:
+            return _Locator()
+
+    class _Context:
+        def new_page(self) -> _Page:
+            return _Page()
+
+        def cookies(self) -> list[dict[str, object]]:
+            return [
+                {"name": "sessionid", "value": "fresh-session", "domain": ".instagram.com"},
+                {"name": "csrftoken", "value": "fresh-csrf", "domain": ".instagram.com"},
+                {"name": "ds_user_id", "value": "123", "domain": ".instagram.com"},
+            ]
+
+        def storage_state(self) -> dict[str, object]:
+            return {"cookies": self.cookies(), "origins": []}
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    class _FakeChromium:
+        def launch_persistent_context(self, **kwargs: object) -> _Context:
+            captured.update(kwargs)
+            return _Context()
+
+    class _PlaywrightContext:
+        def __enter__(self) -> SimpleNamespace:
+            return SimpleNamespace(chromium=_FakeChromium())
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    sync_api_module = ModuleType("playwright.sync_api")
+    sync_api_module.TimeoutError = _FakePlaywrightTimeoutError
+    sync_api_module.sync_playwright = lambda: _PlaywrightContext()
+    playwright_module = ModuleType("playwright")
+    playwright_module.sync_api = sync_api_module
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
+    monkeypatch.setattr(
+        instagram_cookie_refresh,
+        "_write_cookie_file",
+        lambda path, cookies: writes.append((Path(path), dict(cookies))),
+    )
+
+    cookies = instagram_cookie_refresh.interactive_chrome_login(
+        chrome_profile_name="codex@thereality.report",
+        cookie_file=tmp_path / "instagram-cookies.json",
+        validation_username="bravotv",
+        timeout_seconds=120,
+        headless=False,
+        validation_mode="schema_only",
+    )
+
+    assert captured["user_data_dir"] == str(chrome_root)
+    assert "--profile-directory=Profile 13" in captured["args"]
+    assert captured["headless"] is False
+    assert captured["closed"] is True
+    assert cookies["sessionid"] == "fresh-session"
+    assert writes == [(tmp_path / "instagram-cookies.json", cookies)]
+
+
 def test_refresh_twitter_cookies_retries_headed_after_headless_error_shell(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     attempts: list[bool] = []
+    monkeypatch.setenv("SOCIAL_TWITTER_COOKIE_REFRESH_ALLOW_HEADED_FALLBACK", "true")
 
     def _fake_once(*, headless: bool, **_: object) -> dict[str, str]:
         attempts.append(headless)
@@ -661,3 +990,28 @@ def test_refresh_twitter_cookies_retries_headed_after_headless_error_shell(
     assert attempts == [True, False]
     assert cookies["auth_token"] == "fresh-auth"
     assert cookies["ct0"] == "fresh-ct0"
+
+
+def test_refresh_twitter_cookies_does_not_retry_headed_by_default(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    attempts: list[bool] = []
+    monkeypatch.delenv("SOCIAL_TWITTER_COOKIE_REFRESH_ALLOW_HEADED_FALLBACK", raising=False)
+
+    def _fake_once(*, headless: bool, **_: object) -> dict[str, str]:
+        attempts.append(headless)
+        raise RuntimeError("Twitter login page returned an error shell before credentials were entered")
+
+    monkeypatch.setattr(twitter_cookie_refresh, "_refresh_twitter_cookies_once", _fake_once)
+
+    with pytest.raises(RuntimeError, match="error shell"):
+        twitter_cookie_refresh.refresh_twitter_cookies(
+            username="codex@thereality.report",
+            password="secret",
+            cookie_file=tmp_path / "twitter-cookies.json",
+            headless=True,
+            timeout_seconds=45,
+        )
+
+    assert attempts == [True]

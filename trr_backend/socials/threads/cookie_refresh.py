@@ -10,6 +10,7 @@ from trr_backend.socials.browser_cookie_refresh import SimpleLoginSpec, refresh_
 logger = logging.getLogger(__name__)
 
 _SPEC = SimpleLoginSpec(
+    platform="threads",
     login_url="https://www.threads.com/login",
     validation_url="https://www.threads.com/@threads",
     cookie_domains=(".threads.com", "www.threads.com", ".instagram.com"),

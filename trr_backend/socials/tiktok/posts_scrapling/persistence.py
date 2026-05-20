@@ -95,15 +95,13 @@ def _tiktok_item_to_post_dto(item: dict[str, Any], *, account_handle: str) -> _S
     )
 
 
-def persist_tiktok_posts(
+def _persist_tiktok_post_dtos(
     *,
     account_handle: str,
-    post_items: list[dict[str, Any]],
-    run_id: str | None,
+    posts: list[Any],
     job_id: str | None,
     season_id: str | None = None,
 ) -> PersistedTikTokPosts:
-    """Adapt raw TikTok API items and persist through canonical repo helper."""
     from trr_backend.db import pg
     from trr_backend.repositories import social_season_analytics as repo
 
@@ -118,17 +116,8 @@ def persist_tiktok_posts(
         posts_skipped_by_reason[reason] = int(posts_skipped_by_reason.get(reason) or 0) + 1
 
     with pg.db_connection() as conn:
-        for item in post_items:
-            if not isinstance(item, dict):
-                _record_skip("invalid_item")
-                continue
-            try:
-                dto = _tiktok_item_to_post_dto(item, account_handle=account_handle)
-            except Exception:  # noqa: BLE001
-                logger.exception("Failed to adapt TikTok post item via canonical parser")
-                _record_skip("adapt_failed")
-                continue
-            if not str(dto.video_id or "").strip():
+        for post in posts:
+            if not str(getattr(post, "video_id", "") or "").strip():
                 _record_skip("missing_video_id")
                 continue
             try:
@@ -136,16 +125,85 @@ def persist_tiktok_posts(
                     context,
                     job_id=job_id,
                     account=account_handle,
-                    post=dto,
+                    post=post,
                     conn=conn,
                 )
                 posts_upserted += 1
             except Exception:  # noqa: BLE001
-                logger.exception("Failed to upsert TikTok post %s via canonical helper", dto.video_id)
+                logger.exception("Failed to upsert TikTok post %s via canonical helper", post.video_id)
                 _record_skip("upsert_failed")
 
     return PersistedTikTokPosts(
         posts_upserted=posts_upserted,
+        posts_skipped=posts_skipped,
+        posts_skipped_by_reason=posts_skipped_by_reason,
+    )
+
+
+def persist_tiktok_post_dtos(
+    *,
+    account_handle: str,
+    posts: list[Any],
+    run_id: str | None,
+    job_id: str | None,
+    season_id: str | None = None,
+) -> PersistedTikTokPosts:
+    """Persist already-adapted TikTokPost-compatible objects."""
+    del run_id
+    return _persist_tiktok_post_dtos(
+        account_handle=account_handle,
+        posts=posts,
+        job_id=job_id,
+        season_id=season_id,
+    )
+
+
+def persist_tiktok_posts(
+    *,
+    account_handle: str,
+    post_items: list[dict[str, Any]],
+    run_id: str | None,
+    job_id: str | None,
+    season_id: str | None = None,
+) -> PersistedTikTokPosts:
+    """Adapt raw TikTok API items and persist through canonical repo helper."""
+    del run_id
+    posts: list[_ScraplingTikTokPostDTO] = []
+    posts_skipped = 0
+    posts_skipped_by_reason: dict[str, int] = {}
+
+    def _record_skip(reason: str) -> None:
+        nonlocal posts_skipped
+        posts_skipped += 1
+        posts_skipped_by_reason[reason] = int(posts_skipped_by_reason.get(reason) or 0) + 1
+
+    for item in post_items:
+        if not isinstance(item, dict):
+            _record_skip("invalid_item")
+            continue
+        try:
+            dto = _tiktok_item_to_post_dto(item, account_handle=account_handle)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to adapt TikTok post item via canonical parser")
+            _record_skip("adapt_failed")
+            continue
+        if not str(dto.video_id or "").strip():
+            _record_skip("missing_video_id")
+            continue
+        posts.append(dto)
+
+    persisted = _persist_tiktok_post_dtos(
+        account_handle=account_handle,
+        posts=posts,
+        job_id=job_id,
+        season_id=season_id,
+    )
+    posts_skipped += persisted.posts_skipped
+    for reason, count in persisted.posts_skipped_by_reason.items():
+        posts_skipped_by_reason[reason] = int(posts_skipped_by_reason.get(reason) or 0) + int(count or 0)
+
+    return PersistedTikTokPosts(
+        posts_upserted=persisted.posts_upserted,
         posts_skipped=posts_skipped,
         posts_skipped_by_reason=posts_skipped_by_reason,
     )

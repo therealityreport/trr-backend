@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from trr_backend.socials.socialblade import service as service_module
 from trr_backend.repositories.socialblade_growth import normalize_socialblade_account_handle
+from trr_backend.socials.socialblade import service as service_module
 from trr_backend.socials.socialblade.service import (
     attach_instagram_following_scrape,
     is_growth_data_fresh,
@@ -187,10 +187,13 @@ def test_sanitize_socialblade_handle_extracts_full_profile_urls() -> None:
 
 def test_socialblade_handle_normalization_preserves_youtube_channel_ids_and_facebook_profile_ids() -> None:
     assert sanitize_socialblade_handle("UCabcXYZ123", platform="youtube") == "UCabcXYZ123"
-    assert normalize_socialblade_account_handle(
-        "https://www.youtube.com/channel/UCabcXYZ123",
-        platform="youtube",
-    ) == "UCabcXYZ123"
+    assert (
+        normalize_socialblade_account_handle(
+            "https://www.youtube.com/channel/UCabcXYZ123",
+            platform="youtube",
+        )
+        == "UCabcXYZ123"
+    )
     assert sanitize_socialblade_handle("https://www.facebook.com/profile.php?id=123456789", platform="facebook") == (
         "123456789"
     )

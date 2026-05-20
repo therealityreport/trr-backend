@@ -687,8 +687,8 @@ def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides_without_pytes
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
-    assert sizing["minconn"] == 1
-    assert sizing["maxconn"] == 1
+    assert sizing["minconn"] == 2
+    assert sizing["maxconn"] == 2
     assert sizing["session_pooler_override_clamped"] is False
     assert sizing["modal_session_pooler_override_clamped"] is True
     assert sizing["maxconn_source"] == "clamped:modal_session_pooler_ceiling"
@@ -782,8 +782,8 @@ def test_resolve_pool_sizing_clamps_modal_session_pooler_overrides(monkeypatch: 
 
     assert sizing["requested_minconn"] == 4
     assert sizing["requested_maxconn"] == 16
-    assert sizing["minconn"] == 1
-    assert sizing["maxconn"] == 1
+    assert sizing["minconn"] == 2
+    assert sizing["maxconn"] == 2
     assert sizing["modal_session_pooler_override_clamped"] is True
     assert sizing["minconn_source"] == "clamped:modal_session_pooler_ceiling"
     assert sizing["maxconn_source"] == "clamped:modal_session_pooler_ceiling"

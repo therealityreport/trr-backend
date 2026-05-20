@@ -41,6 +41,13 @@ def test_tiktok_result_dataclass():
     assert result.fetch_failed is False
 
 
+def test_tiktok_extracts_sec_uid_from_warmup_html():
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import _extract_sec_uid_from_text
+
+    assert _extract_sec_uid_from_text('{"user":{"secUid":"SEC123"}}') == "SEC123"
+    assert _extract_sec_uid_from_text(r"{\"user\":{\"secUid\":\"SEC456\"}}") == "SEC456"
+
+
 def test_tiktok_challenge_detection():
     from trr_backend.socials.tiktok.posts_scrapling.fetcher import _is_challenge_response
 
@@ -92,6 +99,24 @@ def test_tiktok_fetch_posts_page_preserves_explicit_count_override(_mock_scrapli
     asyncio.run(fetcher.fetch_posts_page(sec_uid="SEC_UID", count=7))
 
     assert captured_params["count"] == "7"
+
+
+def test_tiktok_resolve_sec_uid_falls_back_to_warmup_html(_mock_scrapling, monkeypatch):
+    import asyncio
+
+    from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
+
+    fetcher = TikTokPostsScraplingFetcher(cookies=[], raw_cookies={})
+    fetcher._warmup_sec_uid = "SEC_FROM_HTML"
+
+    async def _fake_fetch_api_json(_url, *, params, referer):
+        del params, referer
+        return {"failed": True, "reason": "non_json_response", "payload": None}
+
+    monkeypatch.setattr(fetcher, "_fetch_api_json", _fake_fetch_api_json)
+
+    assert asyncio.run(fetcher.resolve_sec_uid("bravotv")) == "SEC_FROM_HTML"
+    assert fetcher.runtime_metadata["sec_uid_source"] == "warmup_html"
 
 
 def test_tiktok_runtime_metadata_never_exposes_cookie_values(_mock_scrapling):

@@ -21,7 +21,7 @@ def build_canary_commands(account: str) -> list[list[str]]:
             "--account",
             account,
             "--source-scope",
-            "bravo",
+            "network",
             "--action",
             "backfill",
             "--selected-task",

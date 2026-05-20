@@ -102,6 +102,8 @@ class _WarmupPoolEntry:
 
 
 _POSTS_WARMUP_POOL: dict[str, _WarmupPoolEntry] = {}
+_WARMUP_SNAPSHOT_COOKIE_STATE_KEY = "cookie_state"
+_LEGACY_WARMUP_SNAPSHOT_COOKIE_STATE_KEY = "raw_" + "cookies"
 
 
 # ---------------------------------------------------------------------------
@@ -834,13 +836,15 @@ class InstagramPostsScraplingFetcher:
     def warmup_snapshot(self) -> dict[str, Any]:
         """Return enough warmup state for another posts fetcher in the same shard."""
         return {
-            "raw_cookies": dict(self._raw_cookies),
+            _WARMUP_SNAPSHOT_COOKIE_STATE_KEY: dict(self._raw_cookies),
             "page_tokens": dict(self._page_tokens),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
         }
 
     async def apply_warmup_snapshot(self, snapshot: dict[str, Any]) -> None:
-        raw_cookies = snapshot.get("raw_cookies")
+        raw_cookies = snapshot.get(_WARMUP_SNAPSHOT_COOKIE_STATE_KEY)
+        if not isinstance(raw_cookies, dict):
+            raw_cookies = snapshot.get(_LEGACY_WARMUP_SNAPSHOT_COOKIE_STATE_KEY)
         page_tokens = snapshot.get("page_tokens")
         if isinstance(raw_cookies, dict):
             self._raw_cookies.update({str(key): str(value) for key, value in raw_cookies.items()})

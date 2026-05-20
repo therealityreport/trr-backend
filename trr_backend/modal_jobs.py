@@ -6,6 +6,7 @@ import logging
 import os
 import pathlib
 import socket
+import time
 import uuid
 from typing import Final
 
@@ -58,9 +59,11 @@ def _build_modal_stub_module():
         def __init__(self, *_args, **_kwargs):
             return
 
-        def function(self, *_args, **_kwargs):
+        def function(self, *args, **kwargs):
             def _decorator(func):
                 func.local = func
+                func._modal_function_args = args
+                func._modal_function_options = dict(kwargs)
                 return func
 
             return _decorator
@@ -104,6 +107,7 @@ _TIMEZONE = str(os.getenv("TRR_MODAL_TIMEZONE") or "America/New_York").strip() o
 _API_FUNCTION_NAME = str(os.getenv("TRR_MODAL_API_FUNCTION") or "serve_backend_api").strip() or "serve_backend_api"
 _API_LABEL = str(os.getenv("TRR_MODAL_API_LABEL") or "trr-backend-api").strip() or "trr-backend-api"
 _API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1")))
+_API_MAX_CONTAINERS = max(1, int(os.getenv("TRR_MODAL_API_MAX_CONTAINERS", "8")))
 _SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "5")))
 _SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
     1,
@@ -112,6 +116,27 @@ _SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
 _SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "4")))
 _ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "1")))
 _ADMIN_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_ADMIN_OPERATION_CONCURRENCY_LIMIT", "8")))
+_GOOGLE_NEWS_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT", "4")))
+_REDDIT_REFRESH_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT", "2")))
+_VISION_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_VISION_CONCURRENCY_LIMIT", "4")))
+_SOCIALBLADE_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT", "3")))
+_STALE_WORKER_CLEANUP_CONCURRENCY_LIMIT = max(
+    1,
+    int(os.getenv("TRR_MODAL_STALE_WORKER_CLEANUP_CONCURRENCY_LIMIT", "1")),
+)
+_ADMIN_OPERATION_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_ADMIN_OPERATION_TIMEOUT_SECONDS", "2700")))
+_GOOGLE_NEWS_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_GOOGLE_NEWS_TIMEOUT_SECONDS", "1800")))
+_REDDIT_REFRESH_TIMEOUT_SECONDS = max(15 * 60, int(os.getenv("TRR_MODAL_REDDIT_REFRESH_TIMEOUT_SECONDS", "7200")))
+_VISION_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_VISION_TIMEOUT_SECONDS", "1200")))
+_SOCIALBLADE_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_SOCIALBLADE_TIMEOUT_SECONDS", "900")))
+_STALE_WORKER_CLEANUP_TIMEOUT_SECONDS = max(
+    60,
+    int(os.getenv("TRR_MODAL_STALE_WORKER_CLEANUP_TIMEOUT_SECONDS", "300")),
+)
+_STALE_WORKER_CLEANUP_AFTER_SECONDS = max(
+    24 * 60 * 60,
+    int(os.getenv("SOCIAL_WORKER_HEARTBEAT_CLEANUP_AFTER_SECONDS", str(7 * 24 * 60 * 60))),
+)
 _DEFAULT_RUNTIME_SECRET_NAME = "trr-backend-runtime"
 _DEFAULT_SOCIAL_SECRET_NAME = "trr-social-auth"
 _LOCAL_RUNTIME_MARKERS: Final[frozenset[str]] = frozenset({"local", "dev", "development", "test"})
@@ -163,10 +188,13 @@ _SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = (
     # so the Modal image stays intact if Scrapling changes its install flow.
     "scrapling install",
 )
-_SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ("yt-dlp",)
+_MODAL_LEAN_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.lean.lock.txt"
+_MODAL_BROWSER_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.browser.lock.txt"
+_MODAL_VISION_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.vision.lock.txt"
+_SOCIAL_IMAGE_PIP_PACKAGES: Final[tuple[str, ...]] = ()
 _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_DB_POOL_MINCONN": "1",
-    "TRR_DB_POOL_MAXCONN": "1",
+    "TRR_DB_POOL_MAXCONN": "2",
     "TRR_SOCIAL_PROFILE_DB_POOL_MINCONN": "1",
     "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN": "1",
     "TRR_SOCIAL_CONTROL_DB_POOL_MINCONN": "1",
@@ -197,8 +225,13 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
+    "TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION": "purge_stale_social_worker_heartbeats",
     "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "5",
     "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "10",
+    "TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT": "4",
+    "TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT": "2",
+    "TRR_MODAL_VISION_CONCURRENCY_LIMIT": "4",
+    "TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT": "3",
     "SOCIAL_MODAL_DISPATCH_LIMIT": "16",
     "SOCIAL_WORKER_POOL_COMMENTS": "2",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
@@ -219,13 +252,23 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
 }
 
 
+def _build_lean_image_base(*, image_factory: object | None = None):
+    factory = image_factory or modal.Image
+    return (
+        factory.debian_slim(python_version="3.11")
+        .pip_install_from_requirements(str(_MODAL_LEAN_REQUIREMENTS))
+        .add_local_python_source("api", "trr_backend")
+    )
+
+
 def _build_social_image_base(*, include_browser_runtime: bool = False, image_factory: object | None = None):
     factory = image_factory or modal.Image
     image = factory.debian_slim(python_version="3.11")
     if include_browser_runtime:
         image = image.apt_install(*_SOCIAL_BROWSER_APT_PACKAGES)
-    image = image.pip_install_from_requirements(str(_BACKEND_ROOT / "requirements.lock.txt"))
-    image = image.pip_install(*_SOCIAL_IMAGE_PIP_PACKAGES)
+    image = image.pip_install_from_requirements(str(_MODAL_BROWSER_REQUIREMENTS))
+    if _SOCIAL_IMAGE_PIP_PACKAGES:
+        image = image.pip_install(*_SOCIAL_IMAGE_PIP_PACKAGES)
     if include_browser_runtime:
         image = image.run_commands(*_SOCIAL_BROWSER_SETUP_COMMANDS)
     image = image.add_local_python_source("api", "trr_backend")
@@ -236,31 +279,55 @@ def _build_social_image_base(*, include_browser_runtime: bool = False, image_fac
     return image
 
 
-_image = _build_social_image_base()
+def _modal_capacity_metadata(
+    *,
+    worker_family: str,
+    function_name: str,
+    image_family: str,
+    timeout_seconds: int,
+    max_containers: int,
+    min_containers: int = 0,
+) -> dict[str, object]:
+    return {
+        "worker_family": worker_family,
+        "modal_app": _APP_NAME,
+        "modal_function": function_name,
+        "image_family": image_family,
+        "timeout_seconds": int(timeout_seconds),
+        "min_containers": int(min_containers),
+        "max_containers": int(max_containers),
+    }
+
+
+_image = _build_lean_image_base()
 
 _vision_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("libgl1", "libglib2.0-0")
-    .pip_install_from_requirements(str(_BACKEND_ROOT / "requirements.lock.txt"))
-    .pip_install(
-        "numpy==1.26.4",
-        "opencv-python-headless==4.10.0.84",
-        "onnxruntime==1.18.1",
-        "insightface==0.7.3",
-        "ultralytics==8.3.39",
-    )
+    .pip_install_from_requirements(str(_MODAL_VISION_REQUIREMENTS))
     .add_local_python_source("api", "trr_backend")
 )
 
 _browser_image = _build_social_image_base(include_browser_runtime=True)
 _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
+    "serve_backend_api": _image,
+    "run_admin_operation": _image,
+    "run_admin_operation_v2": _image,
+    "run_google_news_sync": _image,
+    "run_reddit_refresh": _image,
+    "probe_reddit_refresh_runtime": _image,
+    "probe_admin_operation_runtime": _image,
+    "probe_google_news_runtime": _image,
     "run_social_job": _browser_image,
     "run_social_posts_job": _browser_image,
     "run_social_media_job": _browser_image,
     "run_social_comments_job": _browser_image,
     "run_socialblade_scrape": _browser_image,
-    "heartbeat_remote_executors": _browser_image,
+    "probe_socialblade_runtime": _browser_image,
+    "heartbeat_remote_executors": _image,
+    "purge_stale_social_worker_heartbeats": _image,
     "run_admin_vision": _vision_image,
+    "probe_admin_vision_runtime": _vision_image,
 }
 
 
@@ -363,6 +430,56 @@ def _inject_modal_runtime_defaults() -> None:
         os.environ.pop("OBJECT_STORAGE_PROFILE", None)
 
 
+def _worker_id(worker_family: str) -> str:
+    normalized = str(worker_family or "worker").strip().lower().replace(" ", "-")
+    return f"modal:{normalized}:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def _worker_started(family: str, **metadata: object) -> float:
+    started_at = time.monotonic()
+    logger.info(
+        "[modal_worker_start] family=%s app=%s function=%s metadata=%s",
+        family,
+        _APP_NAME,
+        str(metadata.pop("function_name", "") or ""),
+        metadata,
+    )
+    return started_at
+
+
+def _worker_finished(family: str, started_at: float, *, result_status: str, **metadata: object) -> None:
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.info(
+        "[modal_worker_finish] family=%s app=%s status=%s elapsed_ms=%s metadata=%s",
+        family,
+        _APP_NAME,
+        result_status,
+        elapsed_ms,
+        metadata,
+    )
+
+
+def _worker_failed(family: str, started_at: float, *, failure_class: str, **metadata: object) -> None:
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.exception(
+        "[modal_worker_failed] family=%s app=%s failure_class=%s elapsed_ms=%s metadata=%s",
+        family,
+        _APP_NAME,
+        failure_class,
+        elapsed_ms,
+        metadata,
+    )
+
+
+def _close_db_pools_after_worker(worker_family: str, **metadata: object) -> None:
+    try:
+        from trr_backend.db import pg
+
+        pg.close_pool()
+    except Exception:  # noqa: BLE001
+        logger.exception("[modal_worker_db_cleanup_failed] family=%s metadata=%s", worker_family, metadata)
+
+
 _secrets = _resolve_modal_secrets()
 _inject_modal_runtime_defaults()
 configure_runtime_observability(service_name="trr-backend-modal-jobs")
@@ -375,6 +492,7 @@ app = modal.App(_APP_NAME, image=_image)
     secrets=_secrets,
     timeout=60 * 60,
     min_containers=_API_MIN_CONTAINERS,
+    max_containers=_API_MAX_CONTAINERS,
 )
 @modal.asgi_app(label=_API_LABEL, custom_domains=_api_custom_domains())
 def serve_backend_api():
@@ -389,37 +507,170 @@ def _execute_admin_operation(operation_id: str, operation_type: str) -> dict[str
         wait_for_sub_operation_dependencies,
     )
 
-    worker_id = f"modal:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    worker_id = _worker_id("admin-operation")
+    started_at = _worker_started(
+        "admin_operations",
+        function_name="run_admin_operation_v2",
+        operation_id=operation_id,
+        operation_type=operation_type,
+        worker_id=worker_id,
+    )
+    try:
+        # If this is a sub-operation, wait for dependency targets to complete
+        deps_satisfied = wait_for_sub_operation_dependencies(operation_id)
+        if not deps_satisfied:
+            result = {
+                "operation_id": operation_id,
+                "operation_type": operation_type,
+                "claimed": False,
+                "worker_id": worker_id,
+                "reason": "dependency_not_satisfied",
+                "worker_family": "admin_operations",
+            }
+            _worker_finished("admin_operations", started_at, result_status="skipped", **result)
+            return result
 
-    # If this is a sub-operation, wait for dependency targets to complete
-    deps_satisfied = wait_for_sub_operation_dependencies(operation_id)
-    if not deps_satisfied:
-        return {
+        claimed = claim_and_execute_operation(
+            operation_id=operation_id,
+            worker_id=worker_id,
+            operation_types=[operation_type],
+        )
+        result = {
             "operation_id": operation_id,
             "operation_type": operation_type,
-            "claimed": False,
+            "claimed": claimed,
             "worker_id": worker_id,
-            "reason": "dependency_not_satisfied",
+            "worker_family": "admin_operations",
         }
+        _worker_finished(
+            "admin_operations",
+            started_at,
+            result_status="completed" if claimed else "skipped",
+            **result,
+        )
+        return result
+    except Exception as exc:
+        _worker_failed(
+            "admin_operations",
+            started_at,
+            failure_class=type(exc).__name__,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            worker_id=worker_id,
+        )
+        raise
+    finally:
+        _close_db_pools_after_worker("admin_operations", operation_id=operation_id, worker_id=worker_id)
 
-    claimed = claim_and_execute_operation(
-        operation_id=operation_id,
-        worker_id=worker_id,
-        operation_types=[operation_type],
-    )
+
+def _admin_operation_runtime_probe_payload() -> dict[str, object]:
+    from trr_backend.pipeline import admin_operations as admin_operations_module
+
     return {
-        "operation_id": operation_id,
-        "operation_type": operation_type,
-        "claimed": claimed,
-        "worker_id": worker_id,
+        "healthy": True,
+        "reason": "ok",
+        "worker_family": "admin_operations",
+        "supports_claim_by_id": hasattr(admin_operations_module, "claim_and_execute_operation"),
+        "supports_claim_heartbeat": hasattr(admin_operations_module.admin_operations, "heartbeat_operation_claim"),
+        "execution_backend": "modal",
     }
 
 
 @app.function(
-    name="run_admin_operation",
+    name="probe_admin_operation_runtime",
+    image=_FUNCTION_IMAGE_BINDINGS["probe_admin_operation_runtime"],
     secrets=_secrets,
     retries=0,
-    timeout=60 * 60,
+    timeout=60,
+    max_containers=1,
+)
+def probe_admin_operation_runtime() -> dict[str, object]:
+    return _admin_operation_runtime_probe_payload()
+
+
+def _google_news_runtime_probe_payload() -> dict[str, object]:
+    from api.routers import admin_show_news
+
+    return {
+        "healthy": True,
+        "reason": "ok",
+        "worker_family": "google_news",
+        "supports_claim_by_id": hasattr(admin_show_news, "claim_and_execute_google_news_sync_job"),
+        "supports_heartbeat": hasattr(admin_show_news, "_touch_google_news_sync_job_heartbeat"),
+        "execution_backend": "modal",
+    }
+
+
+@app.function(
+    name="probe_google_news_runtime",
+    image=_FUNCTION_IMAGE_BINDINGS["probe_google_news_runtime"],
+    secrets=_secrets,
+    retries=0,
+    timeout=60,
+    max_containers=1,
+)
+def probe_google_news_runtime() -> dict[str, object]:
+    return _google_news_runtime_probe_payload()
+
+
+def _vision_runtime_probe_payload() -> dict[str, object]:
+    from trr_backend.vision import people_count_engine
+
+    return {
+        "healthy": True,
+        "reason": "ok",
+        "worker_family": "admin_vision",
+        "supports_single": hasattr(people_count_engine, "compute_people_count"),
+        "supports_batch": hasattr(people_count_engine, "compute_people_count_batch"),
+        "execution_backend": "modal",
+    }
+
+
+@app.function(
+    name="probe_admin_vision_runtime",
+    image=_FUNCTION_IMAGE_BINDINGS["probe_admin_vision_runtime"],
+    secrets=_secrets,
+    retries=0,
+    timeout=2 * 60,
+    max_containers=1,
+)
+def probe_admin_vision_runtime() -> dict[str, object]:
+    return _vision_runtime_probe_payload()
+
+
+def _socialblade_runtime_probe_payload() -> dict[str, object]:
+    from trr_backend.socials.socialblade.auth import load_socialblade_cookies_from_sources
+    from trr_backend.socials.socialblade.service import sanitize_socialblade_platform
+
+    cookies = load_socialblade_cookies_from_sources()
+    return {
+        "healthy": True,
+        "reason": "ok",
+        "worker_family": "socialblade",
+        "has_cookie_source": bool(cookies),
+        "supports_instagram": sanitize_socialblade_platform("instagram") == "instagram",
+        "execution_backend": "modal",
+    }
+
+
+@app.function(
+    name="probe_socialblade_runtime",
+    image=_FUNCTION_IMAGE_BINDINGS["probe_socialblade_runtime"],
+    secrets=_secrets,
+    retries=0,
+    timeout=2 * 60,
+    max_containers=1,
+)
+def probe_socialblade_runtime() -> dict[str, object]:
+    return _socialblade_runtime_probe_payload()
+
+
+@app.function(
+    name="run_admin_operation",
+    image=_FUNCTION_IMAGE_BINDINGS["run_admin_operation"],
+    secrets=_secrets,
+    retries=0,
+    timeout=_ADMIN_OPERATION_TIMEOUT_SECONDS,
     min_containers=_ADMIN_KEEP_WARM,
     max_containers=_ADMIN_CONCURRENCY_LIMIT,
 )
@@ -429,9 +680,10 @@ def run_admin_operation(operation_id: str, operation_type: str) -> dict[str, obj
 
 @app.function(
     name="run_admin_operation_v2",
+    image=_FUNCTION_IMAGE_BINDINGS["run_admin_operation_v2"],
     secrets=_secrets,
     retries=0,
-    timeout=60 * 60,
+    timeout=_ADMIN_OPERATION_TIMEOUT_SECONDS,
     min_containers=_ADMIN_KEEP_WARM,
     max_containers=_ADMIN_CONCURRENCY_LIMIT,
 )
@@ -440,37 +692,77 @@ def run_admin_operation_v2(operation_id: str, operation_type: str) -> dict[str, 
 
 
 @app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_google_news_sync"],
     secrets=_secrets,
     retries=0,
-    timeout=60 * 60,
+    timeout=_GOOGLE_NEWS_TIMEOUT_SECONDS,
+    max_containers=_GOOGLE_NEWS_CONCURRENCY_LIMIT,
 )
 def run_google_news_sync(job_id: str) -> dict[str, object]:
     from api.routers.admin_show_news import claim_and_execute_google_news_sync_job
 
-    worker_id = f"modal:google-news:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    claimed = claim_and_execute_google_news_sync_job(job_id=job_id, worker_id=worker_id)
-    return {
-        "job_id": job_id,
-        "claimed": claimed,
-        "worker_id": worker_id,
-    }
+    worker_id = _worker_id("google-news")
+    started_at = _worker_started(
+        "google_news",
+        function_name="run_google_news_sync",
+        job_id=job_id,
+        worker_id=worker_id,
+    )
+    try:
+        claimed = claim_and_execute_google_news_sync_job(job_id=job_id, worker_id=worker_id)
+        result = {
+            "job_id": job_id,
+            "claimed": claimed,
+            "worker_id": worker_id,
+            "worker_family": "google_news",
+        }
+        _worker_finished("google_news", started_at, result_status="completed" if claimed else "skipped", **result)
+        return result
+    except Exception as exc:
+        _worker_failed("google_news", started_at, failure_class=type(exc).__name__, job_id=job_id, worker_id=worker_id)
+        raise
+    finally:
+        _close_db_pools_after_worker("google_news", job_id=job_id, worker_id=worker_id)
 
 
 @app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_reddit_refresh"],
     secrets=_secrets,
     retries=0,
-    timeout=2 * 60 * 60,
+    timeout=_REDDIT_REFRESH_TIMEOUT_SECONDS,
+    max_containers=_REDDIT_REFRESH_CONCURRENCY_LIMIT,
 )
 def run_reddit_refresh(run_id: str) -> dict[str, object]:
     from trr_backend.repositories.reddit_refresh import execute_refresh_run
 
-    worker_id = f"modal:reddit-refresh:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    result = execute_refresh_run(run_id, worker_id=worker_id)
-    return {
-        "run_id": run_id,
-        "status": str(result.get("status") or ""),
-        "worker_id": worker_id,
-    }
+    worker_id = _worker_id("reddit-refresh")
+    started_at = _worker_started(
+        "reddit_refresh",
+        function_name="run_reddit_refresh",
+        run_id=run_id,
+        worker_id=worker_id,
+    )
+    try:
+        result = execute_refresh_run(run_id, worker_id=worker_id)
+        payload = {
+            "run_id": run_id,
+            "status": str(result.get("status") or ""),
+            "worker_id": worker_id,
+            "worker_family": "reddit_refresh",
+        }
+        _worker_finished("reddit_refresh", started_at, result_status=str(payload["status"] or "completed"), **payload)
+        return payload
+    except Exception as exc:
+        _worker_failed(
+            "reddit_refresh",
+            started_at,
+            failure_class=type(exc).__name__,
+            run_id=run_id,
+            worker_id=worker_id,
+        )
+        raise
+    finally:
+        _close_db_pools_after_worker("reddit_refresh", run_id=run_id, worker_id=worker_id)
 
 
 def _reddit_runtime_probe_payload() -> dict[str, object]:
@@ -501,9 +793,11 @@ def _reddit_runtime_probe_payload() -> dict[str, object]:
 
 
 @app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["probe_reddit_refresh_runtime"],
     secrets=_secrets,
     retries=0,
     timeout=60,
+    max_containers=1,
 )
 def probe_reddit_refresh_runtime() -> dict[str, object]:
     return _reddit_runtime_probe_payload()
@@ -599,15 +893,11 @@ def _execute_social_job(job_id: str, *, worker_prefix: str) -> dict[str, object]
             "job_id": job_id,
             "claimed": bool(result.get("claimed")),
             "worker_id": worker_id,
+            "worker_family": "social",
             "job": result.get("job"),
         }
     finally:
-        try:
-            from trr_backend.db import pg
-
-            pg.close_pool()
-        except Exception:  # noqa: BLE001
-            logger.exception("Failed to close DB pools after Modal social job: job_id=%s", job_id)
+        _close_db_pools_after_worker("social", job_id=job_id, worker_id=worker_id)
 
 
 @app.function(
@@ -661,6 +951,7 @@ def run_social_job(job_id: str) -> dict[str, object]:
 
 
 @app.function(
+    image=_image,
     secrets=_secrets,
     retries=0,
     timeout=15 * 60,
@@ -670,7 +961,25 @@ def run_social_job(job_id: str) -> dict[str, object]:
 def sweep_social_dispatch_queue() -> dict[str, object]:
     from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
 
-    return recover_and_dispatch_due_social_jobs()
+    started_at = _worker_started(
+        "social_recovery",
+        function_name="sweep_social_dispatch_queue",
+    )
+    try:
+        result = recover_and_dispatch_due_social_jobs()
+        _worker_finished(
+            "social_recovery",
+            started_at,
+            result_status=str(result.get("status") or "completed"),
+            recovered=result.get("recovered"),
+            dispatched=result.get("dispatched"),
+        )
+        return result
+    except Exception as exc:
+        _worker_failed("social_recovery", started_at, failure_class=type(exc).__name__)
+        raise
+    finally:
+        _close_db_pools_after_worker("social_recovery")
 
 
 @app.function(
@@ -678,56 +987,228 @@ def sweep_social_dispatch_queue() -> dict[str, object]:
     secrets=_secrets,
     retries=0,
     timeout=10 * 60,
+    max_containers=1,
     schedule=modal.Cron("* * * * *", timezone=_TIMEZONE),
 )
 def heartbeat_remote_executors() -> dict[str, object]:
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
     from trr_backend.socials.control_plane import get_worker_auth_capabilities, is_queue_enabled
 
-    metadata = {
-        "dispatch_enabled": True,
-        "heartbeat_source": "modal_cron",
-        "heartbeat_call_id": f"heartbeat:{uuid.uuid4().hex[:8]}",
-    }
-    _record_dispatcher_heartbeat(
-        dispatcher_name="admin",
-        status="idle",
-        metadata_updates=metadata,
+    started_at = _worker_started(
+        "executor_heartbeat",
+        function_name="heartbeat_remote_executors",
     )
-    _record_dispatcher_heartbeat(
-        dispatcher_name="google-news",
-        status="idle",
-        metadata_updates=metadata,
-    )
-    _record_dispatcher_heartbeat(
-        dispatcher_name="reddit",
-        status="idle",
-        metadata_updates=metadata,
-    )
-    if is_queue_enabled():
-        social_metadata = {
-            **metadata,
-            "auth_capabilities": get_worker_auth_capabilities(),
+    try:
+        metadata = {
+            "dispatch_enabled": True,
+            "heartbeat_source": "modal_cron",
+            "heartbeat_call_id": f"heartbeat:{uuid.uuid4().hex[:8]}",
         }
         _record_dispatcher_heartbeat(
-            dispatcher_name="social",
+            dispatcher_name="admin",
             status="idle",
-            metadata_updates=social_metadata,
-            supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
+            metadata_updates={
+                **metadata,
+                "modal_capacity": _modal_capacity_metadata(
+                    worker_family="admin_operations",
+                    function_name="run_admin_operation_v2",
+                    image_family="lean",
+                    timeout_seconds=_ADMIN_OPERATION_TIMEOUT_SECONDS,
+                    min_containers=_ADMIN_KEEP_WARM,
+                    max_containers=_ADMIN_CONCURRENCY_LIMIT,
+                ),
+            },
         )
-    else:
-        social_metadata = None
-    return {
-        "ok": True,
-        "social_auth_capabilities": social_metadata.get("auth_capabilities") if social_metadata else None,
-    }
+        _record_dispatcher_heartbeat(
+            dispatcher_name="google-news",
+            status="idle",
+            metadata_updates={
+                **metadata,
+                "modal_capacity": _modal_capacity_metadata(
+                    worker_family="google_news",
+                    function_name="run_google_news_sync",
+                    image_family="lean",
+                    timeout_seconds=_GOOGLE_NEWS_TIMEOUT_SECONDS,
+                    max_containers=_GOOGLE_NEWS_CONCURRENCY_LIMIT,
+                ),
+            },
+        )
+        _record_dispatcher_heartbeat(
+            dispatcher_name="reddit",
+            status="idle",
+            metadata_updates={
+                **metadata,
+                "modal_capacity": _modal_capacity_metadata(
+                    worker_family="reddit_refresh",
+                    function_name="run_reddit_refresh",
+                    image_family="lean",
+                    timeout_seconds=_REDDIT_REFRESH_TIMEOUT_SECONDS,
+                    max_containers=_REDDIT_REFRESH_CONCURRENCY_LIMIT,
+                ),
+            },
+        )
+        if is_queue_enabled():
+            social_metadata = {
+                **metadata,
+                "auth_capabilities": get_worker_auth_capabilities(),
+                "modal_capacity": _modal_capacity_metadata(
+                    worker_family="social",
+                    function_name="run_social_job",
+                    image_family="browser",
+                    timeout_seconds=2 * 60 * 60,
+                    max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+                ),
+                "modal_capacity_by_function": [
+                    _modal_capacity_metadata(
+                        worker_family="social_posts",
+                        function_name="run_social_posts_job",
+                        image_family="browser",
+                        timeout_seconds=2 * 60 * 60,
+                        max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+                    ),
+                    _modal_capacity_metadata(
+                        worker_family="social_media",
+                        function_name="run_social_media_job",
+                        image_family="browser",
+                        timeout_seconds=2 * 60 * 60,
+                        max_containers=_SOCIAL_MEDIA_CONCURRENCY_LIMIT,
+                    ),
+                    _modal_capacity_metadata(
+                        worker_family="social_comments",
+                        function_name="run_social_comments_job",
+                        image_family="browser",
+                        timeout_seconds=2 * 60 * 60,
+                        max_containers=_SOCIAL_CONCURRENCY_LIMIT,
+                    ),
+                    _modal_capacity_metadata(
+                        worker_family="socialblade",
+                        function_name="run_socialblade_scrape",
+                        image_family="browser",
+                        timeout_seconds=_SOCIALBLADE_TIMEOUT_SECONDS,
+                        max_containers=_SOCIALBLADE_CONCURRENCY_LIMIT,
+                    ),
+                    _modal_capacity_metadata(
+                        worker_family="admin_vision",
+                        function_name="run_admin_vision",
+                        image_family="vision",
+                        timeout_seconds=_VISION_TIMEOUT_SECONDS,
+                        max_containers=_VISION_CONCURRENCY_LIMIT,
+                    ),
+                ],
+            }
+            _record_dispatcher_heartbeat(
+                dispatcher_name="social",
+                status="idle",
+                metadata_updates=social_metadata,
+                supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
+            )
+        else:
+            social_metadata = None
+        _worker_finished(
+            "executor_heartbeat",
+            started_at,
+            result_status="completed",
+            social_queue_enabled=bool(social_metadata),
+        )
+        return {
+            "ok": True,
+            "social_auth_capabilities": social_metadata.get("auth_capabilities") if social_metadata else None,
+        }
+    except Exception as exc:
+        _worker_failed("executor_heartbeat", started_at, failure_class=type(exc).__name__)
+        raise
+    finally:
+        _close_db_pools_after_worker("executor_heartbeat")
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["purge_stale_social_worker_heartbeats"],
+    secrets=_secrets,
+    retries=0,
+    timeout=_STALE_WORKER_CLEANUP_TIMEOUT_SECONDS,
+    max_containers=_STALE_WORKER_CLEANUP_CONCURRENCY_LIMIT,
+    schedule=modal.Cron("17 4 * * *", timezone=_TIMEZONE),
+)
+def purge_stale_social_worker_heartbeats() -> dict[str, object]:
+    from collections import Counter
+
+    from trr_backend.db import pg
+
+    started_at = _worker_started(
+        "social_worker_heartbeat_cleanup",
+        function_name="purge_stale_social_worker_heartbeats",
+        stale_after_seconds=_STALE_WORKER_CLEANUP_AFTER_SECONDS,
+    )
+    try:
+        active_clause = (
+            "status in ('starting', 'idle', 'working') and last_seen_at >= now() - (%s * interval '1 second')"
+        )
+        snapshot_row = (
+            pg.fetch_one(
+                f"""
+                select
+                  count(*) filter (where {active_clause})::int as active_workers,
+                  count(*)::int as total_workers
+                from social.scrape_workers
+                """,
+                [_STALE_WORKER_CLEANUP_AFTER_SECONDS],
+            )
+            or {}
+        )
+        deleted_rows = pg.execute_returning(
+            """
+            delete from social.scrape_workers
+            where last_seen_at < now() - (%s * interval '1 second')
+            returning worker_id, status
+            """,
+            [_STALE_WORKER_CLEANUP_AFTER_SECONDS],
+        )
+        deleted_by_status = Counter(str(row.get("status") or "unknown") for row in deleted_rows or [])
+        total_workers_before = int(snapshot_row.get("total_workers") or 0)
+        deleted_workers = len(deleted_rows or [])
+        result = {
+            "stale_after_seconds": _STALE_WORKER_CLEANUP_AFTER_SECONDS,
+            "active_workers": int(snapshot_row.get("active_workers") or 0),
+            "total_workers_before": total_workers_before,
+            "total_workers_after": max(0, total_workers_before - deleted_workers),
+            "deleted_workers": deleted_workers,
+            "deleted_by_status": dict(sorted(deleted_by_status.items())),
+            "reason": None,
+        }
+        _worker_finished(
+            "social_worker_heartbeat_cleanup",
+            started_at,
+            result_status="completed",
+            deleted_workers=result.get("deleted_workers"),
+            total_workers_before=result.get("total_workers_before"),
+            total_workers_after=result.get("total_workers_after"),
+        )
+        return {
+            **result,
+            "worker_family": "social_worker_heartbeat_cleanup",
+            "cleanup_policy": "delete_rows_older_than_threshold",
+        }
+    except Exception as exc:
+        _worker_failed(
+            "social_worker_heartbeat_cleanup",
+            started_at,
+            failure_class=type(exc).__name__,
+            stale_after_seconds=_STALE_WORKER_CLEANUP_AFTER_SECONDS,
+        )
+        raise
+    finally:
+        _close_db_pools_after_worker(
+            "social_worker_heartbeat_cleanup",
+            stale_after_seconds=_STALE_WORKER_CLEANUP_AFTER_SECONDS,
+        )
 
 
 @app.function(
     image=_FUNCTION_IMAGE_BINDINGS["run_admin_vision"],
     secrets=_secrets,
     retries=0,
-    timeout=20 * 60,
+    timeout=_VISION_TIMEOUT_SECONDS,
+    max_containers=_VISION_CONCURRENCY_LIMIT,
 )
 def run_admin_vision(payload: dict[str, object], batch: bool = False) -> dict[str, object]:
     from trr_backend.vision.people_count_engine import (
@@ -737,26 +1218,45 @@ def run_admin_vision(payload: dict[str, object], batch: bool = False) -> dict[st
         compute_people_count_batch,
     )
 
+    started_at = _worker_started(
+        "admin_vision",
+        function_name="run_admin_vision",
+        batch=batch,
+        target_count=len(payload) if batch and isinstance(payload, list) else 1,
+    )
     try:
-        return compute_people_count_batch(payload) if batch else compute_people_count(payload)
+        result = compute_people_count_batch(payload) if batch else compute_people_count(payload)
+        _worker_finished("admin_vision", started_at, result_status="completed", batch=batch)
+        return result
     except VisionEngineUnavailableError as exc:
+        _worker_finished("admin_vision", started_at, result_status="unavailable", batch=batch)
         return {
             "error": str(exc),
             "retry_after_s": int(exc.retry_after_s),
             "unavailable": True,
         }
     except VisionEngineError as exc:
+        _worker_finished(
+            "admin_vision",
+            started_at,
+            result_status="failed",
+            batch=batch,
+            failure_class=type(exc).__name__,
+        )
         return {
             "error": str(exc),
             "unavailable": False,
         }
+    finally:
+        _close_db_pools_after_worker("admin_vision", batch=batch)
 
 
 @app.function(
     image=_FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"],
     secrets=_secrets,
     retries=0,
-    timeout=10 * 60,
+    timeout=_SOCIALBLADE_TIMEOUT_SECONDS,
+    max_containers=_SOCIALBLADE_CONCURRENCY_LIMIT,
 )
 def run_socialblade_scrape(
     handle: str,
@@ -776,25 +1276,62 @@ def run_socialblade_scrape(
         scrape_socialblade_then_following,
     )
 
-    normalized_platform = sanitize_socialblade_platform(platform)
-    normalized_source_scope = normalize_socialblade_source_scope(source_scope)
-    cookies = load_socialblade_cookies_from_sources()
-
-    def _scrape_with_following_sidecar(safe_handle: str) -> dict[str, object]:
-        return scrape_socialblade_then_following(
-            lambda normalized_handle: scrape_socialblade(normalized_handle, cookies, platform=normalized_platform),
-            handle=safe_handle,
-            platform=normalized_platform,
-            source=source,
-            source_scope=normalized_source_scope,
-            enabled=scrape_following,
-        )
-
-    return refresh_and_persist_socialblade(
-        person_id=person_id,
+    started_at = _worker_started(
+        "socialblade",
+        function_name="run_socialblade_scrape",
         handle=handle,
-        scraper=_scrape_with_following_sidecar,
+        person_id=person_id,
         source=source,
-        force=force,
-        platform=normalized_platform,
+        platform=platform,
+        scrape_following=scrape_following,
+        source_scope=source_scope,
     )
+    try:
+        normalized_platform = sanitize_socialblade_platform(platform)
+        normalized_source_scope = normalize_socialblade_source_scope(source_scope)
+        cookies = load_socialblade_cookies_from_sources()
+
+        def _scrape_with_following_sidecar(safe_handle: str) -> dict[str, object]:
+            return scrape_socialblade_then_following(
+                lambda normalized_handle: scrape_socialblade(normalized_handle, cookies, platform=normalized_platform),
+                handle=safe_handle,
+                platform=normalized_platform,
+                source=source,
+                source_scope=normalized_source_scope,
+                enabled=scrape_following,
+            )
+
+        result = refresh_and_persist_socialblade(
+            person_id=person_id,
+            handle=handle,
+            scraper=_scrape_with_following_sidecar,
+            source=source,
+            force=force,
+            platform=normalized_platform,
+        )
+        status = (
+            str(result.get("status") or result.get("refresh_status") or "completed")
+            if isinstance(result, dict)
+            else "completed"
+        )
+        _worker_finished(
+            "socialblade",
+            started_at,
+            result_status=status,
+            handle=handle,
+            person_id=person_id,
+            platform=normalized_platform,
+        )
+        return result
+    except Exception as exc:
+        _worker_failed(
+            "socialblade",
+            started_at,
+            failure_class=type(exc).__name__,
+            handle=handle,
+            person_id=person_id,
+            platform=platform,
+        )
+        raise
+    finally:
+        _close_db_pools_after_worker("socialblade", handle=handle, person_id=person_id, platform=platform)

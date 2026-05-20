@@ -353,8 +353,12 @@ class TwitterScraper:
         self.last_reply_fetch_reason: str | None = None
         self.last_quote_fetch_reason: str | None = None
         self.last_quote_fetch_meta: dict[str, Any] = {}
+        self._search_timeline_unavailable = False
+        self._search_timeline_unavailable_reason: str | None = None
         self._quote_search_timeline_unavailable = False
         self._last_twikit_search_error: str | None = None
+        self._twikit_search_unavailable = False
+        self._twikit_search_unavailable_reason: str | None = None
         self._last_playwright_search_error: str | None = None
         self._last_playwright_search_meta: dict[str, Any] = {}
         self.comments_auth_failed = False
@@ -590,6 +594,12 @@ class TwitterScraper:
         if not self._search_hash:
             self._discover_graphql_hashes()
         return f"{self.GRAPHQL_BASE_URL}/{self._search_hash}/SearchTimeline"
+
+    def _mark_search_timeline_unavailable(self, reason: str = "http_404") -> None:
+        self._search_timeline_unavailable = True
+        self._search_timeline_unavailable_reason = str(reason or "search_timeline_unavailable")
+        if reason == "http_404":
+            self._quote_search_timeline_unavailable = True
 
     @property
     def _tweet_detail_url(self) -> str:
@@ -1526,6 +1536,10 @@ class TwitterScraper:
         """
         if not self._twikit_credentials:
             return []
+        if self._twikit_search_unavailable:
+            self._last_twikit_search_error = self._twikit_search_unavailable_reason or "twikit_unavailable"
+            return []
+
         self._last_twikit_search_error = None
         try:
             from twikit import Client as TwikitClient  # noqa: F811
@@ -1538,6 +1552,8 @@ class TwitterScraper:
 
         def _error_reason(exc: Exception) -> str:
             lowered = str(exc).lower()
+            if "key_byte" in lowered or "client_transaction" in lowered:
+                return "twikit_client_transaction_unavailable"
             if "429" in lowered or "rate" in lowered:
                 return "rate_limited"
             return "twikit_page_error"
@@ -1593,17 +1609,23 @@ class TwitterScraper:
             return collected
 
         try:
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return asyncio.run(_run_search())
             if loop.is_running():
                 import nest_asyncio
 
                 nest_asyncio.apply()
             return loop.run_until_complete(_run_search())
-        except RuntimeError:
-            return asyncio.run(_run_search())
         except Exception as exc:
             self._last_twikit_search_error = _error_reason(exc)
-            logger.exception("twikit fallback search failed for query=%s", query)
+            if self._last_twikit_search_error == "twikit_client_transaction_unavailable":
+                self._twikit_search_unavailable = True
+                self._twikit_search_unavailable_reason = self._last_twikit_search_error
+                logger.warning("twikit fallback search unavailable for query=%s: %s", query, exc)
+            else:
+                logger.exception("twikit fallback search failed for query=%s", query)
             return []
 
     def _fetch_tweet_replies_via_twikit(self, *, tweet_id: str, max_pages: int = 5, delay: float = 0.5) -> list[Tweet]:
@@ -2095,6 +2117,14 @@ class TwitterScraper:
         import json
         import urllib.parse
 
+        if self._search_timeline_unavailable:
+            self._last_graphql_status_code = None
+            logger.debug(
+                "Skipping SearchTimeline query after prior failure: %s",
+                self._search_timeline_unavailable_reason or "unavailable",
+            )
+            return None
+
         self._rate_limit(delay, fast_mode=fast_mode)
 
         variables = {
@@ -2475,6 +2505,10 @@ class TwitterScraper:
 
     def _fetch_tweet_replies_via_search(self, *, tweet_id: str, delay: float, max_pages: int = 20) -> list[Tweet]:
         """Fallback reply fetch using SearchTimeline conversation query."""
+        if self._search_timeline_unavailable:
+            self._set_reply_failure_reason(self._search_timeline_unavailable_reason or "search_timeline_unavailable")
+            return []
+
         self._ensure_auth()
         query = f"conversation_id:{tweet_id}"
         cursor: str | None = None
@@ -2495,8 +2529,14 @@ class TwitterScraper:
                     self._discover_graphql_hashes()
                     data = self._fetch_search(query, cursor, delay)
                     if not data:
+                        if self._last_graphql_status_code == 404:
+                            self._mark_search_timeline_unavailable("http_404")
+                            self._set_reply_failure_reason("http_404")
                         break
                 else:
+                    if self._last_graphql_status_code == 404:
+                        self._mark_search_timeline_unavailable("http_404")
+                        self._set_reply_failure_reason("http_404")
                     break
 
             timeline = (
@@ -2896,8 +2936,8 @@ class TwitterScraper:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[Tweet]:
         """Fetch quote tweets using SearchTimeline with quoted_tweet_id operator."""
-        if self._quote_search_timeline_unavailable:
-            self._set_quote_failure_reason("http_404")
+        if self._search_timeline_unavailable or self._quote_search_timeline_unavailable:
+            self._set_quote_failure_reason(self._search_timeline_unavailable_reason or "http_404")
             return []
         self._ensure_auth()
         query = f"quoted_tweet_id:{tweet_id}"
@@ -2947,7 +2987,7 @@ class TwitterScraper:
                     )
                     if not data:
                         if self._last_graphql_status_code == 404:
-                            self._quote_search_timeline_unavailable = True
+                            self._mark_search_timeline_unavailable("http_404")
                         self._set_quote_failure_reason(
                             f"http_{int(self._last_graphql_status_code)}"
                             if self._last_graphql_status_code
@@ -2956,7 +2996,7 @@ class TwitterScraper:
                         break
                 else:
                     if self._last_graphql_status_code == 404:
-                        self._quote_search_timeline_unavailable = True
+                        self._mark_search_timeline_unavailable("http_404")
                     self._set_quote_failure_reason(
                         f"http_{int(self._last_graphql_status_code)}"
                         if self._last_graphql_status_code
@@ -3203,6 +3243,8 @@ class TwitterScraper:
                     self._detail_hash = None
                     logger.warning("GraphQL returned 404; retrying after hash rediscovery")
                     continue
+                if self._last_graphql_status_code == 404:
+                    self._mark_search_timeline_unavailable("http_404")
                 graphql_failed = True
                 stop_reason = "graphql_fetch_failed"
                 break
@@ -3294,7 +3336,8 @@ class TwitterScraper:
         # Fallback chain:
         # 1) GraphQL SearchTimeline always first
         # 2) twikit next (if configured)
-        # 3) syndication last resort (from: queries only)
+        # 3) Playwright search capture if server-side fallbacks are empty
+        # 4) syndication last resort (from: queries only)
         if not tweets and from_match:
             fallback_triggered = True
             if self._twikit_credentials:
@@ -3316,27 +3359,6 @@ class TwitterScraper:
                     self._emit_progress(
                         progress_cb,
                         phase="scrape_twikit_fallback",
-                        pages_scanned=page_num,
-                        posts_checked=posts_checked_total,
-                        matched_posts=len(tweets),
-                    )
-            if not tweets:
-                username = from_match.group(1)
-                fallback_attempts.append("syndication")
-                logger.info(f"Falling back to syndication API for @{username}")
-                syndication_tweets = self._scrape_syndication(username, config)
-                syndication_checked_total = len(syndication_tweets)
-                posts_checked_total += syndication_checked_total
-                tweets = self._clamp_tweets_to_window(
-                    tweets=syndication_tweets,
-                    start_ts=window_start_ts,
-                    end_ts_exclusive=window_end_ts_exclusive,
-                )
-                if tweets:
-                    retrieval_mode = "syndication"
-                    self._emit_progress(
-                        progress_cb,
-                        phase="scrape_syndication_fallback",
                         pages_scanned=page_num,
                         posts_checked=posts_checked_total,
                         matched_posts=len(tweets),
@@ -3375,6 +3397,27 @@ class TwitterScraper:
                     ).strip()
                 if playwright_stop_reason:
                     stop_reason = playwright_stop_reason
+            if not tweets:
+                username = from_match.group(1)
+                fallback_attempts.append("syndication")
+                logger.info(f"Falling back to syndication API for @{username}")
+                syndication_tweets = self._scrape_syndication(username, config)
+                syndication_checked_total = len(syndication_tweets)
+                posts_checked_total += syndication_checked_total
+                tweets = self._clamp_tweets_to_window(
+                    tweets=syndication_tweets,
+                    start_ts=window_start_ts,
+                    end_ts_exclusive=window_end_ts_exclusive,
+                )
+                if tweets:
+                    retrieval_mode = "syndication"
+                    self._emit_progress(
+                        progress_cb,
+                        phase="scrape_syndication_fallback",
+                        pages_scanned=page_num,
+                        posts_checked=posts_checked_total,
+                        matched_posts=len(tweets),
+                    )
         elif graphql_failed and not tweets:
             fallback_triggered = True
             if self._twikit_credentials:

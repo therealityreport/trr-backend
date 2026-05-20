@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import trr_backend.socials.social_season_analytics_impl as _core
@@ -32,6 +35,33 @@ _LOCAL_ROOM_NAMES: set[str] = set()
 _LOCAL_ROOM_FUNCTIONS: dict[str, Any] = {}
 _CORE_ROOM_WRAPPERS: dict[str, Any] = {}
 SOCIAL_INSTAGRAM_COOKIE_VALIDATION_USERNAME_DEFAULT = "instagram"
+
+
+@contextmanager
+def _instagram_cookie_validation_probe_mode() -> Iterator[None]:
+    """Keep cookie health probes diagnostic-only.
+
+    The GraphQL health check intentionally answers "are these cookies usable?"
+    rather than "can this process repair them?". Without these guards,
+    InstagramScraper's normal recovery path can launch browser auth during
+    validation-only CLI runs and obscure the real checkpoint state.
+    """
+
+    guarded_keys = {
+        "SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH": "false",
+        "SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED": "true",
+        "SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN": "false",
+    }
+    previous = {key: os.environ.get(key) for key in guarded_keys}
+    os.environ.update(guarded_keys)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _sync_core_overrides() -> None:
@@ -248,12 +278,13 @@ def _inspect_instagram_cookie_health(cookies: dict[str, str]) -> dict[str, Any]:
             cookies=cookies,
             browser_account_id=validation_username,
         )
-        payload = scraper.fetch_posts_graphql(
-            validation_username,
-            delay=0.0,
-            request_timeout=(10, 20),
-            allow_browser_fallback=False,
-        )
+        with _instagram_cookie_validation_probe_mode():
+            payload = scraper.fetch_posts_graphql(
+                validation_username,
+                delay=0.0,
+                request_timeout=(10, 20),
+                allow_browser_fallback=False,
+            )
         connection = (payload or {}).get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
         if connection.get("edges"):
             result = {

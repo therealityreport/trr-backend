@@ -74,6 +74,39 @@ def test_run_worker_repairs_when_recent_unauthorized_exists(monkeypatch: pytest.
     assert payload["trigger"]["reason_codes"] == ["recent_instagram_graphql_unauthorized"]
 
 
+def test_run_worker_does_not_auto_repair_recent_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "load_env", lambda: None)
+    monkeypatch.setattr(
+        cli.social_repo, "_instagram_cookie_refresh_target_path", lambda: Path("/tmp/instagram-cookies.json")
+    )
+    monkeypatch.setattr(
+        cli.instagram_cookie_refresh,
+        "read_instagram_cookie_file_metadata",
+        lambda _path: {"_cookie_refreshed_at": _iso_days_ago(1)},
+    )
+    monkeypatch.setattr(
+        cli.social_repo,
+        "get_instagram_auth_repair_signal",
+        lambda failure_lookback_hours=24: {
+            "needs_repair": True,
+            "reason_codes": ["recent_instagram_graphql_checkpoint_required"],
+            "cookie_validation": {"valid": False, "reason": "checkpoint_required", "detail": None},
+            "latest_failure": {"job_id": "job-1"},
+        },
+    )
+    monkeypatch.setattr(
+        cli.repair_instagram_auth,
+        "run_repair",
+        lambda **_kwargs: pytest.fail("checkpoint-blocked sessions require manual login, not auto repair"),
+    )
+
+    payload = cli.run_worker(max_cookie_age_days=7, failure_lookback_hours=24)
+
+    assert payload["ok"] is False
+    assert payload["action"] == "manual_checkpoint_required"
+    assert payload["failure_reason"] == "manual_checkpoint_required"
+
+
 def test_run_worker_repairs_when_cookie_age_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "load_env", lambda: None)
     monkeypatch.setattr(

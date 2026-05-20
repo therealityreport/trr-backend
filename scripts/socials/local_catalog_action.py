@@ -49,6 +49,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Backfill task to run. Repeat for post_details, comments, and media.",
     )
+    parser.add_argument(
+        "--comment-anchor-source-id",
+        dest="comment_anchor_source_ids",
+        action="append",
+        default=[],
+        help="Limit comment repair to a specific platform post/source id. Repeat for multiple anchors.",
+    )
     return parser.parse_args(argv if argv is not None else sys.argv[1:])
 
 
@@ -91,10 +98,14 @@ def _execute_run(payload: dict[str, Any], worker_id: str, control_plane: Any) ->
     if not run_ids:
         print("Catalog action did not return a run_id.", file=sys.stderr)
         return 1
+    platform = str(payload.get("platform") or "").strip().lower() or None
+    supported_platforms = [platform] if platform else None
     for index, run_id in enumerate(run_ids, start=1):
         control_plane.execute_run_with_inline_worker_registration(
             run_id,
             worker_id=f"{worker_id}:{index}",
+            platform=platform,
+            supported_platforms=supported_platforms,
         )
     print(json.dumps({"run_id": run_ids[0], "executed_run_ids": run_ids, "status": "completed"}, sort_keys=True))
     return 0
@@ -111,8 +122,11 @@ def _start_backfill(
     selected_tasks: list[str] | None = None,
     date_start: str | None = None,
     date_end: str | None = None,
+    comment_anchor_source_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized_selected_tasks = [str(task).strip() for task in (selected_tasks or []) if str(task).strip()]
+    normalized_anchor_ids = [str(item).strip() for item in (comment_anchor_source_ids or []) if str(item).strip()]
+    anchor_config = {platform: normalized_anchor_ids} if normalized_anchor_ids else None
     if normalized_selected_tasks:
         return analytics_repo.launch_social_account_catalog_backfill(
             platform=platform,
@@ -124,6 +138,7 @@ def _start_backfill(
             inline_worker_id=worker_id,
             allow_local_dev_inline_bypass=True,
             selected_tasks=normalized_selected_tasks,
+            comment_anchor_source_ids=anchor_config,
         )
     return analytics_repo.start_social_account_catalog_backfill(
         platform=platform,
@@ -136,6 +151,7 @@ def _start_backfill(
         allow_local_dev_inline_bypass=True,
         catalog_action="backfill",
         catalog_action_scope=scope,
+        comment_anchor_source_ids=anchor_config,
     )
 
 
@@ -208,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
                 worker_id=worker_id,
                 scope="full_history",
                 selected_tasks=list(getattr(args, "selected_tasks", []) or []),
+                comment_anchor_source_ids=list(getattr(args, "comment_anchor_source_ids", []) or []),
             )
         elif args.action == "sync_recent":
             payload = analytics_repo.sync_recent_social_account_catalog(

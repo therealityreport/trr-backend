@@ -33,6 +33,7 @@ def test_verify_readiness_checks_modal_auth_and_getty_probe(monkeypatch: pytest.
     assert result == {"ok": True}
     assert captured["probe_remote_auth_platform"] == "instagram"
     assert captured["probe_getty_remote_access"] is True
+    assert captured["probe_core_workers"] is True
 
 
 def test_reconcile_modal_runtime_is_ok_when_readiness_passes_and_fingerprint_unchanged(
@@ -427,3 +428,55 @@ def test_modal_fingerprint_changes_when_socialblade_scraper_changes(
     second = cli.build_modal_fingerprint(repo_root)
 
     assert first != second
+
+
+def test_modal_fingerprint_changes_when_non_social_worker_contract_changes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "TRR-Backend"
+    for relative_path in (
+        "trr_backend/modal_jobs.py",
+        "trr_backend/pipeline/admin_operations.py",
+        "api/routers/admin_show_news.py",
+        "trr_backend/repositories/reddit_refresh.py",
+        "trr_backend/vision/people_count_engine.py",
+        "scripts/modal/verify_modal_readiness.py",
+        "requirements.txt",
+        "requirements.lock.txt",
+        "requirements.modal.lean.in",
+        "requirements.modal.lean.lock.txt",
+        "requirements.modal.browser.in",
+        "requirements.modal.browser.lock.txt",
+        "requirements.modal.vision.in",
+        "requirements.modal.vision.lock.txt",
+    ):
+        path = repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{relative_path}: v1\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli.prepare_named_secrets, "_load_source_env", lambda _path: {})
+    monkeypatch.setattr(cli.prepare_named_secrets, "_split_env", lambda _env: ({}, {}))
+    monkeypatch.setattr(
+        cli.prepare_named_secrets,
+        "_apply_runtime_overrides",
+        lambda values, *, disabled=False: values,
+    )
+
+    first = cli.build_modal_fingerprint(repo_root)
+    (repo_root / "trr_backend/repositories/reddit_refresh.py").write_text(
+        "reddit refresh worker: v2\n",
+        encoding="utf-8",
+    )
+    second = cli.build_modal_fingerprint(repo_root)
+
+    assert first != second
+
+    third = cli.build_modal_fingerprint(repo_root)
+    (repo_root / "requirements.modal.lean.lock.txt").write_text(
+        "modal lean lock: v2\n",
+        encoding="utf-8",
+    )
+    fourth = cli.build_modal_fingerprint(repo_root)
+
+    assert third != fourth

@@ -129,6 +129,34 @@ def test_search_asset_candidates_records_query_summary_and_detects_page_rewrite(
     assert summary["first_editorial_ids"][:3] == ["11", "12", "13"]
 
 
+def test_search_asset_candidates_records_request_exception_details(monkeypatch) -> None:
+    class _Response:
+        status_code = 403
+        url = "https://www.gettyimages.com/sign-in"
+
+    class _Session:
+        def get(self, url: str, **kwargs):
+            exc = getty.RequestException("blocked by upstream")
+            exc.response = _Response()
+            raise exc
+
+    summary: dict[str, object] = {}
+    monkeypatch.setattr(getty, "_session", lambda session=None: _Session())
+
+    candidates = getty._search_asset_candidates_for_phrase(
+        "Bravo",
+        limit=None,
+        query_summary_out=summary,
+    )
+
+    assert candidates == []
+    assert summary["termination_reason"] == "request_exception"
+    assert summary["request_exception_class"] == "RequestException"
+    assert summary["request_exception_message"] == "blocked by upstream"
+    assert summary["request_http_status"] == 403
+    assert summary["request_redirect_url"] == "https://www.gettyimages.com/sign-in"
+
+
 def test_search_asset_candidates_supports_browser_backed_page_fetcher() -> None:
     def _page_html(page: int) -> str:
         payload = {

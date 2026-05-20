@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -48,6 +49,7 @@ TIKTOK_POST_LIST_URL = "https://www.tiktok.com/api/post/item_list/"
 TIKTOK_POST_PAGE_SIZE = 30
 TIKTOK_POST_PAGE_SIZE_MIN = 10
 TIKTOK_POST_PAGE_SIZE_MAX = 50
+_SEC_UID_RE = re.compile(r'\\?"secUid\\?"\s*:\s*\\?"(?P<sec_uid>[^"\\]+)')
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,15 @@ def tiktok_posts_scrapling_page_size() -> int:
     except (TypeError, ValueError):
         return TIKTOK_POST_PAGE_SIZE
     return min(TIKTOK_POST_PAGE_SIZE_MAX, max(TIKTOK_POST_PAGE_SIZE_MIN, parsed))
+
+
+def _extract_sec_uid_from_text(text: str) -> str | None:
+    normalized = str(text or "")
+    for candidate in (normalized, normalized.replace(r"\"", '"')):
+        match = _SEC_UID_RE.search(candidate)
+        if match:
+            return str(match.group("sec_uid") or "").strip() or None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +144,8 @@ class TikTokPostsScraplingFetcher:
         self._warmup_cookie_delta: dict[str, str] = {}
         self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
         self._sec_uid: str | None = None
+        self._sec_uid_source: str | None = None
+        self._warmup_sec_uid: str | None = None
 
         try:
             from scrapling.fetchers import StealthyFetcher
@@ -148,6 +161,7 @@ class TikTokPostsScraplingFetcher:
             "warmup_cookie_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
             "sec_uid_resolved": bool(self._sec_uid),
+            "sec_uid_source": self._sec_uid_source,
             "request_count": self._request_count,
             "transport": "httpx_after_browser_warmup",
         }
@@ -160,6 +174,7 @@ class TikTokPostsScraplingFetcher:
         status = _status_code(response)
         if (status in {401, 403}) or (_is_challenge_response(text) and status not in range(200, 300)):
             raise RuntimeError("TikTok warmup hit challenge page or auth failure; cookies may be invalid.")
+        self._warmup_sec_uid = _extract_sec_uid_from_text(text)
         self._merge_warmup_cookies(response)
         self._rebuild_http_client()
         logger.info(
@@ -180,13 +195,22 @@ class TikTokPostsScraplingFetcher:
             referer=f"https://www.tiktok.com/@{username}",
         )
         if response.get("failed"):
+            if self._warmup_sec_uid:
+                self._sec_uid = self._warmup_sec_uid
+                self._sec_uid_source = "warmup_html"
+                return self._warmup_sec_uid
             raise RuntimeError(f"TikTok user detail failed: {response.get('reason')}")
         payload = response.get("payload") or {}
         user_info = (payload.get("userInfo") or {}).get("user") or {}
         sec_uid = str(user_info.get("secUid") or "").strip()
+        if not sec_uid and self._warmup_sec_uid:
+            self._sec_uid = self._warmup_sec_uid
+            self._sec_uid_source = "warmup_html"
+            return self._warmup_sec_uid
         if not sec_uid:
             raise RuntimeError(f"TikTok secUid not found for @{username}")
         self._sec_uid = sec_uid
+        self._sec_uid_source = "user_detail_api"
         return sec_uid
 
     async def fetch_posts_page(

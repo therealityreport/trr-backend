@@ -53,6 +53,27 @@ def test_parse_args_accepts_selected_tasks() -> None:
     assert args.selected_tasks == ["post_details", "comments", "media"]
 
 
+def test_parse_args_accepts_comment_anchor_source_ids() -> None:
+    args = cli.parse_args(
+        [
+            "--platform",
+            "twitter",
+            "--account",
+            "TheTraitorsUS",
+            "--action",
+            "backfill",
+            "--selected-task",
+            "comments",
+            "--comment-anchor-source-id",
+            "2015151653134172554",
+            "--comment-anchor-source-id",
+            "2014150059768652195",
+        ]
+    )
+
+    assert args.comment_anchor_source_ids == ["2015151653134172554", "2014150059768652195"]
+
+
 def test_main_dispatches_backfill(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
@@ -138,6 +159,61 @@ def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monk
         ("comments-run-1", "local-script:catalog:instagram:2"),
     ]
     assert "catalog-run-1" in capsys.readouterr().out
+
+
+def test_main_dispatches_targeted_twitter_comment_backfill(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="twitter",
+            account="TheTraitorsUS",
+            source_scope="network",
+            action="backfill",
+            selected_tasks=["comments"],
+            comment_anchor_source_ids=["2015151653134172554"],
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _launch(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "run_id": "catalog-run-twitter-comments",
+            "platform": "twitter",
+            "status": "queued",
+        }
+
+    execute_calls: list[dict[str, object]] = []
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(launch_social_account_catalog_backfill=_launch),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.socials.control_plane",
+        SimpleNamespace(
+            execute_run_with_inline_worker_registration=lambda run_id, **kwargs: (
+                execute_calls.append({"run_id": run_id, **kwargs})
+                or {
+                    "run_id": run_id,
+                    "status": "completed",
+                }
+            )
+        ),
+    )
+
+    assert cli.main() == 0
+    assert captured["selected_tasks"] == ["comments"]
+    assert captured["comment_anchor_source_ids"] == {"twitter": ["2015151653134172554"]}
+    assert execute_calls[0]["platform"] == "twitter"
+    assert execute_calls[0]["supported_platforms"] == ["twitter"]
+    assert "catalog-run-twitter-comments" in capsys.readouterr().out
 
 
 def test_main_dispatches_sync_newer(monkeypatch, capsys) -> None:

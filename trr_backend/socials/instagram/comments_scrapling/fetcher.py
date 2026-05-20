@@ -137,6 +137,7 @@ _RELAY_COAUTHOR_SOURCE_SNAPSHOT_TYPE = "graphql_coauthor_relay_comments"
 _TERMINAL_MISSING_CLASSIFIED_REASON = "coverage_terminal_missing_classified"
 _TERMINAL_MISSING_REASON_INSTAGRAM_NOT_SERVED = "instagram_not_served_after_all_lanes"
 _PARENTLESS_REPLY_ATTACH_FAILED_REASON = "parentless_reply_attach_failed"
+_BROWSER_API_EVALUATE_RESULT_MARKER_ID = "trr-browser-api-result"
 _LOGGED_OUT_LSD_RE = re.compile(r'"LSD",\[\],\{"token":"([^"]+)"')
 _LOGGED_OUT_MREQUEST_LSD_RE = re.compile(r'"lsd":"([^"]+)"')
 _LOGGED_OUT_JAZOEST_RE = re.compile(r"jazoest=(\d+)")
@@ -6720,6 +6721,142 @@ class InstagramCommentsScraplingFetcher:
         self._sync_response_cookies(response)
         return response
 
+    @staticmethod
+    def _browser_fetch_headers(headers: Mapping[str, Any]) -> dict[str, str]:
+        forbidden = {
+            "accept-encoding",
+            "connection",
+            "content-length",
+            "cookie",
+            "host",
+            "origin",
+            "referer",
+            "user-agent",
+        }
+        result: dict[str, str] = {}
+        for key, value in dict(headers or {}).items():
+            name = str(key or "").strip()
+            lower = name.lower()
+            if not name or lower in forbidden or lower.startswith("sec-"):
+                continue
+            result[name] = str(value)
+        return result
+
+    @staticmethod
+    def _browser_evaluated_fetch_response(
+        *,
+        result_payload: Mapping[str, Any],
+        request_url: str,
+    ) -> httpx.Response:
+        error = str(result_payload.get("error") or "").strip()
+        if error:
+            raise RuntimeError(f"browser_api_evaluate_fetch_failed: {error[:240]}")
+        status_code = int(result_payload.get("status") or 0)
+        if status_code <= 0:
+            raise RuntimeError("browser_api_evaluate_fetch_missing_status")
+        body = result_payload.get("body")
+        if not isinstance(body, str):
+            body = "" if body is None else str(body)
+        headers = {
+            str(key): str(value)
+            for key, value in dict(result_payload.get("headers") or {}).items()
+            if str(key or "").strip()
+        }
+        response_url = str(result_payload.get("url") or request_url).strip() or request_url
+        return httpx.Response(
+            status_code,
+            content=body.encode("utf-8", errors="ignore"),
+            headers=headers,
+            request=httpx.Request("GET", response_url),
+        )
+
+    @staticmethod
+    def _extract_browser_evaluated_fetch_payload(response: Any) -> dict[str, Any]:
+        text = _response_text(response)
+        marker = re.escape(_BROWSER_API_EVALUATE_RESULT_MARKER_ID)
+        match = re.search(rf"<pre[^>]*id=[\"']{marker}[\"'][^>]*>(.*?)</pre>", text, flags=re.DOTALL)
+        raw = html_lib.unescape(match.group(1)) if match else text.strip()
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise RuntimeError("browser_api_evaluate_fetch_invalid_payload")
+        return payload
+
+    async def _fetch_api_with_browser_evaluate(
+        self,
+        request_url: str,
+        *,
+        referer: str,
+        headers: Mapping[str, Any],
+        deadline: float | None = None,
+    ) -> httpx.Response:
+        remaining = _deadline_remaining_seconds(deadline)
+        if remaining is not None and remaining <= 0:
+            raise _PaginationDeadlineExceededError
+        fetch_timeout_ms = self._timeout_ms
+        if remaining is not None:
+            fetch_timeout_ms = max(1_000, min(fetch_timeout_ms, int(remaining * 1_000)))
+
+        async def page_action(page: Any) -> None:
+            await page.evaluate(
+                """
+                async ({ url, headers, markerId, referrer }) => {
+                  const result = {};
+                  try {
+                    const response = await fetch(url, {
+                      method: "GET",
+                      headers,
+                      credentials: "include",
+                      referrer,
+                    });
+                    const responseHeaders = {};
+                    response.headers.forEach((value, key) => {
+                      responseHeaders[key] = value;
+                    });
+                    result.status = response.status;
+                    result.statusText = response.statusText;
+                    result.url = response.url;
+                    result.headers = responseHeaders;
+                    result.body = await response.text();
+                  } catch (error) {
+                    result.error = String((error && (error.stack || error.message)) || error);
+                  }
+                  document.documentElement.innerHTML =
+                    "<head><title>TRR browser API result</title></head><body></body>";
+                  const pre = document.createElement("pre");
+                  pre.id = markerId;
+                  pre.textContent = JSON.stringify(result);
+                  document.body.appendChild(pre);
+                }
+                """,
+                {
+                    "url": request_url,
+                    "headers": dict(headers),
+                    "markerId": _BROWSER_API_EVALUATE_RESULT_MARKER_ID,
+                    "referrer": referer,
+                },
+            )
+
+        container_response = await self._fetcher.async_fetch(
+            referer,
+            headless=self._headless,
+            network_idle=False,
+            load_dom=True,
+            cookies=_cookies_to_scrapling(self._raw_cookies),
+            proxy_rotator=self._proxy_rotator,
+            extra_headers=self._parser.get_headers(referer),
+            timeout=fetch_timeout_ms,
+            retries=1,
+            retry_delay=1.0,
+            page_action=page_action,
+            google_search=False,
+        )
+        self._sync_response_cookies(container_response)
+        result_payload = self._extract_browser_evaluated_fetch_payload(container_response)
+        return self._browser_evaluated_fetch_response(
+            result_payload=result_payload,
+            request_url=request_url,
+        )
+
     async def _fetch_api_with_browser(
         self,
         url: str,
@@ -6744,23 +6881,37 @@ class InstagramCommentsScraplingFetcher:
         remaining = _deadline_remaining_seconds(deadline)
         if remaining is not None and remaining <= 0:
             raise _PaginationDeadlineExceededError
+        headers = self._parser.get_headers(referer)
         self._request_count += 1
         fetch_timeout_ms = self._timeout_ms
         if remaining is not None:
             fetch_timeout_ms = max(1_000, min(fetch_timeout_ms, int(remaining * 1_000)))
-        fetch_task = self._fetcher.async_fetch(
-            request_url,
-            headless=self._headless,
-            network_idle=False,
-            load_dom=False,
-            cookies=_cookies_to_scrapling(self._raw_cookies),
-            proxy_rotator=self._proxy_rotator,
-            extra_headers=self._parser.get_headers(referer),
-            timeout=fetch_timeout_ms,
-            retries=1,
-            retry_delay=1.0,
-        )
-        response = await asyncio.wait_for(fetch_task, timeout=remaining) if remaining is not None else await fetch_task
+        try:
+            fetch_task = self._fetcher.async_fetch(
+                request_url,
+                headless=self._headless,
+                network_idle=False,
+                load_dom=False,
+                cookies=_cookies_to_scrapling(self._raw_cookies),
+                proxy_rotator=self._proxy_rotator,
+                extra_headers=headers,
+                timeout=fetch_timeout_ms,
+                retries=1,
+                retry_delay=1.0,
+            )
+            response = (
+                await asyncio.wait_for(fetch_task, timeout=remaining) if remaining is not None else await fetch_task
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not _warmup_transport_failure(exc):
+                raise
+            self._record_retry_reason("browser_api_evaluate_fetch_after_navigation_failure")
+            response = await self._fetch_api_with_browser_evaluate(
+                request_url,
+                referer=referer,
+                headers=self._browser_fetch_headers(headers),
+                deadline=deadline,
+            )
         self._sync_response_cookies(response)
         await self._rebuild_http_client()
         return response
@@ -7390,6 +7541,46 @@ class InstagramCommentsScraplingFetcher:
                         ):
                             return browser_result
                     auth_redirect = True
+                elif (
+                    reason == "redirect_to_login"
+                    and not browser_api_fallback_attempted
+                    and _env_truthy(_BROWSER_API_FALLBACK_ENV, True)
+                ):
+                    browser_api_fallback_attempted = True
+                    self._record_retry_reason("browser_api_fallback_after_auth_redirect")
+                    try:
+                        browser_response = await self._fetch_api_with_browser(
+                            url,
+                            referer=referer,
+                            params=params,
+                            deadline=deadline,
+                        )
+                    except _PaginationDeadlineExceededError:
+                        return _deadline_response(attempt)
+                    except TimeoutError:
+                        return _deadline_response(attempt)
+                    except Exception as exc:  # noqa: BLE001
+                        if not _warmup_transport_failure(exc):
+                            raise
+                        fallback_reason = _transport_failure_reason(exc)
+                        self._record_retry_reason(fallback_reason)
+                        self._record_transport_failure(
+                            exc,
+                            reason=fallback_reason,
+                            transport="browser_api",
+                            attempt=attempt,
+                            request_url=request_url,
+                            referer=referer,
+                        )
+                    else:
+                        browser_result = self._decode_json_response_result(
+                            browser_response,
+                            attempt=attempt,
+                            transport="browser_api",
+                            request_url=request_url,
+                        )
+                        if not (browser_result.get("failed") and browser_result.get("reason") == "redirect_to_login"):
+                            return browser_result
                 diagnostic_metadata = self._record_challenge_response(
                     response,
                     reason=reason,

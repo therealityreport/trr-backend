@@ -21,6 +21,7 @@ def _clear_runtime_db_env(monkeypatch: pytest.MonkeyPatch):
         "TRR_DB_FALLBACK_URL",
         "TRR_DB_RUNTIME_LANE",
         "TRR_DB_TRANSACTION_FLIGHT_TEST",
+        "WORKSPACE_TRR_DB_LANE",
     )
     for name in runtime_envs:
         os.environ.pop(name, None)
@@ -33,6 +34,18 @@ def _clear_runtime_db_env(monkeypatch: pytest.MonkeyPatch):
             "database": "postgres",
             "current_user": "postgres",
             "server_version": "PostgreSQL 17",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "read_session_db_identity",
+        lambda _db_url: {
+            "project_ref": cli.EXPECTED_PROJECT_REF,
+            "host": "aws-0-us-east-1.pooler.supabase.com",
+            "database": "postgres",
+            "current_user": f"postgres.{cli.EXPECTED_PROJECT_REF}",
+            "server_version": "PostgreSQL 17",
+            "lane": "session",
         },
     )
     yield
@@ -78,6 +91,27 @@ def test_ensure_runtime_db_env_loaded_prefers_direct_app_env_file(tmp_path, monk
     cli.ensure_runtime_db_env_loaded()
 
     assert cli.os.environ["TRR_DB_DIRECT_URL"] == "postgresql://direct-from-app"
+    assert cli.os.environ["TRR_DB_SESSION_URL"] == "postgresql://session-from-app"
+
+
+def test_ensure_runtime_db_env_loaded_preserves_session_fallback_when_direct_is_present(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_env = tmp_path / ".env.local"
+    app_env.write_text(
+        "TRR_DB_DIRECT_URL=postgresql://direct-from-app\nTRR_DB_URL=postgresql://session-from-app\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TRR_DB_DIRECT_URL", raising=False)
+    monkeypatch.delenv("TRR_DB_SESSION_URL", raising=False)
+    monkeypatch.delenv("TRR_DB_URL", raising=False)
+    monkeypatch.setattr(cli, "APP_ENV_PATH", app_env)
+
+    cli.ensure_runtime_db_env_loaded()
+
+    assert cli.os.environ["TRR_DB_DIRECT_URL"] == "postgresql://direct-from-app"
+    assert cli.os.environ["TRR_DB_URL"] == "postgresql://session-from-app"
 
 
 def test_reconcile_runtime_db_blocks_when_core_schema_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,6 +127,64 @@ def test_reconcile_runtime_db_blocks_when_core_schema_missing(monkeypatch: pytes
 
     assert result["state"] == "blocked"
     assert result["reason"] == "missing_core_schema"
+
+
+def test_resolve_runtime_db_url_uses_session_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORKSPACE_TRR_DB_LANE", "session")
+    monkeypatch.setenv("TRR_DB_DIRECT_URL", "postgresql://postgres:secret@db.example.supabase.co:5432/postgres")
+    monkeypatch.setenv(
+        "TRR_DB_SESSION_URL",
+        f"postgresql://postgres.{cli.EXPECTED_PROJECT_REF}:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+    )
+
+    assert cli.resolve_runtime_db_url().startswith(f"postgresql://postgres.{cli.EXPECTED_PROJECT_REF}:secret@")
+
+
+def test_reconcile_runtime_db_uses_session_identity_for_session_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_TRR_DB_LANE", "session")
+    monkeypatch.setenv(
+        "TRR_DB_SESSION_URL",
+        f"postgresql://postgres.{cli.EXPECTED_PROJECT_REF}:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+    )
+    monkeypatch.setattr(cli, "assert_migration_safe", lambda require_core_schema=True: None)
+    monkeypatch.setattr(
+        cli,
+        "read_direct_db_identity",
+        lambda _db_url: (_ for _ in ()).throw(AssertionError("direct identity should not run")),
+    )
+    monkeypatch.setattr(cli, "read_local_versions", lambda: ["20260422094500"])
+    monkeypatch.setattr(cli, "read_remote_versions", lambda _db_url: ["20260422094500"])
+
+    result = cli.reconcile_runtime_db()
+
+    assert result["state"] == "ok"
+    assert result["db_identity"]["lane"] == "session"
+
+
+def test_reconcile_runtime_db_falls_back_to_session_when_direct_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRR_DB_DIRECT_URL", "postgresql://postgres:secret@db.example.supabase.co:5432/postgres")
+    monkeypatch.setenv(
+        "TRR_DB_SESSION_URL",
+        f"postgresql://postgres.{cli.EXPECTED_PROJECT_REF}:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+    )
+    monkeypatch.setattr(cli, "assert_migration_safe", lambda require_core_schema=True: None)
+    monkeypatch.setattr(
+        cli,
+        "read_direct_db_identity",
+        lambda _db_url: (_ for _ in ()).throw(RuntimeError("direct_db_unreachable")),
+    )
+    monkeypatch.setattr(cli, "read_local_versions", lambda: ["20260422094500"])
+    monkeypatch.setattr(cli, "read_remote_versions", lambda _db_url: ["20260422094500"])
+
+    result = cli.reconcile_runtime_db()
+
+    assert result["state"] == "advisory"
+    assert result["reason"] == "direct_db_unreachable_session_fallback"
+    assert result["db_identity"]["lane"] == "session"
 
 
 def test_reconcile_runtime_db_blocks_on_remote_only_history(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,6 +251,30 @@ def test_reconcile_runtime_db_blocks_when_pending_exceeds_cap(monkeypatch: pytes
 
     assert result["state"] == "blocked"
     assert result["reason"] == "too_many_pending"
+
+
+def test_reconcile_runtime_db_does_not_auto_apply_over_session_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_TRR_DB_LANE", "session")
+    monkeypatch.setenv(
+        "TRR_DB_SESSION_URL",
+        f"postgresql://postgres.{cli.EXPECTED_PROJECT_REF}:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+    )
+    monkeypatch.setattr(cli, "assert_migration_safe", lambda require_core_schema=True: None)
+    monkeypatch.setattr(cli, "read_local_versions", lambda: ["20260422094500", "20260422111500"])
+    monkeypatch.setattr(cli, "read_remote_versions", lambda _db_url: ["20260422094500"])
+    monkeypatch.setattr(cli, "read_allowlist", lambda path=cli.ALLOWLIST_PATH: {"20260422111500"})
+    monkeypatch.setattr(
+        cli,
+        "run_supabase_db_push",
+        lambda _repo_root, _db_url: (_ for _ in ()).throw(AssertionError("session lane must not auto-apply")),
+    )
+
+    result = cli.reconcile_runtime_db()
+
+    assert result["state"] == "advisory"
+    assert result["reason"] == "session_lane_auto_apply_skipped"
 
 
 def test_reconcile_runtime_db_auto_applies_safe_allowlisted_suffix(monkeypatch: pytest.MonkeyPatch) -> None:

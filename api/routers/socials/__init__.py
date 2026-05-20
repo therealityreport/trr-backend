@@ -57,7 +57,20 @@ from trr_backend.read_path_diagnostics import log_read_path
 from trr_backend.repositories.twitter_standalone import persist_standalone_twitter_search
 from trr_backend.socials.api.handlers import live_status as social_live_status
 from trr_backend.socials.api.handlers import profile_reads as social_profile_reads
+from trr_backend.socials.inline_ingest import (
+    normalize_target_platforms as _normalize_inline_target_platforms,
+)
+from trr_backend.socials.inline_ingest import (
+    run_inline_season_ingest_execution,
+)
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+
+from .analytics_read import (
+    analytics_read_path_extra,
+    page_week_detail_payload,
+    parse_analytics_include,
+    week_detail_cached_post_counts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -939,14 +952,7 @@ def _normalize_run_summary_payload(summary: Any) -> dict[str, Any]:
 
 
 def _normalize_target_platforms(platforms: list[str] | None) -> list[str]:
-    ordered = platforms or list(SOCIAL_SUPPORTED_PLATFORMS)
-    deduped: list[str] = []
-    for platform in ordered:
-        normalized = str(platform or "").strip().lower()
-        if not normalized or normalized in deduped:
-            continue
-        deduped.append(normalized)
-    return deduped or list(SOCIAL_SUPPORTED_PLATFORMS)
+    return _normalize_inline_target_platforms(platforms, supported_platforms=SOCIAL_SUPPORTED_PLATFORMS)
 
 
 def _remote_only_social_platforms() -> set[str]:
@@ -962,6 +968,27 @@ def _remote_only_social_platforms() -> set[str]:
 def _blocked_remote_only_platforms(platforms: list[str] | None) -> list[str]:
     requested_platforms = set(_normalize_target_platforms(platforms))
     return sorted(requested_platforms & _remote_only_social_platforms())
+
+
+def _run_inline_season_ingest(
+    run_id: str,
+    *,
+    platforms: list[str] | None,
+    ingest_mode: str,
+    worker_prefix: str,
+) -> None:
+    from trr_backend.repositories.social_season_analytics import execute_run
+
+    run_inline_season_ingest_execution(
+        run_id,
+        platforms=platforms,
+        supported_platforms=SOCIAL_SUPPORTED_PLATFORMS,
+        ingest_mode=ingest_mode,
+        worker_prefix=worker_prefix,
+        comments_workers_cap=_comments_run_workers_cap(),
+        execute_run=execute_run,
+        thread_pool_executor_factory=ThreadPoolExecutor,
+    )
 
 
 def _parse_utc_iso_datetime(value: str | None) -> datetime | None:
@@ -1141,39 +1168,6 @@ def _coverage_cache_window_key(
         timezone,
         _cache_datetime_key(date_start),
         _cache_datetime_key(date_end),
-    )
-
-
-def _coerce_week_detail_numeric(value: Any) -> float:
-    if isinstance(value, bool):
-        return float(int(value))
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _sort_week_detail_posts(
-    posts: list[tuple[str, str, dict[str, Any]]],
-    *,
-    sort_field: WeekDetailSortField,
-    sort_dir: WeekDetailSortDir,
-) -> None:
-    reverse = sort_dir == "desc"
-    if sort_field == "posted_at":
-        posts.sort(
-            key=lambda item: str((item[2] if isinstance(item[2], dict) else {}).get("posted_at") or ""),
-            reverse=reverse,
-        )
-        return
-    posts.sort(
-        key=lambda item: (
-            _coerce_week_detail_numeric((item[2] if isinstance(item[2], dict) else {}).get(sort_field)),
-            str((item[2] if isinstance(item[2], dict) else {}).get("posted_at") or ""),
-        ),
-        reverse=reverse,
     )
 
 
@@ -3399,7 +3393,6 @@ async def ingest_season_social(
         SocialIngestValidationError,
         SocialWorkerUnavailableError,
         assert_worker_available_when_queue_enabled,
-        execute_run,
         ingest_season,
         is_queue_enabled,
         recover_stale_running_jobs,
@@ -3549,44 +3542,6 @@ async def ingest_season_social(
         run_id = str(run_payload.get("run_id") or "")
         if run_id and not queue_enabled:
 
-            def _run_inline_execution(*, worker_prefix: str) -> None:
-                target_platforms = _normalize_target_platforms(payload.platforms)
-                if payload.ingest_mode == "comments_only":
-                    max_workers = min(_comments_run_workers_cap(), max(1, len(target_platforms)))
-                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                        futures = [
-                            pool.submit(
-                                execute_run,
-                                run_id,
-                                worker_id=f"{worker_prefix}:comments:{plat}",
-                                stage="comments",
-                                platform=plat,
-                            )
-                            for plat in target_platforms
-                        ]
-                        for future in futures:
-                            future.result()
-                    return
-                if len(target_platforms) > 1:
-                    with ThreadPoolExecutor(max_workers=len(target_platforms)) as pool:
-                        futures = [
-                            pool.submit(
-                                execute_run,
-                                run_id,
-                                worker_id=f"{worker_prefix}:{plat}",
-                                platform=plat,
-                            )
-                            for plat in target_platforms
-                        ]
-                        for future in futures:
-                            future.result()
-                    return
-                execute_run(
-                    run_id,
-                    worker_id=worker_prefix,
-                    platform=target_platforms[0] if target_platforms else None,
-                )
-
             def _run_sync() -> None:
                 timeout = _inline_execution_timeout_seconds()
                 logger.info(
@@ -3597,8 +3552,13 @@ async def ingest_season_social(
                 )
                 try:
                     _execute_with_timeout(
-                        _run_inline_execution,
-                        kwargs={"worker_prefix": "api-background"},
+                        _run_inline_season_ingest,
+                        kwargs={
+                            "run_id": run_id,
+                            "platforms": payload.platforms,
+                            "ingest_mode": payload.ingest_mode,
+                            "worker_prefix": "api-background",
+                        },
                         timeout_seconds=timeout,
                     )
                 except TimeoutError:
@@ -3620,8 +3580,13 @@ async def ingest_season_social(
                                 len(recovered),
                             )
                         _execute_with_timeout(
-                            _run_inline_execution,
-                            kwargs={"worker_prefix": "api-background:recovery"},
+                            _run_inline_season_ingest,
+                            kwargs={
+                                "run_id": run_id,
+                                "platforms": payload.platforms,
+                                "ingest_mode": payload.ingest_mode,
+                                "worker_prefix": "api-background:recovery",
+                            },
                             timeout_seconds=timeout,
                         )
                     except TimeoutError:
@@ -5833,6 +5798,16 @@ def _instagram_comments_auth_probe_allows_rendered_fallback(
     return False
 
 
+def _cookie_health_auth_probe_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **dict(payload),
+        "probe_only": True,
+        "probe_source": "cookie_health",
+        "repair_action": None,
+        "repair_available": False,
+    }
+
+
 @router.get("/profiles/{platform}/{account_handle}/cookies/health")
 def get_cookie_health_route(
     platform: str,
@@ -5853,7 +5828,7 @@ def get_cookie_health_route(
     auth_probe_reason: str | None = None
     local_cookie_fingerprint = str(health.get("cookie_fingerprint") or "").strip() or None
     if posts_auth and str(platform or "").strip().lower() == "instagram":
-        posts_probe = probe_modal_instagram_posts_auth_health(account_handle)
+        posts_probe = _cookie_health_auth_probe_metadata(probe_modal_instagram_posts_auth_health(account_handle))
         posts_cookie_fingerprint = str(posts_probe.get("cookie_fingerprint") or "").strip() or None
         posts_status = (
             str(posts_probe.get("status") or posts_probe.get("result") or ("valid" if posts_probe.get("ready") else ""))
@@ -5882,6 +5857,10 @@ def get_cookie_health_route(
                 "category": posts_category,
                 "reason": posts_reason,
                 "execution_backend": str(posts_probe.get("execution_backend") or "modal").strip().lower() or "modal",
+                "probe_only": True,
+                "probe_source": "cookie_health",
+                "repair_action": None,
+                "repair_available": False,
                 "cookie_fingerprint": posts_cookie_fingerprint,
                 "cookie_fingerprint_match": (
                     local_cookie_fingerprint == posts_cookie_fingerprint
@@ -5895,7 +5874,7 @@ def get_cookie_health_route(
             auth_probe_blocked = True
             auth_probe_reason = posts_reason or "posts_auth_blocked"
     if comments_auth and str(platform or "").strip().lower() == "instagram":
-        comments_probe = probe_modal_instagram_comments_auth_health(account_handle)
+        comments_probe = _cookie_health_auth_probe_metadata(probe_modal_instagram_comments_auth_health(account_handle))
         comments_cookie_fingerprint = str(comments_probe.get("cookie_fingerprint") or "").strip() or None
         comments_status = (
             str(
@@ -5927,6 +5906,10 @@ def get_cookie_health_route(
             "category": comments_category,
             "reason": comments_reason,
             "execution_backend": str(comments_probe.get("execution_backend") or "modal").strip().lower() or "modal",
+            "probe_only": True,
+            "probe_source": "cookie_health",
+            "repair_action": None,
+            "repair_available": False,
         }
         if comments_cookie_fingerprint:
             comments_auth_health["cookie_fingerprint"] = comments_cookie_fingerprint
@@ -5946,6 +5929,7 @@ def get_cookie_health_route(
             "healthy": False,
             "reason": auth_probe_reason,
             "auth_surface_blocked": True,
+            "auth_surface_probe_only": True,
         }
     return health
 
@@ -7352,26 +7336,20 @@ async def get_season_analytics(
     from trr_backend.repositories.social_season_analytics import get_analytics
 
     parsed_platforms = _parse_platform_query(platforms)
-    include_set: set[str] | None = None
-    if include and include.strip():
-        include_set = {item.strip().lower() for item in include.split(",") if item.strip()}
+    include_options = parse_analytics_include(include)
 
     started_at = perf_counter()
     try:
-        include_rows = bool(include_set and "rows" in include_set)
-        include_flags = include_set is None or "flags" in include_set
-        include_schedule = include_set is None or "schedule" in include_set
-        include_benchmark = include_set is None or "benchmark" in include_set
         cache_key = _analytics_cache_key(
             season_id=str(season_id),
             source_scope=source_scope,
             platforms=parsed_platforms,
             timezone=timezone,
             week=week,
-            include_rows=include_rows,
-            include_flags=include_flags,
-            include_schedule=include_schedule,
-            include_benchmark=include_benchmark,
+            include_rows=include_options.include_rows,
+            include_flags=include_options.include_flags,
+            include_schedule=include_options.include_schedule,
+            include_benchmark=include_options.include_benchmark,
         )
         cached_payload = _get_ttl_cached_payload(
             _ANALYTICS_CACHE,
@@ -7383,12 +7361,12 @@ async def get_season_analytics(
                 "season-social-analytics",
                 latency_ms=(perf_counter() - started_at) * 1000,
                 payload=cached_payload,
-                extra={
-                    "cache": "hit",
-                    "source_scope": source_scope,
-                    "week": week,
-                    "platforms": ",".join(parsed_platforms) if parsed_platforms else "all",
-                },
+                extra=analytics_read_path_extra(
+                    cache="hit",
+                    source_scope=source_scope,
+                    week=week,
+                    platforms=parsed_platforms,
+                ),
             )
             return cached_payload
         payload = await run_in_threadpool(
@@ -7398,11 +7376,11 @@ async def get_season_analytics(
             timezone=timezone,
             week=week,
             source_scope=source_scope,
-            include_rows=include_rows,
+            include_rows=include_options.include_rows,
             include_jobs=False,
-            include_flags=include_flags,
-            include_schedule=include_schedule,
-            include_benchmark=include_benchmark,
+            include_flags=include_options.include_flags,
+            include_schedule=include_options.include_schedule,
+            include_benchmark=include_options.include_benchmark,
         )
         _set_ttl_cached_payload(
             _ANALYTICS_CACHE,
@@ -7425,12 +7403,12 @@ async def get_season_analytics(
             "season-social-analytics",
             latency_ms=(perf_counter() - started_at) * 1000,
             payload=payload,
-            extra={
-                "cache": "miss",
-                "source_scope": source_scope,
-                "week": week,
-                "platforms": ",".join(parsed_platforms) if parsed_platforms else "all",
-            },
+            extra=analytics_read_path_extra(
+                cache="miss",
+                source_scope=source_scope,
+                week=week,
+                platforms=parsed_platforms,
+            ),
         )
         return payload
     except ValueError as exc:
@@ -7596,13 +7574,7 @@ async def get_season_analytics_week_detail(
             )
             _set_week_detail_cached_payload(cache_key, base_payload)
         else:
-            cached_posts = 0
-            cached_total = 0
-            for platform_payload in (base_payload.get("platforms") or {}).values():
-                platform_posts = platform_payload.get("posts") if isinstance(platform_payload, dict) else []
-                cached_posts += len(platform_posts) if isinstance(platform_posts, list) else 0
-                fallback_count = len(platform_posts) if isinstance(platform_posts, list) else 0
-                cached_total += int(platform_payload.get("total_posts", fallback_count) or 0)
+            cached_posts, cached_total = week_detail_cached_post_counts(base_payload)
 
             if requested_end > cached_posts and cached_total > cached_posts:
                 base_payload = await _run_admin_repo_call(
@@ -7621,57 +7593,13 @@ async def get_season_analytics_week_detail(
                 )
             _set_week_detail_cached_payload(cache_key, base_payload)
 
-        base_payload = copy.deepcopy(base_payload)
-        total_posts = 0
-        all_posts: list[tuple[str, str, dict[str, Any]]] = []
-        source_index_cache: dict[str, set[str]] = {}
-        for platform_name, platform_payload in (base_payload.get("platforms") or {}).items():
-            platform_posts = platform_payload.get("posts") if isinstance(platform_payload, dict) else []
-            if isinstance(platform_posts, list):
-                for post in platform_posts:
-                    if isinstance(post, dict):
-                        source_id = str(post.get("source_id") or "").strip()
-                        post_key = f"{platform_name}:{source_id}"
-                        if post_key in source_index_cache.get(platform_name, set()):
-                            continue
-                        source_index_cache.setdefault(platform_name, set()).add(post_key)
-                        all_posts.append((str(post.get("posted_at") or ""), platform_name, post))
-            fallback_total_posts = len(platform_posts) if isinstance(platform_posts, list) else 0
-            total_posts += int(platform_payload.get("total_posts", fallback_total_posts) or 0)
-
-        _sort_week_detail_posts(all_posts, sort_field=sort_field, sort_dir=sort_dir)
-        page_end = post_offset + post_limit
-        page_posts = all_posts[post_offset:page_end]
-        posts_by_platform: dict[str, list[dict[str, Any]]] = {}
-        for page_index, (_, platform_name, post) in enumerate(page_posts, start=post_offset):
-            post["sort_rank"] = page_index
-            posts_by_platform.setdefault(platform_name, []).append(post)
-
-        if isinstance(base_payload.get("totals"), dict):
-            base_payload["totals"]["posts"] = total_posts
-
-        for _platform_name, payload in (base_payload.get("platforms") or {}).items():
-            if isinstance(payload, dict):
-                payload["totals"] = payload.get("totals") or {}
-                platform_payload_posts = payload.get("posts")
-                if isinstance(payload.get("total_posts"), int):
-                    payload["totals"]["posts"] = int(payload["total_posts"] or 0)
-                elif isinstance(platform_payload_posts, list):
-                    payload["totals"]["posts"] = int(len(platform_payload_posts))
-
-        paged_payload = base_payload
-        for platform_name, payload in (paged_payload.get("platforms") or {}).items():
-            payload["posts"] = posts_by_platform.get(platform_name, [])
-            if not payload["posts"]:
-                payload["posts"] = []
-
-        paged_payload["pagination"] = {
-            "limit": post_limit,
-            "offset": post_offset,
-            "returned": len(page_posts),
-            "total": total_posts,
-            "has_more": page_end < total_posts,
-        }
+        paged_payload = page_week_detail_payload(
+            base_payload,
+            post_limit=post_limit,
+            post_offset=post_offset,
+            sort_field=sort_field,
+            sort_dir=sort_dir,
+        )
         duration_ms = int((perf_counter() - started_at) * 1000)
         logger.info(
             (

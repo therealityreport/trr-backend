@@ -204,7 +204,7 @@ def test_inject_modal_runtime_defaults_sets_canonical_modal_flags(
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
     assert os.environ["TRR_REMOTE_EXECUTOR"] == "modal"
     assert os.environ["TRR_DB_POOL_MINCONN"] == "1"
-    assert os.environ["TRR_DB_POOL_MAXCONN"] == "1"
+    assert os.environ["TRR_DB_POOL_MAXCONN"] == "2"
     assert os.environ["TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"] == "1"
     assert os.environ["TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN"] == "1"
     assert os.environ["TRR_DB_POOL_CLOSE_AFTER_RETURN"] == "1"
@@ -239,7 +239,7 @@ def test_inject_modal_runtime_defaults_overrides_explicit_env(
     modal_jobs._inject_modal_runtime_defaults()
 
     assert os.environ["TRR_JOB_PLANE_MODE"] == "remote"
-    assert os.environ["TRR_DB_POOL_MAXCONN"] == "1"
+    assert os.environ["TRR_DB_POOL_MAXCONN"] == "2"
 
 
 def test_inject_modal_runtime_defaults_clears_object_storage_profile_when_static_creds_present(
@@ -319,6 +319,7 @@ def test_execute_social_job_closes_db_pool_after_success(monkeypatch: pytest.Mon
 
     assert result["job_id"] == "job-1"
     assert result["claimed"] is True
+    assert result["worker_family"] == "social"
     assert close_calls == ["closed"]
 
 
@@ -340,6 +341,80 @@ def test_execute_social_job_closes_db_pool_after_failure(monkeypatch: pytest.Mon
     assert close_calls == ["closed"]
 
 
+def test_execute_admin_operation_closes_db_pool_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+    from trr_backend.pipeline import admin_operations
+
+    close_calls: list[str] = []
+
+    monkeypatch.setattr(admin_operations, "wait_for_sub_operation_dependencies", lambda _operation_id: True)
+    monkeypatch.setattr(
+        admin_operations,
+        "claim_and_execute_operation",
+        lambda *, operation_id, worker_id, operation_types: True,
+    )
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+
+    result = modal_jobs._execute_admin_operation("operation-1", "admin_show_refresh")
+
+    assert result["claimed"] is True
+    assert result["worker_family"] == "admin_operations"
+    assert close_calls == ["closed"]
+
+
+def test_run_google_news_sync_closes_db_pool_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.routers import admin_show_news
+    from trr_backend.db import pg
+
+    close_calls: list[str] = []
+    monkeypatch.setattr(admin_show_news, "claim_and_execute_google_news_sync_job", lambda *, job_id, worker_id: True)
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+
+    payload = modal_jobs.run_google_news_sync.local("job-1")
+
+    assert payload["claimed"] is True
+    assert payload["worker_family"] == "google_news"
+    assert close_calls == ["closed"]
+
+
+def test_run_reddit_refresh_closes_db_pool_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+    from trr_backend.repositories import reddit_refresh
+
+    close_calls: list[str] = []
+    monkeypatch.setattr(reddit_refresh, "execute_refresh_run", lambda run_id, *, worker_id: {"status": "completed"})
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+
+    payload = modal_jobs.run_reddit_refresh.local("run-1")
+
+    assert payload["status"] == "completed"
+    assert payload["worker_family"] == "reddit_refresh"
+    assert close_calls == ["closed"]
+
+
+def test_sweep_social_dispatch_queue_closes_db_pool_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trr_backend.db import pg
+
+    close_calls: list[str] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "trr_backend.socials.control_plane",
+        types.SimpleNamespace(
+            recover_and_dispatch_due_social_jobs=lambda: {
+                "status": "completed",
+                "recovered": 2,
+                "dispatched": 1,
+            },
+        ),
+    )
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+
+    payload = modal_jobs.sweep_social_dispatch_queue.local()
+
+    assert payload == {"status": "completed", "recovered": 2, "dispatched": 1}
+    assert close_calls == ["closed"]
+
+
 def test_build_social_image_base_includes_shared_script_payloads() -> None:
     image = modal_jobs._build_social_image_base(image_factory=_FakeImage)
 
@@ -353,7 +428,8 @@ def test_build_social_image_base_includes_shared_script_payloads() -> None:
     assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
     assert added_files == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_FILES)
     assert added_dirs == dict(modal_jobs._SOCIAL_IMAGE_LOCAL_DIRS)
-    assert _ops_for(image, "pip_install") == [modal_jobs._SOCIAL_IMAGE_PIP_PACKAGES]
+    assert _ops_for(image, "pip_install_from_requirements") == [(str(modal_jobs._MODAL_BROWSER_REQUIREMENTS),)]
+    assert _ops_for(image, "pip_install") == []
     assert _ops_for(image, "apt_install") == []
     assert _ops_for(image, "run_commands") == []
 
@@ -365,13 +441,32 @@ def test_build_social_image_base_adds_browser_runtime_when_requested() -> None:
     assert _ops_for(image, "run_commands") == [modal_jobs._SOCIAL_BROWSER_SETUP_COMMANDS]
 
 
+def test_build_lean_image_base_omits_social_browser_payloads() -> None:
+    image = modal_jobs._build_lean_image_base(image_factory=_FakeImage)
+
+    assert _ops_for(image, "add_local_python_source") == [("api", "trr_backend")]
+    assert _ops_for(image, "pip_install_from_requirements") == [(str(modal_jobs._MODAL_LEAN_REQUIREMENTS),)]
+    assert _ops_for(image, "pip_install") == []
+    assert _ops_for(image, "apt_install") == []
+    assert _ops_for(image, "add_local_file") == []
+    assert _ops_for(image, "add_local_dir") == []
+
+
 def test_run_social_job_uses_browser_capable_image_binding() -> None:
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_admin_operation"] is modal_jobs._image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_admin_operation_v2"] is modal_jobs._image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_google_news_sync"] is modal_jobs._image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_reddit_refresh"] is modal_jobs._image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["probe_reddit_refresh_runtime"] is modal_jobs._image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_posts_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_media_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_social_comments_job"] is modal_jobs._browser_image
     assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_socialblade_scrape"] is modal_jobs._browser_image
-    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["heartbeat_remote_executors"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["probe_socialblade_runtime"] is modal_jobs._browser_image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["heartbeat_remote_executors"] is modal_jobs._image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["purge_stale_social_worker_heartbeats"] is modal_jobs._image
+    assert modal_jobs._FUNCTION_IMAGE_BINDINGS["run_admin_vision"] is modal_jobs._vision_image
 
 
 def test_run_socialblade_scrape_persists_payload_with_following_sidecar(
@@ -477,6 +572,9 @@ def test_run_socialblade_scrape_persists_account_scoped_payload_without_person(
 def test_heartbeat_remote_executors_reports_social_auth_capabilities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from trr_backend.db import pg
+
+    close_calls: list[str] = []
     recorded: list[dict[str, object]] = []
 
     def _fake_record_dispatcher_heartbeat(**kwargs):
@@ -495,6 +593,7 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
             get_worker_auth_capabilities=lambda: {"instagram_authenticated": True, "twitter_authenticated": False},
         ),
     )
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
 
     payload = modal_jobs.heartbeat_remote_executors.local()
 
@@ -507,7 +606,54 @@ def test_heartbeat_remote_executors_reports_social_auth_capabilities(
         "instagram_authenticated": True,
         "twitter_authenticated": False,
     }
+    assert social_call["metadata_updates"]["modal_capacity"]["modal_function"] == "run_social_job"
+    assert social_call["metadata_updates"]["modal_capacity_by_function"]
+    admin_call = next(call for call in recorded if call["dispatcher_name"] == "admin")
+    assert admin_call["metadata_updates"]["modal_capacity"] == {
+        "worker_family": "admin_operations",
+        "modal_app": modal_jobs._APP_NAME,
+        "modal_function": "run_admin_operation_v2",
+        "image_family": "lean",
+        "timeout_seconds": modal_jobs._ADMIN_OPERATION_TIMEOUT_SECONDS,
+        "min_containers": modal_jobs._ADMIN_KEEP_WARM,
+        "max_containers": modal_jobs._ADMIN_CONCURRENCY_LIMIT,
+    }
     assert social_call["supported_platforms"] == list(modal_jobs.SOCIAL_SUPPORTED_PLATFORMS)
+    assert close_calls == ["closed"]
+
+
+def test_purge_stale_social_worker_heartbeats_uses_seven_day_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.db import pg
+
+    close_calls: list[str] = []
+    captured: dict[str, object] = {"params": []}
+
+    def _fake_fetch_one(_sql, params=None):
+        captured["fetch_sql"] = _sql
+        captured["params"].append(params)
+        return {"active_workers": 3, "total_workers": 23}
+
+    def _fake_execute_returning(sql, params=None):
+        captured["delete_sql"] = sql
+        captured["params"].append(params)
+        return [{"worker_id": "old-1", "status": "stopped"}, {"worker_id": "old-2", "status": "idle"}]
+
+    monkeypatch.setattr(pg, "fetch_one", _fake_fetch_one)
+    monkeypatch.setattr(pg, "execute_returning", _fake_execute_returning)
+    monkeypatch.setattr(pg, "close_pool", lambda: close_calls.append("closed"))
+
+    payload = modal_jobs.purge_stale_social_worker_heartbeats.local()
+
+    assert captured["params"] == [[7 * 24 * 60 * 60], [7 * 24 * 60 * 60]]
+    assert "last_seen_at < now()" in str(captured["delete_sql"])
+    assert "where not" not in str(captured["delete_sql"]).lower()
+    assert payload["deleted_workers"] == 2
+    assert payload["deleted_by_status"] == {"idle": 1, "stopped": 1}
+    assert payload["cleanup_policy"] == "delete_rows_older_than_threshold"
+    assert payload["worker_family"] == "social_worker_heartbeat_cleanup"
+    assert close_calls == ["closed"]
 
 
 def test_reload_falls_back_to_stub_when_modal_module_is_partial(

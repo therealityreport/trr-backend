@@ -32,6 +32,8 @@ def default_result() -> dict[str, Any]:
         "remediation": None,
         "deployed": False,
         "fingerprint_changed": False,
+        "actions": [],
+        "skipped": [],
         "readiness": None,
     }
 
@@ -111,16 +113,19 @@ def _modal_auth_advisory(readiness: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
-    source_env = prepare_named_secrets._load_source_env(repo_root / ".env")
-    runtime_values, social_values = prepare_named_secrets._split_env(source_env)
-    runtime_values = prepare_named_secrets._apply_runtime_overrides(
-        runtime_values,
-        disabled=False,
-    )
-    fingerprint_files = [
+def modal_fingerprint_files(repo_root: Path = REPO_ROOT) -> list[Path]:
+    return [
         repo_root / "trr_backend" / "modal_jobs.py",
         repo_root / "trr_backend" / "modal_dispatch.py",
+        repo_root / "trr_backend" / "job_plane.py",
+        repo_root / "trr_backend" / "pipeline" / "admin_operations.py",
+        repo_root / "api" / "routers" / "admin_show_news.py",
+        repo_root / "trr_backend" / "repositories" / "reddit_refresh.py",
+        repo_root / "trr_backend" / "vision" / "people_count_engine.py",
+        repo_root / "scripts" / "workers" / "admin_operations_worker.py",
+        repo_root / "scripts" / "workers" / "google_news_worker.py",
+        repo_root / "scripts" / "workers" / "reddit_refresh_worker.py",
+        repo_root / "scripts" / "modal" / "verify_modal_readiness.py",
         repo_root / "trr_backend" / "media" / "s3_mirror.py",
         repo_root / "trr_backend" / "repositories" / "social_sync_orchestrator.py",
         repo_root / "trr_backend" / "repositories" / "socialblade_growth.py",
@@ -144,7 +149,23 @@ def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
         repo_root / "trr_backend" / "socials" / "youtube" / "media_resolver.py",
         repo_root / "requirements.txt",
         repo_root / "requirements.lock.txt",
+        repo_root / "requirements.modal.lean.in",
+        repo_root / "requirements.modal.lean.lock.txt",
+        repo_root / "requirements.modal.browser.in",
+        repo_root / "requirements.modal.browser.lock.txt",
+        repo_root / "requirements.modal.vision.in",
+        repo_root / "requirements.modal.vision.lock.txt",
     ]
+
+
+def build_modal_fingerprint(repo_root: Path = REPO_ROOT) -> str:
+    source_env = prepare_named_secrets._load_source_env(repo_root / ".env")
+    runtime_values, social_values = prepare_named_secrets._split_env(source_env)
+    runtime_values = prepare_named_secrets._apply_runtime_overrides(
+        runtime_values,
+        disabled=False,
+    )
+    fingerprint_files = modal_fingerprint_files(repo_root)
     payload = {
         "runtime_values": runtime_values,
         "social_values": social_values,
@@ -193,6 +214,7 @@ def verify_readiness(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         # transport diagnostics without turning challenge-page noise into a
         # startup outage.
         probe_getty_remote_access=True,
+        probe_core_workers=True,
     )
 
 
@@ -246,12 +268,14 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         payload = default_result()
         payload["state"] = "skipped"
         payload["reason"] = "modal_disabled"
+        payload["skipped"].append("modal_disabled")
         return payload
 
     readiness = verify_readiness(repo_root)
     current_fingerprint = build_modal_fingerprint(repo_root)
     saved_fingerprint = load_saved_fingerprint(repo_root)
     fingerprint_changed = current_fingerprint != saved_fingerprint
+    fingerprint_file_count = sum(1 for path in modal_fingerprint_files(repo_root) if path.is_file())
     startup_resources_ready = _modal_resources_ready_for_startup(readiness)
     startup_auth_advisory = _modal_auth_advisory(readiness)
 
@@ -262,7 +286,11 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
             payload["reason"] = startup_auth_advisory["reason"]
             payload["remediation"] = startup_auth_advisory["remediation"]
             payload["auth_advisory_failures"] = startup_auth_advisory["failures"]
+            payload["skipped"].append("deploy_not_needed_auth_only_advisory")
+        else:
+            payload["skipped"].append("deploy_not_needed_readiness_ok_fingerprint_unchanged")
         payload["readiness"] = readiness
+        payload["fingerprint_file_count"] = fingerprint_file_count
         return payload
 
     if os.getenv("WORKSPACE_RUNTIME_MODAL_AUTO_DEPLOY", "1") != "1":
@@ -271,10 +299,13 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         payload["reason"] = "modal_verify_failed"
         payload["fingerprint_changed"] = fingerprint_changed
         payload["readiness"] = readiness
+        payload["fingerprint_file_count"] = fingerprint_file_count
+        payload["skipped"].append("auto_deploy_disabled")
         payload["remediation"] = "Modal auto-deploy is disabled, but readiness drift was detected."
         return payload
 
     try:
+        secret_start = time.monotonic()
         secrets_completed = apply_named_secrets(repo_root)
     except subprocess.TimeoutExpired:
         payload = default_result()
@@ -282,20 +313,29 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         payload["reason"] = "modal_secret_apply_failed"
         payload["fingerprint_changed"] = fingerprint_changed
         payload["readiness"] = readiness
+        payload["fingerprint_file_count"] = fingerprint_file_count
         payload["remediation"] = f"Timed out while applying Modal secrets after {command_timeout_seconds()} seconds."
         return payload
+    payload_action_secret = {
+        "name": "apply_named_secrets",
+        "status": "ok" if secrets_completed.returncode == 0 else "failed",
+        "elapsed_ms": int((time.monotonic() - secret_start) * 1000),
+    }
     if secrets_completed.returncode != 0:
         payload = default_result()
         payload["state"] = "blocked"
         payload["reason"] = "modal_secret_apply_failed"
         payload["fingerprint_changed"] = fingerprint_changed
         payload["readiness"] = readiness
+        payload["fingerprint_file_count"] = fingerprint_file_count
+        payload["actions"].append(payload_action_secret)
         payload["remediation"] = (
             secrets_completed.stderr or secrets_completed.stdout or "Failed to apply Modal secrets"
         ).strip()
         return payload
 
     try:
+        deploy_start = time.monotonic()
         deploy_completed = deploy_modal_app(repo_root)
     except subprocess.TimeoutExpired:
         payload = default_result()
@@ -303,18 +343,33 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         payload["reason"] = "modal_deploy_failed"
         payload["fingerprint_changed"] = fingerprint_changed
         payload["readiness"] = readiness
+        payload["fingerprint_file_count"] = fingerprint_file_count
+        payload["actions"].append(payload_action_secret)
         payload["remediation"] = f"Timed out while deploying Modal app after {command_timeout_seconds()} seconds."
         return payload
+    payload_action_deploy = {
+        "name": "deploy_modal_app",
+        "status": "ok" if deploy_completed.returncode == 0 else "failed",
+        "elapsed_ms": int((time.monotonic() - deploy_start) * 1000),
+    }
     if deploy_completed.returncode != 0:
         payload = default_result()
         payload["state"] = "blocked"
         payload["reason"] = "modal_deploy_failed"
         payload["fingerprint_changed"] = fingerprint_changed
         payload["readiness"] = readiness
+        payload["fingerprint_file_count"] = fingerprint_file_count
+        payload["actions"].extend([payload_action_secret, payload_action_deploy])
         payload["remediation"] = (deploy_completed.stderr or deploy_completed.stdout or "Modal deploy failed").strip()
         return payload
 
+    verify_start = time.monotonic()
     refreshed = verify_readiness_after_deploy(repo_root)
+    payload_action_verify = {
+        "name": "verify_after_deploy",
+        "status": "ok" if _modal_resources_ready_for_startup(refreshed) else "failed",
+        "elapsed_ms": int((time.monotonic() - verify_start) * 1000),
+    }
     refreshed_startup_resources_ready = _modal_resources_ready_for_startup(refreshed)
     refreshed_auth_advisory = _modal_auth_advisory(refreshed)
     if not refreshed_startup_resources_ready:
@@ -324,6 +379,8 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         payload["deployed"] = True
         payload["fingerprint_changed"] = fingerprint_changed
         payload["readiness"] = refreshed
+        payload["fingerprint_file_count"] = fingerprint_file_count
+        payload["actions"].extend([payload_action_secret, payload_action_deploy, payload_action_verify])
         payload["remediation"] = "Modal deploy completed but readiness checks still failed."
         return payload
 
@@ -333,6 +390,8 @@ def reconcile_modal_runtime(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     payload["deployed"] = True
     payload["fingerprint_changed"] = fingerprint_changed
     payload["readiness"] = refreshed
+    payload["fingerprint_file_count"] = fingerprint_file_count
+    payload["actions"].extend([payload_action_secret, payload_action_deploy, payload_action_verify])
     if refreshed_auth_advisory:
         payload["reason"] = refreshed_auth_advisory["reason"]
         payload["remediation"] = refreshed_auth_advisory["remediation"]
