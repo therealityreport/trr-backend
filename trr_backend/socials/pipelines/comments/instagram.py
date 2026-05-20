@@ -355,6 +355,16 @@ def _env_truthy(name: str) -> bool:
     return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def _metadata_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return False
+
+
 def _instagram_comments_single_session_load_all_enabled() -> bool:
     return _env_truthy(_INSTAGRAM_COMMENTS_SINGLE_SESSION_ENV)
 
@@ -1472,7 +1482,7 @@ def _ensure_instagram_comments_auth_ready_for_launch(
         )
     repair_result = refresh_platform_cookies_interactive(
         "instagram",
-        headless=False,
+        headless=True,
         timeout_seconds=300,
         account_handle=account_handle,
     )
@@ -1529,6 +1539,7 @@ def start_social_account_comments_scrape(
     launch_group_id: str | None = None,
     dispatch_immediately: bool = True,
     skip_launch_auth_probe: bool = False,
+    target_source_ids: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
     normalized_platform = _normalize_social_account_profile_platform(platform)
@@ -1558,6 +1569,9 @@ def start_social_account_comments_scrape(
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
     normalized_max_posts = None if max_posts is None else max(1, min(int(max_posts), 500))
     normalized_max_comments_per_post = None if max_comments_per_post is None else max(1, int(max_comments_per_post))
+    explicit_target_source_ids = list(
+        dict.fromkeys(str(item or "").strip() for item in list(target_source_ids or []) if str(item or "").strip())
+    )
     effective_profile_max_comments_per_post = (
         0
         if normalized_mode == "profile" and normalized_max_comments_per_post is None
@@ -1639,6 +1653,8 @@ def start_social_account_comments_scrape(
             target_enumeration_started_at = time_module.perf_counter()
             if normalized_mode == "single_post":
                 normalized_source_id = str(source_id or "").strip()
+                if not normalized_source_id and len(explicit_target_source_ids) == 1:
+                    normalized_source_id = explicit_target_source_ids[0]
                 if not normalized_source_id:
                     raise SocialIngestValidationError(
                         "SOCIAL_ACCOUNT_COMMENTS_SOURCE_ID_REQUIRED",
@@ -1646,7 +1662,9 @@ def start_social_account_comments_scrape(
                     )
                 target_source_ids = [normalized_source_id]
             else:
-                if normalized_target_filter == "incomplete":
+                if explicit_target_source_ids:
+                    target_source_ids = explicit_target_source_ids
+                elif normalized_target_filter == "incomplete":
                     target_source_ids = _room_callable(
                         "_instagram_social_account_incomplete_comment_target_shortcodes",
                         _instagram_social_account_incomplete_comment_target_shortcodes,
@@ -1766,6 +1784,7 @@ def start_social_account_comments_scrape(
                 "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
                 "ingest_mode": "comments_only",
                 "target_source_ids_count": target_source_ids_count,
+                "explicit_target_source_ids": bool(explicit_target_source_ids),
                 **strategy_metadata,
                 "comments_shard_count": comments_shard_count,
                 "comments_sharding_enabled": comments_shard_count > 1,
@@ -2654,7 +2673,22 @@ def _build_comments_scrape_run_progress_payload(
         .strip()
         .lower()
     )
-    manual_auth_required = probe_status == "auth_blocked" or latest_error_code in {
+    probe_advisory_continue = _metadata_truthy(latest_comments_endpoint_probe.get("advisory_continue"))
+    run_has_active_progress = (
+        effective_run_status in {"queued", "pending", "retrying", "running"}
+        and active_jobs + queued_jobs > 0
+        and (
+            items_found_total > 0 or comments_processed_total > 0 or comments_upserted_total > 0 or completed_posts > 0
+        )
+    )
+    endpoint_probe_advisory_active = (
+        probe_status == "auth_blocked" and probe_advisory_continue and run_has_active_progress
+    )
+    endpoint_probe_auth_codes = {
+        "instagram_comments_endpoint_auth_blocked",
+        "checkpoint_required",
+    }
+    hard_auth_error_codes = {
         "instagram_comments_endpoint_auth_blocked",
         "instagram_comments_auth_failed",
         "instagram_comments_browser_session_invalidated",
@@ -2662,6 +2696,11 @@ def _build_comments_scrape_run_progress_payload(
         "instagram_comments_warmup_no_cookies",
         "checkpoint_required",
     }
+    manual_auth_required = (
+        (probe_status == "auth_blocked" and not endpoint_probe_advisory_active)
+        or latest_error_code in hard_auth_error_codes - endpoint_probe_auth_codes
+        or (latest_error_code in endpoint_probe_auth_codes and not endpoint_probe_advisory_active)
+    )
     proxy_session_state = {
         key: value
         for key, value in {
@@ -2698,6 +2737,7 @@ def _build_comments_scrape_run_progress_payload(
         "incomplete_fill": bool(run_config.get("incomplete_fill")),
         "auth_validation_mode": auth_validation_mode,
         "comments_endpoint_probe": latest_comments_endpoint_probe or None,
+        "comments_endpoint_probe_advisory_active": endpoint_probe_advisory_active,
         "manual_auth_required": manual_auth_required,
         "proxy_session_state": proxy_session_state or None,
         "target_source_ids": list(dict.fromkeys(target_source_ids)),

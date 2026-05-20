@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 
 from scripts.socials.tiktok import scrape as tiktok_cli
+from scripts.socials.tiktok import smoke_posts_scrapling as tiktok_smoke_cli
+from trr_backend.db import pg
+from trr_backend.repositories import social_season_analytics as repo
+from trr_backend.socials.tiktok import ops as tiktok_ops
 from trr_backend.socials.tiktok.ops import proxy_label
 
 
@@ -21,6 +25,58 @@ def test_smoke_posts_scrapling_direct_file_help_works() -> None:
     assert result.returncode == 0, result.stderr
     assert "--account" in result.stdout
     assert "--max-pages" in result.stdout
+
+
+def test_smoke_posts_scrapling_loads_env_before_running(monkeypatch, capsys) -> None:
+    calls: list[str] = []
+
+    def fake_load_env() -> None:
+        calls.append("load_env")
+
+    def fake_run_posts_scrapling_smoke(*, account: str, max_pages: int):
+        calls.append("run")
+        assert account == "bravotv"
+        assert max_pages == 1
+        return {"run_id": "run-id", "job_id": "job-id", "status": "completed", "items_found": 3}
+
+    monkeypatch.setattr(tiktok_smoke_cli, "load_env", fake_load_env)
+    monkeypatch.setattr(tiktok_smoke_cli, "run_posts_scrapling_smoke", fake_run_posts_scrapling_smoke)
+    monkeypatch.setattr(sys, "argv", ["smoke_posts_scrapling.py", "--account", "bravotv", "--max-pages", "1"])
+
+    assert tiktok_smoke_cli.main() == 0
+    assert calls == ["load_env", "run"]
+    assert "Items found: 3" in capsys.readouterr().out
+
+
+def test_run_posts_scrapling_smoke_uses_current_source_scope(monkeypatch) -> None:
+    captured: dict[str, dict] = {}
+
+    def fake_create_run(_context, **kwargs):
+        captured["run"] = kwargs
+        return "run-id"
+
+    def fake_create_job(_context, **kwargs):
+        captured["job"] = kwargs
+        return "job-id"
+
+    def fake_fetch_one(_query, _params):
+        return {"id": "job-id", "config": {}}
+
+    def fake_runner(job):
+        captured["runner_job"] = job
+        return {"status": "completed", "items_found": 1}
+
+    monkeypatch.setattr(repo, "_create_run", fake_create_run)
+    monkeypatch.setattr(repo, "_create_job", fake_create_job)
+    monkeypatch.setattr(pg, "fetch_one", fake_fetch_one)
+
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner
+
+    monkeypatch.setattr(job_runner, "run_tiktok_posts_scrapling_job", fake_runner)
+
+    assert tiktok_ops.run_posts_scrapling_smoke(account="bravotv", max_pages=1)["status"] == "completed"
+    assert captured["run"]["source_scope"] == "network"
+    assert captured["job"]["source_scope"] == "network"
 
 
 def test_proxy_label_redacts_schemeless_proxy_credentials() -> None:

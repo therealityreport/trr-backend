@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from trr_backend.socials.tiktok.ops import run_posts_scrapling_smoke
+from trr_backend.utils.env import load_env
 
 
 def main() -> int:
@@ -32,6 +33,7 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=1, help="Max API pages to fetch")
     args = parser.parse_args()
 
+    load_env()
     result = run_posts_scrapling_smoke(account=args.account, max_pages=args.max_pages)
     run_id = result.get("run_id")
     job_id = result.get("job_id")

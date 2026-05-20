@@ -675,8 +675,9 @@ def test_run_platform_media_mirror_stage_clears_auxiliary_only_pending_status(
     monkeypatch.setattr(
         social_repo,
         "_platform_posts_has_column",
-        lambda _platform, column, **_kwargs: column
-        in {"media_urls", "asset_manifest", "raw_data", "hosted_user_avatar_url", "media_mirror_status"},
+        lambda _platform, column, **_kwargs: (
+            column in {"media_urls", "asset_manifest", "raw_data", "hosted_user_avatar_url", "media_mirror_status"}
+        ),
     )
     monkeypatch.setattr(social_repo, "_recover_platform_post_source_avatar", lambda **_kwargs: None)
     monkeypatch.setattr(

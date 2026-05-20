@@ -2699,30 +2699,38 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 )
                 probe_reason = str(comments_endpoint_probe.get("reason") or "").strip()
                 if probe_status == "auth_blocked":
-                    runtime_metadata = {
-                        **dict(fetcher.runtime_metadata),
-                        "comments_endpoint_probe": dict(comments_endpoint_probe),
-                    }
                     if (
                         probe_reason == BROWSER_SESSION_INVALIDATED_REASON
                         or _metadata_indicates_browser_session_invalidated(comments_endpoint_probe)
                     ):
+                        runtime_metadata = {
+                            **dict(fetcher.runtime_metadata),
+                            "comments_endpoint_probe": dict(comments_endpoint_probe),
+                        }
                         raise CommentsScraplingRuntimeError(
                             "Instagram comments browser session was invalidated before target processing.",
                             error_code=_BROWSER_SESSION_INVALIDATED_ERROR_CODE,
                             retryable=False,
                             runtime_metadata=runtime_metadata,
                         )
-                    raise CommentsScraplingRuntimeError(
-                        "Instagram comments endpoint auth validation failed before target processing.",
-                        error_code="instagram_comments_endpoint_auth_blocked",
-                        retryable=False,
-                        runtime_metadata=runtime_metadata,
+                    comments_endpoint_probe = {
+                        **dict(comments_endpoint_probe),
+                        "advisory_continue": True,
+                        "advisory_reason": probe_reason or "comments_endpoint_auth_blocked",
+                    }
+                    logger.warning(
+                        "Instagram comments endpoint auth validation was blocked before target processing; "
+                        "continuing so fetcher fallback lanes can attempt public comment recovery. "
+                        "job_id=%s run_id=%s reason=%s",
+                        job_id,
+                        run_id,
+                        comments_endpoint_probe.get("reason"),
                     )
                 if probe_status == "transport_blocked":
                     comments_endpoint_probe = {
                         **dict(comments_endpoint_probe),
                         "advisory_continue": True,
+                        "advisory_reason": probe_reason or "comments_endpoint_transport_blocked",
                     }
                     logger.warning(
                         "Instagram comments endpoint transport validation was inconclusive before target "

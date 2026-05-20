@@ -586,13 +586,13 @@ def _refresh_interactively(
     if not _interactive_login_enabled():
         return {}, None
     cookies = interactive_chrome_login(
-        chrome_profile_name=(os.getenv("SOCIAL_INSTAGRAM_CHROME_PROFILE") or "").strip()
-        or "entertainmentdatagroup@gmail.com",
+        chrome_profile_name=(os.getenv("SOCIAL_INSTAGRAM_CHROME_PROFILE") or "").strip() or "codex@thereality.report",
         cookie_file=str(cookie_file_path),
         timeout_seconds=max(60, int(os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_TIMEOUT_SECONDS") or "300")),
         validation_username=_validation_username(session_account_id, caller_context=caller_context),
         account_id=session_account_id,
-        headless=(os.getenv("SOCIAL_INSTAGRAM_BROWSER_MODE") or "").strip().lower() == "headless",
+        headless=(os.getenv("SOCIAL_INSTAGRAM_BROWSER_MODE") or "headless").strip().lower()
+        not in {"0", "false", "off", "no", "headed"},
     )
     return cookies, "interactive_login"
 

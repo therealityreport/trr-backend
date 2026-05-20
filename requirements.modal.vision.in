@@ -1,0 +1,12 @@
+# Vision Modal runtime for admin image-analysis only.
+--extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements.modal.lean.in
+
+numpy==1.26.4
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+onnxruntime==1.18.1
+insightface==0.7.3
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+ultralytics==8.3.39

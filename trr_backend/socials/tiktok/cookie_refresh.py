@@ -5,6 +5,7 @@ from __future__ import annotations
 from trr_backend.socials.browser_cookie_refresh import SimpleLoginSpec, refresh_simple_login_cookies
 
 _SPEC = SimpleLoginSpec(
+    platform="tiktok",
     login_url="https://www.tiktok.com/login/phone-or-email/email",
     validation_url="https://www.tiktok.com/messages?lang=en",
     cookie_domains=(".tiktok.com", "www.tiktok.com"),

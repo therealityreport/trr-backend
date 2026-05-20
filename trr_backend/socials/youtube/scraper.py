@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util import Timeout
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,8 @@ class YouTubeScrapeConfig:
     max_results: int | None = None  # None = no limit
     max_pages: int | None = None  # continuation page limit
     enforce_keyword_filter: bool = True
+    allow_ytdlp_search_supplement: bool = True
+    allow_ytdlp_video_enrichment: bool = True
     source_type: str = "account"
     playlist_id: str | None = None
     playlist_url: str | None = None
@@ -437,10 +440,19 @@ class YouTubeScraper:
     MAX_RETRIES = 3
     RETRY_BACKOFF_FACTOR = 1.5
     REQUEST_TIMEOUT_SECONDS = (10, 45)
+    CONTINUATION_REQUEST_TIMEOUT_SECONDS = (
+        _env_int("SOCIAL_YOUTUBE_CONTINUATION_CONNECT_TIMEOUT_SECONDS", 6),
+        _env_int("SOCIAL_YOUTUBE_CONTINUATION_READ_TIMEOUT_SECONDS", 10),
+    )
+    CONTINUATION_REQUEST_TOTAL_TIMEOUT_SECONDS = _env_int(
+        "SOCIAL_YOUTUBE_CONTINUATION_TOTAL_TIMEOUT_SECONDS",
+        20,
+    )
     PRE_WINDOW_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_PRE_WINDOW_PAGE_CAP", 12)
     INITIAL_DATE_WINDOW_NO_HIT_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_INITIAL_DATE_WINDOW_NO_HIT_PAGE_CAP", 8)
-    DATE_WINDOW_NO_HIT_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_DATE_WINDOW_NO_HIT_PAGE_CAP", 5)
+    DATE_WINDOW_NO_HIT_PAGE_CAP = _env_int("SOCIAL_YOUTUBE_DATE_WINDOW_NO_HIT_PAGE_CAP", 1)
     YTDLP_SEARCH_TIMEOUT_SECONDS = _env_int("SOCIAL_YOUTUBE_YTDLP_TIMEOUT_SECONDS", 120)
+    YTDLP_ENRICH_MAX_VIDEOS = _env_int("SOCIAL_YOUTUBE_YTDLP_ENRICH_MAX_VIDEOS", 300)
     COMMENT_CONTINUATION_RETRY_ATTEMPTS = _env_int("SOCIAL_YOUTUBE_COMMENT_CONTINUATION_RETRY_ATTEMPTS", 3)
     COMMENT_CONTINUATION_RETRY_BACKOFF_SECONDS = _env_int(
         "SOCIAL_YOUTUBE_COMMENT_CONTINUATION_RETRY_BACKOFF_SECONDS",
@@ -531,6 +543,14 @@ class YouTubeScraper:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         return session
+
+    def _continuation_request_timeout(self) -> Timeout:
+        connect_timeout, read_timeout = self.CONTINUATION_REQUEST_TIMEOUT_SECONDS
+        return Timeout(
+            total=max(1, self.CONTINUATION_REQUEST_TOTAL_TIMEOUT_SECONDS),
+            connect=max(1, connect_timeout),
+            read=max(1, read_timeout),
+        )
 
     def _get_headers(self) -> dict:
         """Get request headers."""
@@ -1647,11 +1667,14 @@ class YouTubeScraper:
 
         browse_url = "https://www.youtube.com/youtubei/v1/browse"
         try:
-            response = self.session.post(
+            # Channel continuation pages run on the hot path for bounded admin
+            # backfills. Bypass the session retry adapter here so a single slow
+            # YouTube continuation cannot hold a Modal worker for minutes.
+            response = requests.post(
                 browse_url,
                 headers=headers,
                 data=json.dumps(payload),
-                timeout=self.REQUEST_TIMEOUT_SECONDS,
+                timeout=self._continuation_request_timeout(),
             )
             self._track_response_status(response.status_code)
             response.raise_for_status()
@@ -1961,7 +1984,12 @@ class YouTubeScraper:
             seen_ids.add(video.video_id)
             matched.append(video)
 
-        self._enrich_videos_via_ytdlp(matched, delay=config.delay_seconds, fast_mode=config.fast_mode)
+        enrichment_meta = self._maybe_enrich_videos_via_ytdlp(
+            matched,
+            config,
+            delay=config.delay_seconds,
+            fast_mode=config.fast_mode,
+        )
         surface_cap_override_applied = False
         effective_result_cap: int | None = None
         if config.max_results:
@@ -2001,6 +2029,7 @@ class YouTubeScraper:
             "resolved_channel_title": channel_title,
             "resolved_channel_avatar_url": None,
             "ytdlp_returncode": proc.returncode,
+            "yt_dlp_enrichment": enrichment_meta,
         }
         if proc.returncode != 0 and not matched:
             self.last_retrieval_meta["error_code"] = "youtube_playlist_ytdlp_failed"
@@ -2019,6 +2048,106 @@ class YouTubeScraper:
         )
         logger.info("Playlist scrape complete: found %d videos for %s", len(matched), playlist_id)
         return matched
+
+    def _scrape_channel_via_ytdlp(
+        self,
+        config: YouTubeScrapeConfig,
+        *,
+        canonical_handle: str | None = None,
+        canonical_channel_id: str | None = None,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> tuple[list[YouTubeVideo], dict[str, Any]]:
+        handle = (canonical_handle or config.channel_handle or "").strip().lstrip("@")
+        normalized_handle = self._normalize_handle(handle)
+        if not normalized_handle or not shutil.which("yt-dlp"):
+            return [], {
+                "used": False,
+                "available": bool(shutil.which("yt-dlp")),
+                "posts_checked": 0,
+                "matched_posts": 0,
+            }
+
+        requested_limit = int(config.max_results or 100)
+        playlist_end = max(1, min(requested_limit, 200))
+        matched: list[YouTubeVideo] = []
+        seen_ids: set[str] = set()
+        posts_checked = 0
+        surfaces_checked: dict[str, int] = {"videos": 0, "shorts": 0}
+        errors: list[str] = []
+
+        for surface in ("videos", "shorts"):
+            channel_url = f"https://www.youtube.com/@{normalized_handle}/{surface}"
+            cmd = [
+                "yt-dlp",
+                "--dump-json",
+                "--skip-download",
+                "--ignore-errors",
+                "--playlist-end",
+                str(playlist_end),
+                channel_url,
+            ]
+            logger.info("Channel page was empty; trying yt-dlp %s fallback for @%s", surface, normalized_handle)
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(60, int(self.YTDLP_SEARCH_TIMEOUT_SECONDS) * 3),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                errors.append(f"{surface}:timeout")
+                continue
+
+            payload = self._parse_ytdlp_playlist_stdout(proc.stdout)
+            entries = payload.get("entries") if isinstance(payload, dict) else None
+            entry_list = [entry for entry in (entries or []) if isinstance(entry, dict)]
+            if not entry_list and isinstance(payload, dict) and payload.get("id"):
+                entry_list = [payload]
+            posts_checked += len(entry_list)
+            surfaces_checked[surface] = len(entry_list)
+
+            if proc.returncode != 0 and not entry_list:
+                stderr = str(proc.stderr or "").strip()
+                errors.append(f"{surface}:{stderr[-160:] or proc.returncode}")
+                continue
+
+            for entry in entry_list:
+                owner_candidates = self._extract_ytdlp_owner_candidates(entry)
+                if owner_candidates and not self._ytdlp_entry_matches_owner(
+                    entry,
+                    target_handle=normalized_handle,
+                    target_channel_id=canonical_channel_id,
+                ):
+                    continue
+                video = self._video_from_ytdlp_payload(entry, config, source_surface=surface)
+                if not video or video.video_id in seen_ids:
+                    continue
+                seen_ids.add(video.video_id)
+                matched.append(video)
+
+            self._emit_progress(
+                progress_cb,
+                phase="scrape_ytdlp_channel_fallback",
+                pages_scanned=sum(1 for count in surfaces_checked.values() if count > 0),
+                posts_checked=posts_checked,
+                matched_posts=len(matched),
+            )
+
+        matched.sort(key=lambda video: int(video.published_at or 0), reverse=True)
+        if config.max_results:
+            matched, _override_applied, _effective_limit = self._apply_surface_guaranteed_limit(
+                matched,
+                max_results=config.max_results,
+            )
+        return matched, {
+            "used": True,
+            "available": True,
+            "posts_checked": posts_checked,
+            "matched_posts": len(matched),
+            "surfaces_checked": surfaces_checked,
+            "errors": errors,
+        }
 
     def scrape(
         self,
@@ -2080,9 +2209,64 @@ class YouTubeScraper:
         self._shorts_precise_publish_failures = 0
         surface_cap_override_applied = False
         effective_result_cap: int | None = None
+        initial_surfaces_processed: set[str] = set()
 
         def _total_pages_scanned() -> int:
             return int(surface_pages_scanned.get("videos", 0) + surface_pages_scanned.get("shorts", 0))
+
+        def _total_continuation_pages_scanned() -> int:
+            return int(continuation_pages_by_surface.get("videos", 0) + continuation_pages_by_surface.get("shorts", 0))
+
+        def _bounded_date_window_scan() -> bool:
+            return bool(config.date_start or config.date_end)
+
+        def _continuation_page_cap_reached(surface: str) -> bool:
+            if not config.max_pages:
+                return False
+            if _bounded_date_window_scan():
+                return _total_continuation_pages_scanned() >= config.max_pages
+            return int(continuation_pages_by_surface.get(surface, 0) or 0) >= config.max_pages
+
+        def _unique_collection_state() -> tuple[int, set[str]]:
+            seen_ids: set[str] = set()
+            surfaces_present: set[str] = set()
+            unique_count = 0
+            for candidate in videos:
+                video_id = str(getattr(candidate, "video_id", "") or "")
+                if not video_id or video_id in seen_ids:
+                    continue
+                seen_ids.add(video_id)
+                unique_count += 1
+                surfaces_present.add(self._video_surface(candidate))
+            return unique_count, surfaces_present
+
+        def _requested_max_results() -> int | None:
+            if not config.max_results:
+                return None
+            return max(0, int(config.max_results))
+
+        def _current_surface_has_enough_for_next_surface() -> bool:
+            requested_limit = _requested_max_results()
+            if requested_limit is None:
+                return False
+            if requested_limit <= 0:
+                return True
+            if not ({"videos", "shorts"} - initial_surfaces_processed):
+                return False
+            unique_count, _surfaces_present = _unique_collection_state()
+            return unique_count >= requested_limit
+
+        def _collection_satisfies_max_results() -> bool:
+            requested_limit = _requested_max_results()
+            if requested_limit is None:
+                return False
+            if requested_limit <= 0:
+                return True
+            if {"videos", "shorts"} - initial_surfaces_processed:
+                return False
+            unique_count, surfaces_present = _unique_collection_state()
+            effective_limit = max(requested_limit, 2) if {"videos", "shorts"} <= surfaces_present else requested_limit
+            return unique_count >= effective_limit
 
         for surface in ("videos", "shorts"):
             logger.info("Fetching %s from @%s channel page...", surface, handle)
@@ -2152,6 +2336,7 @@ class YouTubeScraper:
             surface_pages_scanned[surface] = max(1, int(surface_pages_scanned.get(surface, 0) or 0))
             first_page_counts[surface] = len(initial_page_videos)
             videos.extend(initial_page_videos)
+            initial_surfaces_processed.add(surface)
             self._emit_progress(
                 progress_cb,
                 phase="scrape_initial_page" if surface == "videos" else "scrape_initial_page_shorts",
@@ -2164,7 +2349,21 @@ class YouTubeScraper:
             page_num = 1
 
             while continuation_token:
-                if config.max_pages and continuation_pages_by_surface[surface] >= config.max_pages:
+                if _current_surface_has_enough_for_next_surface():
+                    logger.info(
+                        "Reached max results collection target (%s); trying next surface before %s continuation",
+                        config.max_results,
+                        surface,
+                    )
+                    break
+                if _collection_satisfies_max_results():
+                    logger.info(
+                        "Reached max results collection target (%s); skipping %s continuation",
+                        config.max_results,
+                        surface,
+                    )
+                    break
+                if _continuation_page_cap_reached(surface):
                     logger.info("Reached max continuation pages limit (%s)", config.max_pages)
                     break
 
@@ -2277,6 +2476,31 @@ class YouTubeScraper:
                         break
                 else:
                     surface_no_hit_pages = 0
+                if _collection_satisfies_max_results():
+                    logger.info(
+                        "Reached max results collection target (%s); stopping %s continuation",
+                        config.max_results,
+                        surface,
+                    )
+                    break
+
+            if _collection_satisfies_max_results():
+                logger.info(
+                    "Reached max results collection target (%s); skipping remaining surfaces",
+                    config.max_results,
+                )
+                break
+            if (
+                config.max_pages
+                and _bounded_date_window_scan()
+                and _total_continuation_pages_scanned() >= config.max_pages
+            ):
+                scan_capped_reason = scan_capped_reason or "max_pages"
+                logger.info(
+                    "Reached bounded-window continuation page limit (%s); skipping remaining surfaces",
+                    config.max_pages,
+                )
+                break
 
         # Deduplicate by video_id
         seen = set()
@@ -2286,11 +2510,58 @@ class YouTubeScraper:
                 seen.add(video.video_id)
                 unique_videos.append(video)
 
-        # Enrich channel-page results with likes/comments/tags via yt-dlp.
-        self._enrich_videos_via_ytdlp(unique_videos, delay=config.delay_seconds, fast_mode=config.fast_mode)
+        if config.max_results:
+            unique_videos, surface_cap_override_applied, effective_result_cap = self._apply_surface_guaranteed_limit(
+                unique_videos,
+                max_results=config.max_results,
+            )
+
+        # Enrich small channel-page result sets with likes/comments/tags via yt-dlp.
+        # Large catalog backfills must persist page results promptly; per-video
+        # yt-dlp enrichment would turn a 12k-video channel scrape into hours.
+        enrichment_meta = self._maybe_enrich_videos_via_ytdlp(
+            unique_videos,
+            config,
+            delay=config.delay_seconds,
+            fast_mode=config.fast_mode,
+        )
+
+        channel_ytdlp_fallback_meta: dict[str, Any] = {
+            "used": False,
+            "available": bool(shutil.which("yt-dlp")),
+            "posts_checked": 0,
+            "matched_posts": 0,
+        }
+        should_try_channel_ytdlp_fallback = len(unique_videos) == 0 and bool(config.allow_ytdlp_search_supplement)
+        if (
+            should_try_channel_ytdlp_fallback
+            and (config.date_start or config.date_end)
+            and checked_renderers > 0
+            and continuation_failure_count == 0
+        ):
+            should_try_channel_ytdlp_fallback = False
+            channel_ytdlp_fallback_meta["skip_reason"] = "bounded_window_no_hits_after_channel_scan"
+        if should_try_channel_ytdlp_fallback:
+            fallback_videos, channel_ytdlp_fallback_meta = self._scrape_channel_via_ytdlp(
+                config,
+                canonical_handle=canonical_handle or handle,
+                canonical_channel_id=canonical_channel_id or None,
+                progress_cb=progress_cb,
+            )
+            if fallback_videos:
+                unique_videos = fallback_videos
+                checked_renderers = max(checked_renderers, int(channel_ytdlp_fallback_meta.get("posts_checked") or 0))
+                in_range_hits = max(in_range_hits, len(unique_videos))
+                enrichment_meta = self._maybe_enrich_videos_via_ytdlp(
+                    unique_videos,
+                    config,
+                    delay=config.delay_seconds,
+                    fast_mode=config.fast_mode,
+                )
 
         # Supplement with yt-dlp when channel browsing found no matches or was capped.
-        should_supplement = len(unique_videos) == 0 or scan_capped_reason is not None
+        supplement_needed = len(unique_videos) == 0 or scan_capped_reason is not None
+        should_supplement = supplement_needed and bool(config.allow_ytdlp_search_supplement)
         if should_supplement and config.keywords and shutil.which("yt-dlp"):
             logger.info(f"Channel browsing found only {len(unique_videos)} videos; supplementing with yt-dlp search...")
             search_videos = self._search_via_ytdlp(
@@ -2316,7 +2587,7 @@ class YouTubeScraper:
                     matched_posts=len(unique_videos),
                 )
 
-        if config.max_results:
+        if should_supplement and config.max_results:
             unique_videos, surface_cap_override_applied, effective_result_cap = self._apply_surface_guaranteed_limit(
                 unique_videos,
                 max_results=config.max_results,
@@ -2352,12 +2623,12 @@ class YouTubeScraper:
             posts_checked=checked_renderers,
             matched_posts=len(unique_videos),
         )
-        continuation_pages_total = int(
-            continuation_pages_by_surface.get("videos", 0) + continuation_pages_by_surface.get("shorts", 0)
-        )
+        continuation_pages_total = int(_total_continuation_pages_scanned())
         fallback_chain = ["channel_page_json"]
         if continuation_pages_total > 0:
             fallback_chain.append("continuation")
+        if bool(channel_ytdlp_fallback_meta.get("used")):
+            fallback_chain.append("yt_dlp_channel")
         if should_supplement:
             fallback_chain.append("yt_dlp_enrichment")
         self._last_transport = "channel_page_json"
@@ -2368,6 +2639,7 @@ class YouTubeScraper:
         self._last_source_mode = "hybrid" if should_supplement else "scraper"
         self.last_retrieval_meta = {
             "retrieval_mode": "channel_continuation",
+            "fallback_chain": list(fallback_chain),
             "continuation_pages": continuation_pages_total,
             "continuation_pages_by_surface": dict(continuation_pages_by_surface),
             "pages_scanned": max(1, _total_pages_scanned()),
@@ -2389,6 +2661,16 @@ class YouTubeScraper:
             "surface_cap_override_applied": bool(surface_cap_override_applied),
             "requested_max_results": int(config.max_results) if config.max_results is not None else None,
             "effective_max_results": effective_result_cap,
+            "yt_dlp_supplement_needed": bool(supplement_needed),
+            "yt_dlp_supplement_enabled": bool(config.allow_ytdlp_search_supplement),
+            "yt_dlp_channel_fallback_used": bool(channel_ytdlp_fallback_meta.get("used")),
+            "yt_dlp_channel_fallback_available": bool(channel_ytdlp_fallback_meta.get("available")),
+            "yt_dlp_channel_fallback_posts_checked": int(channel_ytdlp_fallback_meta.get("posts_checked") or 0),
+            "yt_dlp_channel_fallback_matched_posts": int(channel_ytdlp_fallback_meta.get("matched_posts") or 0),
+            "yt_dlp_channel_fallback_surfaces_checked": dict(channel_ytdlp_fallback_meta.get("surfaces_checked") or {}),
+            "yt_dlp_channel_fallback_errors": list(channel_ytdlp_fallback_meta.get("errors") or []),
+            "yt_dlp_channel_fallback_skip_reason": channel_ytdlp_fallback_meta.get("skip_reason"),
+            "yt_dlp_enrichment": enrichment_meta,
             "continuation_failure_reason": continuation_failure_reason,
             "continuation_failure_count": continuation_failure_count,
             "precise_publish_attempts": self._precise_publish_attempts,
@@ -2409,6 +2691,57 @@ class YouTubeScraper:
             self.last_retrieval_meta["error_class"] = "YouTubeContinuationFetchError"
         return unique_videos
 
+    def _videos_needing_ytdlp_enrichment(self, videos: list[YouTubeVideo]) -> list[YouTubeVideo]:
+        return [
+            v
+            for v in videos
+            if isinstance(v, YouTubeVideo)
+            and ((v.likes == 0 and v.comments == 0) or int(getattr(v, "duration_seconds", 0) or 0) <= 0)
+        ]
+
+    def _maybe_enrich_videos_via_ytdlp(
+        self,
+        videos: list[YouTubeVideo],
+        config: YouTubeScrapeConfig,
+        *,
+        delay: float = 1.0,
+        fast_mode: bool = False,
+    ) -> dict[str, Any]:
+        needs_enrichment = self._videos_needing_ytdlp_enrichment(videos)
+        max_videos = max(1, int(self.YTDLP_ENRICH_MAX_VIDEOS or 1))
+        meta: dict[str, Any] = {
+            "available": bool(shutil.which("yt-dlp")),
+            "attempted": False,
+            "video_count": len(videos),
+            "needs_enrichment_count": len(needs_enrichment),
+            "max_videos": max_videos,
+            "skipped_count": 0,
+            "skip_reason": None,
+        }
+        if not needs_enrichment:
+            meta["skip_reason"] = "nothing_missing"
+            return meta
+        if not bool(config.allow_ytdlp_video_enrichment):
+            meta["skip_reason"] = "disabled_by_config"
+            meta["skipped_count"] = len(needs_enrichment)
+            return meta
+        if not meta["available"]:
+            meta["skip_reason"] = "yt_dlp_unavailable"
+            meta["skipped_count"] = len(needs_enrichment)
+            return meta
+        if len(needs_enrichment) > max_videos:
+            meta["skip_reason"] = "video_count_exceeds_limit"
+            meta["skipped_count"] = len(needs_enrichment)
+            logger.info(
+                "Skipping yt-dlp enrichment for %d YouTube videos; limit=%d. Run detail refresh for per-video metrics.",
+                len(needs_enrichment),
+                max_videos,
+            )
+            return meta
+        self._enrich_videos_via_ytdlp(videos, delay=delay, fast_mode=fast_mode)
+        meta["attempted"] = True
+        return meta
+
     def _enrich_videos_via_ytdlp(
         self,
         videos: list[YouTubeVideo],
@@ -2425,12 +2758,7 @@ class YouTubeScraper:
             logger.debug("yt-dlp not available; skipping enrichment")
             return
 
-        needs_enrichment = [
-            v
-            for v in videos
-            if isinstance(v, YouTubeVideo)
-            and ((v.likes == 0 and v.comments == 0) or int(getattr(v, "duration_seconds", 0) or 0) <= 0)
-        ]
+        needs_enrichment = self._videos_needing_ytdlp_enrichment(videos)
         if not needs_enrichment:
             return
 

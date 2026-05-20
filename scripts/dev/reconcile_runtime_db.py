@@ -112,13 +112,19 @@ def _read_env_file_value(path: Path, key: str) -> str | None:
 def ensure_runtime_db_env_loaded() -> None:
     if (os.getenv("TRR_DB_DIRECT_URL") or os.getenv("TRR_DB_SESSION_URL") or os.getenv("TRR_DB_URL") or "").strip():
         return
-    for key in ("TRR_DB_DIRECT_URL", "TRR_DB_SESSION_URL", "TRR_DB_URL"):
+    loaded: dict[str, str] = {}
+    for key in ("TRR_DB_DIRECT_URL", "TRR_DB_SESSION_URL", "TRR_DB_URL", "TRR_DB_FALLBACK_URL"):
         fallback = _read_env_file_value(APP_ENV_PATH, key)
         if fallback:
             os.environ[key] = fallback
-            if key == "TRR_DB_DIRECT_URL":
-                os.environ.setdefault("TRR_DB_URL", fallback)
-            return
+            loaded[key] = fallback
+    if (
+        loaded.get("TRR_DB_DIRECT_URL")
+        and not loaded.get("TRR_DB_SESSION_URL")
+        and not loaded.get("TRR_DB_URL")
+        and not loaded.get("TRR_DB_FALLBACK_URL")
+    ):
+        os.environ.setdefault("TRR_DB_URL", loaded["TRR_DB_DIRECT_URL"])
 
 
 def resolve_direct_runtime_db_url() -> str:
@@ -130,6 +136,30 @@ def resolve_direct_runtime_db_url() -> str:
         allow_local_supabase_status=False,
     )
     return resolved.value
+
+
+def _runtime_session_escape_requested() -> bool:
+    return (os.getenv("WORKSPACE_TRR_DB_LANE") or "").strip().lower() == "session"
+
+
+def _session_runtime_db_url_candidate() -> str | None:
+    for key in ("TRR_DB_SESSION_URL", "TRR_DB_URL", "TRR_DB_FALLBACK_URL"):
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return value
+        fallback = _read_env_file_value(APP_ENV_PATH, key)
+        if fallback:
+            return fallback
+    return None
+
+
+def resolve_runtime_db_url() -> str:
+    if _runtime_session_escape_requested():
+        session_url = _session_runtime_db_url_candidate()
+        if not session_url:
+            raise RuntimeError("missing_session_runtime_db_url")
+        return session_url
+    return resolve_direct_runtime_db_url()
 
 
 def _direct_database_from_url(db_url: str) -> str:
@@ -179,6 +209,59 @@ def read_direct_db_identity(db_url: str) -> dict[str, str]:
     }
 
 
+def read_session_db_identity(db_url: str) -> dict[str, str]:
+    parsed = urlsplit(db_url)
+    host = (parsed.hostname or "").lower()
+    database = _direct_database_from_url(db_url)
+    username = parsed.username or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+
+    if not host.endswith("pooler.supabase.com"):
+        raise RuntimeError("session_db_identity_mismatch")
+    if port != 5432:
+        raise RuntimeError("session_db_port_mismatch")
+    if username != f"postgres.{EXPECTED_PROJECT_REF}":
+        raise RuntimeError("session_db_identity_mismatch")
+    if database != "postgres":
+        raise RuntimeError("session_db_database_mismatch")
+
+    try:
+        with psycopg2.connect(db_url, connect_timeout=8) as conn, conn.cursor() as cursor:
+            cursor.execute("select version(), current_database(), current_user")
+            row = cursor.fetchone()
+    except psycopg2.Error as exc:
+        raise RuntimeError("session_db_unreachable") from exc
+
+    if not row:
+        raise RuntimeError("session_db_identity_unavailable")
+
+    server_version, current_database, current_user = (str(value or "") for value in row)
+    if current_database != "postgres":
+        raise RuntimeError("session_db_database_mismatch")
+
+    return {
+        "project_ref": EXPECTED_PROJECT_REF,
+        "host": host,
+        "database": current_database,
+        "current_user": current_user,
+        "server_version": server_version,
+        "lane": "session",
+    }
+
+
+def read_runtime_db_identity(db_url: str) -> dict[str, str]:
+    if _runtime_session_escape_requested():
+        return read_session_db_identity(db_url)
+    return read_direct_db_identity(db_url)
+
+
+def _can_fallback_to_session_after_direct_failure(reason: str) -> bool:
+    return reason == "direct_db_unreachable" and _session_runtime_db_url_candidate() is not None
+
+
 def read_remote_versions(db_url: str) -> list[str]:
     with psycopg2.connect(db_url) as conn, conn.cursor() as cursor:
         assert_core_schema_exists_sql(conn)
@@ -224,8 +307,18 @@ def reconcile_runtime_db() -> dict[str, Any]:
         )
     try:
         assert_migration_safe(require_core_schema=True)
-        db_url = resolve_direct_runtime_db_url()
-        db_identity = read_direct_db_identity(db_url)
+        db_url = resolve_runtime_db_url()
+        session_fallback = False
+        try:
+            db_identity = read_runtime_db_identity(db_url)
+        except RuntimeError as exc:
+            reason = str(exc) or "direct_db_identity_failed"
+            if not _runtime_session_escape_requested() and _can_fallback_to_session_after_direct_failure(reason):
+                db_url = _session_runtime_db_url_candidate() or db_url
+                db_identity = read_session_db_identity(db_url)
+                session_fallback = True
+            else:
+                raise
         remote_versions = read_remote_versions(db_url)
     except DatabasePreflightError as exc:
         if "No database URL configured" in str(exc):
@@ -251,6 +344,16 @@ def reconcile_runtime_db() -> dict[str, Any]:
                 "Configure TRR_DB_DIRECT_URL, TRR_DB_SESSION_URL, or TRR_DB_URL in "
                 "TRR-APP/apps/web/.env.local or export one before running make dev."
             )
+        elif reason == "missing_session_runtime_db_url":
+            remediation = (
+                "WORKSPACE_TRR_DB_LANE=session was requested, but no TRR_DB_SESSION_URL, "
+                "TRR_DB_URL, or TRR_DB_FALLBACK_URL is configured."
+            )
+        elif reason.startswith("session_db_"):
+            remediation = (
+                f"Validate the session-pooler URL points at project {EXPECTED_PROJECT_REF}, "
+                "uses pooler.supabase.com:5432, and database postgres, then rerun preflight."
+            )
         return blocked_result(
             reason,
             remediation,
@@ -266,6 +369,8 @@ def reconcile_runtime_db() -> dict[str, Any]:
         "remote_only": remote_only,
         "db_identity": db_identity,
     }
+    if session_fallback:
+        base["session_fallback_reason"] = "direct_db_unreachable"
 
     if remote_only:
         return blocked_result(
@@ -297,7 +402,28 @@ def reconcile_runtime_db() -> dict[str, Any]:
             f"Startup will not auto-apply more than {max_auto_apply} backend-owned shared-schema migrations.",
             **base,
         )
+    if pending_local and _runtime_session_escape_requested():
+        return advisory_result(
+            "session_lane_auto_apply_skipped",
+            "WORKSPACE_TRR_DB_LANE=session uses the session pooler for startup; pending migrations were not "
+            "auto-applied. Use the direct DB lane or apply migrations separately when the task requires them.",
+            **base,
+        )
+    if pending_local and session_fallback:
+        return advisory_result(
+            "direct_db_unreachable_session_fallback",
+            "Direct DB is unreachable, so startup is using the session pooler fallback. Pending migrations were not "
+            "auto-applied; use the direct DB lane or apply migrations separately when the task requires them.",
+            **base,
+        )
     if not pending_local or os.getenv("WORKSPACE_RUNTIME_DB_AUTO_APPLY_ENABLED", "1") != "1":
+        if session_fallback:
+            return advisory_result(
+                "direct_db_unreachable_session_fallback",
+                "Direct DB is unreachable, so startup is using the session pooler fallback. No pending local "
+                "migrations were detected.",
+                **base,
+            )
         return ok_result(**base)
 
     completed = run_supabase_db_push(REPO_ROOT, db_url)

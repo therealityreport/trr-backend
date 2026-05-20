@@ -11,7 +11,7 @@ from typing import Any
 
 from trr_backend.socials.browser_cookie_refresh import (
     cookie_payload,
-    launch_browser,
+    open_cookie_refresh_context,
     validate_browser_cookie_session,
     write_cookie_file,
 )
@@ -68,7 +68,7 @@ def _wait_for_visible(locator: Any, *, deadline: float, timeout_cap_ms: int = 10
 
 
 def _should_allow_headed_fallback() -> bool:
-    return (os.getenv("SOCIAL_TWITTER_COOKIE_REFRESH_ALLOW_HEADED_FALLBACK") or "true").strip().lower() not in {
+    return (os.getenv("SOCIAL_TWITTER_COOKIE_REFRESH_ALLOW_HEADED_FALLBACK") or "false").strip().lower() not in {
         "0",
         "false",
         "off",
@@ -92,10 +92,22 @@ def _refresh_twitter_cookies_once(
 
     deadline = time.monotonic() + max(30, int(timeout_seconds))
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright, headless=headless)
+        session = open_cookie_refresh_context(
+            playwright,
+            platform="twitter",
+            headless=headless,
+            viewport={"width": 1_440, "height": 1_600},
+        )
         try:
-            context = browser.new_context(viewport={"width": 1_440, "height": 1_600})
+            context = session.context
             page = context.new_page()
+            page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=_remaining_timeout_ms(deadline))
+            page.wait_for_timeout(2_000)
+            existing_cookies = cookie_payload(context.cookies(), domains=_TWITTER_COOKIE_DOMAINS)
+            if existing_cookies.get("auth_token") and existing_cookies.get("ct0"):
+                write_cookie_file(cookie_file, existing_cookies)
+                return existing_cookies
+
             for url in LOGIN_URLS:
                 page.goto(url, wait_until="domcontentloaded", timeout=_remaining_timeout_ms(deadline, floor_ms=10_000))
                 page.wait_for_timeout(4_000)
@@ -174,7 +186,7 @@ def _refresh_twitter_cookies_once(
         except PlaywrightTimeoutError as exc:
             raise RuntimeError("Timed out while refreshing Twitter cookies") from exc
         finally:
-            browser.close()
+            session.close()
 
 
 def refresh_twitter_cookies(

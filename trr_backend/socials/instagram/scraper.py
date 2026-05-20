@@ -8,6 +8,7 @@ Supports:
 - Both authenticated (full pagination) and public (limited) modes
 """
 
+import asyncio
 import json
 import logging
 import math
@@ -840,6 +841,15 @@ class InstagramScraper:
             return {"refreshed": False, "reason": f"refresh_error: {exc}"}
 
     @staticmethod
+    def _graphql_recovery_disabled() -> bool:
+        return (os.getenv("SOCIAL_INSTAGRAM_GRAPHQL_RECOVERY_DISABLED") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @staticmethod
     def _is_local_environment() -> bool:
         """True when running on local machine, not on Modal workers."""
         return not (os.getenv("MODAL_TASK_ID") or os.getenv("MODAL_ENVIRONMENT"))
@@ -850,15 +860,14 @@ class InstagramScraper:
 
         SOCIAL_INSTAGRAM_BROWSER_MODE=headed   → False (show browser)
         SOCIAL_INSTAGRAM_BROWSER_MODE=headless → True  (background)
-        Default: headed locally, headless on Modal.
+        Default: headless with the configured Chrome profile.
         """
         mode = (os.getenv("SOCIAL_INSTAGRAM_BROWSER_MODE") or "").strip().lower()
         if mode == "headless":
             return True
         if mode == "headed":
             return False
-        # Default: headed locally so you can watch / intervene
-        return not InstagramScraper._is_local_environment()
+        return True
 
     def _try_interactive_login(self) -> dict[str, Any]:
         """Open Chrome with the user's profile for Instagram auth.
@@ -876,9 +885,7 @@ class InstagramScraper:
         if not self._is_local_environment():
             return {"refreshed": False, "reason": "running_on_modal"}
 
-        chrome_profile = (
-            os.getenv("SOCIAL_INSTAGRAM_CHROME_PROFILE") or ""
-        ).strip() or "entertainmentdatagroup@gmail.com"
+        chrome_profile = (os.getenv("SOCIAL_INSTAGRAM_CHROME_PROFILE") or "").strip() or "codex@thereality.report"
         cookie_file = (os.getenv("SOCIAL_INSTAGRAM_COOKIES_FILE") or "").strip() or "data/instagram_cookies.json"
         validation_username = str(self.browser_account_id or "").strip().lstrip("@") or None
         headless = self._chrome_browser_headless()
@@ -886,13 +893,22 @@ class InstagramScraper:
         try:
             from .cookie_refresh import interactive_chrome_login
 
-            fresh_cookies = interactive_chrome_login(
-                chrome_profile_name=chrome_profile,
-                cookie_file=cookie_file,
-                timeout_seconds=300,
-                validation_username=validation_username,
-                headless=headless,
-            )
+            def _run_interactive_login() -> dict[str, str]:
+                return interactive_chrome_login(
+                    chrome_profile_name=chrome_profile,
+                    cookie_file=cookie_file,
+                    timeout_seconds=300,
+                    validation_username=validation_username,
+                    headless=headless,
+                )
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                fresh_cookies = _run_interactive_login()
+            else:
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="instagram-interactive-login") as executor:
+                    fresh_cookies = executor.submit(_run_interactive_login).result()
             if not fresh_cookies or not fresh_cookies.get("sessionid"):
                 return {"refreshed": False, "reason": "interactive_login_no_sessionid"}
 
@@ -2913,6 +2929,7 @@ class InstagramScraper:
         request_timeout: tuple[int, int] | float | None = None,
         fast_mode: bool = False,
         allow_browser_fallback: bool = True,
+        allow_recovery: bool = True,
         page_size: int | None = None,
     ) -> dict | None:
         """Fetch posts using GraphQL (requires auth for full access)."""
@@ -3123,9 +3140,10 @@ class InstagramScraper:
         error_code = str(self.last_retrieval_meta.get("error_code") or "").strip() or None
         auth_recoverable_errors = self._graphql_auth_recoverable_errors()
         recovery_policy = self._graphql_recovery_policy(error_code)
+        recovery_disabled = self._graphql_recovery_disabled() or not bool(allow_recovery)
         # ── Lightweight session rotation before escalating to interactive login ──
         _auto_rotation_attempted = getattr(self, "_auto_rotation_attempted_this_scrape", False)
-        if error_code in auth_recoverable_errors and not _auto_rotation_attempted:
+        if error_code in auth_recoverable_errors and not _auto_rotation_attempted and not recovery_disabled:
             logger.warning(
                 "GraphQL auth error for @%s (%s) — attempting auto cookie refresh before interactive login",
                 username,
@@ -3143,6 +3161,7 @@ class InstagramScraper:
                     request_timeout=request_timeout,
                     fast_mode=fast_mode,
                     allow_browser_fallback=allow_browser_fallback,
+                    allow_recovery=allow_recovery,
                     page_size=page_size,
                 )
                 if retry_payload is not None:
@@ -3156,6 +3175,7 @@ class InstagramScraper:
             error_code in auth_recoverable_errors
             and self._is_local_environment()
             and not _interactive_already_attempted
+            and not recovery_disabled
         ):
             logger.warning(
                 "Instagram auth failed for @%s (%s) — attempting interactive Chrome login",
@@ -3175,6 +3195,7 @@ class InstagramScraper:
                     request_timeout=request_timeout,
                     fast_mode=fast_mode,
                     allow_browser_fallback=False,
+                    allow_recovery=allow_recovery,
                     page_size=page_size,
                 )
                 if retry_payload is not None:
@@ -3194,16 +3215,20 @@ class InstagramScraper:
                 "Instagram GraphQL 403 for @%s persists after interactive login — falling through to browser fallback",
                 username,
             )
-        rotated_payload = self._maybe_rotate_identity_after_failure(
-            username=username,
-            error_code=error_code,
-            error=last_error,
-            cursor=cursor,
-            delay=delay,
-            request_timeout=request_timeout,
-            fast_mode=fast_mode,
-            allow_browser_fallback=allow_browser_fallback,
-            page_size=page_size,
+        rotated_payload = (
+            None
+            if recovery_disabled
+            else self._maybe_rotate_identity_after_failure(
+                username=username,
+                error_code=error_code,
+                error=last_error,
+                cursor=cursor,
+                delay=delay,
+                request_timeout=request_timeout,
+                fast_mode=fast_mode,
+                allow_browser_fallback=allow_browser_fallback,
+                page_size=page_size,
+            )
         )
         if rotated_payload is not None:
             self._identity_rotation_attempted_this_scrape = False

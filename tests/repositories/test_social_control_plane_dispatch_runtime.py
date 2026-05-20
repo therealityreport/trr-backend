@@ -212,15 +212,17 @@ def test_dispatch_runtime_uses_capacity_stage_and_job_config_cap(
     monkeypatch.setattr(
         legacy,
         "_modal_dispatch_effective_platform_cap",
-        lambda stage, platform, *, active_account_count=1, job_config=None: cap_calls.append(
-            {
-                "stage": stage,
-                "platform": platform,
-                "active_account_count": active_account_count,
-                "job_config": dict(job_config or {}),
-            }
-        )
-        or 4,
+        lambda stage, platform, *, active_account_count=1, job_config=None: (
+            cap_calls.append(
+                {
+                    "stage": stage,
+                    "platform": platform,
+                    "active_account_count": active_account_count,
+                    "job_config": dict(job_config or {}),
+                }
+            )
+            or 4
+        ),
     )
     monkeypatch.setattr(legacy, "_touch_job_dispatch_metadata", lambda job_id, **kwargs: None)
     monkeypatch.setattr(legacy, "_touch_modal_social_dispatcher_heartbeat", lambda **kwargs: {})

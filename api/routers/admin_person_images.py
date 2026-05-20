@@ -55,6 +55,7 @@ from trr_backend.repositories.tagging_references import (
 )
 from trr_backend.services.person_images import detection as person_image_detection
 from trr_backend.services.person_images import source_policy as person_image_source_policy
+from trr_backend.services.person_images import url_selection as person_image_url_selection
 
 logger = logging.getLogger(__name__)
 
@@ -152,23 +153,11 @@ def _safe_dict(value: Any) -> dict[str, Any]:
 
 
 def _looks_like_getty_media_url(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    cleaned = value.strip()
-    if not cleaned:
-        return False
-    try:
-        hostname = (urlparse(cleaned).hostname or "").strip().lower()
-    except Exception:
-        return False
-    return hostname == "media.gettyimages.com" or hostname.endswith(".gettyimages.com")
+    return person_image_url_selection.looks_like_getty_media_url(value)
 
 
 def _get_mirrored_from_url(metadata: Any) -> str:
-    if not isinstance(metadata, dict):
-        return ""
-    value = metadata.get("mirrored_from")
-    return str(value or "").strip()
+    return person_image_url_selection.get_mirrored_from_url(metadata)
 
 
 def _should_reset_getty_hosted_state(
@@ -179,21 +168,13 @@ def _should_reset_getty_hosted_state(
     hosted_key: Any,
     metadata: Any,
 ) -> bool:
-    desired = str(desired_original_url or "").strip()
-    current_source = str(current_source_url or "").strip()
-    current_hosted_url = str(hosted_url or "").strip()
-    current_hosted_key = str(hosted_key or "").strip()
-    mirrored_from = _get_mirrored_from_url(metadata)
-
-    if current_hosted_url and _looks_like_getty_media_url(current_hosted_url):
-        return True
-    if desired and current_source and current_source != desired:
-        return True
-    if desired and mirrored_from and mirrored_from != desired:
-        return True
-    if desired and current_hosted_url and not current_hosted_key:
-        return True
-    return False
+    return person_image_url_selection.should_reset_getty_hosted_state(
+        desired_original_url=desired_original_url,
+        current_source_url=current_source_url,
+        hosted_url=hosted_url,
+        hosted_key=hosted_key,
+        metadata=metadata,
+    )
 
 
 _EVENT_SUBCATEGORY_LABEL_BY_KEY = {key: label for key, label, _keywords in _EVENT_SUBCATEGORY_DEFINITIONS}
@@ -5693,58 +5674,23 @@ def _get_known_source_total(
 
 
 def _is_http_url(value: str | None) -> bool:
-    if not isinstance(value, str):
-        return False
-    trimmed = value.strip().lower()
-    return trimmed.startswith("http://") or trimmed.startswith("https://")
+    return person_image_url_selection.is_http_url(value)
 
 
 def _is_wikia_static_url(value: str | None) -> bool:
-    if not isinstance(value, str) or not _is_http_url(value):
-        return False
-    return "static.wikia.nocookie.net" in value.lower()
+    return person_image_url_selection.is_wikia_static_url(value)
 
 
 def _iter_unique_urls(candidates: list[str | None]) -> list[str]:
-    seen: set[str] = set()
-    urls: list[str] = []
-    for value in candidates:
-        if not _is_http_url(value):
-            continue
-        normalized = str(value).strip()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        urls.append(normalized)
-    return urls
+    return person_image_url_selection.iter_unique_urls(candidates)
 
 
 def _pick_autocount_urls(row: dict[str, Any]) -> list[str]:
-    from trr_backend.media.s3_mirror import normalize_fandom_file_url
-
-    source = str(row.get("source") or "").lower()
-    image_url = row.get("image_url") or row.get("url")
-    raw_url = row.get("url")
-    thumb_url = row.get("thumb_url")
-    hosted_url = row.get("hosted_url")
-    referer = row.get("source_page_url") if isinstance(row.get("source_page_url"), str) else None
-
-    if source == "tmdb":
-        return _iter_unique_urls([image_url, raw_url, hosted_url, thumb_url])
-
-    if source in ("fandom", "fandom-gallery"):
-        normalized = [
-            normalize_fandom_file_url(str(value), referer=referer) if isinstance(value, str) else None
-            for value in (image_url, raw_url, thumb_url)
-        ]
-        return _iter_unique_urls([hosted_url, *normalized, image_url, raw_url, thumb_url])
-
-    return _iter_unique_urls([hosted_url, image_url, raw_url, thumb_url])
+    return person_image_url_selection.pick_autocount_urls(row)
 
 
 def _pick_autocount_url(row: dict[str, Any]) -> str | None:
-    urls = _pick_autocount_urls(row)
-    return urls[0] if urls else None
+    return person_image_url_selection.pick_autocount_url(row)
 
 
 def _normalize_face_coord(value: float) -> float:
@@ -6780,27 +6726,7 @@ def _should_recenter_auto_crop(existing_crop: Any, *, force: bool = False) -> bo
 
 
 def _build_media_link_autocount_urls(row: dict[str, Any]) -> list[str]:
-    from trr_backend.media.s3_mirror import normalize_fandom_file_url
-
-    source = str(row.get("source") or "").lower()
-    hosted_url = row.get("hosted_url")
-    source_url = row.get("source_url")
-    raw_metadata = row.get("metadata")
-    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-    page_url_val = metadata.get("page_url")
-    source_page_url_val = metadata.get("source_page_url")
-    source_page_url = (
-        page_url_val
-        if isinstance(page_url_val, str)
-        else source_page_url_val
-        if isinstance(source_page_url_val, str)
-        else None
-    )
-
-    if source in {"fandom", "fandom-gallery"} and isinstance(source_url, str):
-        normalized = normalize_fandom_file_url(source_url, referer=source_page_url)
-        return _iter_unique_urls([hosted_url, normalized, source_url])
-    return _iter_unique_urls([hosted_url, source_url])
+    return person_image_url_selection.build_media_link_autocount_urls(row)
 
 
 def _fetch_person_media_link_rows(

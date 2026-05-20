@@ -237,6 +237,154 @@ def test_tiktok_job_runner_records_retryable_error_metadata(
     }
 
 
+def test_tiktok_job_runner_recovers_non_json_posts_with_canonical_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {
+            "transport": "test",
+            "request_count": 3,
+            "sec_uid_source": "warmup_html",
+        }
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def resolve_sec_uid(self, _account_handle: str) -> str:
+            return "SEC_UID"
+
+        async def fetch_posts_page(self, *, sec_uid: str, cursor: str | None = None) -> SimpleNamespace:
+            del sec_uid, cursor
+            return SimpleNamespace(
+                auth_failed=False,
+                fetch_failed=True,
+                retryable=False,
+                fetch_reason="non_json_response",
+                posts=[],
+                has_more=False,
+                cursor=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    fallback_posts = [SimpleNamespace(video_id="fallback-video-1")]
+    fallback_calls: list[dict[str, Any]] = []
+
+    def _fake_fallback(**kwargs):
+        fallback_calls.append(kwargs)
+        return fallback_posts, {
+            "used": True,
+            "retrieval_mode": "ytdlp",
+            "trigger_reason": kwargs["trigger_reason"],
+            "posts_found": len(fallback_posts),
+        }
+
+    _install_common_fakes(monkeypatch, jr, fetcher=_FakeFetcher())
+    monkeypatch.setattr(jr, "_scrape_canonical_tiktok_fallback_posts", _fake_fallback)
+    monkeypatch.setattr(
+        jr,
+        "persist_tiktok_post_dtos",
+        lambda **_kwargs: PersistedTikTokPosts(posts_upserted=1, posts_skipped=0),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_tiktok_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "config": {"account": "bravotv", "max_pages": 1}},
+        worker_id="worker-1",
+    )
+
+    assert fallback_calls
+    assert fallback_calls[0]["account_handle"] == "bravotv"
+    assert fallback_calls[0]["trigger_reason"] == "non_json_response"
+
+    progress = fake_lifecycle.progress_calls[-1]
+    assert progress["activity"]["phase"] == "tiktok_posts_canonical_fallback_completed"
+    assert progress["activity"]["canonical_fallback"] == {
+        "trigger_reason": "non_json_response",
+        "posts_found": 1,
+    }
+
+    finish = fake_lifecycle.finish_calls[-1]
+    metadata = finish["metadata"]
+    assert finish["status"] == "completed"
+    assert finish["items_found"] == 1
+    assert metadata["stage_counters"] == {"posts": 1, "pages": 1}
+    assert metadata["persist_counters"]["posts_upserted"] == 1
+    assert metadata["listing_progress"]["partial"] is False
+    assert metadata["runtime_metadata"]["fetcher_runtime"]["canonical_fallback"]["used"] is True
+    assert metadata["runtime_metadata"]["fetcher_runtime"]["canonical_fallback"]["trigger_reason"] == (
+        "non_json_response"
+    )
+
+
+def test_tiktok_job_runner_recovers_warmup_http_failure_with_canonical_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.tiktok.posts_scrapling import job_runner as jr
+
+    class _WarmupFailureFetcher:
+        runtime_metadata = {
+            "transport": "test",
+            "request_count": 1,
+        }
+
+        async def warmup(self, _account_handle: str) -> None:
+            raise RuntimeError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+
+        async def resolve_sec_uid(self, _account_handle: str) -> str:
+            raise AssertionError("secUid API should not run after warmup fallback")
+
+        async def fetch_posts_page(self, *, sec_uid: str, cursor: str | None = None) -> SimpleNamespace:
+            raise AssertionError("post API should not run after warmup fallback")
+
+        async def aclose(self) -> None:
+            return None
+
+    fallback_posts = [SimpleNamespace(video_id="fallback-video-1"), SimpleNamespace(video_id="fallback-video-2")]
+    fallback_calls: list[dict[str, Any]] = []
+
+    def _fake_fallback(**kwargs):
+        fallback_calls.append(kwargs)
+        return fallback_posts, {
+            "used": True,
+            "retrieval_mode": "ytdlp",
+            "trigger_reason": kwargs["trigger_reason"],
+            "posts_found": len(fallback_posts),
+        }
+
+    _install_common_fakes(monkeypatch, jr, fetcher=_WarmupFailureFetcher())
+    monkeypatch.setattr(jr, "_scrape_canonical_tiktok_fallback_posts", _fake_fallback)
+    monkeypatch.setattr(
+        jr,
+        "persist_tiktok_post_dtos",
+        lambda **_kwargs: PersistedTikTokPosts(posts_upserted=2, posts_skipped=0),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_tiktok_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "config": {"account": "bravotv", "max_pages": 1}},
+        worker_id="worker-1",
+    )
+
+    assert fallback_calls
+    assert fallback_calls[0]["trigger_reason"] == "warmup_http_response_code_failure"
+
+    finish = fake_lifecycle.finish_calls[-1]
+    metadata = finish["metadata"]
+    assert finish["status"] == "completed"
+    assert finish["items_found"] == 2
+    assert metadata["stage_counters"] == {"posts": 2, "pages": 1}
+    assert metadata["runtime_metadata"]["fetcher_runtime"]["canonical_fallback"]["used"] is True
+    assert metadata["runtime_metadata"]["fetcher_runtime"]["canonical_fallback"]["trigger_reason"] == (
+        "warmup_http_response_code_failure"
+    )
+
+
 def test_tiktok_job_runner_times_out_stalled_fetch_with_retry(
     monkeypatch: pytest.MonkeyPatch,
     fake_lifecycle: _FakeLifecycle,

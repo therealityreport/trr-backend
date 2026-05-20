@@ -42,7 +42,7 @@ def main() -> int:
     # updates it to 'running' when it claims work and 'completed'/'failed' at the end.
     run_id = repo._create_run(
         None,
-        source_scope="bravo",
+        source_scope="network",
         initiated_by="manual_smoke",
         config=run_config,
         status="queued",
@@ -51,7 +51,7 @@ def main() -> int:
         None,
         run_id=run_id,
         platform="instagram",
-        source_scope="bravo",
+        source_scope="network",
         job_type="posts",
         stage=repo.INSTAGRAM_POSTS_SCRAPLING_STAGE,
         config={

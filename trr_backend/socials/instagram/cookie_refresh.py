@@ -14,7 +14,11 @@ from typing import Any
 
 from trr_backend.socials.account_browser_sessions import AccountBrowserSessionManager
 from trr_backend.socials.browser_cookie_refresh import (
+    DEFAULT_SOCIAL_AUTH_CHROME_PROFILE,
     ensure_private_file_mode,
+    find_chrome_profile_dir,
+    open_cookie_refresh_context,
+    resolve_chrome_profile_selection,
     validate_browser_cookie_session,
     write_private_json_file,
 )
@@ -285,17 +289,46 @@ def refresh_instagram_cookies(
     storage_state: dict[str, Any] | None = None
     try:
         with sync_playwright() as playwright:
-            launch_kwargs: dict[str, Any] = {
-                "headless": bool(headless),
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            try:
-                browser = playwright.chromium.launch(channel="chrome", **launch_kwargs)
-            except Exception:
-                browser = playwright.chromium.launch(**launch_kwargs)
-
-            context = browser.new_context(viewport={"width": 1_280, "height": 1_500})
+            session = open_cookie_refresh_context(
+                playwright,
+                platform="instagram",
+                headless=headless,
+                viewport={"width": 1_280, "height": 1_500},
+            )
+            browser = session
+            context = session.context
             page = context.new_page()
+            page.goto(
+                f"https://www.instagram.com/{normalized_validation_username}/"
+                if normalized_validation_username
+                else "https://www.instagram.com/",
+                wait_until="domcontentloaded",
+                timeout=_remaining_timeout_ms(deadline, floor_ms=10_000),
+            )
+            page.wait_for_timeout(1_500)
+            cookies = _cookie_payload(context.cookies())
+            if cookies.get("sessionid"):
+                if normalized_validation_username:
+                    _raise_if_login_failed(page)
+                    if normalized_validation_mode == "graphql_profile" and not _validate_session_via_graphql(
+                        page,
+                        normalized_validation_username,
+                        deadline,
+                    ):
+                        cookies = {}
+                if cookies.get("sessionid"):
+                    storage_state = context.storage_state()
+                    session.close()
+                    browser = None
+                    _INSTAGRAM_BROWSER_SESSIONS.import_bootstrapped_session(
+                        account_id,
+                        storage_state,
+                        fallback_account_id=normalized_validation_username or username,
+                    )
+                    _write_cookie_file(target_file, cookies)
+                    logger.info("Reused Instagram cookies from Chrome profile into %s", target_file)
+                    return cookies
+
             page.goto(
                 INSTAGRAM_LOGIN_URL,
                 wait_until="networkidle",
@@ -381,19 +414,19 @@ def refresh_instagram_cookies(
 
 def interactive_chrome_login(
     *,
-    chrome_profile_name: str = "entertainmentdatagroup@gmail.com",
+    chrome_profile_name: str = DEFAULT_SOCIAL_AUTH_CHROME_PROFILE,
     cookie_file: str | Path = "data/instagram_cookies.json",
     timeout_seconds: int = 300,
     validation_username: str | None = None,
     account_id: str | None = None,
-    headless: bool = False,
+    headless: bool = True,
     validation_mode: str | None = "graphql_profile",
 ) -> dict[str, str]:
     """Open Chrome with the user's real profile for Instagram login.
 
     Args:
-        headless: If False (default), shows the browser so you can log in
-                  manually and watch it work. If True, runs in background.
+        headless: If True (default), runs in the background with the configured
+                  Chrome profile. Pass False only for deliberate manual repair.
     """
     target_file = Path(cookie_file).expanduser()
     if not target_file.is_absolute():
@@ -476,7 +509,7 @@ def interactive_chrome_login(
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Playwright is required for interactive Chrome login") from exc
 
-    chrome_profile_dir = _find_chrome_profile_dir(chrome_profile_name)
+    chrome_profile = resolve_chrome_profile_selection(chrome_profile_name)
     deadline = time.monotonic() + max(60, int(timeout_seconds))
 
     mode_label = "headless" if headless else "headed"
@@ -488,15 +521,23 @@ def interactive_chrome_login(
     )
 
     with sync_playwright() as playwright:
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--profile-directory={chrome_profile.profile_directory}",
+        ]
+        logger.info(
+            "[instagram] Chrome profile contract: user_data_dir=%s profile_directory=%s preferences=%s",
+            chrome_profile.user_data_dir,
+            chrome_profile.profile_directory,
+            chrome_profile.preferences_path,
+        )
         context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(chrome_profile_dir),
+            user_data_dir=str(chrome_profile.user_data_dir),
             channel="chrome",
             headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
+            args=launch_args,
             viewport={"width": 1280, "height": 1400},
         )
         try:
@@ -628,21 +669,4 @@ def interactive_chrome_login(
 
 def _find_chrome_profile_dir(profile_name: str) -> Path:
     """Locate a Chrome profile directory by display name or email."""
-    chrome_base = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
-    for entry in chrome_base.iterdir():
-        prefs_file = entry / "Preferences"
-        if not prefs_file.is_file():
-            continue
-        try:
-            prefs = json.loads(prefs_file.read_text())
-            name = prefs.get("profile", {}).get("name", "")
-            account_info = prefs.get("account_info", [])
-            emails = [a.get("email", "") for a in account_info if isinstance(a, dict)]
-            if name.lower() == profile_name.lower() or profile_name.lower() in [e.lower() for e in emails]:
-                return entry
-        except (json.JSONDecodeError, OSError):
-            continue
-    raise FileNotFoundError(
-        f"Chrome profile '{profile_name}' not found in {chrome_base}. "
-        "Check profile name in chrome://settings or pass the profile email."
-    )
+    return find_chrome_profile_dir(profile_name)

@@ -8,12 +8,13 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - None.
 
 ## Blocked / Waiting
-- `Instagram Social Scraper Readiness - 2026-05-03` | last updated `2026-05-03` | current phase `Instagram scraper readiness passed code and route-contract gates, but launch-path comments auth remained blocked.` | next action `Investigate the comments endpoint auth/session mismatch before queuing live Instagram comments jobs.` | details `local-status/instagram-social-scraper-readiness-20260503.md`
+- None.
 
 ## Recent Completions
 - None.
 
 ## Older Plans
+- `Instagram Social Scraper Readiness - 2026-05-03` | last updated `2026-05-03` | current phase `Instagram scraper readiness passed code and route-contract gates, but launch-path comments auth remained blocked.` | next action `Investigate the comments endpoint auth/session mismatch before queuing live Instagram comments jobs.` | details `local-status/instagram-social-scraper-readiness-20260503.md`
 - `Social Scraper Separation Phase 1 Inventory` | last updated `2026-05-02` | current phase `phase 0–1.5 inventory captured; baseline 65114 lines and dirty worktree overlap recorded` | next action `Resolve overlapping Instagram comments/cookie dirty files before resuming runtime moves out of social_season_analytics.py.` | details `local-status/social-scraper-separation-phase1-inventory-20260502.md`
 - `Social Scraper Separation Final Notes` | last updated `2026-05-02` | current phase `all planned social scraper separation phases completed through Instagram-first persistence, handler registry, router package split, and ops thinning` | next action `Plan a separate compatibility-wrapper deletion pass after route/test patch paths no longer need the legacy facade.` | details `local-status/social-scraper-separation-final-20260502.md`
 - `FK Index Hardening Rollout — Closeout` | last updated `2026-04-20` | current phase `closeout complete` | next action `Monitor planner usage for the new indexes over the next 24-48h and merge the rollout branch via PR.` | details `local-status/fk-index-hardening-rollout-2026-04-20.md`
@@ -23,7 +24,6 @@ Purpose: active-work index for multi-turn AI agent sessions in `TRR-Backend`. Ke
 - `Show Page Parity Shared Social Links` | last updated `2026-04-07` | current phase `show page TMDb watch-provider buckets landed` | next action `Use as reference while downstream app parity work continues.` | details `local-status/show-page-parity-shared-social-links.md`
 - `Instagram Backfill Speed Recovery` | last updated `2026-04-07` | current phase `instagram backfill speed recovery deployed and live-verified` | next action `Let run 6cf227d4-7d0e-4447-9a4b-f7b55fc6eb1d continue on the pinned Modal runtime, then decide whether to implement additional throughput optimizations such as larger page size, adaptive catalog delay, and batched upserts.` | details `local-status/instagram-backfill-speed-recovery.md`
 - `Modal Instagram Auth Repair` | last updated `2026-04-06` | current phase `modal instagram auth repair` | next action `Refresh the admin social profile page and run Backfill Posts.` | details `local-status/modal-instagram-auth-repair.md`
-- `TASK26 Instagram Shared-Profile Rollout Guardrails` | last updated `2026-04-04` | current phase `frontier/auth fix proven live; instagram session repair pending` | next action `repair the Instagram authenticated session, then rerun bounded canary and affected replay against the deployed backend` | details `../cross-collab/TASK26/STATUS.md`
 
 ## Archives / Canonical Links
 - History archive: `archive/HANDOFF-legacy-2026-03-16.md`

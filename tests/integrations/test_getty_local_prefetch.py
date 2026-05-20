@@ -693,3 +693,46 @@ def test_fetch_person_getty_prefetch_payload_decodo_remote_carries_transport_met
     assert payload["getty_proxy_fingerprint"] == "gate.decodo.com:7000:decodo"
     assert payload["getty_runtime_probe_status"] == "not_run"
     assert payload["getty_fallback_invoked"] is False
+
+
+def test_probe_getty_remote_access_includes_request_exception_diagnostics(monkeypatch) -> None:
+    class _Session:
+        def close(self) -> None:
+            return None
+
+    def _fake_search_editorial_assets(phrase: str, **kwargs):
+        summary = kwargs.get("query_summary_out")
+        if isinstance(summary, dict):
+            summary.update(
+                {
+                    "query_url": f"https://www.gettyimages.com/search?q={phrase}",
+                    "candidate_count": 0,
+                    "termination_reason": "request_exception",
+                    "request_exception_class": "ProxyError",
+                    "request_exception_message": "proxy tunnel failed",
+                    "request_http_status": 407,
+                    "request_redirect_url": None,
+                    "fetched_candidates_total": 0,
+                }
+            )
+        return []
+
+    monkeypatch.setattr(getty_local_prefetch, "load_env", lambda: None)
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_transport,
+        "build_remote_getty_session",
+        lambda: (_Session(), {"getty_proxy_fingerprint": "gate.decodo.com:7000:decodo"}),
+    )
+    monkeypatch.setattr(
+        getty_local_prefetch.getty_integration,
+        "search_editorial_assets",
+        _fake_search_editorial_assets,
+    )
+
+    payload = getty_local_prefetch.probe_getty_remote_access(probe_phrase="Bravo")
+
+    assert payload["ready"] is False
+    assert payload["queries"][0]["request_exception_class"] == "ProxyError"
+    assert payload["queries"][0]["request_exception_message"] == "proxy tunnel failed"
+    assert payload["queries"][0]["request_http_status"] == 407
+    assert payload["queries"][0]["fetched_candidates_total"] == 0

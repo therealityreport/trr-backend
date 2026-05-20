@@ -232,6 +232,12 @@ Examples:
         help="Delay between requests in seconds (default: 2.0)",
     )
     parser.add_argument("--max-results", type=int, help="Maximum number of videos to fetch (videos only)")
+    parser.add_argument("--max-pages", type=int, help="Maximum continuation pages per surface (videos only)")
+    parser.add_argument(
+        "--no-ytdlp-supplement",
+        action="store_true",
+        help="Skip yt-dlp search supplement when channel browsing finds no matching videos.",
+    )
     parser.add_argument("--api-key", help="YouTube Data API key (optional)")
     parser.add_argument("--show-id", type=int, help="Associated show ID for metadata")
     parser.add_argument("--season", type=int, help="Associated season number for metadata")
@@ -331,6 +337,8 @@ Examples:
         date_end=parse_date(args.end),
         delay_seconds=args.delay,
         max_results=args.max_results,
+        max_pages=args.max_pages,
+        allow_ytdlp_search_supplement=not args.no_ytdlp_supplement,
         show_id=args.show_id,
         season_number=args.season,
         person_id=args.person_id,

@@ -811,6 +811,7 @@ def _persist_tweet_interactions(
                 *,
                 _index: int = index,
                 _tweet_id: str = tweet_id,
+                _expected_replies: int = expected_replies,
             ) -> None:
                 nonlocal reply_pages_scanned
                 reply_pages_scanned = max(
@@ -828,7 +829,7 @@ def _persist_tweet_interactions(
                     source_account=account_handle,
                     root_source_id=_tweet_id,
                     interaction_kind="reply",
-                    reported_count=expected_replies,
+                    reported_count=_expected_replies,
                     pages_scanned=reply_pages_scanned,
                     status="running",
                     job_id=job_id,
@@ -952,6 +953,7 @@ def _persist_tweet_interactions(
                 *,
                 _index: int = index,
                 _tweet_id: str = tweet_id,
+                _expected_quotes: int = expected_quotes,
             ) -> None:
                 nonlocal quote_pages_scanned
                 quote_pages_scanned = max(
@@ -969,7 +971,7 @@ def _persist_tweet_interactions(
                     source_account=account_handle,
                     root_source_id=_tweet_id,
                     interaction_kind="quote",
-                    reported_count=expected_quotes,
+                    reported_count=_expected_quotes,
                     pages_scanned=quote_pages_scanned,
                     status="running",
                     job_id=job_id,

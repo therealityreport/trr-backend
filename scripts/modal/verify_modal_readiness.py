@@ -21,6 +21,10 @@ DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION = "probe_social_remote_auth"
 DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION = "probe_instagram_posts_auth"
 DEFAULT_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION = "probe_instagram_comments_auth"
 DEFAULT_GETTY_REMOTE_PROBE_FUNCTION = "probe_getty_remote_access"
+DEFAULT_ADMIN_RUNTIME_PROBE_FUNCTION = "probe_admin_operation_runtime"
+DEFAULT_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION = "probe_google_news_runtime"
+DEFAULT_VISION_RUNTIME_PROBE_FUNCTION = "probe_admin_vision_runtime"
+DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION = "probe_socialblade_runtime"
 BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
@@ -117,6 +121,11 @@ def _parse_args() -> argparse.Namespace:
         help="Optionally run the deployed Getty remote access probe on Modal.",
     )
     parser.add_argument(
+        "--probe-core-workers",
+        action="store_true",
+        help="Run lightweight deployed runtime probes for admin, Google News, Reddit, vision, and SocialBlade workers.",
+    )
+    parser.add_argument(
         "--strict-probes",
         action="store_true",
         help="Treat advisory probe failures as a non-zero CLI exit.",
@@ -206,6 +215,18 @@ def expected_function_names() -> tuple[str, ...]:
         str(os.getenv("TRR_MODAL_REDDIT_REFRESH_FUNCTION") or "run_reddit_refresh").strip() or "run_reddit_refresh",
         str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION") or "probe_reddit_refresh_runtime").strip()
         or "probe_reddit_refresh_runtime",
+        str(os.getenv("TRR_MODAL_ADMIN_RUNTIME_PROBE_FUNCTION") or DEFAULT_ADMIN_RUNTIME_PROBE_FUNCTION).strip()
+        or DEFAULT_ADMIN_RUNTIME_PROBE_FUNCTION,
+        str(
+            os.getenv("TRR_MODAL_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION") or DEFAULT_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION
+        ).strip()
+        or DEFAULT_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION,
+        str(os.getenv("TRR_MODAL_VISION_RUNTIME_PROBE_FUNCTION") or DEFAULT_VISION_RUNTIME_PROBE_FUNCTION).strip()
+        or DEFAULT_VISION_RUNTIME_PROBE_FUNCTION,
+        str(
+            os.getenv("TRR_MODAL_SOCIALBLADE_RUNTIME_PROBE_FUNCTION") or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION
+        ).strip()
+        or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION,
         str(os.getenv("TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION") or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION).strip()
         or DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION,
         str(
@@ -225,6 +246,8 @@ def expected_function_names() -> tuple[str, ...]:
         str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
         or "run_socialblade_scrape",
         "heartbeat_remote_executors",
+        str(os.getenv("TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION") or "purge_stale_social_worker_heartbeats").strip()
+        or "purge_stale_social_worker_heartbeats",
         *social_function_names,
     )
 
@@ -264,6 +287,35 @@ def getty_remote_probe_function_name() -> str:
         str(os.getenv("TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION") or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION).strip()
         or DEFAULT_GETTY_REMOTE_PROBE_FUNCTION
     )
+
+
+def core_worker_runtime_probe_functions() -> dict[str, str]:
+    return {
+        "admin_operations": (
+            str(os.getenv("TRR_MODAL_ADMIN_RUNTIME_PROBE_FUNCTION") or DEFAULT_ADMIN_RUNTIME_PROBE_FUNCTION).strip()
+            or DEFAULT_ADMIN_RUNTIME_PROBE_FUNCTION
+        ),
+        "google_news": (
+            str(
+                os.getenv("TRR_MODAL_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION") or DEFAULT_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION
+            ).strip()
+            or DEFAULT_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION
+        ),
+        "reddit_refresh": (
+            str(os.getenv("TRR_MODAL_REDDIT_RUNTIME_PROBE_FUNCTION") or "probe_reddit_refresh_runtime").strip()
+            or "probe_reddit_refresh_runtime"
+        ),
+        "admin_vision": (
+            str(os.getenv("TRR_MODAL_VISION_RUNTIME_PROBE_FUNCTION") or DEFAULT_VISION_RUNTIME_PROBE_FUNCTION).strip()
+            or DEFAULT_VISION_RUNTIME_PROBE_FUNCTION
+        ),
+        "socialblade": (
+            str(
+                os.getenv("TRR_MODAL_SOCIALBLADE_RUNTIME_PROBE_FUNCTION") or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION
+            ).strip()
+            or DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION
+        ),
+    }
 
 
 def get_app_function_handles(*, app_name: str, modal_environment: str = "") -> dict[str, Any]:
@@ -343,6 +395,41 @@ def invoke_remote_auth_probe(
     return dict(payload)
 
 
+def invoke_runtime_probe(
+    *,
+    function_handle: Any,
+    worker_family: str,
+) -> dict[str, Any]:
+    try:
+        payload = function_handle.remote()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "worker_family": worker_family,
+            "healthy": False,
+            "reason": "probe_invocation_failed",
+            "detail": {
+                "phase": "runtime_probe",
+                "exception_class": type(exc).__name__,
+                "message": str(exc)[:240],
+            },
+        }
+    if not isinstance(payload, dict):
+        return {
+            "worker_family": worker_family,
+            "healthy": False,
+            "reason": "probe_payload_invalid",
+            "detail": {
+                "phase": "runtime_probe",
+                "message": f"Expected dict payload, got {type(payload).__name__}",
+            },
+        }
+    normalized = dict(payload)
+    normalized.setdefault("worker_family", worker_family)
+    normalized.setdefault("healthy", bool(normalized.get("ready", True)))
+    normalized.setdefault("reason", "ok" if bool(normalized.get("healthy")) else "runtime_probe_failed")
+    return normalized
+
+
 def _resolve_instagram_comments_probe_shortcode(account_handle: str) -> str | None:
     try:
         from trr_backend.repositories import social_season_analytics as social_repo
@@ -364,6 +451,7 @@ def verify_modal_readiness(
     probe_instagram_comments_auth_handle: str | None = None,
     probe_instagram_comments_auth_shortcode: str | None = None,
     probe_getty_remote_access: bool = False,
+    probe_core_workers: bool = False,
 ) -> dict[str, Any]:
     social_jobs_are_enabled = social_jobs_enabled()
     secret_names = list_secret_names(modal_environment=modal_environment)
@@ -581,6 +669,24 @@ def verify_modal_readiness(
                     }
                 )
 
+    runtime_probes: list[dict[str, Any]] = []
+    if probe_core_workers:
+        for worker_family, probe_function_name in core_worker_runtime_probe_functions().items():
+            probe_handle = app_function_handles.get(probe_function_name)
+            if probe_handle is None or probe_function_name in missing_functions:
+                runtime_probes.append(
+                    {
+                        "worker_family": worker_family,
+                        "function_name": probe_function_name,
+                        "healthy": False,
+                        "reason": "probe_function_unavailable",
+                    }
+                )
+                continue
+            probe_payload = invoke_runtime_probe(function_handle=probe_handle, worker_family=worker_family)
+            probe_payload.setdefault("function_name", probe_function_name)
+            runtime_probes.append(probe_payload)
+
     blocking_probe_failures: list[str] = []
     advisory_probe_failures: list[str] = []
     if remote_auth_probe is not None and not bool(remote_auth_probe.get("ready")):
@@ -602,6 +708,11 @@ def verify_modal_readiness(
         advisory_probe_failures.append(
             str(getty_remote_probe.get("reason") or "getty_remote_probe_failed").strip() or "getty_remote_probe_failed"
         )
+    for runtime_probe in runtime_probes:
+        if not bool(runtime_probe.get("healthy")):
+            worker_family = str(runtime_probe.get("worker_family") or "worker").strip()
+            reason = str(runtime_probe.get("reason") or "runtime_probe_failed").strip() or "runtime_probe_failed"
+            blocking_probe_failures.append(f"{worker_family}:{reason}")
 
     core_ok = (
         app_found
@@ -635,6 +746,7 @@ def verify_modal_readiness(
         "instagram_posts_auth_probe": instagram_posts_auth_probe,
         "instagram_comments_auth_probe": instagram_comments_auth_probe,
         "getty_remote_probe": getty_remote_probe,
+        "runtime_probes": runtime_probes,
         "blocking_probe_failures": blocking_probe_failures,
         "advisory_probe_failures": advisory_probe_failures,
     }
@@ -690,6 +802,13 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
         probe = summary["getty_remote_probe"]
         probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
         print(f"  Getty remote probe: {'ready' if probe.get('ready') else 'not ready'}{probe_reason}")
+    if summary.get("runtime_probes"):
+        print("  Runtime probes:")
+        for probe in summary["runtime_probes"]:
+            probe_reason = f" ({probe.get('reason')})" if probe.get("reason") else ""
+            print(
+                f"    - {probe.get('worker_family')}: {'ready' if probe.get('healthy') else 'not ready'}{probe_reason}"
+            )
     if summary.get("advisory_probe_failures"):
         print("  Advisory probe failures: " + ", ".join(summary["advisory_probe_failures"]))
     print(f"  Core ready: {'yes' if summary.get('core_ok') else 'no'}")
@@ -711,6 +830,7 @@ def main() -> int:
         probe_instagram_comments_auth_handle=str(args.probe_instagram_comments_auth or "").strip() or None,
         probe_instagram_comments_auth_shortcode=str(args.probe_instagram_comments_shortcode or "").strip() or None,
         probe_getty_remote_access=bool(args.probe_getty_remote_access),
+        probe_core_workers=bool(args.probe_core_workers),
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

@@ -153,6 +153,59 @@ def test_persist_tiktok_posts_accepts_aweme_id_without_id(monkeypatch):
     assert result.posts_skipped == 0
 
 
+def test_persist_tiktok_post_dtos_accepts_canonical_posts(monkeypatch):
+    from trr_backend.db import pg
+    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_post_dtos
+    from trr_backend.socials.tiktok.scraper import TikTokPost
+
+    class _ConnectionContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return None
+
+    persisted_video_ids: list[str] = []
+
+    def _fake_upsert(_context, *, post, **_kwargs):
+        persisted_video_ids.append(post.video_id)
+
+    monkeypatch.setattr(pg, "db_connection", lambda: _ConnectionContext())
+    monkeypatch.setattr(repo, "_upsert_tiktok_post", _fake_upsert)
+
+    result = persist_tiktok_post_dtos(
+        account_handle="testuser",
+        posts=[
+            TikTokPost(
+                video_id="7900000000000000000",
+                date_time="2026-05-01 00:00:00",
+                create_time=1777593600,
+                description="canonical fallback post",
+                hashtags=[],
+                mentions=[],
+                likes=1,
+                comments=2,
+                shares=3,
+                saves=4,
+                views=5,
+                url="https://www.tiktok.com/@testuser/video/7900000000000000000",
+                username="testuser",
+                author_nickname="Test User",
+                duration=10,
+                music_title="",
+                music_author="",
+            )
+        ],
+        run_id="run-1",
+        job_id="job-1",
+    )
+
+    assert persisted_video_ids == ["7900000000000000000"]
+    assert result.posts_upserted == 1
+    assert result.posts_skipped == 0
+
+
 def test_adapt_tiktok_item_accepts_video_id_without_id():
     from trr_backend.socials.tiktok.posts_scrapling.persistence import _tiktok_item_to_post_dto
 

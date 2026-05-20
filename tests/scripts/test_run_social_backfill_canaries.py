@@ -18,7 +18,7 @@ def test_build_canary_commands_includes_one_command_per_required_platform() -> N
             "--account",
             "thetraitorsus",
             "--source-scope",
-            "bravo",
+            "network",
             "--action",
             "backfill",
             "--selected-task",

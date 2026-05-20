@@ -1017,11 +1017,16 @@ class TikTokScraper:
         )
         if max_videos_hint is None and config_max_videos_hint > 0:
             max_videos_hint = config_max_videos_hint
-        # max_videos_hint is advisory only — never reduce below the date-based estimate
-        if max_videos_hint is not None and max_videos_hint > max_videos:
-            max_videos = min(25_000, max_videos_hint)
         if max_posts_hint is None and max_videos_hint is not None and max_videos_hint > 0:
             max_posts_hint = max_videos_hint
+        # With a date range, keep the date-based floor so older posts are not
+        # silently missed. Without a date range, an explicit small hint is a
+        # real canary/backfill cap and keeps fallback runs bounded.
+        if max_videos_hint is not None and max_videos_hint > 0:
+            if start_dt is None and max_posts_hint is not None:
+                max_videos = min(25_000, max_videos_hint)
+            elif max_videos_hint > max_videos:
+                max_videos = min(25_000, max_videos_hint)
 
         url = f"https://www.tiktok.com/@{config.username}"
         cmd = [

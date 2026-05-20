@@ -408,6 +408,13 @@ def get_social_account_profile_summary(
                 )
                 comments_coverage_state["recent_runs"] = list(recent_comments_runs)
                 latest_comments_run = recent_comments_runs[0] if recent_comments_runs else {}
+                if normalized_detail in {"lite", "distribution"}:
+                    return {
+                        "coverage_counts_deferred": True,
+                        "coverage_counts_deferred_reason": "lite_summary",
+                        "last_comments_run_at": latest_comments_run.get("created_at"),
+                        "last_comments_run_status": latest_comments_run.get("status"),
+                    }
                 return {
                     **_call_profile_summary_loader_with_conn(
                         _instagram_social_account_comments_target_counts,

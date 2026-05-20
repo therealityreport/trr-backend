@@ -85,6 +85,9 @@ def build_smoke_commands(args: argparse.Namespace, parser: argparse.ArgumentPars
         youtube_end,
         "--max-results",
         str(args.youtube_max_results),
+        "--max-pages",
+        str(args.youtube_max_pages),
+        "--no-ytdlp-supplement",
     )
 
     return [
@@ -163,6 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--youtube-end", help="YouTube scrape end date, YYYY-MM-DD. Defaults to today.")
     parser.add_argument("--youtube-days", type=int, default=30, help="Default YouTube lookback window in days.")
     parser.add_argument("--youtube-max-results", type=int, default=5, help="Max YouTube videos for the smoke scrape.")
+    parser.add_argument("--youtube-max-pages", type=int, default=2, help="Max YouTube continuation pages per surface.")
     return parser
 
 

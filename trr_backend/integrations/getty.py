@@ -841,6 +841,10 @@ def _search_asset_candidates_for_phrase(
             )
             if query_summary is not None:
                 query_summary["termination_reason"] = "request_exception"
+                query_summary["request_exception_class"] = type(exc).__name__
+                query_summary["request_exception_message"] = str(exc)[:240]
+                query_summary["request_http_status"] = http_status
+                query_summary["request_redirect_url"] = redirect_url
             break
         except Exception as exc:
             logger.warning("Getty browser search fetch failed for %s page=%s: %s", phrase, page, exc)
@@ -852,6 +856,8 @@ def _search_asset_candidates_for_phrase(
             )
             if query_summary is not None:
                 query_summary["termination_reason"] = "page_fetcher_exception"
+                query_summary["page_fetcher_exception_class"] = type(exc).__name__
+                query_summary["page_fetcher_exception_message"] = str(exc)[:240]
             break
 
         page_classification = _classify_getty_page(response_text, status_code=status_code)
@@ -1057,6 +1063,12 @@ def _init_query_summary(
     query_summary_out["page_debug"] = []
     query_summary_out["pagination_rewrite_detected"] = False
     query_summary_out["termination_reason"] = None
+    query_summary_out["request_exception_class"] = None
+    query_summary_out["request_exception_message"] = None
+    query_summary_out["request_http_status"] = None
+    query_summary_out["request_redirect_url"] = None
+    query_summary_out["page_fetcher_exception_class"] = None
+    query_summary_out["page_fetcher_exception_message"] = None
     return query_summary_out
 
 

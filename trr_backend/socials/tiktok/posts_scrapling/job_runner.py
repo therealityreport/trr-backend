@@ -16,8 +16,11 @@ from datetime import timedelta
 from typing import Any
 
 from trr_backend.db import pg
-from trr_backend.socials.tiktok.posts_scrapling.fetcher import TikTokPostsScraplingFetcher
-from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_posts
+from trr_backend.socials.tiktok.posts_scrapling.fetcher import (
+    TikTokPostsScraplingFetcher,
+    tiktok_posts_scrapling_page_size,
+)
+from trr_backend.socials.tiktok.posts_scrapling.persistence import persist_tiktok_post_dtos, persist_tiktok_posts
 from trr_backend.socials.tiktok.posts_scrapling.proxy import select_tiktok_posts_proxy
 from trr_backend.socials.tiktok.posts_scrapling.session import resolve_tiktok_posts_session
 
@@ -61,6 +64,8 @@ TikTokPostsScraplingCancelled = TikTokPostsScraplingCancelledError
 
 _OPERATION_TIMEOUT_SECONDS_DEFAULT = 240.0
 _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT = 30.0
+_CANONICAL_TIKTOK_FALLBACK_REASONS = frozenset({"non_json_response", "challenge_or_blocked"})
+_CANONICAL_TIKTOK_FALLBACK_MAX_POSTS_CAP = 250
 
 
 def _resolve_operation_timeout_seconds() -> float:
@@ -85,6 +90,73 @@ def _resolve_operation_heartbeat_interval_seconds() -> float:
     except (TypeError, ValueError):
         return _OPERATION_HEARTBEAT_INTERVAL_SECONDS_DEFAULT
     return min(max(parsed, 1.0), 120.0)
+
+
+def _should_use_canonical_tiktok_fallback(fetch_reason: Any) -> bool:
+    return str(fetch_reason or "").strip().lower() in _CANONICAL_TIKTOK_FALLBACK_REASONS
+
+
+def _canonical_tiktok_fallback_max_posts(max_pages: int | None) -> int:
+    page_count = max(1, int(max_pages or 1))
+    return min(
+        _CANONICAL_TIKTOK_FALLBACK_MAX_POSTS_CAP,
+        page_count * tiktok_posts_scrapling_page_size(),
+    )
+
+
+def _canonical_tiktok_fallback_page_count(*, posts_found: int, max_pages: int | None) -> int:
+    if posts_found <= 0:
+        return 0
+    page_size = max(1, tiktok_posts_scrapling_page_size())
+    inferred_pages = max(1, (int(posts_found) + page_size - 1) // page_size)
+    if max_pages:
+        return min(int(max_pages), inferred_pages)
+    return inferred_pages
+
+
+def _scrape_canonical_tiktok_fallback_posts(
+    *,
+    account_handle: str,
+    cookies: dict[str, Any],
+    max_pages: int | None,
+    trigger_reason: Any,
+) -> tuple[list[Any], dict[str, Any]]:
+    from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
+
+    max_posts = _canonical_tiktok_fallback_max_posts(max_pages)
+    scraper = TikTokScraper(cookies=cookies)
+    config = TikTokScrapeConfig(
+        username=account_handle,
+        fast_mode=True,
+        max_pages=max(1, int(max_pages or 1)),
+        scrape_mode="ytdlp",
+        ytdlp_max_videos_hint=max_posts,
+    )
+    posts = scraper.scrape(config)
+    metadata = dict(getattr(scraper, "last_retrieval_meta", {}) or {})
+    metadata.update(
+        {
+            "used": True,
+            "trigger_reason": str(trigger_reason or "").strip() or None,
+            "requested_max_posts": max_posts,
+            "posts_found": len(posts),
+        }
+    )
+    return posts, metadata
+
+
+def _canonical_tiktok_fallback_reason(*, phase: str, exc: BaseException | None = None, reason: Any = None) -> str:
+    normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason:
+        return normalized_reason
+    message = str(exc or "").strip().lower()
+    if "err_http_response_code_failure" in message:
+        return f"{phase}_http_response_code_failure"
+    if "challenge" in message or "captcha" in message or "blocked" in message:
+        return "challenge_or_blocked"
+    if "non_json_response" in message:
+        return "non_json_response"
+    return f"{phase}_failed"
 
 
 def _raise_if_cancelled(
@@ -215,6 +287,7 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
             raw_cookies=session.raw_cookies,
             proxy_config=proxy_config,
         )
+        canonical_fallback_metadata: dict[str, Any] | None = None
 
         def _fetcher_runtime_metadata() -> dict[str, Any]:
             return dict(getattr(fetcher, "runtime_metadata", {}) or {})
@@ -254,16 +327,101 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
                 _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
+        async def _run_canonical_fallback(trigger_reason: Any) -> bool:
+            nonlocal posts_fetched, posts_upserted, posts_skipped, pages_fetched
+            nonlocal fetcher_metadata, stop_reason, canonical_fallback_metadata
+
+            cookies = dict(session.raw_cookies or session.cookies or {})
+            fallback_posts, fallback_metadata = await _await_operation_with_heartbeat(
+                asyncio.to_thread(
+                    _scrape_canonical_tiktok_fallback_posts,
+                    account_handle=account_handle,
+                    cookies=cookies,
+                    max_pages=max_pages,
+                    trigger_reason=trigger_reason,
+                ),
+                phase="canonical_fallback",
+            )
+            fetcher_metadata = {
+                **_fetcher_runtime_metadata(),
+                "fetch_reason": str(trigger_reason or "").strip() or None,
+                "canonical_fallback": fallback_metadata,
+            }
+            canonical_fallback_metadata = fallback_metadata
+            if not fallback_posts:
+                return False
+
+            persisted = persist_tiktok_post_dtos(
+                account_handle=account_handle,
+                posts=fallback_posts,
+                run_id=run_id or None,
+                job_id=job_id,
+                season_id=season_id,
+            )
+            posts_fetched += len(fallback_posts)
+            posts_upserted += persisted.posts_upserted
+            posts_skipped += persisted.posts_skipped
+            _merge_skipped_reasons(dict(getattr(persisted, "posts_skipped_by_reason", {}) or {}))
+            pages_fetched += _canonical_tiktok_fallback_page_count(
+                posts_found=len(fallback_posts),
+                max_pages=max_pages,
+            )
+            stop_reason = "completed"
+            lifecycle.emit_job_progress(
+                job_id=job_id,
+                stage=stage,
+                platform="tiktok",
+                account=account_handle,
+                scraped_posts=posts_fetched,
+                scraped_comments=0,
+                posts_upserted=posts_upserted,
+                comments_upserted=0,
+                activity={
+                    "phase": "tiktok_posts_canonical_fallback_completed",
+                    "pages_fetched": pages_fetched,
+                    "listing_progress": _listing_progress(partial=False),
+                    "canonical_fallback": {
+                        "trigger_reason": trigger_reason,
+                        "posts_found": len(fallback_posts),
+                    },
+                },
+                progress_state=progress_state,
+                force=True,
+            )
+            return True
+
         try:
-            await _await_operation_with_heartbeat(fetcher.warmup(account_handle), phase="warmup")
+            try:
+                await _await_operation_with_heartbeat(fetcher.warmup(account_handle), phase="warmup")
+            except Exception as exc:  # noqa: BLE001
+                trigger_reason = _canonical_tiktok_fallback_reason(phase="warmup", exc=exc)
+                if await _run_canonical_fallback(trigger_reason):
+                    return fetcher_metadata
+                raise TikTokPostsScraplingRuntimeError(
+                    f"TikTok warmup failed for @{account_handle}: {exc}",
+                    error_code=trigger_reason,
+                    retryable=True,
+                    runtime_metadata={**_fetcher_runtime_metadata(), "fetch_reason": trigger_reason},
+                ) from exc
             fetcher_metadata = _fetcher_runtime_metadata()
             lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id)
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
 
-            sec_uid = await _await_operation_with_heartbeat(
-                fetcher.resolve_sec_uid(account_handle),
-                phase="resolve_sec_uid",
-            )
+            try:
+                sec_uid = await _await_operation_with_heartbeat(
+                    fetcher.resolve_sec_uid(account_handle),
+                    phase="resolve_sec_uid",
+                )
+            except Exception as exc:  # noqa: BLE001
+                trigger_reason = _canonical_tiktok_fallback_reason(phase="resolve_sec_uid", exc=exc)
+                if await _run_canonical_fallback(trigger_reason):
+                    return fetcher_metadata
+                raise TikTokPostsScraplingRuntimeError(
+                    f"TikTok secUid resolution failed for @{account_handle}: {exc}",
+                    error_code=trigger_reason,
+                    retryable=True,
+                    runtime_metadata={**_fetcher_runtime_metadata(), "fetch_reason": trigger_reason},
+                ) from exc
             fetcher_metadata = _fetcher_runtime_metadata()
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
             cursor: str | None = None
@@ -287,6 +445,9 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                         runtime_metadata={**fetcher_metadata, "fetch_reason": result.fetch_reason},
                     )
                 if result.fetch_failed and not result.posts:
+                    if _should_use_canonical_tiktok_fallback(result.fetch_reason):
+                        if await _run_canonical_fallback(result.fetch_reason):
+                            break
                     raise TikTokPostsScraplingRuntimeError(
                         f"TikTok posts fetch failed for @{account_handle}: {result.fetch_reason}",
                         error_code=str(result.fetch_reason or "tiktok_posts_fetch_failed"),
@@ -344,6 +505,8 @@ def run_tiktok_posts_scrapling_job(job: dict[str, Any], *, worker_id: str | None
                 cursor = result.cursor
 
             fetcher_metadata = _fetcher_runtime_metadata()
+            if canonical_fallback_metadata:
+                fetcher_metadata["canonical_fallback"] = canonical_fallback_metadata
             _raise_if_cancelled(job_id=job_id, run_id=run_id, runtime_metadata=fetcher_metadata)
             return fetcher_metadata
         finally:

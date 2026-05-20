@@ -801,7 +801,9 @@ def _mark_payload_as_degraded_attempt(payload: dict[str, Any], error: Exception)
     """Keep partial scrape evidence when the authenticated retry cannot complete."""
     degraded = dict(payload)
     if _socialblade_payload_has_complete_page_capture(degraded):
-        runtime_metadata = degraded.get("runtime_metadata") if isinstance(degraded.get("runtime_metadata"), dict) else {}
+        runtime_metadata = (
+            degraded.get("runtime_metadata") if isinstance(degraded.get("runtime_metadata"), dict) else {}
+        )
         degraded["runtime_metadata"] = {
             **runtime_metadata,
             "login_retry_failed": True,
@@ -1582,7 +1584,7 @@ async def _refresh_socialblade_cookies_via_visible_login_async() -> dict[str, st
 def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> dict[str, str]:
     from playwright.sync_api import sync_playwright
 
-    from trr_backend.socials.browser_cookie_refresh import launch_browser
+    from trr_backend.socials.browser_cookie_refresh import open_cookie_refresh_context
     from trr_backend.socials.socialblade.auth import (
         SOCIALBLADE_STEALTH_INIT_SCRIPT,
         SOCIALBLADE_STEALTH_USER_AGENT,
@@ -1594,14 +1596,17 @@ def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> d
 
     try:
         with sync_playwright() as pw:
-            browser = launch_browser(pw, headless=bool(headless))
+            session = open_cookie_refresh_context(
+                pw,
+                platform="socialblade",
+                headless=bool(headless),
+                viewport={"width": 1440, "height": 1600},
+                user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
             try:
-                context = browser.new_context(
-                    viewport={"width": 1440, "height": 1600},
-                    user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
-                    locale="en-US",
-                    timezone_id="America/New_York",
-                )
+                context = session.context
                 context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
                 page = context.new_page()
                 try:
@@ -1610,7 +1615,7 @@ def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> d
                 finally:
                     page.close()
             finally:
-                browser.close()
+                session.close()
     except Exception as exc:
         if not headless:
             raise
@@ -1629,21 +1634,24 @@ def _refresh_socialblade_cookies_via_login(*, headless: bool | None = None) -> d
 def _refresh_socialblade_cookies_via_headless_login_legacy() -> dict[str, str]:
     from playwright.sync_api import sync_playwright
 
-    from trr_backend.socials.browser_cookie_refresh import launch_browser
+    from trr_backend.socials.browser_cookie_refresh import open_cookie_refresh_context
     from trr_backend.socials.socialblade.auth import (
         SOCIALBLADE_STEALTH_INIT_SCRIPT,
         SOCIALBLADE_STEALTH_USER_AGENT,
     )
 
     with sync_playwright() as pw:
-        browser = launch_browser(pw, headless=True)
+        session = open_cookie_refresh_context(
+            pw,
+            platform="socialblade",
+            headless=True,
+            viewport={"width": 1440, "height": 1600},
+            user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
         try:
-            context = browser.new_context(
-                viewport={"width": 1440, "height": 1600},
-                user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
+            context = session.context
             context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
             page = context.new_page()
             try:
@@ -1652,7 +1660,7 @@ def _refresh_socialblade_cookies_via_headless_login_legacy() -> dict[str, str]:
             finally:
                 page.close()
         finally:
-            browser.close()
+            session.close()
 
 
 # ---------------------------------------------------------------------------

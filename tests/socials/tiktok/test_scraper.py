@@ -2,6 +2,7 @@
 
 import builtins
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 from trr_backend.socials.tiktok.scraper import TikTokScrapeConfig, TikTokScraper
@@ -129,6 +130,31 @@ def test_ytdlp_fallback_updates_path_health_topology(monkeypatch) -> None:
     assert scraper.last_retrieval_meta["retrieval_mode"] == "api"
     assert scraper.last_retrieval_meta["path_role"] == "fallback"
     assert scraper.last_retrieval_meta["topology_state"] == "ytdlp_with_api_fallback"
+
+
+def test_ytdlp_explicit_hint_caps_playlist_when_no_date_range(monkeypatch) -> None:
+    from trr_backend.socials.tiktok import scraper as scraper_module
+
+    scraper = TikTokScraper(cookies={"sessionid": "cookie"})
+    captured_cmd: list[str] = []
+
+    def _fake_run(cmd, **_kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scraper, "_has_ytdlp", lambda: True)
+    monkeypatch.setattr(scraper, "_find_ytdlp_cookie_file", lambda: None)
+    monkeypatch.setattr(scraper_module.subprocess, "run", _fake_run)
+
+    scraper._scrape_via_ytdlp(  # noqa: SLF001
+        TikTokScrapeConfig(
+            username="bravotv",
+            scrape_mode="ytdlp",
+            ytdlp_max_videos_hint=30,
+        )
+    )
+
+    assert captured_cmd[captured_cmd.index("--playlist-end") + 1] == "30"
 
 
 def test_browser_intercept_zero_posts_classifies_target_drift() -> None:

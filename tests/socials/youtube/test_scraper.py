@@ -4,6 +4,8 @@ import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from urllib3.util import Timeout
+
 from trr_backend.socials.youtube.scraper import YouTubeComment, YouTubeScrapeConfig, YouTubeScraper, YouTubeVideo
 
 
@@ -49,6 +51,32 @@ def test_apply_surface_guaranteed_limit_overrides_small_cap_when_both_surfaces_p
     assert {"videos", "shorts"} <= {scraper._video_surface(video) for video in limited}
 
 
+def test_fetch_continuation_uses_bounded_continuation_timeout(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True}
+
+    def _post(*_args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return _Response()
+
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.requests.post", _post)
+
+    assert scraper._fetch_continuation("token", delay=0) == {"ok": True}
+    assert isinstance(captured["timeout"], Timeout)
+    assert captured["timeout"].total == scraper.CONTINUATION_REQUEST_TOTAL_TIMEOUT_SECONDS
+    assert captured["timeout"].connect_timeout == scraper.CONTINUATION_REQUEST_TIMEOUT_SECONDS[0]
+    assert captured["timeout"].read_timeout == scraper.CONTINUATION_REQUEST_TIMEOUT_SECONDS[1]
+
+
 def test_scrape_playlist_uses_ytdlp_entries_for_videos_and_shorts(monkeypatch) -> None:
     scraper = YouTubeScraper()
     playlist_id = "PLCsQHuMS6NoyF7gnzgOo7UxUrCcMtMH1v"
@@ -90,7 +118,7 @@ def test_scrape_playlist_uses_ytdlp_entries_for_videos_and_shorts(monkeypatch) -
     }
 
     monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _binary: "/usr/bin/yt-dlp")
-    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_maybe_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: {"attempted": False})
     monkeypatch.setattr(
         "trr_backend.socials.youtube.scraper.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
@@ -233,7 +261,7 @@ def test_scrape_progress_reports_non_zero_shorts_initial_pages(monkeypatch) -> N
     monkeypatch.setattr(scraper, "fetch_channel_videos", lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
     monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_maybe_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: {"attempted": False})
 
     def _fake_process_video_data(*_args, **kwargs):
         if kwargs.get("return_stats"):
@@ -249,11 +277,491 @@ def test_scrape_progress_reports_non_zero_shorts_initial_pages(monkeypatch) -> N
 
     monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
 
-    config = YouTubeScrapeConfig(channel_handle="bravo", keywords=[], max_results=None)
+    config = YouTubeScrapeConfig(
+        channel_handle="bravo",
+        keywords=[],
+        max_results=None,
+        allow_ytdlp_search_supplement=False,
+    )
     scraper.scrape(config, progress_cb=lambda payload: progress_events.append(dict(payload)))
 
     shorts_initial = next(event for event in progress_events if event.get("phase") == "scrape_initial_page_shorts")
     assert int(shorts_initial.get("pages_scanned") or 0) > 0
+
+
+def test_scrape_can_disable_ytdlp_search_supplement(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _binary: "/usr/bin/yt-dlp")
+
+    def _fake_process_video_data(*_args, **kwargs):
+        if kwargs.get("return_stats"):
+            return [], {
+                "checked_renderers": 0,
+                "before_window_items": 0,
+                "after_window_items": 0,
+                "window_candidate_items": 0,
+                "timestamp_unknown": 0,
+                "in_range_hits": 0,
+            }
+        return []
+
+    def _fail_search(*_args, **_kwargs):
+        raise AssertionError("yt-dlp supplement should be disabled")
+
+    monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+    monkeypatch.setattr(scraper, "_search_via_ytdlp", _fail_search)
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=["Bravo"],
+            allow_ytdlp_search_supplement=False,
+        )
+    )
+
+    assert videos == []
+    assert scraper.last_retrieval_meta["yt_dlp_supplement_needed"] is True
+    assert scraper.last_retrieval_meta["yt_dlp_supplement_enabled"] is False
+    assert scraper.last_retrieval_meta["fallback_chain"] == ["channel_page_json"]
+
+
+def test_scrape_uses_ytdlp_channel_fallback_when_channel_pages_are_empty(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    video_ts = int(datetime(2026, 5, 10, 12, 0, tzinfo=UTC).timestamp())
+    short_ts = int(datetime(2026, 5, 11, 12, 0, tzinfo=UTC).timestamp())
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda *args, **kwargs: {"surface": kwargs.get("surface")})
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "UC123"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _binary: "/usr/bin/yt-dlp")
+
+    def _empty_page(*_args, **_kwargs):
+        return [], {
+            "checked_renderers": 0,
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+
+    def _fake_run(cmd, **_kwargs):
+        url = cmd[-1]
+        if url.endswith("/videos"):
+            payload = {
+                "id": "video-yt-dlp",
+                "title": "Bravo clip",
+                "description": "clip",
+                "timestamp": video_ts,
+                "duration": 180,
+                "webpage_url": "https://www.youtube.com/watch?v=video-yt-dlp",
+                "channel_id": "UC123",
+                "channel": "Bravo",
+                "uploader_url": "https://www.youtube.com/@bravo",
+            }
+        else:
+            payload = {
+                "id": "short-yt-dlp",
+                "title": "Bravo short",
+                "description": "short",
+                "timestamp": short_ts,
+                "duration": 30,
+                "webpage_url": "https://www.youtube.com/shorts/short-yt-dlp",
+                "channel_id": "UC123",
+                "channel": "Bravo",
+                "uploader_url": "https://www.youtube.com/@bravo",
+            }
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(scraper, "_process_video_data", _empty_page)
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.subprocess.run", _fake_run)
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=[],
+            date_start=datetime(2026, 5, 1, tzinfo=UTC),
+            date_end=datetime(2026, 5, 18, tzinfo=UTC),
+            delay_seconds=0,
+            max_results=5,
+        )
+    )
+
+    assert [video.video_id for video in videos] == ["short-yt-dlp", "video-yt-dlp"]
+    assert {video.source_surface for video in videos} == {"videos", "shorts"}
+    assert scraper.last_retrieval_meta["fallback_chain"] == ["channel_page_json", "yt_dlp_channel"]
+    assert scraper.last_retrieval_meta["yt_dlp_channel_fallback_used"] is True
+    assert scraper.last_retrieval_meta["yt_dlp_channel_fallback_posts_checked"] == 2
+    assert scraper.last_retrieval_meta["matched_posts"] == 2
+
+
+def test_scrape_skips_ytdlp_channel_fallback_for_bounded_window_no_hits(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda *args, **kwargs: {"surface": kwargs.get("surface")})
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "UC123"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_maybe_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: {"attempted": False})
+
+    def _non_matching_page(*_args, **_kwargs):
+        return [], {
+            "checked_renderers": 24,
+            "before_window_items": 0,
+            "after_window_items": 24,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+
+    def _unexpected_ytdlp_fallback(*_args, **_kwargs):
+        raise AssertionError("bounded window no-hit scans should not run full-channel yt-dlp fallback")
+
+    monkeypatch.setattr(scraper, "_process_video_data", _non_matching_page)
+    monkeypatch.setattr(scraper, "_scrape_channel_via_ytdlp", _unexpected_ytdlp_fallback)
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _binary: "/usr/bin/yt-dlp")
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=[],
+            date_start=datetime(2026, 5, 14, tzinfo=UTC),
+            date_end=datetime(2026, 5, 15, tzinfo=UTC),
+            delay_seconds=0,
+        )
+    )
+
+    assert videos == []
+    assert scraper.last_retrieval_meta["yt_dlp_channel_fallback_used"] is False
+    assert (
+        scraper.last_retrieval_meta["yt_dlp_channel_fallback_skip_reason"]
+        == "bounded_window_no_hits_after_channel_scan"
+    )
+    assert scraper.last_retrieval_meta["posts_checked"] == 48
+
+
+def test_scrape_applies_max_results_before_ytdlp_enrichment(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    enriched_batches: list[list[str]] = []
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda *args, **kwargs: {"surface": kwargs.get("surface")})
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: None)
+
+    def _fake_enrich(videos, *_args, **_kwargs):
+        enriched_batches.append([video.video_id for video in videos])
+
+    def _needs_enrichment(video_id: str, *, surface: str, published_at: int) -> YouTubeVideo:
+        video = _build_video(video_id, surface=surface, published_at=published_at)
+        video.likes = 0
+        video.comments = 0
+        video.duration_seconds = 0
+        video.duration = ""
+        return video
+
+    def _fake_process_video_data(*_args, **kwargs):
+        surface = kwargs.get("surface")
+        if surface == "videos":
+            videos = [
+                _needs_enrichment("video-1", surface="videos", published_at=1_000),
+                _needs_enrichment("video-2", surface="videos", published_at=900),
+                _needs_enrichment("video-3", surface="videos", published_at=800),
+            ]
+        else:
+            videos = [
+                _needs_enrichment("short-1", surface="shorts", published_at=950),
+                _needs_enrichment("short-2", surface="shorts", published_at=850),
+                _needs_enrichment("short-3", surface="shorts", published_at=750),
+            ]
+        return videos, {
+            "checked_renderers": len(videos),
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": len(videos),
+            "timestamp_unknown": 0,
+            "in_range_hits": len(videos),
+        }
+
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", _fake_enrich)
+    monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=[],
+            delay_seconds=0,
+            max_results=2,
+        )
+    )
+
+    assert len(videos) == 2
+    assert enriched_batches == [[video.video_id for video in videos]]
+    assert {scraper._video_surface(video) for video in videos} == {"videos", "shorts"}
+    assert scraper.last_retrieval_meta["requested_max_results"] == 2
+    assert scraper.last_retrieval_meta["effective_max_results"] == 2
+
+
+def test_scrape_skips_ytdlp_enrichment_for_large_channel_collection(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    monkeypatch.setattr(scraper, "YTDLP_ENRICH_MAX_VIDEOS", 2)
+    monkeypatch.setattr(scraper, "fetch_channel_videos", lambda *args, **kwargs: {"surface": kwargs.get("surface")})
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _binary: "/usr/bin/yt-dlp")
+
+    def _fail_enrich(*_args, **_kwargs):
+        raise AssertionError("large catalog scrape should not enrich every video via yt-dlp")
+
+    def _needs_enrichment(video_id: str, published_at: int) -> YouTubeVideo:
+        video = _build_video(video_id, surface="videos", published_at=published_at)
+        video.likes = 0
+        video.comments = 0
+        video.duration_seconds = 0
+        video.duration = ""
+        return video
+
+    def _fake_process_video_data(*_args, **kwargs):
+        if kwargs.get("surface") == "shorts":
+            videos: list[YouTubeVideo] = []
+        else:
+            videos = [
+                _needs_enrichment("video-1", 1_000),
+                _needs_enrichment("video-2", 900),
+                _needs_enrichment("video-3", 800),
+            ]
+        return videos, {
+            "checked_renderers": len(videos),
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": len(videos),
+            "timestamp_unknown": 0,
+            "in_range_hits": len(videos),
+        }
+
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", _fail_enrich)
+    monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+
+    videos = scraper.scrape(YouTubeScrapeConfig(channel_handle="bravo", keywords=[], delay_seconds=0))
+
+    assert len(videos) == 3
+    assert scraper.last_retrieval_meta["yt_dlp_enrichment"]["attempted"] is False
+    assert scraper.last_retrieval_meta["yt_dlp_enrichment"]["skip_reason"] == "video_count_exceeds_limit"
+    assert scraper.last_retrieval_meta["yt_dlp_enrichment"]["skipped_count"] == 3
+
+
+def test_scrape_skips_continuations_after_max_results_target(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    fetched_surfaces: list[str] = []
+
+    def _fake_fetch_channel_videos(_handle, _delay, *, surface: str, fast_mode: bool = False):
+        del fast_mode
+        fetched_surfaces.append(surface)
+        return {"surface": surface}
+
+    def _fake_process_video_data(*_args, **kwargs):
+        surface = kwargs.get("surface")
+        if surface == "videos":
+            videos = [
+                _build_video("video-1", surface="videos", published_at=1_000),
+                _build_video("video-2", surface="videos", published_at=900),
+                _build_video("video-3", surface="videos", published_at=800),
+            ]
+        else:
+            videos = [_build_video("short-1", surface="shorts", published_at=950)]
+        return videos, {
+            "checked_renderers": len(videos),
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": len(videos),
+            "timestamp_unknown": 0,
+            "in_range_hits": len(videos),
+        }
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", _fake_fetch_channel_videos)
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: "continuation-token")
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_continuation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("continuation should be skipped")),
+    )
+    monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=[],
+            delay_seconds=0,
+            max_results=2,
+            max_pages=10,
+        )
+    )
+
+    assert fetched_surfaces == ["videos", "shorts"]
+    assert len(videos) == 2
+    assert {scraper._video_surface(video) for video in videos} == {"videos", "shorts"}
+    assert scraper.last_retrieval_meta["continuation_pages"] == 0
+
+
+def test_scrape_stops_bounded_window_after_in_range_no_hit_page(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    fetched_tokens: list[str] = []
+    initial_ts = int(datetime(2026, 5, 8, tzinfo=UTC).timestamp())
+
+    def _fake_fetch_channel_videos(_handle, _delay, *, surface: str, fast_mode: bool = False):
+        del fast_mode
+        return {"surface": surface}
+
+    def _fake_process_video_data(*_args, **kwargs):
+        surface = kwargs.get("surface")
+        if surface == "videos":
+            videos = [_build_video("video-in-window", surface="videos", published_at=initial_ts)]
+            return videos, {
+                "checked_renderers": 1,
+                "before_window_items": 0,
+                "after_window_items": 0,
+                "window_candidate_items": 1,
+                "timestamp_unknown": 0,
+                "in_range_hits": 1,
+            }
+        return [], {
+            "checked_renderers": 0,
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+
+    def _fake_fetch_continuation(token: str, *_args, **_kwargs):
+        fetched_tokens.append(token)
+        return {"token": token}
+
+    def _fake_extract_continuation(_data):
+        return [{"videoRenderer": {"videoId": "no-hit"}}], "next-token"
+
+    def _fake_process_renderer_batch(*_args, **_kwargs):
+        return [], {
+            "checked_renderers": 30,
+            "before_window_items": 0,
+            "after_window_items": 0,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", _fake_fetch_channel_videos)
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scraper,
+        "_extract_channel_continuation_token",
+        lambda data: "first-token" if data.get("surface") == "videos" else None,
+    )
+    monkeypatch.setattr(scraper, "_fetch_continuation", _fake_fetch_continuation)
+    monkeypatch.setattr(scraper, "_extract_continuation_videos_and_token", _fake_extract_continuation)
+    monkeypatch.setattr(scraper, "_process_renderer_batch", _fake_process_renderer_batch)
+    monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+    monkeypatch.setattr(scraper, "_maybe_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: {"attempted": False})
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=[],
+            date_start=datetime(2026, 5, 1, tzinfo=UTC),
+            date_end=datetime(2026, 5, 18, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=1,
+            allow_ytdlp_video_enrichment=False,
+        )
+    )
+
+    assert [video.video_id for video in videos] == ["video-in-window"]
+    assert fetched_tokens == ["first-token"]
+    assert scraper.last_retrieval_meta["continuation_pages_by_surface"]["videos"] == 1
+    assert scraper.last_retrieval_meta["continuation_failure_count"] == 0
+    assert scraper.runtime_metadata["complete"] is True
+
+
+def test_scrape_applies_bounded_max_pages_across_surfaces(monkeypatch) -> None:
+    scraper = YouTubeScraper()
+    fetched_surfaces: list[str] = []
+
+    def _fake_fetch_channel_videos(_handle, _delay, *, surface: str, fast_mode: bool = False):
+        del fast_mode
+        fetched_surfaces.append(surface)
+        return {"surface": surface}
+
+    def _fake_process_video_data(*_args, **_kwargs):
+        return [], {
+            "checked_renderers": 1,
+            "before_window_items": 0,
+            "after_window_items": 1,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+
+    def _fake_process_renderer_batch(*_args, **_kwargs):
+        return [], {
+            "checked_renderers": 30,
+            "before_window_items": 0,
+            "after_window_items": 30,
+            "window_candidate_items": 0,
+            "timestamp_unknown": 0,
+            "in_range_hits": 0,
+        }
+
+    monkeypatch.setattr(scraper, "fetch_channel_videos", _fake_fetch_channel_videos)
+    monkeypatch.setattr(scraper, "_extract_channel_identity_from_data", lambda *_args, **_kwargs: ("bravo", "chan"))
+    monkeypatch.setattr(scraper, "_extract_channel_title_from_data", lambda *_args, **_kwargs: "Bravo")
+    monkeypatch.setattr(scraper, "_extract_channel_avatar_from_data", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "_extract_channel_continuation_token", lambda *_args, **_kwargs: "first-token")
+    monkeypatch.setattr(scraper, "_fetch_continuation", lambda *_args, **_kwargs: {"items": []})
+    monkeypatch.setattr(
+        scraper,
+        "_extract_continuation_videos_and_token",
+        lambda *_args, **_kwargs: ([{"videoRenderer": {"videoId": "no-hit"}}], "next-token"),
+    )
+    monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+    monkeypatch.setattr(scraper, "_process_renderer_batch", _fake_process_renderer_batch)
+    monkeypatch.setattr(scraper, "_maybe_enrich_videos_via_ytdlp", lambda *_args, **_kwargs: {"attempted": False})
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _binary: "/usr/bin/yt-dlp")
+
+    videos = scraper.scrape(
+        YouTubeScrapeConfig(
+            channel_handle="bravo",
+            keywords=[],
+            date_start=datetime(2026, 5, 14, tzinfo=UTC),
+            date_end=datetime(2026, 5, 15, tzinfo=UTC),
+            delay_seconds=0,
+            max_pages=1,
+            allow_ytdlp_video_enrichment=False,
+        )
+    )
+
+    assert videos == []
+    assert fetched_surfaces == ["videos"]
+    assert scraper.last_retrieval_meta["continuation_pages"] == 1
+    assert scraper.last_retrieval_meta["continuation_pages_by_surface"] == {"videos": 1, "shorts": 0}
+    assert scraper.last_retrieval_meta["scan_capped_reason"] == "max_pages"
 
 
 def test_scrape_marks_continuation_fetch_failure_as_retryable(monkeypatch) -> None:

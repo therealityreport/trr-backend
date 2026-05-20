@@ -329,6 +329,34 @@ def test_refresh_interactively_skips_sync_playwright_inside_async_loop(
     assert asyncio.run(_probe()) == ({}, None)
 
 
+def test_refresh_interactively_defaults_to_headless_codex_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trr_backend.socials.instagram import auth_resolver
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_BROWSER_MODE", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_CHROME_PROFILE", raising=False)
+
+    def _fake_interactive_login(**kwargs: object) -> dict[str, str]:
+        captured.update(kwargs)
+        return {"sessionid": "fresh-session", "csrftoken": "csrf"}
+
+    monkeypatch.setattr(auth_resolver, "interactive_chrome_login", _fake_interactive_login)
+
+    cookies, method = auth_resolver._refresh_interactively(
+        session_account_id="thommycodex",
+        cookie_file_path=tmp_path / "cookies.json",
+    )
+
+    assert method == "interactive_login"
+    assert cookies["sessionid"] == "fresh-session"
+    assert captured["chrome_profile_name"] == "codex@thereality.report"
+    assert captured["headless"] is True
+
+
 def test_credential_refresh_skips_sync_playwright_inside_async_loop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

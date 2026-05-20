@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -74,6 +76,21 @@ def _default_modal_resolution_ready(monkeypatch: pytest.MonkeyPatch) -> None:
             "function_name": "run_social_job",
             "modal_environment": "main",
         },
+    )
+
+
+@pytest.fixture(autouse=True)
+def _block_live_social_worker_launches(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _blocked_live_worker_launch(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("social route test attempted to launch a live inline worker")
+
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics.execute_run",
+        _blocked_live_worker_launch,
+    )
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics.execute_run_with_inline_worker_registration",
+        _blocked_live_worker_launch,
     )
 
 
@@ -2304,7 +2321,16 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
     assert body["healthy"] is False
     assert body["reason"] == "html_challenge_or_auth_required"
     assert body["auth_surface_blocked"] is True
+    assert body["auth_surface_probe_only"] is True
     assert body["posts_auth_health"]["ready"] is True
+    assert body["posts_auth_health"]["probe_only"] is True
+    assert body["posts_auth_health"]["probe_source"] == "cookie_health"
+    assert body["posts_auth_health"]["repair_action"] is None
+    assert body["posts_auth_health"]["repair_available"] is False
+    assert body["posts_auth_probe"]["probe_only"] is True
+    assert body["posts_auth_probe"]["probe_source"] == "cookie_health"
+    assert body["posts_auth_probe"]["repair_action"] is None
+    assert body["posts_auth_probe"]["repair_available"] is False
     assert body["comments_auth_health"] == {
         "platform": "instagram",
         "account_handle": "thetraitorsus",
@@ -2314,7 +2340,15 @@ def test_get_social_account_cookie_health_marks_comments_auth_blocked_unhealthy(
         "category": "auth",
         "reason": "html_challenge_or_auth_required",
         "execution_backend": "modal",
+        "probe_only": True,
+        "probe_source": "cookie_health",
+        "repair_action": None,
+        "repair_available": False,
     }
+    assert body["comments_auth_probe"]["probe_only"] is True
+    assert body["comments_auth_probe"]["probe_source"] == "cookie_health"
+    assert body["comments_auth_probe"]["repair_action"] is None
+    assert body["comments_auth_probe"]["repair_available"] is False
 
 
 def test_post_social_account_cookie_refresh_route_returns_instagram_auth_repair_summary(
@@ -2878,6 +2912,49 @@ def test_post_social_account_catalog_freshness_returns_stale_on_default_refresh_
     assert payload["stale"] is True
     assert payload["degraded"] is True
     assert payload["freshness_error"]["code"] == "CATALOG_FRESHNESS_REFRESH_FAILED"
+
+
+def test_post_social_account_catalog_freshness_returns_degraded_recent_runs_payload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trr_backend.repositories.social_season_analytics as social_repo
+    from api.routers import socials as socials_router
+
+    socials_router._clear_account_profile_caches()
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setattr(social_repo.pg, "db_connection", lambda **_kwargs: nullcontext(object()))
+    monkeypatch.setattr(
+        social_repo.pg,
+        "db_cursor",
+        lambda conn=None, **_kwargs: nullcontext(SimpleNamespace(execute=lambda *_args, **_kwargs: None)),
+    )
+    monkeypatch.setattr(social_repo, "_assert_social_account_profile_exists", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        social_repo,
+        "_catalog_recent_runs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DatabaseServiceUnavailableError("pool exhausted", reason="pool_capacity")
+        ),
+    )
+    monkeypatch.setattr(social_repo, "_shared_catalog_total_posts", lambda *_args, **_kwargs: 100)
+    monkeypatch.setattr(social_repo, "_catalog_newest_stored_post_at", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_catalog_oldest_stored_post_at", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(social_repo, "_latest_account_frontier", lambda *_args, **_kwargs: {})
+
+    response = client.post(
+        "/api/v1/admin/socials/profiles/instagram/bravotv/catalog/freshness",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["degraded"] is True
+    assert payload["recent_runs_available"] is False
+    assert payload["stored_total_posts"] == 100
+    assert payload["freshness_error"]["code"] == "CATALOG_RECENT_RUNS_UNAVAILABLE"
+    assert payload["freshness_error"]["reason"] == "pool_capacity"
 
 
 def test_post_social_account_catalog_freshness_returns_503_on_session_pool_saturation(
@@ -3813,7 +3890,7 @@ def test_post_shared_ingest_starts_inline_when_queue_disabled(
 
     with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
         with patch("trr_backend.repositories.social_season_analytics.ingest_shared_accounts", return_value=expected):
-            with patch("trr_backend.repositories.social_season_analytics.execute_run") as execute_mock:
+            with patch("api.routers.socials._start_runs_in_background") as background_mock:
                 response = client.post(
                     "/api/v1/admin/socials/shared/ingest",
                     headers={"Authorization": f"Bearer {token}"},
@@ -3825,7 +3902,7 @@ def test_post_shared_ingest_starts_inline_when_queue_disabled(
     assert body["status"] == "started"
     assert body["execution_mode_canonical"] == "inline"
     assert body["execution_owner"] == "local_api"
-    assert execute_mock.called is True
+    background_mock.assert_called_once()
 
 
 def test_post_shared_ingest_requires_modal_when_queue_disabled(
@@ -4052,7 +4129,7 @@ def test_orchestrate_ingest_endpoint_starts_inline_when_queue_disabled(
                 "platforms": ["instagram"],
             },
         ) as mocked:
-            with patch("trr_backend.repositories.social_season_analytics.execute_run") as execute_mock:
+            with patch("api.routers.socials._start_runs_in_background") as background_mock:
                 response = client.post(
                     f"/api/v1/admin/socials/seasons/{season_id}/ingest/orchestrations",
                     headers={"Authorization": f"Bearer {token}"},
@@ -4064,7 +4141,7 @@ def test_orchestrate_ingest_endpoint_starts_inline_when_queue_disabled(
     assert body["status"] == "started"
     assert body["message"] == "Season social orchestration started inline."
     assert mocked.call_args.kwargs["week_index"] == 2
-    assert execute_mock.called is True
+    background_mock.assert_called_once()
 
 
 def test_get_ingest_runs_rejects_invalid_season_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5941,7 +6018,7 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
                 "trr_backend.repositories.social_season_analytics.ingest_season",
                 return_value=expected,
             ) as ingest_mock:
-                with patch("trr_backend.repositories.social_season_analytics.execute_run", return_value=None):
+                with patch("api.routers.socials._run_inline_season_ingest") as inline_runner:
                     response = client.post(
                         f"/api/v1/admin/socials/seasons/{season_id}/ingest",
                         headers={"Authorization": f"Bearer {token}"},
@@ -5960,6 +6037,12 @@ def test_ingest_falls_back_inline_in_dev_when_worker_missing_and_flag_enabled(
     assert isinstance(body.get("warnings"), list)
     assert any("inline dev fallback" in str(item).lower() for item in (body.get("warnings") or []))
     ingest_mock.assert_called_once()
+    inline_runner.assert_called_once_with(
+        run_id="run-inline-fallback",
+        platforms=["youtube"],
+        ingest_mode="posts_and_comments",
+        worker_prefix="api-background",
+    )
 
 
 def test_ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_enabled(
@@ -6006,134 +6089,9 @@ def test_ingest_requires_remote_worker_for_instagram_even_with_inline_fallback_e
     ingest_mock.assert_not_called()
 
 
-def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
-    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
-    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
-    season_id = str(uuid4())
-    payload = {
-        "source_scope": "bravo",
-        "platforms": ["instagram"],
-        "ingest_mode": "comments_only",
-    }
-    expected = {
-        "season_id": season_id,
-        "run_id": "run-inline-comments-only",
-        "status": "pending",
-        "stages": ["comments"],
-        "queued_or_started_jobs": 4,
-        "summary": {"total_jobs": 4},
-    }
-    worker_counts: list[int] = []
+def test_ingest_comments_only_inline_fallback_spawns_per_platform_workers() -> None:
+    from trr_backend.socials.inline_ingest import run_inline_season_ingest_execution
 
-    class _FakeFuture:
-        def result(self) -> None:
-            return None
-
-    class _FakeThreadPoolExecutor:
-        def __init__(self, *, max_workers: int):
-            worker_counts.append(max_workers)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def submit(self, fn, *args, **kwargs):  # noqa: ANN001
-            fn(*args, **kwargs)
-            return _FakeFuture()
-
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
-            with patch("trr_backend.repositories.social_season_analytics.execute_run", return_value=None):
-                with patch("api.routers.socials.ThreadPoolExecutor", _FakeThreadPoolExecutor):
-                    response = client.post(
-                        f"/api/v1/admin/socials/seasons/{season_id}/ingest",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json=payload,
-                    )
-
-    assert response.status_code == 200
-    # One worker per platform (1 platform requested = 1 worker)
-    assert worker_counts == [1]
-
-
-def test_ingest_inline_background_failure_runs_recovery_path(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
-    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
-    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
-    season_id = str(uuid4())
-    payload = {
-        "source_scope": "bravo",
-        "platforms": ["youtube"],
-    }
-    expected = {
-        "season_id": season_id,
-        "run_id": "run-inline-recovery",
-        "status": "pending",
-        "stages": ["posts", "comments"],
-        "queued_or_started_jobs": 2,
-        "summary": {"total_jobs": 2},
-    }
-    execute_worker_ids: list[str | None] = []
-
-    def _execute_with_initial_failure(
-        run_id: str, *, worker_id: str | None = None, stage: str | None = None, platform: str | None = None
-    ) -> None:
-        execute_worker_ids.append(worker_id)
-        if worker_id == "api-background":
-            raise RuntimeError("inline execution failed")
-        return None
-
-    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
-        with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
-            with patch(
-                "trr_backend.repositories.social_season_analytics.recover_stale_running_jobs",
-                return_value=[{"id": "job-stale"}],
-            ) as recover_mock:
-                with patch(
-                    "trr_backend.repositories.social_season_analytics.execute_run",
-                    side_effect=_execute_with_initial_failure,
-                ):
-                    response = client.post(
-                        f"/api/v1/admin/socials/seasons/{season_id}/ingest",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json=payload,
-                    )
-
-    assert response.status_code == 200
-    assert execute_worker_ids == ["api-background", "api-background:recovery"]
-    recover_mock.assert_called_once_with(run_id="run-inline-recovery", limit=250)
-
-
-def test_ingest_comments_only_queue_mode_does_not_spawn_inline_runners(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
-    monkeypatch.setenv("SOCIAL_COMMENTS_RUN_WORKERS", "3")
-    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
-    season_id = str(uuid4())
-    payload = {
-        "source_scope": "bravo",
-        "platforms": ["instagram", "youtube", "tiktok", "twitter"],
-        "ingest_mode": "comments_only",
-    }
-    expected = {
-        "season_id": season_id,
-        "run_id": "run-queue-comments-only",
-        "status": "queued",
-        "stages": ["comments"],
-        "queued_or_started_jobs": 4,
-        "summary": {"total_jobs": 4},
-    }
     worker_counts: list[int] = []
     execute_calls: list[dict[str, object]] = []
 
@@ -6167,19 +6125,131 @@ def test_ingest_comments_only_queue_mode_does_not_spawn_inline_runners(
             }
         )
 
+    run_inline_season_ingest_execution(
+        "run-inline-comments-only",
+        platforms=["instagram", "youtube", "tiktok", "twitter"],
+        supported_platforms=["instagram", "youtube", "tiktok", "twitter"],
+        ingest_mode="comments_only",
+        worker_prefix="api-background",
+        comments_workers_cap=3,
+        execute_run=_record_execute,
+        thread_pool_executor_factory=_FakeThreadPoolExecutor,
+    )
+
+    assert worker_counts == [3]
+    assert execute_calls == [
+        {
+            "run_id": "run-inline-comments-only",
+            "worker_id": "api-background:comments:instagram",
+            "stage": "comments",
+            "platform": "instagram",
+        },
+        {
+            "run_id": "run-inline-comments-only",
+            "worker_id": "api-background:comments:youtube",
+            "stage": "comments",
+            "platform": "youtube",
+        },
+        {
+            "run_id": "run-inline-comments-only",
+            "worker_id": "api-background:comments:tiktok",
+            "stage": "comments",
+            "platform": "tiktok",
+        },
+        {
+            "run_id": "run-inline-comments-only",
+            "worker_id": "api-background:comments:twitter",
+            "stage": "comments",
+            "platform": "twitter",
+        },
+    ]
+
+
+def test_ingest_inline_background_failure_runs_recovery_path(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_REMOTE_ONLY_PLATFORMS", "none")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["youtube"],
+    }
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-inline-recovery",
+        "status": "pending",
+        "stages": ["posts", "comments"],
+        "queued_or_started_jobs": 2,
+        "summary": {"total_jobs": 2},
+    }
+    execute_worker_ids: list[str | None] = []
+
+    def _inline_with_initial_failure(
+        run_id: str, *, worker_prefix: str, platforms: list[str] | None, ingest_mode: str
+    ) -> None:
+        execute_worker_ids.append(worker_prefix)
+        if worker_prefix == "api-background":
+            raise RuntimeError("inline execution failed")
+        return None
+
+    with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=False):
+        with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
+            with patch(
+                "trr_backend.repositories.social_season_analytics.recover_stale_running_jobs",
+                return_value=[{"id": "job-stale"}],
+            ) as recover_mock:
+                with patch(
+                    "api.routers.socials._run_inline_season_ingest",
+                    side_effect=_inline_with_initial_failure,
+                ):
+                    response = client.post(
+                        f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+
+    assert response.status_code == 200
+    assert execute_worker_ids == ["api-background", "api-background:recovery"]
+    recover_mock.assert_called_once_with(run_id="run-inline-recovery", limit=250)
+
+
+def test_ingest_comments_only_queue_mode_does_not_spawn_inline_runners(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret-32-bytes-minimum-abcdef")
+    monkeypatch.setenv("SOCIAL_COMMENTS_RUN_WORKERS", "3")
+    token = _make_admin_token("test-secret-32-bytes-minimum-abcdef")
+    season_id = str(uuid4())
+    payload = {
+        "source_scope": "bravo",
+        "platforms": ["instagram", "youtube", "tiktok", "twitter"],
+        "ingest_mode": "comments_only",
+    }
+    expected = {
+        "season_id": season_id,
+        "run_id": "run-queue-comments-only",
+        "status": "queued",
+        "stages": ["comments"],
+        "queued_or_started_jobs": 4,
+        "summary": {"total_jobs": 4},
+    }
+
     with patch("trr_backend.repositories.social_season_analytics.is_queue_enabled", return_value=True):
         with patch(
             "trr_backend.repositories.social_season_analytics.assert_worker_available_when_queue_enabled",
             return_value={"healthy": True, "healthy_workers": 1},
         ):
             with patch("trr_backend.repositories.social_season_analytics.ingest_season", return_value=expected):
-                with patch("trr_backend.repositories.social_season_analytics.execute_run", side_effect=_record_execute):
-                    with patch("api.routers.socials.ThreadPoolExecutor", _FakeThreadPoolExecutor):
-                        response = client.post(
-                            f"/api/v1/admin/socials/seasons/{season_id}/ingest",
-                            headers={"Authorization": f"Bearer {token}"},
-                            json=payload,
-                        )
+                with patch("api.routers.socials._run_inline_season_ingest") as inline_runner:
+                    response = client.post(
+                        f"/api/v1/admin/socials/seasons/{season_id}/ingest",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
 
     assert response.status_code == 200
     body = response.json()
@@ -6188,8 +6258,7 @@ def test_ingest_comments_only_queue_mode_does_not_spawn_inline_runners(
     assert body["execution_mode_legacy"] == "queue"
     assert body["execution_mode_deprecation"]["field"] == "execution_mode_legacy"
     assert body["status"] == "queued"
-    assert worker_counts == []
-    assert execute_calls == []
+    inline_runner.assert_not_called()
 
 
 def test_get_mirror_coverage_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

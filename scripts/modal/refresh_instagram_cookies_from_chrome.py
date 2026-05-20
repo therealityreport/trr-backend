@@ -139,7 +139,7 @@ def _push_to_modal(source_env: Path) -> tuple[bool, str]:
         "--apply",
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+        subprocess.run(cmd, check=True, capture_output=True, cwd=REPO_ROOT, text=True, timeout=120)
         return True, "secrets pushed successfully"
     except subprocess.CalledProcessError as exc:
         return False, f"prepare_named_secrets failed: {exc.stderr[:200]}"
@@ -151,7 +151,7 @@ def _deploy_modal() -> tuple[bool, str]:
     """Deploy Modal app to pick up new secrets."""
     cmd = [_python_command(), "-m", "modal", "deploy", "-m", "trr_backend.modal_jobs"]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+        subprocess.run(cmd, check=True, capture_output=True, cwd=REPO_ROOT, text=True, timeout=300)
         return True, "modal app deployed"
     except subprocess.CalledProcessError as exc:
         return False, f"modal deploy failed: {exc.stderr[:200]}"
@@ -177,8 +177,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--chrome-profile",
-        default="codex",
-        help="Chrome profile display name or email (default: codex)",
+        default="codex@thereality.report",
+        help="Chrome profile display name or email (default: codex@thereality.report)",
     )
     parser.add_argument(
         "--push-to-modal",

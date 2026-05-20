@@ -16,7 +16,7 @@ from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.socials.browser_cookie_refresh import (
     _body_text,
     cookie_payload,
-    launch_browser,
+    open_cookie_refresh_context,
     validate_browser_cookie_session,
     write_cookie_file,
 )
@@ -201,8 +201,7 @@ def _run_visible_managed_chrome_guard(cdp_url: str) -> bool:
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise VisibleManagedChromeProfileError(
-            "Visible shared Chrome is not using the expected codex@thereality.report profile. "
-            f"{detail}"
+            f"Visible shared Chrome is not using the expected codex@thereality.report profile. {detail}"
         ) from exc
     return True
 
@@ -421,14 +420,17 @@ def refresh_socialblade_cookies(
     headless = headless_raw not in {"0", "false", "off", "no"}
 
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright, headless=headless)
+        session = open_cookie_refresh_context(
+            playwright,
+            platform="socialblade",
+            headless=headless,
+            viewport={"width": 1440, "height": 1600},
+            user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
         try:
-            context = browser.new_context(
-                viewport={"width": 1440, "height": 1600},
-                user_agent=SOCIALBLADE_STEALTH_USER_AGENT,
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
+            context = session.context
             context.add_init_script(SOCIALBLADE_STEALTH_INIT_SCRIPT)
             page = context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=30_000)
@@ -442,4 +444,4 @@ def refresh_socialblade_cookies(
             write_cookie_file(socialblade_cookie_file_path(), cookies)
             return cookies
         finally:
-            browser.close()
+            session.close()

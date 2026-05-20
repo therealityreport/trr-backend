@@ -996,6 +996,14 @@ def _finalize_run_status_locked(
         active_jobs = int(summary.get("active_jobs") or 0)
         failed_jobs = int(summary.get("failed_jobs") or 0)
     status_breakdown = _run_job_status_breakdown(run_id, conn=lock_conn)
+    status_breakdown_active_jobs = (
+        status_breakdown["running_jobs"] + status_breakdown["queued_jobs"] + status_breakdown["cancelling_jobs"]
+    )
+    if active_jobs > 0 and status_breakdown_active_jobs <= 0:
+        summary = _update_run_summary(run_id, force_recompute=True, conn=lock_conn)
+        active_jobs = int(summary.get("active_jobs") or 0)
+        failed_jobs = int(summary.get("failed_jobs") or 0)
+        status_breakdown = _run_job_status_breakdown(run_id, conn=lock_conn)
     fetch_terminal_error = legacy._resolve_pipeline_ingest_mode(
         current_config.get("pipeline_ingest_mode")
     ) == legacy.SHARED_ACCOUNT_CATALOG_BACKFILL_INGEST_MODE and _call_with_optional_conn(

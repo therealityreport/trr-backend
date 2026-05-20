@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from typing import Any
 
 import pytest
@@ -902,6 +904,90 @@ def test_redirect_login_failure_marks_auth_block_and_attempts_interactive_repair
     assert payload is None
     assert scraper.last_retrieval_meta["request_error_code"] == "redirect_login"
     assert scraper.last_retrieval_meta["redirect_target"] == "https://www.instagram.com/accounts/login/"
+
+
+def test_fetch_posts_graphql_can_disable_auth_recovery_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed", "csrftoken": "csrf", "ds_user_id": "1"})
+    monkeypatch.setattr(scraper, "_is_local_environment", lambda: True)
+    monkeypatch.setattr(
+        scraper,
+        "_try_auto_refresh_cookies",
+        lambda: pytest.fail("auto-refresh should be disabled for non-repairing shared fetches"),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_try_interactive_login",
+        lambda: pytest.fail("interactive login should be disabled for non-repairing shared fetches"),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_fetch_posts_graphql_with_browser",
+        lambda *_args, **_kwargs: pytest.fail("browser fallback should be disabled for this probe"),
+    )
+    monkeypatch.setattr(
+        scraper,
+        "_warm_profile_request_context",
+        lambda *args, **kwargs: {
+            "lsd": "lsd-token",
+            "bloks_version": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        },
+    )
+
+    class _Client:
+        def post_form_json(self, *args, **kwargs):
+            raise InstagramRequestFailure(
+                "redirect_login",
+                status_code=302,
+                retryable=False,
+                redirect_target="https://www.instagram.com/accounts/login/",
+            )
+
+    scraper._request_client = _Client()
+
+    payload = scraper.fetch_posts_graphql(
+        "bravotv",
+        "cursor-1",
+        0.0,
+        allow_browser_fallback=False,
+        allow_recovery=False,
+    )
+
+    assert payload is None
+    assert scraper.last_retrieval_meta["request_error_code"] == "redirect_login"
+
+
+def test_interactive_login_runs_sync_playwright_outside_active_async_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = InstagramScraper(cookies={"sessionid": "seed"}, browser_account_id="bravotv")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_BROWSER_MODE", "headless")
+    monkeypatch.setattr(scraper, "_is_local_environment", lambda: True)
+    caller_thread_id = threading.get_ident()
+    captured: dict[str, Any] = {}
+
+    def fake_interactive_chrome_login(**kwargs: Any) -> dict[str, str]:
+        captured["thread_id"] = threading.get_ident()
+        captured["kwargs"] = kwargs
+        return {"sessionid": "fresh-session", "csrftoken": "fresh-csrf", "ds_user_id": "123"}
+
+    from trr_backend.socials.instagram import cookie_refresh
+
+    monkeypatch.setattr(cookie_refresh, "interactive_chrome_login", fake_interactive_chrome_login)
+
+    async def run_login() -> dict[str, Any]:
+        return scraper._try_interactive_login()
+
+    result = asyncio.run(run_login())
+
+    assert result["refreshed"] is True
+    assert result["method"] == "interactive_chrome"
+    assert captured["thread_id"] != caller_thread_id
+    assert captured["kwargs"]["validation_username"] == "bravotv"
+    assert scraper.cookies["sessionid"] == "fresh-session"
+    assert scraper.session.cookies.get("csrftoken", domain=".instagram.com") == "fresh-csrf"
 
 
 def test_fetch_profile_info_tolerates_duplicate_csrftoken_session_cookies(monkeypatch: pytest.MonkeyPatch) -> None:

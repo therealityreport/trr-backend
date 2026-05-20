@@ -49,7 +49,7 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
     assert result["TRR_JOB_PLANE_MODE"] == "remote"
     assert result["TRR_REMOTE_EXECUTOR"] == "modal"
     assert result["TRR_DB_POOL_MINCONN"] == "1"
-    assert result["TRR_DB_POOL_MAXCONN"] == "1"
+    assert result["TRR_DB_POOL_MAXCONN"] == "2"
     assert result["TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"] == "1"
     assert result["TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN"] == "1"
     assert result["TRR_DB_POOL_CLOSE_AFTER_RETURN"] == "1"
@@ -98,7 +98,7 @@ def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
 
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
     assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
-    assert result["TRR_DB_POOL_MAXCONN"] == "1"
+    assert result["TRR_DB_POOL_MAXCONN"] == "2"
 
 
 def test_apply_runtime_overrides_can_be_disabled() -> None:

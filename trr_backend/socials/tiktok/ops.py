@@ -98,7 +98,7 @@ def run_posts_scrapling_smoke(*, account: str, max_pages: int) -> dict[str, Any]
     }
     run_id = repo._create_run(
         None,
-        source_scope="bravo",
+        source_scope="network",
         initiated_by="manual_smoke",
         config=run_config,
         status="queued",
@@ -107,7 +107,7 @@ def run_posts_scrapling_smoke(*, account: str, max_pages: int) -> dict[str, Any]
         None,
         run_id=run_id,
         platform="tiktok",
-        source_scope="bravo",
+        source_scope="network",
         job_type="posts",
         stage=repo.TIKTOK_POSTS_SCRAPLING_STAGE,
         config={

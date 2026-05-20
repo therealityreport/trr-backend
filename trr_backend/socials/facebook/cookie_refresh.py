@@ -5,6 +5,7 @@ from __future__ import annotations
 from trr_backend.socials.browser_cookie_refresh import SimpleLoginSpec, refresh_simple_login_cookies
 
 _SPEC = SimpleLoginSpec(
+    platform="facebook",
     login_url="https://www.facebook.com/login",
     validation_url="https://www.facebook.com/",
     cookie_domains=(".facebook.com", "www.facebook.com"),
