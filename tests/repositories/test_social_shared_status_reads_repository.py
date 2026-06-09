@@ -150,5 +150,5 @@ def test_list_shared_runs_normalizes_execution_metadata(monkeypatch: pytest.Monk
     assert payload[0]["execution_mode_canonical"] == "remote"
     assert payload[0]["execution_backend_canonical"] == "modal"
     assert payload[0]["ingest_mode"] == social_repo.SHARED_ACCOUNT_ASYNC_INGEST_MODE
-    assert captured["params"] == [social_repo.SHARED_ACCOUNT_ASYNC_INGEST_MODE, "running", "bravo", 25]
+    assert captured["params"] == [social_repo.SHARED_ACCOUNT_ASYNC_INGEST_MODE, "running", "network", 25]
     assert seen_fetch_all_pools == [run_lifecycle.SOCIAL_CONTROL_POOL_NAME]

@@ -22,6 +22,7 @@ from trr_backend.problem import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
+WEEK_DETAIL_TIMEOUT_SECONDS = 45.0
 
 # Paths exempt from timeout enforcement.
 # Health, metrics, and liveness probes must never be timed out.
@@ -55,6 +56,7 @@ EXEMPT_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/v1/admin/shows/[^/]+/seasons/[^/]+/assets/batch-jobs/stream$"),
     re.compile(r"^/api/v1/admin/socials/live-status/stream$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/catalog/backfill$"),
+    re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/catalog/runs/[^/]+/manual-auth$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/catalog/runs/[^/]+/repair-auth$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/cookies/refresh$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/posts$"),
@@ -66,6 +68,12 @@ EXEMPT_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/v1/admin/cast-screentime/video-assets/[^/]+/runs$"),
     re.compile(r"^/api/v1/admin/people/[^/]+/socialblade/refresh$"),
     re.compile(r"^/api/v1/admin/socials/profiles/[^/]+/[^/]+/socialblade/refresh$"),
+)
+
+EXTENDED_TIMEOUT_PATH_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
+    # The app proxy waits 40s for week detail reads; keep a backend-side cap
+    # slightly above that so aborted app requests cannot run indefinitely.
+    (re.compile(r"^/api/v1/admin/socials/seasons/[^/]+/analytics/week/[^/]+$"), WEEK_DETAIL_TIMEOUT_SECONDS),
 )
 
 
@@ -93,6 +101,13 @@ def _is_exempt(path: str) -> bool:
     return any(pattern.match(path) for pattern in EXEMPT_PATH_PATTERNS)
 
 
+def _timeout_for_path(path: str, default_timeout_seconds: float) -> float:
+    for pattern, timeout_seconds in EXTENDED_TIMEOUT_PATH_PATTERNS:
+        if pattern.match(path):
+            return max(default_timeout_seconds, timeout_seconds)
+    return default_timeout_seconds
+
+
 class RequestTimeoutMiddleware:
     """Pure ASGI middleware — wraps the inner app with asyncio.wait_for."""
 
@@ -109,6 +124,7 @@ class RequestTimeoutMiddleware:
         if _is_exempt(path):
             await self.app(scope, receive, send)
             return
+        timeout_seconds = _timeout_for_path(path, self.timeout_seconds)
 
         response_started = False
 
@@ -121,7 +137,7 @@ class RequestTimeoutMiddleware:
         try:
             await asyncio.wait_for(
                 self.app(scope, receive, send_wrapper),
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:  # noqa: UP041 — asyncio.TimeoutError != TimeoutError on Python <3.11
             method = scope.get("method", "?")
@@ -129,7 +145,7 @@ class RequestTimeoutMiddleware:
                 "[request-timeout] path=%s method=%s timeout_seconds=%s",
                 path,
                 method,
-                self.timeout_seconds,
+                timeout_seconds,
             )
             # Only send 504 if the response hasn't already started
             if not response_started:
@@ -137,13 +153,13 @@ class RequestTimeoutMiddleware:
                 problem = build_problem_detail(
                     code="REQUEST_TIMEOUT",
                     status=504,
-                    message=f"Request timed out after {self.timeout_seconds}s",
+                    message=f"Request timed out after {timeout_seconds}s",
                     retryable=True,
                     trace_id=trace_id,
                     request_id=request_id,
                     extra={
                         "retry_after_ms": 1000,
-                        "timeout_seconds": self.timeout_seconds,
+                        "timeout_seconds": timeout_seconds,
                     },
                 )
                 body = problem_json_bytes(problem)

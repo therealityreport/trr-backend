@@ -4425,10 +4425,10 @@ def test_twitter_scrape_from_query_falls_back_to_playwright_after_syndication(
     )
 
     assert len(results) == 1
-    assert calls["syndication"] == 1
+    assert calls["syndication"] == 0
     assert calls["playwright"] == 1
     assert scraper.last_retrieval_meta["retrieval_mode"] == "playwright"
-    assert scraper.last_retrieval_meta["fallback_attempts"] == ["syndication", "playwright"]
+    assert scraper.last_retrieval_meta["fallback_attempts"] == ["playwright"]
 
 
 def test_twitter_scrape_clamps_results_to_requested_window(monkeypatch: pytest.MonkeyPatch) -> None:

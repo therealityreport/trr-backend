@@ -3511,6 +3511,7 @@ def test_selected_proxy_identical_across_transports() -> None:
 
 def test_select_comments_proxy_decodo_sticky_session(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
     monkeypatch.setenv("DECODO_USERNAME", "user1")
     monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
@@ -4140,14 +4141,17 @@ def test_job_runner_tracks_isolated_post_auth_failure_for_retry(monkeypatch: pyt
         "max_attempts": 2,
     }
 
-    with patch(
-        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
-        return_value={
-            "id": "job-1",
-            "status": "running",
-            "worker_id": "test-worker",
-            "claimed_at": datetime(2026, 5, 1, tzinfo=UTC),
-        },
+    with (
+        patch(
+            "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+            return_value={
+                "id": "job-1",
+                "status": "running",
+                "worker_id": "test-worker",
+                "claimed_at": datetime(2026, 5, 1, tzinfo=UTC),
+            },
+        ),
+        patch("trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_all", return_value=[]),
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
@@ -4220,14 +4224,17 @@ def test_job_runner_fails_immediately_on_target_browser_session_invalidation(
         "max_attempts": 2,
     }
 
-    with patch(
-        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
-        return_value={
-            "id": "job-1",
-            "status": "running",
-            "worker_id": "test-worker",
-            "claimed_at": datetime(2026, 5, 1, tzinfo=UTC),
-        },
+    with (
+        patch(
+            "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+            return_value={
+                "id": "job-1",
+                "status": "running",
+                "worker_id": "test-worker",
+                "claimed_at": datetime(2026, 5, 1, tzinfo=UTC),
+            },
+        ),
+        patch("trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_all", return_value=[]),
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 
@@ -4321,14 +4328,17 @@ def test_job_runner_stops_post_auth_failures_at_circuit_limit(monkeypatch: pytes
         "max_attempts": 2,
     }
 
-    with patch(
-        "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
-        return_value={
-            "id": "job-1",
-            "status": "running",
-            "worker_id": "test-worker",
-            "claimed_at": datetime(2026, 5, 1, tzinfo=UTC),
-        },
+    with (
+        patch(
+            "trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_one",
+            return_value={
+                "id": "job-1",
+                "status": "running",
+                "worker_id": "test-worker",
+                "claimed_at": datetime(2026, 5, 1, tzinfo=UTC),
+            },
+        ),
+        patch("trr_backend.socials.instagram.comments_scrapling.job_runner.pg.fetch_all", return_value=[]),
     ):
         jr.run_instagram_comments_scrapling_job(job, worker_id="test-worker")
 

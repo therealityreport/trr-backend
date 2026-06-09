@@ -18,6 +18,7 @@ router = APIRouter(prefix="/admin", tags=["admin-face-references"])
 class FaceReferenceImageItem(BaseModel):
     id: str
     person_id: str
+    person_name: str | None = None
     media_link_id: str
     media_asset_id: str
     legacy_screenalytics_face_bank_image_id: str | None = None
@@ -44,6 +45,10 @@ class FaceReferenceListResponse(BaseModel):
     items: list[FaceReferenceImageItem]
 
 
+class FaceReferenceReviewQueueResponse(BaseModel):
+    items: list[FaceReferenceImageItem]
+
+
 class ReviewReferenceRequest(BaseModel):
     review_status: Literal["pending_review", "approved", "rejected", "duplicate"]
     review_notes: dict[str, Any] = Field(default_factory=dict)
@@ -66,6 +71,7 @@ class VerifyReferencesRequest(BaseModel):
 
 class ReembedReferenceRequest(BaseModel):
     image_source: str | None = None
+    selected_face_index: int | None = Field(default=None, ge=0)
 
 
 def _row_to_item(row: dict[str, Any]) -> FaceReferenceImageItem:
@@ -93,6 +99,15 @@ def _image_source_for_reference(reference_image_id: str) -> tuple[dict[str, Any]
 def list_face_references(person_id: UUID, _: InternalAdminUser = None) -> FaceReferenceListResponse:
     rows = face_references.list_face_reference_images(person_id=str(person_id), include_inactive=True)
     return FaceReferenceListResponse(person_id=str(person_id), items=[_row_to_item(row) for row in rows])
+
+
+@router.get("/face-references/review-queue", response_model=FaceReferenceReviewQueueResponse)
+def list_face_reference_review_queue(
+    limit: int = 50,
+    _: InternalAdminUser = None,
+) -> FaceReferenceReviewQueueResponse:
+    rows = face_references.list_face_reference_builder_review_queue(limit=limit)
+    return FaceReferenceReviewQueueResponse(items=[_row_to_item(row) for row in rows])
 
 
 @router.post("/face-references/{reference_image_id}/review", response_model=FaceReferenceImageItem)
@@ -162,9 +177,11 @@ def reembed_face_reference(
     payload: ReembedReferenceRequest,
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    _, derived_image_source = _image_source_for_reference(str(reference_image_id))
+    reference_row, derived_image_source = _image_source_for_reference(str(reference_image_id))
     image_source = payload.image_source or derived_image_source
     return face_reference_embeddings.register_reference_image(
         reference_image_id=str(reference_image_id),
         image_source=image_source,
+        assigned_person_id=str((reference_row or {}).get("person_id") or "") or None,
+        selected_face_index=payload.selected_face_index,
     )

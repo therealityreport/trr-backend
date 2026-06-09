@@ -5,6 +5,16 @@ from trr_backend.services import retained_cast_screentime_dispatch
 
 def test_start_run_uses_backend_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
+        retained_cast_screentime_dispatch.modal_dispatch,
+        "dispatch_cast_screentime_run",
+        lambda *, run_id: {"dispatched": False, "reason_code": "modal_disabled"},
+    )
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.modal_dispatch,
+        "modal_dispatch_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         retained_cast_screentime_dispatch.retained_cast_screentime_runtime,
         "enqueue_run",
         lambda run_id: {"run_id": run_id, "state": "queued", "job_id": f"backend:{run_id}"},
@@ -15,10 +25,79 @@ def test_start_run_uses_backend_runtime(monkeypatch) -> None:
     assert result == {"run_id": "run-123", "state": "queued", "job_id": "backend:run-123"}
 
 
+def test_start_run_uses_modal_dispatch_when_available(monkeypatch) -> None:
+    enqueue_calls: list[str] = []
+    modal_result = {
+        "dispatched": True,
+        "call_id": "fc-123",
+        "function_name": "run_cast_screentime_analysis",
+    }
+
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.modal_dispatch,
+        "dispatch_cast_screentime_run",
+        lambda *, run_id: modal_result,
+    )
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.retained_cast_screentime_runtime,
+        "enqueue_run",
+        lambda run_id: enqueue_calls.append(run_id),
+    )
+
+    result = retained_cast_screentime_dispatch.start_run("run-123")
+
+    assert result == {
+        "run_id": "run-123",
+        "state": "queued",
+        "job_id": "modal:fc-123",
+        "mode": "modal",
+        "dispatch": modal_result,
+    }
+    assert enqueue_calls == []
+
+
+def test_start_run_rejects_local_fallback_when_modal_is_enabled(monkeypatch) -> None:
+    enqueue_calls: list[str] = []
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.modal_dispatch,
+        "dispatch_cast_screentime_run",
+        lambda *, run_id: {"dispatched": False, "reason_code": "modal_function_not_found"},
+    )
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.modal_dispatch,
+        "modal_dispatch_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.retained_cast_screentime_runtime,
+        "enqueue_run",
+        lambda run_id: enqueue_calls.append(run_id),
+    )
+
+    try:
+        retained_cast_screentime_dispatch.start_run("run-123")
+    except retained_cast_screentime_dispatch.RetainedCastScreentimeDispatchError as exc:
+        assert str(exc) == "modal_function_not_found"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected RetainedCastScreentimeDispatchError")
+
+    assert enqueue_calls == []
+
+
 def test_start_run_wraps_backend_runtime_errors(monkeypatch) -> None:
     def _raise(_run_id: str) -> dict[str, object]:
         raise RuntimeError("backend runtime unavailable")
 
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.modal_dispatch,
+        "dispatch_cast_screentime_run",
+        lambda *, run_id: {"dispatched": False, "reason_code": "modal_disabled"},
+    )
+    monkeypatch.setattr(
+        retained_cast_screentime_dispatch.modal_dispatch,
+        "modal_dispatch_enabled",
+        lambda: False,
+    )
     monkeypatch.setattr(
         retained_cast_screentime_dispatch.retained_cast_screentime_runtime,
         "enqueue_run",

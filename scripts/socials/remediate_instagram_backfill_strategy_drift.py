@@ -12,28 +12,23 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-PRESET_DB_POOL_MINCONN = (os.environ.get("TRR_DB_POOL_MINCONN") or "").strip()
-PRESET_DB_POOL_MAXCONN = (os.environ.get("TRR_DB_POOL_MAXCONN") or "").strip()
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts._workspace_runtime_env import apply_workspace_runtime_env  # noqa: E402
 
-load_dotenv()
-
 
 def _apply_cli_db_pool_defaults() -> None:
     """Keep one-off remediation commands from starving the shared local DB lane."""
 
-    if not PRESET_DB_POOL_MINCONN:
+    preset_minconn = (os.environ.get("TRR_DB_POOL_MINCONN") or "").strip()
+    preset_maxconn = (os.environ.get("TRR_DB_POOL_MAXCONN") or "").strip()
+    load_dotenv()
+    if not preset_minconn:
         os.environ["TRR_DB_POOL_MINCONN"] = "1"
-    if not PRESET_DB_POOL_MAXCONN:
+    if not preset_maxconn:
         os.environ["TRR_DB_POOL_MAXCONN"] = "1"
-
-
-_apply_cli_db_pool_defaults()
 
 ACTIVE_JOB_STATUSES = ("queued", "pending", "retrying", "running")
 
@@ -156,6 +151,7 @@ def _summarize_candidate_runs(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    _apply_cli_db_pool_defaults()
     apply_workspace_runtime_env(repo_root=REPO_ROOT)
     social_repo = _social_repo()
 

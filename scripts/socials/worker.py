@@ -32,12 +32,13 @@ from trr_backend.socials.control_plane import (
     update_worker_heartbeat,
 )
 from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+from trr_backend.socials.post_persist_truthfulness import apply_post_persist_truthfulness_metadata
 from trr_backend.utils.env import load_env
 
 logger = logging.getLogger("socials.worker")
 _UNSET = object()
-_TASK8_EXECUTE_RUN_MAX_JOBS_DEFAULT = 1000
-_TASK8_EXECUTE_RUN_MAX_SECONDS_DEFAULT = 1800.0
+_TASK8_EXECUTE_RUN_MAX_JOBS_DEFAULT: int | None = None
+_TASK8_EXECUTE_RUN_MAX_SECONDS_DEFAULT: float | None = None
 
 
 def _worker_lane_from_env() -> str | None:
@@ -483,61 +484,67 @@ def _persist_job_metadata(job_id: str, metadata: dict[str, object]) -> dict[str,
 
 def _apply_post_persist_truthfulness_diagnostics(job: dict[str, object]) -> tuple[dict[str, object], bool]:
     metadata = _metadata_dict(job.get("metadata"))
-    persist_summary = _metadata_dict(metadata.get("posts_scrapling_persist_diagnostics"))
+    diagnostics = _metadata_dict(metadata.get("diagnostics"))
+    existing_truthfulness = _metadata_dict(diagnostics.get("post_persist_truthfulness"))
+    persist_summary = (
+        _metadata_dict(metadata.get("posts_scrapling_persist_diagnostics"))
+        or _metadata_dict(metadata.get("threads_posts_scrapling_persist_diagnostics"))
+        or _metadata_dict(metadata.get("persist_counters"))
+    )
+    if not persist_summary and existing_truthfulness:
+        persist_summary = {
+            "posts_upserted": existing_truthfulness.get("posts_upserted"),
+            "posts_skipped": existing_truthfulness.get("posts_skipped"),
+            "posts_skipped_by_reason": existing_truthfulness.get("posts_skipped_by_reason"),
+        }
     if not persist_summary:
         return job, False
 
-    updated_metadata = copy.deepcopy(metadata)
-    persist_counters = _metadata_dict(updated_metadata.get("persist_counters"))
-    stage_counters = _metadata_dict(updated_metadata.get("stage_counters"))
-    activity = _metadata_dict(updated_metadata.get("activity"))
-    diagnostics = _metadata_dict(updated_metadata.get("diagnostics"))
+    mirror = _metadata_dict(metadata.get("mirror"))
+    mirror_storage = _metadata_dict(mirror.get("storage_summary"))
+    profile_pic_mirror = _metadata_dict(metadata.get("profile_pic_mirror"))
+    avatar_mirror = _metadata_dict(metadata.get("avatar_mirror"))
+    media_assets_persisted = max(
+        _normalize_non_negative_int(mirror.get("mirrored_assets")),
+        _normalize_non_negative_int(mirror.get("mirrored_count")),
+        _normalize_non_negative_int(mirror_storage.get("object_count")),
+        _normalize_non_negative_int(mirror_storage.get("cdn_url_count")),
+        _normalize_non_negative_int(profile_pic_mirror.get("tagged_mirrored"))
+        + (1 if profile_pic_mirror.get("owner_mirrored") else 0),
+        1 if avatar_mirror.get("mirrored") else 0,
+    )
+
+    base_metadata = copy.deepcopy(metadata)
+    stage_counters = _metadata_dict(base_metadata.get("stage_counters"))
+    activity = _metadata_dict(base_metadata.get("activity"))
     posts_upserted = _normalize_non_negative_int(persist_summary.get("posts_upserted"))
     posts_skipped = _normalize_non_negative_int(persist_summary.get("posts_skipped"))
     posts_skipped_by_reason = _normalize_reason_counts(persist_summary.get("posts_skipped_by_reason"))
     posts_checked = max(
+        _normalize_non_negative_int(existing_truthfulness.get("posts_checked")),
         _normalize_non_negative_int(activity.get("posts_checked")),
         _normalize_non_negative_int(stage_counters.get("posts")),
         _normalize_non_negative_int(job.get("items_found")),
     )
-
-    persist_counters["posts_upserted"] = posts_upserted
-    persist_counters["posts_skipped"] = posts_skipped
-    persist_counters["posts_skipped_by_reason"] = posts_skipped_by_reason
-    updated_metadata["persist_counters"] = persist_counters
-
-    silent_drop_detected = (
-        str(job.get("status") or "").strip().lower() == "completed" and posts_checked > 0 and posts_upserted == 0
+    platform = str(base_metadata.get("platform") or job.get("platform") or "instagram").strip().lower() or "instagram"
+    account = str(base_metadata.get("account") or "").strip().lstrip("@") or None
+    updated_metadata = apply_post_persist_truthfulness_metadata(
+        base_metadata,
+        platform=platform,
+        account=account,
+        status=str(job.get("status") or ""),
+        posts_checked=posts_checked,
+        posts_upserted=posts_upserted,
+        posts_skipped=posts_skipped,
+        posts_skipped_by_reason=posts_skipped_by_reason,
+        media_assets_persisted=media_assets_persisted,
+        alias_keys=(f"{platform}_posts_scrapling_persist_diagnostics",),
     )
-    diagnostics["post_persist_truthfulness"] = {
-        "posts_checked": posts_checked,
-        "posts_upserted": posts_upserted,
-        "posts_skipped": posts_skipped,
-        "posts_skipped_by_reason": posts_skipped_by_reason,
-        "silent_drop_detected": silent_drop_detected,
-    }
-    if silent_drop_detected:
-        diagnostics["post_persist_truthfulness"]["status_resolution"] = "completed_with_silent_drop_alert"
-        diagnostics["post_persist_truthfulness"]["operator_summary"] = (
-            "Instagram posts persistence completed with zero saved posts after checking live posts."
+    silent_drop_detected = bool(
+        _metadata_dict(_metadata_dict(updated_metadata.get("diagnostics")).get("post_persist_truthfulness")).get(
+            "silent_drop_detected"
         )
-    updated_metadata["diagnostics"] = diagnostics
-
-    if silent_drop_detected:
-        alerts = [dict(item) for item in list(updated_metadata.get("alerts") or []) if isinstance(item, dict)]
-        alert_code = "instagram_posts_persist_zero_saved"
-        if not any(str(item.get("code") or "") == alert_code for item in alerts):
-            alerts.append(
-                {
-                    "code": alert_code,
-                    "severity": "warning",
-                    "message": (
-                        f"Instagram posts Scrapling checked {posts_checked} posts but persisted 0 for "
-                        f"@{str(updated_metadata.get('account') or '').strip().lstrip('@') or 'unknown'}."
-                    ),
-                }
-            )
-        updated_metadata["alerts"] = alerts
+    )
 
     if updated_metadata == metadata:
         return job, silent_drop_detected

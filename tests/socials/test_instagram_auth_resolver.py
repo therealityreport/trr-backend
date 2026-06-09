@@ -44,6 +44,10 @@ def _clear_auth_resolver_state(monkeypatch: pytest.MonkeyPatch) -> None:
         "INSTAGRAM_PASSWORD",
         "SOCIAL_BROWSER_SESSION_DIR",
         "SOCIAL_INSTAGRAM_COMMENTS_AUTH_VALIDATION",
+        "SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION",
+        "SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN",
+        "SOCIAL_INSTAGRAM_BROWSER_MODE",
+        "SOCIAL_INSTAGRAM_CHROME_PROFILE",
     ):
         monkeypatch.delenv(key, raising=False)
     clear_instagram_auth_runtime_state()
@@ -199,6 +203,46 @@ def test_resolve_instagram_comments_auth_session_graphql_profile_can_validate(
     assert auth_session.metadata["comments_profile_graphql_validation"] is True
 
 
+def test_instagram_auth_resolver_validation_disables_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.socials.instagram import auth_resolver
+
+    captured: dict[str, object] = {}
+
+    class _FakeScraper:
+        last_retrieval_meta: dict[str, object] = {}
+
+        def __init__(self, *, cookies: dict[str, str], browser_account_id: str | None = None) -> None:
+            captured["cookies"] = dict(cookies)
+            captured["browser_account_id"] = browser_account_id
+
+        def fetch_posts_graphql(self, username: str, **kwargs: object) -> dict[str, object]:
+            captured["username"] = username
+            captured["kwargs"] = dict(kwargs)
+            return {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "1"}}],
+                    },
+                },
+            }
+
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.InstagramScraper", _FakeScraper)
+
+    valid, reason, category, stale_ok = auth_resolver._validate_cookies_via_graphql(  # noqa: SLF001
+        {"sessionid": "session", "csrftoken": "csrf", "ds_user_id": "123"},
+        session_account_id="bravotv",
+        require_validation=True,
+    )
+
+    assert (valid, reason, category, stale_ok) == (True, None, "validated", False)
+    assert captured["browser_account_id"] == "bravotv"
+    assert captured["username"] == "bravotv"
+    assert captured["kwargs"]["allow_browser_fallback"] is False
+    assert captured["kwargs"]["allow_recovery"] is False
+
+
 def test_resolve_instagram_comments_auth_validation_mode_invalid_falls_back(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -307,6 +351,51 @@ def test_resolve_instagram_auth_session_validates_against_target_handle(
     assert captured["validation_username"] == "thetraitorsus"
 
 
+def test_resolve_instagram_auth_session_does_not_validate_against_generic_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_FILE", str(tmp_path / "instagram-cookies.json"))
+
+    manager = AccountBrowserSessionManager(platform="instagram", cookie_domains=(".instagram.com",))
+    manager.import_bootstrapped_session(
+        "bravotv",
+        {"sessionid": "browser-session", "csrftoken": "browser-csrf", "ds_user_id": "456"},
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FakeInstagramScraper:
+        def __init__(self, *, cookies: dict[str, str] | None = None, browser_account_id: str | None = None) -> None:
+            captured["browser_account_id"] = browser_account_id
+            captured["cookies"] = dict(cookies or {})
+            self.last_retrieval_meta = {}
+
+        def fetch_posts_graphql(self, username: str, **_kwargs: object) -> dict[str, object]:
+            captured["validation_username"] = username
+            return {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [{"node": {"id": "post"}}],
+                    },
+                },
+            }
+
+    monkeypatch.setattr("trr_backend.socials.instagram.scraper.InstagramScraper", _FakeInstagramScraper)
+
+    auth_session = resolve_instagram_auth_session(
+        browser_account_id="bravotv",
+        caller_context="manual_probe",
+        require_validation=True,
+        browser_session_manager=manager,
+    )
+
+    assert auth_session.validated is True
+    assert captured["browser_account_id"] == "bravotv"
+    assert captured["validation_username"] == "bravotv"
+
+
 def test_refresh_interactively_skips_sync_playwright_inside_async_loop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -337,6 +426,7 @@ def test_refresh_interactively_defaults_to_headless_codex_profile(
 
     captured: dict[str, object] = {}
     monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION", "I UNDERSTAND INSTAGRAM AUTH RISK")
     monkeypatch.delenv("SOCIAL_INSTAGRAM_BROWSER_MODE", raising=False)
     monkeypatch.delenv("SOCIAL_INSTAGRAM_CHROME_PROFILE", raising=False)
 
@@ -355,6 +445,45 @@ def test_refresh_interactively_defaults_to_headless_codex_profile(
     assert cookies["sessionid"] == "fresh-session"
     assert captured["chrome_profile_name"] == "codex@thereality.report"
     assert captured["headless"] is True
+
+
+def test_resolve_instagram_auth_session_repairs_checkpoint_with_interactive_login(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from trr_backend.socials.instagram import auth_resolver
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COOKIES_JSON", '{"sessionid":"stale","csrftoken":"csrf","ds_user_id":"123"}')
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_SESSION_ACCOUNT_ID", "bravotv")
+    monkeypatch.setenv("SOCIAL_BROWSER_SESSION_DIR", str(tmp_path / "browser-sessions"))
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN", "1")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION", "I UNDERSTAND INSTAGRAM AUTH RISK")
+
+    validation_calls: list[dict[str, str]] = []
+
+    def _fake_validate(cookies: dict[str, str], **_kwargs: object) -> tuple[bool, str | None, str, bool]:
+        validation_calls.append(dict(cookies))
+        if cookies.get("sessionid") == "fresh":
+            return True, None, "validated", False
+        return False, "checkpoint_required", "checkpoint_required", False
+
+    monkeypatch.setattr(auth_resolver, "_validate_cookies_via_graphql", _fake_validate)
+    monkeypatch.setattr(
+        auth_resolver,
+        "interactive_chrome_login",
+        lambda **_kwargs: {"sessionid": "fresh", "csrftoken": "fresh-csrf", "ds_user_id": "456"},
+    )
+
+    auth_session = auth_resolver.resolve_instagram_auth_session(
+        browser_account_id="bravotv",
+        caller_context="posts_launch_auth_probe:bravotv",
+    )
+
+    assert [call["sessionid"] for call in validation_calls] == ["stale", "fresh"]
+    assert auth_session.validated is True
+    assert auth_session.refreshed is True
+    assert auth_session.refresh_method == "interactive_login"
+    assert auth_session.cookies["sessionid"] == "fresh"
 
 
 def test_credential_refresh_skips_sync_playwright_inside_async_loop(

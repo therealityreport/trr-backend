@@ -23,24 +23,28 @@ anyio==4.13.0
     #   anthropic
     #   google-genai
     #   httpx
+    #   mcp
     #   scrapling
     #   sse-starlette
     #   starlette
     #   watchfiles
-apify-client==2.5.0
-    # via -r requirements.in
-apify-fingerprint-datapoints==0.12.0
+apify-fingerprint-datapoints==0.13.0
     # via
     #   browserforge
     #   scrapling
-apify-shared==2.2.0
-    # via apify-client
 astunparse==1.6.3
     # via tensorflow
 async-timeout==5.0.1
-    # via crawlee
+    # via
+    #   crawlee
+    #   redis
 attrs==26.1.0
-    # via aiohttp
+    # via
+    #   aiohttp
+    #   jsonschema
+    #   referencing
+backports-tarfile==1.2.0
+    # via jaraco-context
 beautifulsoup4==4.14.3
     # via
     #   -r requirements.in
@@ -74,6 +78,7 @@ certifi==2026.2.25
     #   httpx
     #   modal
     #   requests
+    #   sentry-sdk
 cffi==2.0.0
     # via
     #   cairocffi
@@ -93,14 +98,13 @@ click==8.3.1
     #   typer
     #   uvicorn
 colorama==0.4.6
-    # via
-    #   apify-client
-    #   crawlee
+    # via crawlee
 crawlee==1.6.0
     # via -r requirements.in
-cryptography==46.0.6
+cryptography==43.0.3
     # via
     #   google-auth
+    #   pycookiecheat
     #   pyjwt
 cssselect==1.4.0
     # via scrapling
@@ -125,7 +129,9 @@ distro==1.9.0
 docstring-parser==0.17.0
     # via anthropic
 fastapi==0.135.2
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   sentry-sdk
 filelock==3.25.2
     # via
     #   gdown
@@ -240,11 +246,14 @@ httpx==0.28.1
     #   anthropic
     #   firebase-admin
     #   google-genai
+    #   mcp
     #   postgrest
     #   storage3
     #   supabase
     #   supabase-auth
     #   supabase-functions
+httpx-sse==0.4.3
+    # via mcp
 hyperframe==6.1.0
     # via h2
 idna==3.11
@@ -255,13 +264,19 @@ idna==3.11
     #   tldextract
     #   yarl
 impit==0.12.0
-    # via
-    #   apify-client
-    #   crawlee
+    # via crawlee
+importlib-metadata==9.0.0
+    # via keyring
 iniconfig==2.3.0
     # via pytest
 itsdangerous==2.2.0
     # via flask
+jaraco-classes==3.4.0
+    # via keyring
+jaraco-context==6.1.2
+    # via keyring
+jaraco-functools==4.5.0
+    # via keyring
 jinja2==3.1.6
     # via flask
 jiter==0.13.0
@@ -272,10 +287,16 @@ jmespath==1.1.0
     #   botocore
 joblib==1.5.3
     # via mtcnn
+jsonschema==4.26.0
+    # via mcp
+jsonschema-specifications==2025.9.1
+    # via jsonschema
 keras==3.14.0
     # via
     #   deepface
     #   tensorflow
+keyring==25.7.0
+    # via pycookiecheat
 libclang==18.1.1
     # via tensorflow
 lightdsa==0.0.3
@@ -286,7 +307,7 @@ lightecc==0.0.5
     #   lightphe
 lightphe==0.0.21
     # via deepface
-lxml==6.0.4
+lxml==6.1.1
     # via scrapling
 lz4==4.4.5
     # via mtcnn
@@ -297,6 +318,8 @@ markupsafe==3.0.3
     #   flask
     #   jinja2
     #   werkzeug
+mcp==1.27.2
+    # via -r requirements.in
 mdurl==0.1.2
     # via markdown-it-py
 ml-dtypes==0.5.4
@@ -309,8 +332,9 @@ modal==1.4.0
     # via -r requirements.in
 more-itertools==10.8.0
     # via
-    #   apify-client
     #   crawlee
+    #   jaraco-classes
+    #   jaraco-functools
 mpmath==1.3.0
     # via sympy
 msgpack==1.1.2
@@ -359,7 +383,7 @@ packaging==26.0
     #   wheel
 pandas==3.0.2
     # via deepface
-patchright==1.58.2
+patchright==1.60.1
     # via scrapling
 pillow==12.1.1
     # via
@@ -368,7 +392,7 @@ pillow==12.1.1
     #   deepface
     #   reportlab
     #   retina-face
-playwright==1.58.0
+playwright==1.60.0
     # via
     #   -r requirements.in
     #   scrapling
@@ -407,6 +431,8 @@ pyasn1==0.6.3
     # via pyasn1-modules
 pyasn1-modules==0.4.2
     # via google-auth
+pycookiecheat==0.8.0
+    # via -r requirements.in
 pycparser==3.0
     # via cffi
 pydantic==2.12.5
@@ -416,6 +442,7 @@ pydantic==2.12.5
     #   crawlee
     #   fastapi
     #   google-genai
+    #   mcp
     #   postgrest
     #   pydantic-settings
     #   pyiceberg
@@ -425,7 +452,9 @@ pydantic==2.12.5
 pydantic-core==2.41.5
     # via pydantic
 pydantic-settings==2.13.1
-    # via crawlee
+    # via
+    #   crawlee
+    #   mcp
 pyee==13.0.1
     # via
     #   crawlee
@@ -441,6 +470,7 @@ pyjwt==2.12.1
     # via
     #   -r requirements.in
     #   firebase-admin
+    #   mcp
     #   supabase-auth
 pyparsing==3.3.2
     # via pyiceberg
@@ -462,11 +492,19 @@ python-dotenv==1.2.2
     #   pydantic-settings
     #   uvicorn
 python-multipart==0.0.22
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   mcp
 pyyaml==6.0.3
     # via uvicorn
 realtime==2.28.3
     # via supabase
+redis==8.0.0
+    # via -r requirements.in
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
 reportlab==4.4.10
     # via -r requirements.in
 requests==2.33.0
@@ -497,9 +535,15 @@ rich==14.3.3
     #   modal
     #   pyiceberg
     #   typer
+rpds-py==2026.5.1
+    # via
+    #   jsonschema
+    #   referencing
 s3transfer==0.16.0
     # via boto3
-scrapling==0.4.7
+scrapling==0.4.9
+    # via -r requirements.in
+sentry-sdk==2.62.0
     # via -r requirements.in
 setuptools==82.0.1
     # via tensorflow
@@ -518,10 +562,13 @@ sniffio==1.3.1
 soupsieve==2.8.3
     # via beautifulsoup4
 sse-starlette==3.3.3
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   mcp
 starlette==1.0.0
     # via
     #   fastapi
+    #   mcp
     #   sse-starlette
 storage3==2.28.3
     # via supabase
@@ -593,12 +640,14 @@ typing-extensions==4.15.0
     #   fastapi
     #   google-genai
     #   grpcio
+    #   mcp
     #   modal
     #   optree
     #   pydantic
     #   pydantic-core
     #   pyee
     #   realtime
+    #   referencing
     #   scrapling
     #   starlette
     #   synchronicity
@@ -607,14 +656,18 @@ typing-extensions==4.15.0
 typing-inspection==0.4.2
     # via
     #   fastapi
+    #   mcp
     #   pydantic
     #   pydantic-settings
 urllib3==2.6.3
     # via
     #   botocore
     #   requests
+    #   sentry-sdk
 uvicorn==0.42.0
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   mcp
 uvloop==0.22.1
     # via uvicorn
 w3lib==2.4.1
@@ -648,5 +701,7 @@ yarl==1.23.0
     #   storage3
     #   supabase
     #   supabase-functions
+zipp==4.1.0
+    # via importlib-metadata
 zstandard==0.25.0
     # via pyiceberg

@@ -8,6 +8,8 @@ import pytest
 
 from trr_backend.socials.threads.posts_scrapling.persistence import PersistedThreadsPosts
 
+_ROLLOUT_ENV = "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"
+
 
 class _FakeLifecycle:
     def __init__(self) -> None:
@@ -54,6 +56,11 @@ def fake_lifecycle(monkeypatch: pytest.MonkeyPatch) -> _FakeLifecycle:
     fake = _FakeLifecycle()
     monkeypatch.setattr(jr, "lifecycle", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def default_threads_posts_scrapling_rollout_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(_ROLLOUT_ENV, raising=False)
 
 
 def _thread_post(post_id: str = "th-1") -> SimpleNamespace:
@@ -103,6 +110,110 @@ def _running_status_or_final_row(query: str, *_args: Any, **_kwargs: Any) -> dic
     if normalized.startswith("select status from social.scrape_runs"):
         return {"status": "running"}
     return {"id": "job-1", "status": "completed"}
+
+
+def test_threads_job_runner_defaults_scrapling_rollout_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    class _FakeFetcher:
+        runtime_metadata = {"transport": "test", "request_count": 1, "complete": True}
+
+        async def warmup(self, _account_handle: str) -> None:
+            return None
+
+        async def fetch_posts(self, _account_handle: str, *, max_pages: int | None = None) -> Any:
+            del max_pages
+            return jr.ThreadsPostsFetchResult(
+                posts=[_thread_post()],
+                fetch_failed=False,
+                auth_failed=False,
+                retryable=False,
+                fetch_reason=None,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    _install_common_fakes(
+        monkeypatch,
+        jr,
+        fetcher=_FakeFetcher(),
+        persist_result=PersistedThreadsPosts(posts_upserted=1, posts_skipped=0),
+    )
+    monkeypatch.setattr(jr.pg, "fetch_one", _running_status_or_final_row)
+
+    jr.run_threads_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "config": {"account": "bravotv"}},
+        worker_id="worker-1",
+    )
+
+    metadata = fake_lifecycle.finish_calls[-1]["metadata"]
+    assert fake_lifecycle.finish_calls[-1]["status"] == "completed"
+    assert metadata["threads_posts_scrapling_enabled"] is True
+    assert metadata["rollout_flags"]["threads_posts_scrapling"] == {
+        "env_var": _ROLLOUT_ENV,
+        "enabled": True,
+        "default_enabled": True,
+        "configured_value": None,
+    }
+
+
+def test_threads_job_runner_fails_safely_when_scrapling_rollout_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_lifecycle: _FakeLifecycle,
+) -> None:
+    from trr_backend.socials.threads.posts_scrapling import job_runner as jr
+
+    monkeypatch.setenv(_ROLLOUT_ENV, "false")
+    monkeypatch.setattr(
+        jr,
+        "resolve_threads_posts_session",
+        lambda: pytest.fail("session should not resolve when Threads posts Scrapling is disabled"),
+    )
+    monkeypatch.setattr(
+        jr,
+        "ThreadsPostsScraplingFetcher",
+        lambda **_kwargs: pytest.fail("Scrapling fetcher should not run when disabled"),
+    )
+    monkeypatch.setattr(
+        jr.pg,
+        "fetch_one",
+        lambda *_args, **_kwargs: {
+            "id": "job-1",
+            "run_id": "run-1",
+            "platform": "threads",
+            "job_type": "posts",
+            "status": "failed",
+            "items_found": 0,
+            "error_message": "Threads posts Scrapling job is disabled by SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED.",
+            "metadata": fake_lifecycle.finish_calls[-1]["metadata"],
+        },
+    )
+
+    result = jr.run_threads_posts_scrapling_job(
+        {"id": "job-1", "run_id": "run-1", "config": {"account": "bravotv"}},
+        worker_id="worker-1",
+    )
+
+    finish = fake_lifecycle.finish_calls[-1]
+    metadata = finish["metadata"]
+    assert result["status"] == "failed"
+    assert finish["status"] == "failed"
+    assert finish["last_error_code"] == "threads_posts_scrapling_disabled"
+    assert finish["last_error_class"] == "ThreadsPostsScraplingRuntimeError"
+    assert metadata["threads_posts_scrapling_enabled"] is False
+    assert metadata["rollout_flags"]["threads_posts_scrapling"] == {
+        "env_var": _ROLLOUT_ENV,
+        "enabled": False,
+        "default_enabled": True,
+        "configured_value": "false",
+    }
+    assert metadata["stop_reason"] == "threads_posts_scrapling_disabled"
+    assert metadata["runtime_metadata"]["error"]["disabled_reason"] == "disabled_by_env"
+    assert metadata["runtime_metadata"]["error"]["threads_posts_scrapling_enabled"] is False
 
 
 def test_threads_job_runner_uses_final_fetcher_metadata_not_warmup_snapshot(

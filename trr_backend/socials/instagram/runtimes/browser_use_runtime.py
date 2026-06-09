@@ -21,7 +21,7 @@ TODO before production use:
   2. Verify `Agent` signature. Docs:
      https://docs.browser-use.com/quickstart
   3. Choose LLM provider. Prefer Vercel AI Gateway if available; otherwise
-     direct Anthropic via the `claude-opus-4-6` model (per CLAUDE.md
+     direct Anthropic via the `claude-opus-4-8` model (per CLAUDE.md
      default). Route via the Vercel AI Gateway if present.
   4. Implement `recover_from_checkpoint` - the ONLY exposed entry point.
      Do not expose fetch_profile/fetch_posts here; those should remain

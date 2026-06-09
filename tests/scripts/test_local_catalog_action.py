@@ -2,7 +2,28 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.socials import local_catalog_action as cli
+
+
+@pytest.fixture(autouse=True)
+def _clear_local_catalog_pool_env(monkeypatch):
+    for key in cli.LOCAL_CATALOG_DB_POOL_DEFAULTS:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_apply_local_catalog_db_pool_defaults_preserves_explicit_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN", "8")
+
+    applied = cli.apply_local_catalog_db_pool_defaults()
+
+    assert applied == {
+        "TRR_DB_POOL_MAXCONN": "4",
+        "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN": "4",
+        "TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN": "4",
+    }
+    assert cli.os.environ["TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN"] == "8"
 
 
 def test_parse_args_defaults() -> None:
@@ -13,6 +34,8 @@ def test_parse_args_defaults() -> None:
     assert args.source_scope == "network"
     assert args.action == "backfill"
     assert args.selected_tasks == []
+    assert args.dry_run is False
+    assert args.confirm_bravotv_instagram_backfill == ""
 
 
 def test_parse_args_accepts_legacy_bravo_source_scope() -> None:
@@ -51,6 +74,25 @@ def test_parse_args_accepts_selected_tasks() -> None:
     )
 
     assert args.selected_tasks == ["post_details", "comments", "media"]
+
+
+def test_parse_args_accepts_dry_run_and_bravotv_confirmation() -> None:
+    args = cli.parse_args(
+        [
+            "--platform",
+            "instagram",
+            "--account",
+            "bravotv",
+            "--action",
+            "backfill",
+            "--dry-run",
+            "--confirm-bravotv-instagram-backfill",
+            cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION,
+        ]
+    )
+
+    assert args.dry_run is True
+    assert args.confirm_bravotv_instagram_backfill == cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION
 
 
 def test_parse_args_accepts_comment_anchor_source_ids() -> None:
@@ -120,6 +162,7 @@ def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monk
             source_scope="bravo",
             action="backfill",
             selected_tasks=["post_details", "comments", "media"],
+            confirm_bravotv_instagram_backfill=cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION,
         ),
     )
 
@@ -158,7 +201,175 @@ def test_main_dispatches_selected_task_backfill_through_launch_orchestrator(monk
         ("catalog-run-1", "local-script:catalog:instagram:1"),
         ("comments-run-1", "local-script:catalog:instagram:2"),
     ]
-    assert "catalog-run-1" in capsys.readouterr().out
+    captured_output = capsys.readouterr()
+    assert "catalog-run-1" in captured_output.out
+    assert "local_catalog_db_pool_defaults" in captured_output.err
+
+
+def test_main_dry_run_prints_plan_without_loading_runtime(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no env")))
+    monkeypatch.setattr(
+        cli,
+        "apply_workspace_runtime_env",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("no runtime env")),
+    )
+
+    assert (
+        cli.main(
+            [
+                "--platform",
+                "instagram",
+                "--account",
+                "bravotv",
+                "--source-scope",
+                "network",
+                "--action",
+                "backfill",
+                "--selected-task",
+                "post_details",
+                "--selected-task",
+                "comments",
+                "--selected-task",
+                "media",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["status"] == "dry_run"
+    assert payload["would_launch"] is False
+    assert payload["confirmation_required"] is True
+    assert payload["required_confirmation"] == cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION
+    assert payload["selected_tasks"] == ["post_details", "comments", "media"]
+
+
+def test_main_blocks_bravotv_instagram_backfill_without_confirmation(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no env")))
+    monkeypatch.setattr(
+        cli,
+        "apply_workspace_runtime_env",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("no runtime env")),
+    )
+
+    assert (
+        cli.main(
+            [
+                "--platform",
+                "instagram",
+                "--account",
+                "bravotv",
+                "--action",
+                "backfill",
+                "--selected-task",
+                "post_details",
+                "--selected-task",
+                "comments",
+                "--selected-task",
+                "media",
+            ]
+        )
+        == 2
+    )
+
+    payload = __import__("json").loads(capsys.readouterr().err)
+    assert payload["reason"] == "bravotv_instagram_backfill_confirmation_required"
+    assert payload["required_confirmation"] == cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION
+
+
+def test_main_cancels_started_run_on_keyboard_interrupt(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="instagram",
+            account="bravotv",
+            source_scope="network",
+            action="backfill",
+            selected_tasks=["post_details"],
+            comment_anchor_source_ids=[],
+            confirm_bravotv_instagram_backfill=cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION,
+        ),
+    )
+
+    cancelled: list[dict[str, object]] = []
+
+    def _cancel(**kwargs):
+        cancelled.append(kwargs)
+        return {"run_id": kwargs["run_id"], "status": "cancelled"}
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(
+            launch_social_account_catalog_backfill=lambda *args, **kwargs: {
+                "platform": "instagram",
+                "catalog_run_id": "catalog-run-1",
+                "status": "queued",
+            },
+            cancel_social_account_catalog_run=_cancel,
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.socials.control_plane",
+        SimpleNamespace(
+            execute_run_with_inline_worker_registration=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                KeyboardInterrupt()
+            )
+        ),
+    )
+
+    assert cli.main() == 130
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["status"] == "interrupted"
+    assert payload["interrupted_cleanup"]["cancelled_run_ids"] == ["catalog-run-1"]
+    assert cancelled[0]["platform"] == "instagram"
+    assert cancelled[0]["account_handle"] == "bravotv"
+    assert cancelled[0]["cancelled_by"] == "local-script:local_catalog_action.py:interrupted"
+
+
+def test_main_prints_blocked_launch_payload_without_run_id(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "apply_workspace_runtime_env", lambda **kwargs: {})
+    monkeypatch.setattr(
+        cli,
+        "parse_args",
+        lambda argv=None: SimpleNamespace(
+            platform="instagram",
+            account="bravotv",
+            source_scope="network",
+            action="backfill",
+            selected_tasks=["post_details"],
+            comment_anchor_source_ids=[],
+            confirm_bravotv_instagram_backfill=cli.BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION,
+        ),
+    )
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.repositories.social_season_analytics",
+        SimpleNamespace(
+            launch_social_account_catalog_backfill=lambda *args, **kwargs: {
+                "status": "blocked_auth",
+                "auth_repair_reason": "checkpoint_required",
+            }
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "trr_backend.socials.control_plane",
+        SimpleNamespace(execute_run_with_inline_worker_registration=lambda *_args, **_kwargs: None),
+    )
+
+    assert cli.main() == 1
+    out = capsys.readouterr().out
+    assert '"executed_run_ids": []' in out
+    assert '"status": "blocked_auth"' in out
+    assert '"auth_repair_reason": "checkpoint_required"' in out
 
 
 def test_main_dispatches_targeted_twitter_comment_backfill(monkeypatch, capsys) -> None:

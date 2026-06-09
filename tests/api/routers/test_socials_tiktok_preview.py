@@ -45,3 +45,4 @@ def test_preview_tiktok_profile_uses_auth_preflight(monkeypatch) -> None:
     assert captured["cookies"] == {"sessionid": "cookie"}
     assert payload["username"] == "creator"
     assert payload["followers"] == 10
+    assert payload["likes"] == 30

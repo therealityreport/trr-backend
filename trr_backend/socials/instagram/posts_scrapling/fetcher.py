@@ -67,6 +67,7 @@ from trr_backend.socials.instagram.posts_scrapling.proxy import (
     build_posts_proxy_identity,
     posts_proxy_feature_flags,
 )
+from trr_backend.socials.scrapling_transport import build_stealthy_fetcher, scrapling_runtime_metadata
 
 logger = logging.getLogger("socials.instagram.posts_scrapling.fetcher")
 
@@ -104,6 +105,7 @@ class _WarmupPoolEntry:
 _POSTS_WARMUP_POOL: dict[str, _WarmupPoolEntry] = {}
 _WARMUP_SNAPSHOT_COOKIE_STATE_KEY = "cookie_state"
 _LEGACY_WARMUP_SNAPSHOT_COOKIE_STATE_KEY = "raw_" + "cookies"
+_AUTHENTICATED_COOKIE_NAMES = frozenset({"sessionid", "ds_user_id"})
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +200,58 @@ def _advisory_lock_keys_for(key: str) -> tuple[int, int]:
     return _RATE_LIMIT_ADVISORY_LOCK_NAMESPACE, key_int
 
 
+def _milliseconds(seconds: float) -> int:
+    return max(0, int(max(0.0, float(seconds or 0.0)) * 1000))
+
+
+def _pacing_result(
+    *,
+    acquired: bool,
+    paced: bool,
+    lock_wait_seconds: float = 0.0,
+    lock_held_seconds: float = 0.0,
+    scheduled_sleep_seconds: float = 0.0,
+    scheduled_at: float | None = None,
+    reservation_lag_seconds: float = 0.0,
+    error: str | None = None,
+) -> dict[str, Any]:
+    lock_wait_ms = _milliseconds(lock_wait_seconds)
+    return {
+        "acquired": bool(acquired),
+        "paced": bool(paced),
+        "wait_ms": lock_wait_ms,
+        "lock_wait_ms": lock_wait_ms,
+        "lock_held_ms": _milliseconds(lock_held_seconds),
+        "scheduled_sleep_ms": _milliseconds(scheduled_sleep_seconds),
+        "scheduled_at": scheduled_at,
+        "reservation_lag_ms": _milliseconds(reservation_lag_seconds),
+        "error": error,
+    }
+
+
+def _reserve_rate_limit_slot(handle: Any, *, delay_seconds: float) -> tuple[float, float]:
+    now = time.monotonic()
+    previous_scheduled_at = _read_monotonic_timestamp(handle)
+    scheduled_at = max(now, previous_scheduled_at + max(0.0, float(delay_seconds or 0.0)))
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{scheduled_at:.6f}")
+    handle.flush()
+    os.fsync(handle.fileno())
+    return scheduled_at, max(0.0, scheduled_at - now)
+
+
+def _sleep_until_reserved_start(result: dict[str, Any]) -> dict[str, Any]:
+    scheduled_at = result.get("scheduled_at")
+    if scheduled_at is None:
+        return result
+    sleep_seconds = max(0.0, float(scheduled_at) - time.monotonic())
+    result["scheduled_sleep_ms"] = _milliseconds(sleep_seconds)
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
+    return result
+
+
 def _try_advisory_lock_pace(*, key: str, delay_seconds: float) -> dict[str, Any]:
     delay = max(0.0, float(delay_seconds or 0))
     namespace, lock_key = _advisory_lock_keys_for(key)
@@ -205,23 +259,37 @@ def _try_advisory_lock_pace(*, key: str, delay_seconds: float) -> dict[str, Any]
     try:
         from trr_backend.db import pg
     except Exception as exc:  # noqa: BLE001
-        return {"acquired": False, "paced": True, "wait_ms": 0, "error": f"pg_import_failed:{exc}"}
+        return _pacing_result(acquired=False, paced=True, error=f"pg_import_failed:{exc}")
     try:
         with pg.db_connection(label="instagram-posts-rate-limit-advisory", pool_name="social_control") as conn:
             with pg.db_cursor(conn=conn) as cur:
                 cur.execute("select pg_advisory_lock(%s::int, %s::int)", (namespace, lock_key))
-                wait_ms = int((time.monotonic() - started_at) * 1000)
+                lock_acquired_at = time.monotonic()
+                result: dict[str, Any] | None = None
                 try:
-                    if delay > 0:
-                        time.sleep(delay)
-                    return {"acquired": True, "paced": True, "wait_ms": wait_ms, "error": None}
+                    path = _global_rate_limit_path(key)
+                    with open(path, "a+", encoding="utf-8") as handle:
+                        scheduled_at, reservation_lag_seconds = _reserve_rate_limit_slot(
+                            handle,
+                            delay_seconds=delay,
+                        )
+                    result = _pacing_result(
+                        acquired=True,
+                        paced=True,
+                        lock_wait_seconds=lock_acquired_at - started_at,
+                        scheduled_at=scheduled_at,
+                        reservation_lag_seconds=reservation_lag_seconds,
+                    )
                 finally:
                     cur.execute("select pg_advisory_unlock(%s::int, %s::int)", (namespace, lock_key))
+                    if result is not None:
+                        result["lock_held_ms"] = _milliseconds(time.monotonic() - lock_acquired_at)
+                return _sleep_until_reserved_start(result)
     except Exception as exc:  # noqa: BLE001
-        return {"acquired": False, "paced": True, "wait_ms": 0, "error": str(exc)}
+        return _pacing_result(acquired=False, paced=True, error=str(exc))
 
 
-def _pace_global_api_request(*, key: str, delay_seconds: float) -> bool:
+def _pace_global_api_request(*, key: str, delay_seconds: float) -> dict[str, Any]:
     delay = max(0.0, float(delay_seconds or 0))
     cooldown_path = _global_rate_cooldown_path(key)
     with open(cooldown_path, "a+", encoding="utf-8") as handle:
@@ -229,30 +297,31 @@ def _pace_global_api_request(*, key: str, delay_seconds: float) -> bool:
         try:
             cooldown_until = _read_monotonic_timestamp(handle)
             remaining = cooldown_until - time.monotonic()
-            if remaining > 0:
-                time.sleep(remaining)
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    if remaining > 0:
+        time.sleep(remaining)
 
-    if delay <= 0:
-        return True
-
+    lock_wait_started_at = time.monotonic()
     path = _global_rate_limit_path(key)
     with open(path, "a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        lock_acquired_at = time.monotonic()
+        result: dict[str, Any] | None = None
         try:
-            previous_started_at = _read_monotonic_timestamp(handle)
-            remaining = (previous_started_at + delay) - time.monotonic()
-            if remaining > 0:
-                time.sleep(remaining)
-            handle.seek(0)
-            handle.truncate()
-            handle.write(f"{time.monotonic():.6f}")
-            handle.flush()
-            os.fsync(handle.fileno())
+            scheduled_at, reservation_lag_seconds = _reserve_rate_limit_slot(handle, delay_seconds=delay)
+            result = _pacing_result(
+                acquired=True,
+                paced=True,
+                lock_wait_seconds=lock_acquired_at - lock_wait_started_at,
+                scheduled_at=scheduled_at,
+                reservation_lag_seconds=reservation_lag_seconds,
+            )
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    return True
+            if result is not None:
+                result["lock_held_ms"] = _milliseconds(time.monotonic() - lock_acquired_at)
+    return _sleep_until_reserved_start(result)
 
 
 def _feature_flags_metadata() -> dict[str, bool]:
@@ -275,6 +344,19 @@ def _positive_int_env(name: str, default: int, *, minimum: int = 1, maximum: int
 
 def _warmup_pool_enabled() -> bool:
     return _env_truthy("SOCIAL_INSTAGRAM_POSTS_SHARED_WARMUP_ENABLED", False)
+
+
+def _normalize_auth_state(auth_state: str | None) -> str:
+    normalized = str(auth_state or "authenticated").strip().lower()
+    return "anonymous" if normalized == "anonymous" else "authenticated"
+
+
+def _strip_authenticated_cookies(raw_cookies: dict[str, str]) -> dict[str, str]:
+    return {
+        str(name): str(value)
+        for name, value in dict(raw_cookies or {}).items()
+        if str(name).strip().lower() not in _AUTHENTICATED_COOKIE_NAMES and value is not None
+    }
 
 
 def _warmup_pool_ttl_seconds() -> float:
@@ -317,6 +399,54 @@ def _post_identity(post: dict[str, Any]) -> str | None:
         if value:
             return value
     return None
+
+
+def _response_url_host(response: Any) -> str:
+    """Best-effort destination host for a response, for byte attribution.
+
+    Fail-open: returns "unknown" rather than raising. Reads the final response URL
+    (``response.url``) which httpx exposes as an ``httpx.URL`` with a ``.host``.
+    """
+    try:
+        url = getattr(response, "url", None)
+        if url is None:
+            return "unknown"
+        host = getattr(url, "host", None)
+        if host:
+            return str(host).strip().lower() or "unknown"
+        # Fallback for string-like URLs (some test mocks).
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(str(url))
+        return (parsed.hostname or "unknown").strip().lower() or "unknown"
+    except Exception:  # noqa: BLE001 - never break a fetch over metering
+        return "unknown"
+
+
+def _response_byte_size(response: Any) -> int:
+    """Best-effort response body size in bytes.
+
+    Prefers ``len(response.content)`` (the realized body httpx already buffered),
+    falling back to the ``Content-Length`` header. Returns 0 when neither is
+    available. Fail-open: never raises.
+    """
+    try:
+        content = getattr(response, "content", None)
+        if content is not None:
+            try:
+                return len(content)
+            except TypeError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        headers = getattr(response, "headers", None) or {}
+        raw = headers.get("content-length") if hasattr(headers, "get") else None
+        if raw is not None:
+            return max(0, int(raw))
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
 
 
 def _observed_proxy_identity_from_response(response: Any) -> tuple[str | None, str | None]:
@@ -632,16 +762,32 @@ class InstagramPostsScraplingFetcher:
         timeout_ms: int = 45_000,
         page_size: int | None = None,
         fast_mode: bool = False,
+        allow_requests_recovery: bool = True,
+        identity_provider: Any | None = None,
+        auth_state: str | None = None,
     ) -> None:
-        self._cookies = list(cookies or [])
-        self._raw_cookies = raw_cookies if isinstance(raw_cookies, dict) else dict(raw_cookies or {})
+        self._auth_state = _normalize_auth_state(auth_state)
+        self._anonymous_mode = self._auth_state == "anonymous"
+        self._cookies = [] if self._anonymous_mode else list(cookies or [])
+        resolved_raw_cookies = raw_cookies if isinstance(raw_cookies, dict) else dict(raw_cookies or {})
+        self._raw_cookies = (
+            _strip_authenticated_cookies(resolved_raw_cookies) if self._anonymous_mode else resolved_raw_cookies
+        )
         self._browser_account_id = str(browser_account_id or "").strip() or None
+        # A3: optional zero-arg callable returning the next pool identity as a
+        # PostsRotatedIdentity (cookies, raw_cookies, browser_account_id). Injected
+        # from session-resolve only when SOCIAL_INSTAGRAM_IDENTITY_POOL_ENABLED is
+        # on. None => single-identity / pool disabled, so rotate_session only
+        # swaps the proxy sticky session.
+        self._identity_provider = identity_provider
+        self._identity_rotation_count = 0
         self._proxy_config = proxy_config
         self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
         self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
         self._headless = headless if headless is not None else _env_truthy("SOCIAL_INSTAGRAM_POSTS_HEADLESS", True)
         self._timeout_ms = max(5_000, int(timeout_ms))
         self._fast_mode = bool(fast_mode)
+        self._allow_requests_recovery = bool(allow_requests_recovery)
         resolved_page_size = int(
             page_size
             if page_size is not None
@@ -675,6 +821,11 @@ class InstagramPostsScraplingFetcher:
         self._proxy_rotation_events: list[dict[str, Any]] = []
         self._observed_proxy_identity: str | None = None
         self._observed_proxy_fingerprint: str | None = None
+        # Bandwidth metering: total response bytes downloaded through the proxy this
+        # run, plus a per-destination-host breakdown for cost attribution. Cheap,
+        # fail-open; never break a fetch over metering.
+        self._bytes_total: int = 0
+        self._bytes_by_host: dict[str, int] = {}
         # Phase 4.2: doc-ID rotation observability — record which doc IDs were
         # tried this run and which one ultimately succeeded. Operators can
         # cross-reference http_400 / non_json_response spikes with rotation
@@ -702,6 +853,7 @@ class InstagramPostsScraplingFetcher:
         self._global_rate_limit_advisory_fallback_count = 0
         self._global_rate_limit_advisory_total_wait_ms = 0
         self._global_rate_limit_advisory_last_error: str | None = None
+        self._global_rate_limit_pacing_last: dict[str, Any] = _pacing_result(acquired=False, paced=False)
         self._last_api_request_started_at = 0.0
         self._bidirectional_probe_metadata = build_bidirectional_probe_metadata(
             request_shape={},
@@ -713,12 +865,8 @@ class InstagramPostsScraplingFetcher:
         self._requests_fallback_metadata: dict[str, Any] = {}
         self._requests_fallback_scraper: Any | None = None
 
-        # Browser fetcher (for warmup only).
-        try:
-            from scrapling.fetchers import StealthyFetcher
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("Scrapling StealthyFetcher is unavailable. Install scrapling[fetchers].") from exc
-        self._fetcher = StealthyFetcher()
+        self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._fetcher = build_stealthy_fetcher()
 
         # httpx client (for GraphQL POSTs). Created lazily after warmup bridges cookies.
         self._http_client: httpx.AsyncClient | None = None
@@ -737,6 +885,12 @@ class InstagramPostsScraplingFetcher:
             observed_fingerprint=self._observed_proxy_fingerprint,
         )
         return {
+            "scrapling_runtime": dict(self._scrapling_runtime_metadata),
+            "auth_state": self._auth_state,
+            "http_client": "httpx",
+            "impersonate": None,
+            "cookie_count": len(self._raw_cookies),
+            "authenticated_cookie_count": sum(1 for name in self._raw_cookies if name in _AUTHENTICATED_COOKIE_NAMES),
             "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
             "warmup_cookie_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,
@@ -753,6 +907,11 @@ class InstagramPostsScraplingFetcher:
                 "advisory_fallback_count": self._global_rate_limit_advisory_fallback_count,
                 "advisory_total_wait_ms": self._global_rate_limit_advisory_total_wait_ms,
                 "advisory_last_error": self._global_rate_limit_advisory_last_error,
+                "lock_wait_ms": int(self._global_rate_limit_pacing_last.get("lock_wait_ms") or 0),
+                "lock_held_ms": int(self._global_rate_limit_pacing_last.get("lock_held_ms") or 0),
+                "scheduled_sleep_ms": int(self._global_rate_limit_pacing_last.get("scheduled_sleep_ms") or 0),
+                "scheduled_at": self._global_rate_limit_pacing_last.get("scheduled_at"),
+                "reservation_lag_ms": int(self._global_rate_limit_pacing_last.get("reservation_lag_ms") or 0),
                 "attempts": dict(sorted(self._proxy_request_attempts.items())),
                 "status_counts": {
                     key: dict(sorted(value.items())) for key, value in sorted(self._proxy_status_counts.items())
@@ -760,10 +919,17 @@ class InstagramPostsScraplingFetcher:
                 "auth_failures": dict(sorted(self._proxy_auth_failures.items())),
                 "rate_limit_failures": dict(sorted(self._proxy_rate_limit_failures.items())),
                 "rotation_events": list(self._proxy_rotation_events[-20:]),
+                "bytes_total": self._bytes_total,
+                "bytes_by_host": dict(sorted(self._bytes_by_host.items())),
             },
             "page_tokens_found": list(self._page_tokens.keys()),
             "api_delay_seconds": self._api_delay_seconds,
             "request_count": self._request_count,
+            # Bandwidth metering (cost attribution). bytes_total is the sum of all
+            # response bodies downloaded through the proxy this run; bytes_by_host
+            # breaks it down by destination host.
+            "bytes_total": self._bytes_total,
+            "bytes_by_host": dict(sorted(self._bytes_by_host.items())),
             "transport": "httpx_after_browser_warmup",
             "requests_fallback": {
                 "active": bool(self._requests_fallback_active),
@@ -775,6 +941,7 @@ class InstagramPostsScraplingFetcher:
             "bidirectional_probe": dict(self._bidirectional_probe_metadata),
             "warmup_pool": dict(self._warmup_pool_metadata),
             "consecutive_auth_failures": self._consecutive_auth_failures,
+            "identity_rotation_count": self._identity_rotation_count,
             # Phase 4.2: doc-ID rotation telemetry.
             "profile_posts_doc_ids": {
                 "configured": list(self._doc_ids_configured),
@@ -797,7 +964,23 @@ class InstagramPostsScraplingFetcher:
         if await self._try_apply_warmup_pool_entry():
             return
         profile_url = f"https://www.instagram.com/{username}/"
-        response = await self._fetch_page(profile_url, referer=profile_url)
+        try:
+            response = await self._fetch_page(profile_url, referer=profile_url)
+        except Exception as exc:  # noqa: BLE001
+            if self._activate_requests_fallback("warmup_transport_failed"):
+                self._requests_fallback_metadata.update(
+                    {
+                        "warmup_error_class": type(exc).__name__,
+                        "warmup_error_message": str(exc)[:500],
+                    }
+                )
+                return
+            self._warmup_pool_metadata.update({"miss": True, "refresh_reason": "transport_error"})
+            raise InstagramPostsWarmupError(
+                "Instagram posts warmup failed before a profile response was returned.",
+                error_code="instagram_posts_warmup_transport_failed",
+                retryable=True,
+            ) from exc
         text = _response_text(response)
         if _status_code(response) in {401, 403} or _auth_failure_text(text):
             if self._activate_requests_fallback("warmup_auth_failed"):
@@ -811,7 +994,11 @@ class InstagramPostsScraplingFetcher:
             )
         self._page_tokens = _extract_page_tokens(text)
         self._merge_warmup_cookies(response)
-        if not self._warmup_cookie_delta and not str(self._raw_cookies.get("sessionid") or "").strip():
+        if (
+            not self._anonymous_mode
+            and not self._warmup_cookie_delta
+            and not str(self._raw_cookies.get("sessionid") or "").strip()
+        ):
             self._consecutive_auth_failures += 1
             self._warmup_pool_metadata.update({"miss": True, "refresh_reason": "no_cookies"})
             raise InstagramPostsWarmupError(
@@ -1014,6 +1201,7 @@ class InstagramPostsScraplingFetcher:
             delay=self._api_delay_seconds,
             fast_mode=self._fast_mode,
             allow_browser_fallback=False,
+            allow_recovery=self._allow_requests_recovery,
             page_size=self._page_size,
         )
         self._request_count += 1
@@ -1037,6 +1225,7 @@ class InstagramPostsScraplingFetcher:
                 "checkpoint_required",
                 "challenge_required",
                 "login_required",
+                "instagram_graphql_checkpoint_required",
                 "instagram_graphql_initial_unauthorized",
                 "instagram_graphql_initial_forbidden",
             }
@@ -1223,7 +1412,9 @@ class InstagramPostsScraplingFetcher:
                     fetch_reason = current_reason
                 continue
 
-            connection = payload.get("data", {}).get(_ROOT_FIELD_NAME) or {}
+            payload_data = payload.get("data") if isinstance(payload, dict) else {}
+            connection = payload_data.get(_ROOT_FIELD_NAME) if isinstance(payload_data, dict) else {}
+            connection = connection or {}
             if not connection:
                 self._record_doc_id_empty(doc_id, "graphql_empty_connection")
                 if not fetch_reason:
@@ -1368,6 +1559,9 @@ class InstagramPostsScraplingFetcher:
         rotated `csrftoken` or `ds_user_id` is visible on the next request.
         """
         for name, value in _extract_response_cookies(response).items():
+            normalized_name = str(name or "").strip().lower()
+            if self._anonymous_mode and normalized_name in _AUTHENTICATED_COOKIE_NAMES:
+                continue
             self._raw_cookies[name] = value
 
     async def _rebuild_http_client(self) -> None:
@@ -1410,6 +1604,87 @@ class InstagramPostsScraplingFetcher:
             }
         )
         await self._rebuild_http_client()
+
+    def _apply_proxy_config(self, proxy_config: PostsProxyConfig | None, *, reason: str) -> None:
+        """Set proxy state from a new config (no client rebuild). Force-applies
+        even when the URL is unchanged so a session-rotation always re-pins."""
+        previous_fingerprint = self._selected_proxy_fingerprint
+        self._proxy_config = proxy_config
+        self._proxy_rotator = proxy_config.proxy_rotator if proxy_config else None
+        self._api_proxy_url = proxy_config.api_proxy_url if proxy_config else None
+        self._selected_proxy_fingerprint = proxy_config.fingerprint if proxy_config else "none"
+        self._proxy_session_mode = proxy_config.session_mode if proxy_config else "none"
+        self._observed_proxy_identity = None
+        self._observed_proxy_fingerprint = None
+        self._global_rate_limit_key = _global_rate_limit_key(self._proxy_config)
+        self._proxy_rotation_events.append(
+            {
+                "from": previous_fingerprint,
+                "to": self._selected_proxy_fingerprint,
+                "reason": str(reason or "proxy_change").strip() or "proxy_change",
+                "rotation_index": proxy_config.rotation_index if proxy_config else None,
+            }
+        )
+
+    async def rotate_session(
+        self,
+        *,
+        proxy_config: PostsProxyConfig | None = None,
+        reason: str = "rotate_session",
+    ) -> bool:
+        """A3: re-resolve auth to the next pool identity, pair it with a fresh
+        sticky-session proxy (A2), and rebuild the httpx client.
+
+        Returns True when a *distinct* identity was acquired (multi-identity
+        pool). With a single identity the pool yields the same entry, so this is a
+        no-op for the cookies but still swaps the proxy and rebuilds the client,
+        and returns False so the caller knows no real identity advance happened.
+        """
+        rotated_identity = False
+        if self._identity_provider is not None:
+            try:
+                identity = self._identity_provider()
+            except Exception:  # noqa: BLE001 - provider must never wedge the lane
+                logger.warning("instagram_posts rotate_session identity_provider_failed", exc_info=True)
+                identity = None
+            if identity is not None:
+                new_raw_cookies = {
+                    str(key): str(value)
+                    for key, value in (getattr(identity, "raw_cookies", None) or {}).items()
+                    if value is not None
+                }
+                previous_sessionid = str(self._raw_cookies.get("sessionid") or "").strip()
+                next_sessionid = str(new_raw_cookies.get("sessionid") or "").strip()
+                new_cookies = getattr(identity, "cookies", None)
+                if isinstance(new_cookies, list) and new_cookies:
+                    self._cookies = list(new_cookies)
+                if new_raw_cookies:
+                    # Replace identity-bearing cookies wholesale so a rotated
+                    # sessionid/ds_user_id is not shadowed by the prior identity.
+                    self._raw_cookies = dict(new_raw_cookies)
+                new_browser_account_id = str(getattr(identity, "browser_account_id", "") or "").strip() or None
+                if new_browser_account_id:
+                    self._browser_account_id = new_browser_account_id
+                # A distinct identity = the sessionid actually changed.
+                rotated_identity = bool(next_sessionid and next_sessionid != previous_sessionid)
+
+        if rotated_identity:
+            self._identity_rotation_count += 1
+            # A fresh identity starts clean and must not reuse a pooled warmup
+            # entry keyed on the prior identity's cookies.
+            self._consecutive_auth_failures = 0
+            self._warmup_cookie_delta = {}
+            self._page_tokens = {}
+            self._warmup_pool_key = _warmup_pool_key(
+                browser_account_id=self._browser_account_id,
+                proxy_fingerprint=(proxy_config.fingerprint if proxy_config else self._selected_proxy_fingerprint),
+                raw_cookies=self._raw_cookies,
+            )
+
+        if proxy_config is not None:
+            self._apply_proxy_config(proxy_config, reason=reason)
+        await self._rebuild_http_client()
+        return rotated_identity
 
     # -------------------------------------------------------------------
     # Transport: browser (warmup only)
@@ -1470,26 +1745,31 @@ class InstagramPostsScraplingFetcher:
                 key=self._global_rate_limit_key,
                 delay_seconds=self._api_delay_seconds,
             )
-            self._global_rate_limit_advisory_total_wait_ms += int(advisory_result.get("wait_ms") or 0)
+            self._global_rate_limit_advisory_total_wait_ms += int(
+                advisory_result.get("lock_wait_ms") or advisory_result.get("wait_ms") or 0
+            )
             if advisory_result.get("acquired"):
                 self._global_rate_limit_advisory_acquires += 1
                 self._global_rate_limit_mode_last = "advisory"
+                self._global_rate_limit_pacing_last = dict(advisory_result)
             else:
                 self._global_rate_limit_advisory_fallback_count += 1
                 self._global_rate_limit_advisory_last_error = advisory_result.get("error")
                 self._global_rate_limit_mode_last = "file_lock_fallback"
-                await asyncio.to_thread(
+                fallback_result = await asyncio.to_thread(
                     _pace_global_api_request,
                     key=self._global_rate_limit_key,
                     delay_seconds=self._api_delay_seconds,
                 )
+                self._global_rate_limit_pacing_last = dict(fallback_result)
         else:
             self._global_rate_limit_mode_last = "file_lock"
-            await asyncio.to_thread(
+            pacing_result = await asyncio.to_thread(
                 _pace_global_api_request,
                 key=self._global_rate_limit_key,
                 delay_seconds=self._api_delay_seconds,
             )
+            self._global_rate_limit_pacing_last = dict(pacing_result)
         self._last_api_request_started_at = time.monotonic()
 
     def _record_proxy_response(self, response: Any) -> None:
@@ -1507,6 +1787,7 @@ class InstagramPostsScraplingFetcher:
         status = str(_status_code(response) or "unknown")
         status_counts = self._proxy_status_counts.setdefault(fingerprint, {})
         status_counts[status] = status_counts.get(status, 0) + 1
+        self._record_response_bytes(response)
         text = _response_text(response)
         if _status_code(response) in {401, 403} or _auth_failure_text(text):
             self._proxy_auth_failures[fingerprint] = self._proxy_auth_failures.get(fingerprint, 0) + 1
@@ -1515,6 +1796,46 @@ class InstagramPostsScraplingFetcher:
             self._proxy_rate_limit_failures[fingerprint] = self._proxy_rate_limit_failures.get(fingerprint, 0) + 1
         else:
             self._consecutive_auth_failures = 0
+
+    def _proxy_provider_label(self) -> str:
+        """Best-effort proxy provider name for byte attribution (e.g. ``decodo``)."""
+        provider = str(os.getenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER") or "").strip().lower()
+        if provider:
+            return provider
+        fingerprint = str(self._selected_proxy_fingerprint or "").strip().lower()
+        if fingerprint.endswith(":decodo") or "decodo" in fingerprint:
+            return "decodo"
+        if fingerprint in {"", "none"}:
+            return "none"
+        return "explicit"
+
+    def _record_response_bytes(self, response: Any) -> None:
+        """Accumulate response size (total + per-host) and emit the Prometheus counter.
+
+        Cheap and fail-open: any failure here is swallowed so metering never breaks a
+        fetch. Attribution is by the response's destination host (e.g. ``i.instagram.com``,
+        ``www.instagram.com``, ``*.cdninstagram.com``, or any third-party host).
+        """
+        try:
+            size = _response_byte_size(response)
+            if size <= 0:
+                return
+            host = _response_url_host(response)
+            self._bytes_total += size
+            self._bytes_by_host[host] = self._bytes_by_host.get(host, 0) + size
+            try:
+                from trr_backend import observability
+
+                observability.record_proxy_bytes(
+                    self._proxy_provider_label(),
+                    str(self._browser_account_id or "unknown"),
+                    host,
+                    size,
+                )
+            except Exception:  # noqa: BLE001 - metrics are best-effort
+                pass
+        except Exception:  # noqa: BLE001 - never break a fetch over metering
+            pass
 
     async def _recover_homepage_redirect(self, *, referer: str) -> bool:
         recovery_url = str(referer or "").strip() or "https://www.instagram.com/"

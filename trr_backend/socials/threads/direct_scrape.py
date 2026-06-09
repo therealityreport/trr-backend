@@ -31,7 +31,7 @@ def post_to_payload(post: Any) -> dict[str, Any]:
         "views": int(getattr(post, "views", 0) or 0),
         "url": str(getattr(post, "url", "") or ""),
         "thumbnail_url": str(getattr(post, "thumbnail_url", "") or "") or None,
-        "media_urls": [str(url) for url in (getattr(post, "media_urls", []) or []) if str(url)],
+        "media_urls": [str(url).strip() for url in (getattr(post, "media_urls", []) or []) if str(url or "").strip()],
         "posted_at": datetime.fromtimestamp(int(posted_at), tz=UTC).isoformat() if posted_at is not None else None,
     }
 

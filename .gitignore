@@ -105,6 +105,9 @@ out
 .playwright-mcp
 artifacts/
 
+# Runtime lock files used to coordinate local/background jobs.
+.locks/
+
 # Secrets
 *.pem
 pk-*.pem

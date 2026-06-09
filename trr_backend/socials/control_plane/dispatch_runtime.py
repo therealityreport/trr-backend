@@ -311,10 +311,9 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             }
         )
         return {"dispatched_job_ids": [], "dispatch_attempts": 0, "reason": "pause_after_current"}
-    recovered_capacity = (
-        legacy.recover_failed_instagram_comments_capacity_jobs(run_id=run_id, limit=max(safe_limit, 25))
-        if run_id
-        else []
+    recovered_capacity = legacy.recover_failed_instagram_comments_capacity_jobs(
+        run_id=run_id,
+        limit=max(safe_limit, 25),
     )
     recovered_blocked = _call_extracted_override(
         "recover_dispatch_blocked_no_progress_jobs",
@@ -385,7 +384,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
         job_config = legacy._metadata_dict(job.get("config"))
         job_dispatch = legacy._job_dispatch_metadata(job)
         job_ingest_mode = legacy._resolve_pipeline_ingest_mode(job_config.get("pipeline_ingest_mode"))
-        if legacy._job_requires_dedicated_worker_lane(job_config, platform=platform):
+        if legacy._job_required_lane_blocks_modal_dispatch(job_config, platform=platform):
             continue
         existing_remote_invocation_id = str(job_dispatch.get("remote_invocation_id") or "").strip()
         terminal_remote_invocation = False
@@ -461,6 +460,7 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             candidate_account
             and capacity_stage in {legacy.SHARED_ACCOUNT_DISCOVERY_STAGE, legacy.SHARED_ACCOUNT_POSTS_STAGE}
             and candidate_account in existing_accounts
+            and not legacy._job_allows_parallel_same_account_dispatch(job_config)
         ):
             continue
         prospective_accounts = existing_accounts | {candidate_account} if candidate_account else existing_accounts
@@ -476,7 +476,12 @@ def dispatch_due_social_jobs(*, run_id: str | None = None, limit: int | None = N
             if running_by_run.get(job_run_id, 0) >= legacy._resolve_catalog_run_in_flight_cap():
                 continue
             if stage == legacy.SHARED_ACCOUNT_POSTS_STAGE:
-                platform_run_cap = legacy._modal_dispatch_platform_cap(stage, platform)
+                platform_run_cap = legacy._modal_dispatch_effective_platform_cap(
+                    stage,
+                    platform,
+                    active_account_count=1,
+                    job_config=job_config,
+                )
                 if (
                     platform_run_cap is not None
                     and running_by_run_stage_platform.get((job_run_id, stage, platform), 0) >= platform_run_cap
@@ -670,11 +675,15 @@ def recover_and_dispatch_due_social_jobs(*, limit: int | None = None) -> dict[st
         recover_stale_unclaimed_dispatched_jobs,
         limit=safe_limit,
     )
+    recovered_capacity = legacy.recover_failed_instagram_comments_capacity_jobs(limit=max(safe_limit, 25))
     dispatch_summary = _call_extracted_override("dispatch_due_social_jobs", dispatch_due_social_jobs, limit=limit)
     return {
         "recovered_jobs": [str(row.get("id") or "").strip() for row in recovered],
         "recovered_unclaimed_jobs": [
             str(row.get("id") or "").strip() for row in recovered_unclaimed if str(row.get("id") or "").strip()
+        ],
+        "recovered_capacity_jobs": [
+            str(row.get("id") or "").strip() for row in recovered_capacity if str(row.get("id") or "").strip()
         ],
         **dispatch_summary,
     }

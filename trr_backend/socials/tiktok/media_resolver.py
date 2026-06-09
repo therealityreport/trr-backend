@@ -11,6 +11,14 @@ from typing import Any
 
 import requests
 
+from trr_backend.socials.media_url_safety import (
+    MediaUrlSafetyPolicy,
+    UnsafeMediaUrlError,
+    allowed_hosts_for_platform,
+    safe_requests_get,
+    validate_media_url,
+)
+
 _REHYDRATION_RE = re.compile(
     r'<script\s+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
     re.DOTALL,
@@ -41,6 +49,7 @@ _PROBE_HEADERS = {
     "range": "bytes=0-1",
 }
 _VALID_MEDIA_CONTENT_TYPE_PREFIXES = ("image/", "video/")
+_TIKTOK_MEDIA_URL_POLICY = MediaUrlSafetyPolicy(allowed_hosts_for_platform("tiktok"))
 
 
 @dataclass
@@ -280,6 +289,21 @@ def _parse_ytdlp_payload(payload: dict[str, Any]) -> tuple[list[str], str | None
 
 
 def _resolve_with_ytdlp(video_url: str) -> tuple[list[str], str | None, dict[str, Any], dict[str, Any]]:
+    try:
+        video_url = validate_media_url(video_url, policy=_TIKTOK_MEDIA_URL_POLICY)
+    except UnsafeMediaUrlError as exc:
+        return (
+            [],
+            None,
+            _build_attempt(
+                source="yt_dlp_manifest",
+                success=False,
+                reason_code="tiktok_unsafe_video_url",
+                selected_url_count=0,
+                error=exc,
+            ),
+            {},
+        )
     if not shutil.which("yt-dlp"):
         return (
             [],
@@ -496,8 +520,10 @@ def _probe_media_url(
 ) -> tuple[bool, dict[str, Any], Exception | None]:
     evidence: dict[str, Any] = {"url": media_url}
     try:
-        response = requests.get(
+        response = safe_requests_get(
+            requests,
             media_url,
+            policy=_TIKTOK_MEDIA_URL_POLICY,
             headers=_PROBE_HEADERS,
             timeout=timeout,
             stream=True,
@@ -531,8 +557,11 @@ def _resolve_with_unofficial_api(
     timeout: tuple[int, int],
 ) -> tuple[list[str], str | None, dict[str, Any]]:
     try:
-        response = requests.get(
+        video_url = validate_media_url(video_url, policy=_TIKTOK_MEDIA_URL_POLICY)
+        response = safe_requests_get(
+            requests,
             "https://www.tikwm.com/api/",
+            policy=_TIKTOK_MEDIA_URL_POLICY,
             params={"url": video_url, "hd": "1"},
             headers={"accept": "application/json", "user-agent": _DEFAULT_HEADERS["user-agent"]},
             timeout=timeout,
@@ -593,8 +622,11 @@ def _resolve_thumbnail_via_oembed(
     """
     oembed_endpoint = "https://www.tiktok.com/oembed"
     try:
-        resp = requests.get(
+        video_url = validate_media_url(video_url, policy=_TIKTOK_MEDIA_URL_POLICY)
+        resp = safe_requests_get(
+            requests,
             oembed_endpoint,
+            policy=_TIKTOK_MEDIA_URL_POLICY,
             params={"url": video_url},
             headers={"accept": "application/json", "user-agent": _DEFAULT_HEADERS["user-agent"]},
             timeout=timeout,
@@ -682,6 +714,19 @@ def resolve_tiktok_media(
             )
         )
         return resolution
+    try:
+        candidate_url = validate_media_url(candidate_url, policy=_TIKTOK_MEDIA_URL_POLICY)
+    except UnsafeMediaUrlError as exc:
+        resolution.attempts.append(
+            _build_attempt(
+                source="watch_page_json",
+                success=False,
+                reason_code="tiktok_unsafe_video_url",
+                selected_url_count=0,
+                error=exc,
+            )
+        )
+        return resolution
 
     if allow_ytdlp:
         ytdlp_urls, ytdlp_thumb, ytdlp_attempt, ytdlp_meta = _resolve_with_ytdlp(candidate_url)
@@ -730,7 +775,13 @@ def resolve_tiktok_media(
 
     client = session or requests.Session()
     try:
-        response = client.get(candidate_url, headers=_DEFAULT_HEADERS, timeout=timeout)
+        response = safe_requests_get(
+            client,
+            candidate_url,
+            policy=_TIKTOK_MEDIA_URL_POLICY,
+            headers=_DEFAULT_HEADERS,
+            timeout=timeout,
+        )
         status_code = int(response.status_code)
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001

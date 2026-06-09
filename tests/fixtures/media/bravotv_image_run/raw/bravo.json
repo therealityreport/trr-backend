@@ -1,0 +1,10 @@
+[
+  {
+    "media_uuid": "bravo-media-1",
+    "file_uuid": "bravo-file-1",
+    "file_url": "https://www.bravotv.com/sites/bravo/files/example.jpg",
+    "field_caption": "Jane Doe backstage.",
+    "gallery_item_id": "12345",
+    "gallery_path": "/watch-what-happens-live/photos/example"
+  }
+]

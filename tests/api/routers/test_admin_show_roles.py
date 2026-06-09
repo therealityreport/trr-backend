@@ -14,6 +14,7 @@ from api.routers.admin_show_roles import (
     _SYNC_SOURCE_KID,
     _SYNC_SOURCE_RELATIONSHIP,
     CastMatrixSyncRequest,
+    _apply_social_handle_sources,
     _build_relationship_assignments,
     list_cast_with_roles,
     sync_cast_matrix_for_show,
@@ -172,6 +173,29 @@ def test_list_cast_role_members_accepts_internal_admin_token_without_supabase_jw
 
     assert response.status_code == 200
     assert response.json()[0]["person_name"] == "Heather Gay"
+
+
+def test_apply_social_handle_sources_prefers_canonical_provenance_when_override_matches() -> None:
+    row = {
+        "instagram_handle": "amandabatula",
+        "instagram_override_handle": "amandabatula",
+        "instagram_canonical_handle": "amandabatula",
+        "instagram_entity_link_source": "bravo_profile_social_links",
+        "twitter_handle": "manualonly",
+        "twitter_override_handle": "manualonly",
+        "twitter_canonical_handle": None,
+        "twitter_entity_link_source": None,
+        "tiktok_handle": "tmdbfallback",
+        "tiktok_tmdb_handle": "tmdbfallback",
+        "youtube_handle": None,
+    }
+
+    _apply_social_handle_sources(row)
+
+    assert row["instagram_handle_source"] == "BravoTV"
+    assert row["twitter_handle_source"] == "Manual"
+    assert row["tiktok_handle_source"] == "TMDb"
+    assert "instagram_override_handle" not in row
 
 
 def test_list_cast_role_members_keeps_people_without_active_role_assignments(

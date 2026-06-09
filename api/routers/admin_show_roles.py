@@ -58,6 +58,63 @@ CAST_ROLE_MEMBERS_PERF_LOGS_ENABLED = (
     is not None
 )
 
+_SOCIAL_HANDLE_PLATFORMS = ("instagram", "tiktok", "twitter", "youtube")
+
+
+def _normalize_social_handle_for_compare(value: Any) -> str:
+    return str(value or "").strip().lstrip("@").lower()
+
+
+def _social_source_label(source: Any) -> str:
+    normalized = str(source or "").strip().lower()
+    if "bravo" in normalized:
+        return "BravoTV"
+    if "tmdb" in normalized:
+        return "TMDb"
+    if "wikidata" in normalized:
+        return "Wikidata"
+    if "manual" in normalized or "override" in normalized:
+        return "Manual"
+    return "Canonical profile"
+
+
+def _apply_social_handle_sources(row: dict[str, Any]) -> None:
+    for platform in _SOCIAL_HANDLE_PLATFORMS:
+        handle_key = f"{platform}_handle"
+        selected = _normalize_social_handle_for_compare(row.get(handle_key))
+        source_key = f"{platform}_handle_source"
+        row[source_key] = None
+        if not selected:
+            continue
+
+        candidates = (
+            (f"{platform}_canonical_handle", _social_source_label(row.get(f"{platform}_entity_link_source"))),
+            (f"{platform}_legacy_handle", "Profile"),
+            (f"{platform}_tmdb_handle", "TMDb"),
+        )
+        if _normalize_social_handle_for_compare(row.get(f"{platform}_override_handle")) == selected:
+            if _normalize_social_handle_for_compare(row.get(f"{platform}_canonical_handle")) == selected:
+                row[source_key] = _social_source_label(row.get(f"{platform}_entity_link_source"))
+            else:
+                row[source_key] = "Manual"
+            continue
+        for candidate_key, label in candidates:
+            if _normalize_social_handle_for_compare(row.get(candidate_key)) == selected:
+                row[source_key] = label
+                break
+        if row[source_key] is None:
+            row[source_key] = "Profile"
+
+    for platform in _SOCIAL_HANDLE_PLATFORMS:
+        for suffix in (
+            "override_handle",
+            "canonical_handle",
+            "legacy_handle",
+            "tmdb_handle",
+            "entity_link_source",
+        ):
+            row.pop(f"{platform}_{suffix}", None)
+
 
 class RoleCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
@@ -1125,17 +1182,188 @@ def list_cast_with_roles(
           COALESCE(po.full_name_override, c.person_name) AS display_name,
           COALESCE(
               NULLIF(po.instagram_handle, ''),
-              ct.instagram_id,
+              pei_instagram.external_id,
               p.external_ids->>'instagram_id',
-              p.external_ids->>'instagram'
+              p.external_ids->>'instagram',
+              p.external_ids->>'instagram_handle',
+              ct.instagram_id
           ) AS instagram_handle,
-          po.tiktok_handle,
-          po.twitter_handle,
-          po.youtube_handle
+          COALESCE(
+              NULLIF(po.tiktok_handle, ''),
+              pei_tiktok.external_id,
+              p.external_ids->>'tiktok_id',
+              p.external_ids->>'tiktok',
+              p.external_ids->>'tiktok_handle'
+          ) AS tiktok_handle,
+          COALESCE(
+              NULLIF(po.twitter_handle, ''),
+              pei_twitter.external_id,
+              p.external_ids->>'twitter_id',
+              p.external_ids->>'twitter',
+              p.external_ids->>'twitter_handle',
+              p.external_ids->>'x_id',
+              p.external_ids->>'x_handle',
+              p.external_ids->>'x'
+          ) AS twitter_handle,
+          COALESCE(
+              NULLIF(po.youtube_handle, ''),
+              pei_youtube.external_id,
+              p.external_ids->>'youtube_id',
+              p.external_ids->>'youtube',
+              p.external_ids->>'youtube_handle'
+          ) AS youtube_handle,
+          NULLIF(po.instagram_handle, '') AS instagram_override_handle,
+          NULLIF(po.tiktok_handle, '') AS tiktok_override_handle,
+          NULLIF(po.twitter_handle, '') AS twitter_override_handle,
+          NULLIF(po.youtube_handle, '') AS youtube_override_handle,
+          pei_instagram.external_id AS instagram_canonical_handle,
+          pei_tiktok.external_id AS tiktok_canonical_handle,
+          pei_twitter.external_id AS twitter_canonical_handle,
+          pei_youtube.external_id AS youtube_canonical_handle,
+          COALESCE(
+              p.external_ids->>'instagram_id',
+              p.external_ids->>'instagram',
+              p.external_ids->>'instagram_handle'
+          ) AS instagram_legacy_handle,
+          COALESCE(
+              p.external_ids->>'tiktok_id',
+              p.external_ids->>'tiktok',
+              p.external_ids->>'tiktok_handle'
+          ) AS tiktok_legacy_handle,
+          COALESCE(
+              p.external_ids->>'twitter_id',
+              p.external_ids->>'twitter',
+              p.external_ids->>'twitter_handle',
+              p.external_ids->>'x_id',
+              p.external_ids->>'x_handle',
+              p.external_ids->>'x'
+          ) AS twitter_legacy_handle,
+          COALESCE(
+              p.external_ids->>'youtube_id',
+              p.external_ids->>'youtube',
+              p.external_ids->>'youtube_handle'
+          ) AS youtube_legacy_handle,
+          ct.instagram_id AS instagram_tmdb_handle,
+          el_instagram.source AS instagram_entity_link_source,
+          el_tiktok.source AS tiktok_entity_link_source,
+          el_twitter.source AS twitter_entity_link_source,
+          el_youtube.source AS youtube_entity_link_source
         FROM core.v_show_cast_roles_enriched c
         LEFT JOIN core.people p ON p.id = c.person_id
         LEFT JOIN core.people_overrides po ON po.person_id = c.person_id
         LEFT JOIN core.cast_tmdb ct ON ct.person_id = c.person_id
+        LEFT JOIN LATERAL (
+          SELECT pei.external_id
+          FROM core.person_external_ids pei
+          WHERE pei.person_id = c.person_id
+            AND pei.source_id = 'instagram'
+            AND pei.is_primary = true
+            AND pei.valid_to IS NULL
+          ORDER BY pei.observed_at DESC NULLS LAST, pei.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) pei_instagram ON true
+        LEFT JOIN LATERAL (
+          SELECT pei.external_id
+          FROM core.person_external_ids pei
+          WHERE pei.person_id = c.person_id
+            AND pei.source_id = 'tiktok'
+            AND pei.is_primary = true
+            AND pei.valid_to IS NULL
+          ORDER BY pei.observed_at DESC NULLS LAST, pei.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) pei_tiktok ON true
+        LEFT JOIN LATERAL (
+          SELECT pei.external_id
+          FROM core.person_external_ids pei
+          WHERE pei.person_id = c.person_id
+            AND pei.source_id = 'twitter'
+            AND pei.is_primary = true
+            AND pei.valid_to IS NULL
+          ORDER BY pei.observed_at DESC NULLS LAST, pei.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) pei_twitter ON true
+        LEFT JOIN LATERAL (
+          SELECT pei.external_id
+          FROM core.person_external_ids pei
+          WHERE pei.person_id = c.person_id
+            AND pei.source_id = 'youtube'
+            AND pei.is_primary = true
+            AND pei.valid_to IS NULL
+          ORDER BY pei.observed_at DESC NULLS LAST, pei.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) pei_youtube ON true
+        LEFT JOIN LATERAL (
+          SELECT el.source
+          FROM core.entity_links el
+          WHERE el.entity_type = 'person'
+            AND el.entity_id = c.person_id
+            AND el.link_group = 'social'
+            AND el.link_kind = 'instagram'
+            AND el.status <> 'rejected'
+          ORDER BY
+            CASE WHEN el.status = 'approved' THEN 0 ELSE 1 END,
+            CASE
+              WHEN position('bravo' in lower(COALESCE(el.source, ''))) > 0 THEN 0
+              WHEN position('tmdb' in lower(COALESCE(el.source, ''))) > 0 THEN 2
+              ELSE 1
+            END,
+            el.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) el_instagram ON true
+        LEFT JOIN LATERAL (
+          SELECT el.source
+          FROM core.entity_links el
+          WHERE el.entity_type = 'person'
+            AND el.entity_id = c.person_id
+            AND el.link_group = 'social'
+            AND el.link_kind = 'tiktok'
+            AND el.status <> 'rejected'
+          ORDER BY
+            CASE WHEN el.status = 'approved' THEN 0 ELSE 1 END,
+            CASE
+              WHEN position('bravo' in lower(COALESCE(el.source, ''))) > 0 THEN 0
+              WHEN position('tmdb' in lower(COALESCE(el.source, ''))) > 0 THEN 2
+              ELSE 1
+            END,
+            el.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) el_tiktok ON true
+        LEFT JOIN LATERAL (
+          SELECT el.source
+          FROM core.entity_links el
+          WHERE el.entity_type = 'person'
+            AND el.entity_id = c.person_id
+            AND el.link_group = 'social'
+            AND el.link_kind = 'twitter'
+            AND el.status <> 'rejected'
+          ORDER BY
+            CASE WHEN el.status = 'approved' THEN 0 ELSE 1 END,
+            CASE
+              WHEN position('bravo' in lower(COALESCE(el.source, ''))) > 0 THEN 0
+              WHEN position('tmdb' in lower(COALESCE(el.source, ''))) > 0 THEN 2
+              ELSE 1
+            END,
+            el.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) el_twitter ON true
+        LEFT JOIN LATERAL (
+          SELECT el.source
+          FROM core.entity_links el
+          WHERE el.entity_type = 'person'
+            AND el.entity_id = c.person_id
+            AND el.link_group = 'social'
+            AND el.link_kind = 'youtube'
+            AND el.status <> 'rejected'
+          ORDER BY
+            CASE WHEN el.status = 'approved' THEN 0 ELSE 1 END,
+            CASE
+              WHEN position('bravo' in lower(COALESCE(el.source, ''))) > 0 THEN 0
+              WHEN position('tmdb' in lower(COALESCE(el.source, ''))) > 0 THEN 2
+              ELSE 1
+            END,
+            el.updated_at DESC NULLS LAST
+          LIMIT 1
+        ) el_youtube ON true
         LEFT JOIN LATERAL (
           SELECT
             COALESCE(ph.hosted_url, ph.image_url, ph.url, ph.thumb_url) AS display_url
@@ -1203,6 +1431,7 @@ def list_cast_with_roles(
 
     filtered: list[dict[str, Any]] = []
     for row in rows:
+        _apply_social_handle_sources(row)
         person_id = str(row.get("person_id") or "")
         selected_roles = sorted(role_map.get(person_id, set()))
         if not selected_roles:

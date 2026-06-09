@@ -13,8 +13,6 @@ from dotenv import load_dotenv
 
 import trr_backend.repositories.social_season_analytics as social_repo
 
-load_dotenv()
-
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_DB_TESTS", "").lower() not in ("1", "true", "yes"),
     reason="RUN_DB_TESTS not enabled - set RUN_DB_TESTS=1 to run integration tests",
@@ -23,6 +21,8 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def db_client():
+    load_dotenv()
+
     from trr_backend.db import create_supabase_admin_client
 
     return create_supabase_admin_client()

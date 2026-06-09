@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,59 @@ def test_fetcher_constructs_without_error(_mock_scrapling):
         browser_account_id="test",
     )
     assert fetcher._request_count == 0
+
+
+def test_anonymous_fetcher_strips_authenticated_cookies(_mock_scrapling):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[{"name": "sessionid", "value": "abc", "domain": ".instagram.com", "path": "/"}],
+        raw_cookies={
+            "sessionid": "abc",
+            "csrftoken": "csrf",
+            "ds_user_id": "123",
+            "mid": "mid-token",
+        },
+        browser_account_id="test",
+        auth_state="anonymous",
+    )
+
+    metadata = fetcher.runtime_metadata
+    assert fetcher._cookies == []
+    assert fetcher._raw_cookies == {"csrftoken": "csrf", "mid": "mid-token"}
+    assert metadata["auth_state"] == "anonymous"
+    assert metadata["authenticated_cookie_count"] == 0
+
+
+def test_requests_fallback_can_disable_graphql_recovery(_mock_scrapling):
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    captured: dict[str, object] = {}
+
+    class _FallbackScraper:
+        last_retrieval_meta = {"error_code": "instagram_graphql_checkpoint_required"}
+
+        def fetch_posts_graphql(self, username: str, **kwargs: object) -> None:
+            captured["username"] = username
+            captured["kwargs"] = dict(kwargs)
+            return None
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[{"name": "sessionid", "value": "abc", "domain": ".instagram.com", "path": "/"}],
+        raw_cookies={"sessionid": "abc", "csrftoken": "xyz", "ds_user_id": "123"},
+        browser_account_id="test",
+        allow_requests_recovery=False,
+    )
+    fetcher._requests_fallback_scraper = _FallbackScraper()
+
+    result = fetcher._fetch_posts_page_via_requests("bravotv", cursor=None, direction="forward")
+
+    assert result.fetch_failed is True
+    assert result.auth_failed is True
+    assert result.fetch_reason == "instagram_graphql_checkpoint_required"
+    assert captured["username"] == "bravotv"
+    assert captured["kwargs"]["allow_browser_fallback"] is False
+    assert captured["kwargs"]["allow_recovery"] is False
 
 
 def test_extract_page_tokens():
@@ -93,6 +148,94 @@ def test_advisory_api_pacing_uses_social_control_pool(monkeypatch):
     assert result["paced"] is True
     assert result["error"] is None
     assert calls == [("instagram-posts-rate-limit-advisory", "social_control")]
+
+
+def test_file_lock_pacing_reserves_scheduled_starts_without_holding_sleep(monkeypatch, tmp_path):
+    import trr_backend.socials.instagram.posts_scrapling.fetcher as fetcher_module
+
+    class FakeClock:
+        def __init__(self) -> None:
+            self.current = 1_000.0
+            self.sleeps: list[float] = []
+
+        def monotonic(self) -> float:
+            return self.current
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.current += seconds
+
+    clock = FakeClock()
+    monkeypatch.setattr(fetcher_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(fetcher_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(fetcher_module, "_global_rate_limit_path", lambda key: str(tmp_path / f"{key}.lock"))
+    monkeypatch.setattr(fetcher_module, "_global_rate_cooldown_path", lambda key: str(tmp_path / f"{key}.cooldown"))
+
+    delay = 0.25
+    results = [
+        fetcher_module._pace_global_api_request(key="proxy-a", delay_seconds=delay),
+        fetcher_module._pace_global_api_request(key="proxy-a", delay_seconds=delay),
+        fetcher_module._pace_global_api_request(key="proxy-a", delay_seconds=delay),
+    ]
+    request_start_times = [result["scheduled_at"] for result in results]
+
+    assert request_start_times[1] - request_start_times[0] == pytest.approx(delay)
+    assert request_start_times[2] - request_start_times[1] == pytest.approx(delay)
+    assert clock.current == pytest.approx(request_start_times[-1])
+    assert results[1]["scheduled_sleep_ms"] >= 200
+    assert results[1]["reservation_lag_ms"] >= 200
+    assert results[1]["lock_held_ms"] < results[1]["scheduled_sleep_ms"]
+    assert results[2]["lock_held_ms"] < results[2]["scheduled_sleep_ms"]
+
+
+def test_advisory_pacing_releases_lock_before_scheduled_sleep(monkeypatch, tmp_path):
+    import trr_backend.socials.instagram.posts_scrapling.fetcher as fetcher_module
+    from trr_backend.db import pg
+
+    class FakeClock:
+        def __init__(self) -> None:
+            self.current = 2_000.0
+
+        def monotonic(self) -> float:
+            return self.current
+
+        def sleep(self, seconds: float) -> None:
+            events.append(("sleep", self.current, seconds))
+            self.current += seconds
+
+    events: list[tuple[str, float, float | None]] = []
+    clock = FakeClock()
+
+    class FakeCursor:
+        def execute(self, sql: str, _params: Any = None) -> None:
+            if "pg_advisory_lock" in sql:
+                events.append(("lock", clock.current, None))
+            if "pg_advisory_unlock" in sql:
+                events.append(("unlock", clock.current, None))
+
+    @contextmanager
+    def fake_db_connection(*, label: str, pool_name: str = "default"):
+        assert (label, pool_name) == ("instagram-posts-rate-limit-advisory", "social_control")
+        yield object()
+
+    @contextmanager
+    def fake_db_cursor(*, conn: Any = None, label: str = "write-cursor"):
+        del conn, label
+        yield FakeCursor()
+
+    monkeypatch.setattr(pg, "db_connection", fake_db_connection)
+    monkeypatch.setattr(pg, "db_cursor", fake_db_cursor)
+    monkeypatch.setattr(fetcher_module.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(fetcher_module.time, "sleep", clock.sleep)
+    monkeypatch.setattr(fetcher_module, "_global_rate_limit_path", lambda key: str(tmp_path / f"{key}.lock"))
+
+    first = fetcher_module._try_advisory_lock_pace(key="advisory-proxy", delay_seconds=0.3)
+    second = fetcher_module._try_advisory_lock_pace(key="advisory-proxy", delay_seconds=0.3)
+
+    assert first["acquired"] is True
+    assert second["scheduled_sleep_ms"] >= 250
+    assert second["lock_held_ms"] < second["scheduled_sleep_ms"]
+    assert [event[0] for event in events] == ["lock", "unlock", "lock", "unlock", "sleep"]
 
 
 def test_build_graphql_headers():
@@ -192,6 +335,66 @@ def test_runtime_metadata_reports_delay_and_proxy_session_mode(_mock_scrapling):
     assert meta["api_delay_seconds"] >= 0
 
 
+def test_pace_api_requests_records_fallback_pacing_metadata(_mock_scrapling, monkeypatch):
+    import asyncio
+
+    import trr_backend.socials.instagram.posts_scrapling.fetcher as fetcher_module
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "sensitive-cookie-value"},
+        browser_account_id="test",
+    )
+    fetcher._api_delay_seconds = 0.1
+    fetcher._global_rate_limit_mode_configured = "advisory"
+
+    def fake_advisory_pace(*, key: str, delay_seconds: float) -> dict[str, Any]:
+        del key, delay_seconds
+        return {
+            "acquired": False,
+            "paced": True,
+            "wait_ms": 12,
+            "lock_wait_ms": 12,
+            "lock_held_ms": 0,
+            "scheduled_sleep_ms": 0,
+            "scheduled_at": None,
+            "reservation_lag_ms": 0,
+            "error": "pg_unavailable",
+        }
+
+    def fake_file_pace(*, key: str, delay_seconds: float) -> dict[str, Any]:
+        del key, delay_seconds
+        return {
+            "acquired": True,
+            "paced": True,
+            "wait_ms": 3,
+            "lock_wait_ms": 3,
+            "lock_held_ms": 2,
+            "scheduled_sleep_ms": 95,
+            "scheduled_at": 1234.5,
+            "reservation_lag_ms": 98,
+            "error": None,
+        }
+
+    monkeypatch.setattr(fetcher_module, "_try_advisory_lock_pace", fake_advisory_pace)
+    monkeypatch.setattr(fetcher_module, "_pace_global_api_request", fake_file_pace)
+
+    asyncio.run(fetcher._pace_api_requests())
+
+    proxy_pacing = fetcher.runtime_metadata["proxy_pacing"]
+    assert proxy_pacing["mode_last_used"] == "file_lock_fallback"
+    assert proxy_pacing["advisory_fallback_count"] == 1
+    assert proxy_pacing["advisory_last_error"] == "pg_unavailable"
+    assert proxy_pacing["advisory_total_wait_ms"] == 12
+    assert proxy_pacing["lock_wait_ms"] == 3
+    assert proxy_pacing["lock_held_ms"] == 2
+    assert proxy_pacing["scheduled_sleep_ms"] == 95
+    assert proxy_pacing["scheduled_at"] == 1234.5
+    assert proxy_pacing["reservation_lag_ms"] == 98
+    assert "sensitive-cookie-value" not in repr(proxy_pacing)
+
+
 def test_sync_response_cookies_updates_direct_request_state(_mock_scrapling):
     from unittest.mock import MagicMock
 
@@ -265,6 +468,42 @@ def test_warmup_raises_auth_error_code(_mock_scrapling):
 
     assert exc_info.value.error_code == "instagram_posts_warmup_auth_failed"
     assert exc_info.value.retryable is False
+
+
+def test_warmup_transport_error_activates_requests_fallback(_mock_scrapling, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from trr_backend.socials.instagram.posts_scrapling.fetcher import InstagramPostsScraplingFetcher
+
+    created: dict[str, Any] = {}
+
+    class _FallbackScraper:
+        def __init__(self, *, cookies: dict[str, str], browser_account_id: str | None) -> None:
+            created["cookies"] = cookies
+            created["browser_account_id"] = browser_account_id
+
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_REQUESTS_FALLBACK_ENABLED", "1")
+    monkeypatch.setitem(
+        sys.modules,
+        "trr_backend.socials.instagram.scraper",
+        types.SimpleNamespace(InstagramScraper=_FallbackScraper),
+    )
+
+    fetcher = InstagramPostsScraplingFetcher(
+        cookies=[],
+        raw_cookies={"sessionid": "existing", "csrftoken": "csrf"},
+        browser_account_id="t",
+    )
+    fetcher._fetcher.async_fetch = AsyncMock(side_effect=RuntimeError("Page.goto failed"))
+
+    asyncio.run(fetcher.warmup("bravotv"))
+
+    assert fetcher.runtime_metadata["requests_fallback"]["active"] is True
+    assert fetcher.runtime_metadata["requests_fallback"]["reason"] == "warmup_transport_failed"
+    assert fetcher.runtime_metadata["requests_fallback"]["warmup_error_class"] == "RuntimeError"
+    assert created["cookies"]["sessionid"] == "existing"
+    assert created["browser_account_id"] == "t"
 
 
 def test_warmup_raises_no_cookie_when_no_prior_session(_mock_scrapling):

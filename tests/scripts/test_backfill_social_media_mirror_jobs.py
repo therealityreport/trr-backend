@@ -48,6 +48,8 @@ def test_main_fails_fast_when_s3_preflight_fails(monkeypatch) -> None:
 
 def test_main_hosted_html_only_filters_non_html_rows(monkeypatch, capsys) -> None:
     monkeypatch.setattr(mod, "load_env", lambda: None)
+    monkeypatch.setenv("OBJECT_STORAGE_PUBLIC_BASE_URL", "https://cdn.test")
+    mod.social_repo._expected_cdn_host.cache_clear()  # noqa: SLF001
     monkeypatch.setattr(mod, "_parse_args", lambda: _base_args(platforms="tiktok", hosted_html_only=True))
     monkeypatch.setattr(mod.social_repo, "ensure_media_mirror_s3_ready", lambda: None)
     monkeypatch.setattr(
@@ -110,13 +112,68 @@ def test_main_hosted_html_only_filters_non_html_rows(monkeypatch, capsys) -> Non
         "failed": 0,
         "repair_reasons": {
             "hosted_content": 1,
-            "legacy_hosted_url": 1,
             "non_video_hosted_media": 1,
-            "missing_display_variants": 1,
             "missing_source_avatar": 1,
         },
     }
     assert enqueued_ids == ["tt-1"]
+
+
+def test_main_enqueues_shared_context_when_row_has_no_season(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(mod, "load_env", lambda: None)
+    monkeypatch.setattr(mod, "_parse_args", lambda: _base_args(platforms="instagram"))
+    monkeypatch.setattr(mod.social_repo, "ensure_media_mirror_s3_ready", lambda: None)
+    monkeypatch.setattr(
+        mod,
+        "_load_rows",
+        lambda **_kwargs: [
+            {
+                "id": "ig-1",
+                "season_id": "",
+                "show_id": "",
+                "source_id": "DZNIQIgEoNd",
+                "account": "bravotv",
+                "posted_at": None,
+                "thumbnail_url": "",
+                "media_urls": [],
+                "hosted_thumbnail_url": "",
+                "hosted_media_urls": [],
+                "media_mirror_status": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(mod, "_row_repair_reasons", lambda *_args, **_kwargs: ["missing_hosted_thumbnail"])
+    monkeypatch.setattr(mod.social_repo, "_platform_post_needs_media_mirror", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        mod.social_repo,
+        "get_season_context",
+        lambda *_args, **_kwargs: pytest.fail("season context should not be required"),
+    )
+    monkeypatch.setattr(
+        mod.social_repo,
+        "_resolve_week_windows",
+        lambda *_args, **_kwargs: pytest.fail("season windows should not be resolved without a season"),
+    )
+    monkeypatch.setattr(mod.social_repo, "_coerce_dt", lambda _value: None)
+    monkeypatch.setattr(mod.pg, "db_connection", lambda: nullcontext("conn"))
+
+    enqueued: list[dict[str, object]] = []
+
+    def _fake_enqueue(context, **kwargs) -> str:
+        enqueued.append({"context": context, **kwargs})
+        return "job-shared"
+
+    monkeypatch.setattr(mod.social_repo, "_enqueue_platform_media_mirror_job", _fake_enqueue)
+
+    assert mod.main() == 0
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["source_scope"] == "bravo"
+    assert payload["effective_source_scope"] == "network"
+    assert payload["totals"] == {"scanned": 1, "eligible": 1, "queued": 1, "skipped": 0, "failed": 0}
+    assert enqueued[0]["context"] is None
+    assert enqueued[0]["source_scope"] == "network"
+    assert enqueued[0]["week_index"] is None
 
 
 def test_row_repair_reasons_detects_historical_cleanup_cases(monkeypatch) -> None:

@@ -8,6 +8,7 @@ to in-process pub/sub (fine for local dev, not multi-instance).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -16,8 +17,86 @@ from collections import defaultdict
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_REDIS_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    try:
+        if raw:
+            return max(int(raw), 1)
+    except ValueError:
+        return default
+    return default
+
+
+def _redis_url_snapshot(redis_url: str | None) -> dict[str, object]:
+    if not redis_url:
+        return {"configured": False}
+
+    parsed = urlparse(redis_url)
+    host = parsed.hostname or ""
+    if not host:
+        host_class = "unknown"
+    elif host in _LOCAL_REDIS_HOSTS:
+        host_class = "local"
+    else:
+        host_class = "remote"
+
+    return {
+        "configured": True,
+        "scheme": parsed.scheme or "unknown",
+        "host_class": host_class,
+        "port": parsed.port,
+    }
+
+
+def _redact_redis_error(exc: BaseException, *, redis_url: str | None = None) -> dict[str, str]:
+    message = str(exc).strip() or type(exc).__name__
+    if redis_url:
+        parsed = urlparse(redis_url)
+        replacements = {redis_url: "<redis-url>"}
+        if parsed.hostname:
+            replacements[parsed.hostname] = "<redis-host>"
+        if parsed.password:
+            replacements[parsed.password] = "<redacted>"
+        for needle, replacement in replacements.items():
+            message = message.replace(needle, replacement)
+    return {"type": type(exc).__name__, "message": message[:240]}
+
+
+def _multi_worker_policy_snapshot() -> dict[str, object]:
+    workers = _positive_int_env("TRR_BACKEND_WORKERS", 1)
+    require_redis = _env_flag("TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER", True)
+    redis_url_configured = bool((os.getenv("REDIS_URL") or "").strip())
+    return {
+        "workers_requested": workers,
+        "require_redis_for_multi_worker": require_redis,
+        "redis_url_configured": redis_url_configured,
+        "safe_for_multi_worker": workers <= 1 or (not require_redis) or redis_url_configured,
+    }
+
+
+async def _close_async(resource: Any) -> None:
+    if resource is None:
+        return
+    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 class Broker(ABC):
@@ -78,6 +157,10 @@ class Broker(ABC):
         """Get all keys matching a pattern (e.g., 'typing:conv123:*')."""
         pass
 
+    def status(self) -> dict[str, object]:
+        """Return public-safe runtime status for health diagnostics."""
+        return {"mode": "unknown", "connected": False}
+
 
 class InMemoryBroker(Broker):
     """
@@ -91,11 +174,14 @@ class InMemoryBroker(Broker):
         self._ephemeral: dict[str, tuple[str, float]] = {}  # key -> (value, expires_at)
         self._sub_counter = 0
         self._cleanup_task: asyncio.Task | None = None
+        self._connected = False
 
     async def connect(self) -> None:
         """Start the cleanup task for ephemeral keys."""
         logger.info("InMemoryBroker connected (local dev mode)")
-        self._cleanup_task = asyncio.create_task(self._cleanup_expired())
+        self._connected = True
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._cleanup_expired())
 
     async def disconnect(self) -> None:
         """Stop the cleanup task."""
@@ -105,6 +191,7 @@ class InMemoryBroker(Broker):
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+        self._connected = False
         logger.info("InMemoryBroker disconnected")
 
     async def publish(self, room: str, event: dict) -> None:
@@ -166,6 +253,17 @@ class InMemoryBroker(Broker):
                 matching.append(key)
         return matching
 
+    def status(self) -> dict[str, object]:
+        return {
+            "mode": "memory",
+            "connected": self._connected,
+            "pubsub_backend": "process",
+            "ephemeral_backend": "process",
+            "subscriber_rooms": len(self._subscribers),
+            "subscription_count": sum(len(subscribers) for subscribers in self._subscribers.values()),
+            "ephemeral_key_count": len(self._ephemeral),
+        }
+
     async def _cleanup_expired(self) -> None:
         """Periodically clean up expired ephemeral keys."""
         while True:
@@ -196,6 +294,8 @@ class RedisBroker(Broker):
         self._sub_counter = 0
         self._listener_task: asyncio.Task | None = None
         self._subscribed_rooms: set[str] = set()
+        self._connected = False
+        self._last_error: dict[str, str] | None = None
 
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -203,13 +303,24 @@ class RedisBroker(Broker):
             import redis.asyncio as aioredis
 
             self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
+            await self._redis.ping()
             self._pubsub = self._redis.pubsub()
             self._listener_task = asyncio.create_task(self._listen())
-            logger.info(f"RedisBroker connected to {self._redis_url}")
-        except ImportError:
+            self._connected = True
+            self._last_error = None
+            logger.info("RedisBroker connected")
+        except ImportError as exc:
+            self._connected = False
+            self._last_error = {"type": type(exc).__name__, "message": "redis package not installed"}
             raise RuntimeError("redis package not installed. Run: pip install redis") from None
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
+            self._connected = False
+            self._last_error = _redact_redis_error(e, redis_url=self._redis_url)
+            await _close_async(self._pubsub)
+            await _close_async(self._redis)
+            self._pubsub = None
+            self._redis = None
+            logger.error("Failed to connect to Redis: %s", self._last_error["type"])
             raise
 
     async def disconnect(self) -> None:
@@ -220,10 +331,14 @@ class RedisBroker(Broker):
                 await self._listener_task
             except asyncio.CancelledError:
                 pass
+            self._listener_task = None
         if self._pubsub:
-            await self._pubsub.close()
+            await _close_async(self._pubsub)
+            self._pubsub = None
         if self._redis:
-            await self._redis.close()
+            await _close_async(self._redis)
+            self._redis = None
+        self._connected = False
         logger.info("RedisBroker disconnected")
 
     async def publish(self, room: str, event: dict) -> None:
@@ -245,6 +360,8 @@ class RedisBroker(Broker):
 
         # Subscribe to Redis channel if not already
         if room not in self._subscribed_rooms:
+            if not self._pubsub:
+                raise RuntimeError("Not connected to Redis pubsub")
             await self._pubsub.subscribe(room)
             self._subscribed_rooms.add(room)
             logger.debug(f"Subscribed to Redis channel: {room}")
@@ -259,6 +376,8 @@ class RedisBroker(Broker):
             if not self._subscribers[room]:
                 del self._subscribers[room]
                 if room in self._subscribed_rooms:
+                    if not self._pubsub:
+                        raise RuntimeError("Not connected to Redis pubsub")
                     await self._pubsub.unsubscribe(room)
                     self._subscribed_rooms.discard(room)
                     logger.debug(f"Unsubscribed from Redis channel: {room}")
@@ -285,7 +404,14 @@ class RedisBroker(Broker):
         """Get keys matching pattern from Redis."""
         if not self._redis:
             raise RuntimeError("Not connected to Redis")
-        return await self._redis.keys(pattern)
+        keys: list[str] = []
+        iterator = self._redis.scan_iter(match=pattern)
+        if hasattr(iterator, "__aiter__"):
+            async for key in iterator:
+                keys.append(key)
+        else:
+            keys.extend(iterator)
+        return keys
 
     async def _listen(self) -> None:
         """Listen for messages from Redis pub/sub."""
@@ -309,7 +435,23 @@ class RedisBroker(Broker):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"Error in Redis listener: {e}")
+            self._connected = False
+            self._last_error = _redact_redis_error(e, redis_url=self._redis_url)
+            logger.error("Error in Redis listener: %s", self._last_error["type"])
+
+    def status(self) -> dict[str, object]:
+        return {
+            "mode": "redis",
+            "connected": self._connected,
+            "pubsub_backend": "redis",
+            "ephemeral_backend": "redis",
+            "redis": _redis_url_snapshot(self._redis_url),
+            "last_error": self._last_error,
+            "subscriber_rooms": len(self._subscribers),
+            "subscription_count": sum(len(subscribers) for subscribers in self._subscribers.values()),
+            "subscribed_room_count": len(self._subscribed_rooms),
+            "listener_running": self._listener_task is not None and not self._listener_task.done(),
+        }
 
 
 # --- Singleton broker instance ---
@@ -331,6 +473,26 @@ def get_broker() -> Broker:
         else:
             _broker = InMemoryBroker()
     return _broker
+
+
+def broker_runtime_status() -> dict[str, object]:
+    """Return a public-safe broker status snapshot for runtime health."""
+    redis_url = (os.getenv("REDIS_URL") or "").strip()
+    if _broker is None:
+        broker_status: dict[str, object] = {
+            "mode": "redis" if redis_url else "memory",
+            "connected": False,
+            "initialized": False,
+            "redis": _redis_url_snapshot(redis_url),
+        }
+    else:
+        broker_status = dict(_broker.status())
+        broker_status["initialized"] = True
+        if broker_status.get("mode") == "memory":
+            broker_status["redis"] = _redis_url_snapshot(redis_url)
+
+    broker_status["multi_worker_policy"] = _multi_worker_policy_snapshot()
+    return broker_status
 
 
 async def init_broker() -> Broker:

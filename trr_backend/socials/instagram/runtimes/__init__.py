@@ -6,7 +6,7 @@ axis. Rather than replace it, we route per-endpoint across multiple
 runtimes and fall through on classified failures.
 
 Primary routing order (read from the INSTAGRAM_RUNTIME_ORDER env var):
-    crawlee,scrapling,crawl4ai,browser_use,apify
+    crawlee,scrapling,crawl4ai,browser_use
 
 Endpoint -> preferred runtime matrix:
 
@@ -14,7 +14,7 @@ Endpoint -> preferred runtime matrix:
     Post detail           Scrapling   -> crawl4ai  -> Crawlee
     Comments pagination   Crawlee     -> crawl4ai  -> Scrapling
     Login/challenge       browser-use -> manual
-    Bulk backfill         Apify       -> Scrapling -> Crawlee
+    Bulk backfill         Scrapling   -> Crawlee
 
 See individual runtime modules for implementation status. Runtimes that
 wrap external packages must remain unhealthy or raise RuntimeUnsupported

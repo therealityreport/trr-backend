@@ -7,9 +7,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ DEFAULT_RUNTIME_SECRET = "trr-backend-runtime"
 DEFAULT_SOCIAL_SECRET = "trr-social-auth"
 DEFAULT_API_FUNCTION = "serve_backend_api"
 DEFAULT_SOCIAL_AUTH_PROBE_FUNCTION = "probe_social_remote_auth"
+DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS = 45
 DEFAULT_INSTAGRAM_POSTS_AUTH_PROBE_FUNCTION = "probe_instagram_posts_auth"
 DEFAULT_INSTAGRAM_COMMENTS_AUTH_PROBE_FUNCTION = "probe_instagram_comments_auth"
 DEFAULT_GETTY_REMOTE_PROBE_FUNCTION = "probe_getty_remote_access"
@@ -26,9 +29,48 @@ DEFAULT_GOOGLE_NEWS_RUNTIME_PROBE_FUNCTION = "probe_google_news_runtime"
 DEFAULT_VISION_RUNTIME_PROBE_FUNCTION = "probe_admin_vision_runtime"
 DEFAULT_SOCIALBLADE_RUNTIME_PROBE_FUNCTION = "probe_socialblade_runtime"
 BROWSER_SESSION_INVALIDATED_REASON = "browser_session_invalidated"
+DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS = 30
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+
+
+_REPO_VENV_REEXEC_ENV = "TRR_MODAL_READINESS_VENV_REEXECED"
+
+
+def _repo_venv_python() -> str | None:
+    repo_venv_python = os.path.join(REPO_ROOT, ".venv", "bin", "python")
+    return repo_venv_python if os.path.isfile(repo_venv_python) else None
+
+
+def _same_path(left: str, right: str) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.abspath(left) == os.path.abspath(right)
+
+
+def _running_in_repo_venv(repo_venv_python: str) -> bool:
+    repo_venv = os.path.dirname(os.path.dirname(repo_venv_python))
+    return _same_path(sys.prefix, repo_venv)
+
+
+def _maybe_reexec_with_repo_venv() -> None:
+    repo_venv_python = _repo_venv_python()
+    if not repo_venv_python:
+        return
+    if os.getenv(_REPO_VENV_REEXEC_ENV) == "1":
+        return
+    if _running_in_repo_venv(repo_venv_python):
+        return
+
+    env = os.environ.copy()
+    env[_REPO_VENV_REEXEC_ENV] = "1"
+    os.execve(repo_venv_python, [repo_venv_python, *sys.argv], env)
+
+
+if __name__ == "__main__":
+    _maybe_reexec_with_repo_venv()
 
 from scripts._workspace_runtime_env import apply_workspace_runtime_env
 from trr_backend.modal_dispatch import (
@@ -38,6 +80,7 @@ from trr_backend.modal_dispatch import (
     modal_social_media_job_function_name,
     modal_social_posts_job_function_name,
 )
+from trr_backend.modal_jobs import modal_completion_evidence_contract
 from trr_backend.utils.env import load_env
 
 
@@ -130,12 +173,39 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Treat advisory probe failures as a non-zero CLI exit.",
     )
+    parser.add_argument(
+        "--remote-probe-timeout-seconds",
+        type=int,
+        default=int(os.getenv("TRR_MODAL_REMOTE_PROBE_TIMEOUT_SECONDS") or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS),
+        help=(
+            "Maximum seconds to wait for optional deployed remote probes "
+            f"(default: {DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS})."
+        ),
+    )
+    parser.add_argument(
+        "--modal-lookup-timeout-seconds",
+        type=int,
+        default=int(os.getenv("TRR_MODAL_LOOKUP_TIMEOUT_SECONDS") or DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS),
+        help=(
+            "Maximum seconds to wait for Modal app, secret, and function lookups "
+            f"(default: {DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS})."
+        ),
+    )
     return parser.parse_args()
 
 
+def modal_lookup_timeout_seconds() -> int:
+    raw = str(os.getenv("TRR_MODAL_LOOKUP_TIMEOUT_SECONDS") or DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS).strip()
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS
+    return max(1, parsed)
+
+
 def _python_command() -> str:
-    repo_venv_python = os.path.join(REPO_ROOT, ".venv", "bin", "python")
-    if os.path.isfile(repo_venv_python):
+    repo_venv_python = _repo_venv_python()
+    if repo_venv_python:
         return repo_venv_python
     virtual_env = str(os.getenv("VIRTUAL_ENV") or "").strip()
     if virtual_env:
@@ -149,12 +219,18 @@ def _run_modal_json(*args: str, modal_environment: str = "") -> Any:
     command = [_python_command(), "-m", "modal", *args, "--json"]
     if modal_environment:
         command.extend(["--env", modal_environment])
-    completed = subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=modal_lookup_timeout_seconds(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ModalLookupTimeoutError(
+            f"Modal command timed out after {modal_lookup_timeout_seconds()} seconds: {' '.join(command)}"
+        ) from exc
     return json.loads(completed.stdout or "[]")
 
 
@@ -243,6 +319,8 @@ def expected_function_names() -> tuple[str, ...]:
         str(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_FUNCTION") or "sweep_social_dispatch_queue").strip()
         or "sweep_social_dispatch_queue",
         str(os.getenv("TRR_MODAL_VISION_FUNCTION") or "run_admin_vision").strip() or "run_admin_vision",
+        str(os.getenv("TRR_MODAL_CAST_SCREENTIME_FUNCTION") or "run_cast_screentime_analysis").strip()
+        or "run_cast_screentime_analysis",
         str(os.getenv("TRR_MODAL_SOCIALBLADE_FUNCTION") or "run_socialblade_scrape").strip()
         or "run_socialblade_scrape",
         "heartbeat_remote_executors",
@@ -319,10 +397,11 @@ def core_worker_runtime_probe_functions() -> dict[str, str]:
 
 
 def get_app_function_handles(*, app_name: str, modal_environment: str = "") -> dict[str, Any]:
-    return _load_get_app_objects()(
-        app_name,
-        environment_name=modal_environment or None,
-    )
+    with modal_lookup_timeout(modal_lookup_timeout_seconds()):
+        return _load_get_app_objects()(
+            app_name,
+            environment_name=modal_environment or None,
+        )
 
 
 def get_named_function_handles(
@@ -333,18 +412,20 @@ def get_named_function_handles(
 ) -> dict[str, Any]:
     function_class = _load_modal_function_class()
     handles: dict[str, Any] = {}
-    for function_name in function_names:
-        handles[function_name] = function_class.from_name(
-            app_name,
-            function_name,
-            environment_name=modal_environment or None,
-        )
+    with modal_lookup_timeout(modal_lookup_timeout_seconds()):
+        for function_name in function_names:
+            handles[function_name] = function_class.from_name(
+                app_name,
+                function_name,
+                environment_name=modal_environment or None,
+            )
     return handles
 
 
 def hydrate_function_handle(function_handle: Any) -> tuple[bool, str | None]:
     try:
-        function_handle.hydrate()
+        with modal_lookup_timeout(modal_lookup_timeout_seconds()):
+            function_handle.hydrate()
         return True, None
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
@@ -355,8 +436,9 @@ def resolve_function_web_url_from_handle(
     function_handle: Any,
 ) -> tuple[str | None, str | None]:
     try:
-        function_handle.hydrate()
-        url = str(function_handle.get_web_url() or "").strip() or None
+        with modal_lookup_timeout(modal_lookup_timeout_seconds()):
+            function_handle.hydrate()
+            url = str(function_handle.get_web_url() or "").strip() or None
         if not url:
             return None, "web_url_missing"
         return url, None
@@ -364,13 +446,115 @@ def resolve_function_web_url_from_handle(
         return None, str(exc)
 
 
+class RemoteProbeTimeoutError(TimeoutError):
+    """Raised when an optional deployed Modal probe exceeds its local wait budget."""
+
+
+class ModalLookupTimeoutError(TimeoutError):
+    """Raised when Modal resource lookup exceeds the local readiness budget."""
+
+
+@contextmanager
+def remote_probe_timeout(seconds: int):
+    timeout_seconds = max(1, int(seconds or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS))
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _handle_timeout(_signum: int, _frame: Any) -> None:
+        raise RemoteProbeTimeoutError(f"Remote probe timed out after {timeout_seconds} seconds")
+
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+@contextmanager
+def modal_lookup_timeout(seconds: int):
+    timeout_seconds = max(1, int(seconds or DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS))
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _handle_timeout(_signum: int, _frame: Any) -> None:
+        raise ModalLookupTimeoutError(f"Modal lookup timed out after {timeout_seconds} seconds")
+
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def remote_probe_timeout_payload(
+    *,
+    phase: str,
+    timeout_seconds: int,
+    platform: str | None = None,
+    account_handle: str | None = None,
+    shortcode: str | None = None,
+    worker_family: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ready": False,
+        "healthy": False,
+        "reason": "probe_timeout",
+        "detail": {
+            "phase": phase,
+            "timeout_seconds": max(1, int(timeout_seconds or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS)),
+        },
+    }
+    if platform:
+        payload["platform"] = platform
+    if account_handle:
+        payload["account_handle"] = account_handle
+    if shortcode:
+        payload["shortcode"] = shortcode
+    if worker_family:
+        payload["worker_family"] = worker_family
+    return payload
+
+
+def invoke_modal_function_with_timeout(function_handle: Any, *args: Any, timeout_seconds: int) -> Any:
+    timeout_seconds = max(1, int(timeout_seconds or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS))
+    spawn = getattr(function_handle, "spawn", None)
+    if callable(spawn):
+        function_call = None
+        try:
+            function_call = spawn(*args)
+            return function_call.get(timeout=timeout_seconds)
+        except TimeoutError as exc:
+            if function_call is not None:
+                try:
+                    function_call.cancel(terminate_containers=True)
+                except Exception:
+                    pass
+            raise RemoteProbeTimeoutError(f"Remote probe timed out after {timeout_seconds} seconds") from exc
+
+    with remote_probe_timeout(timeout_seconds):
+        return function_handle.remote(*args)
+
+
 def invoke_remote_auth_probe(
     *,
     function_handle: Any,
     platform: str,
+    timeout_seconds: int = DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     try:
-        payload = function_handle.remote(platform)
+        payload = invoke_modal_function_with_timeout(
+            function_handle,
+            platform,
+            timeout_seconds=timeout_seconds,
+        )
+    except RemoteProbeTimeoutError:
+        return remote_probe_timeout_payload(
+            phase="remote_probe",
+            timeout_seconds=timeout_seconds,
+            platform=platform,
+        )
     except Exception as exc:  # noqa: BLE001
         return {
             "platform": platform,
@@ -399,9 +583,19 @@ def invoke_runtime_probe(
     *,
     function_handle: Any,
     worker_family: str,
+    timeout_seconds: int = DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     try:
-        payload = function_handle.remote()
+        payload = invoke_modal_function_with_timeout(
+            function_handle,
+            timeout_seconds=timeout_seconds,
+        )
+    except RemoteProbeTimeoutError:
+        return remote_probe_timeout_payload(
+            phase="runtime_probe",
+            timeout_seconds=timeout_seconds,
+            worker_family=worker_family,
+        )
     except Exception as exc:  # noqa: BLE001
         return {
             "worker_family": worker_family,
@@ -430,6 +624,54 @@ def invoke_runtime_probe(
     return normalized
 
 
+def modal_lookup_failure_summary(
+    *,
+    app_name: str,
+    runtime_secret_name: str,
+    social_secret_name: str,
+    function_names: tuple[str, ...] | list[str],
+    modal_environment: str,
+    reason: str,
+    message: str,
+) -> dict[str, Any]:
+    social_jobs_are_enabled = social_jobs_enabled()
+    return {
+        "ok": False,
+        "core_ok": False,
+        "modal_environment": modal_environment or None,
+        "app_name": app_name,
+        "app_found": False,
+        "app_lookup_error": message,
+        "runtime_secret_name": runtime_secret_name,
+        "social_secret_name": social_secret_name,
+        "social_jobs_enabled": social_jobs_are_enabled,
+        "configured_social_function_names": modal_social_job_function_names(),
+        "required_social_function_names": list(required_social_function_names(enabled=social_jobs_are_enabled)),
+        "missing_secrets": [],
+        "function_results": [
+            {
+                "name": function_name,
+                "resolved": False,
+                "error": reason,
+            }
+            for function_name in function_names
+        ],
+        "missing_functions": list(function_names),
+        "missing_required_social_functions": list(required_social_function_names(enabled=social_jobs_are_enabled)),
+        "api_function_name": api_function_name(),
+        "api_web_url": None,
+        "missing_web_endpoints": [],
+        "remote_auth_probe": None,
+        "instagram_posts_auth_probe": None,
+        "instagram_comments_auth_probe": None,
+        "getty_remote_probe": None,
+        "runtime_probes": [],
+        "blocking_probe_failures": [reason],
+        "advisory_probe_failures": [],
+        "completion_evidence": modal_completion_evidence_contract(),
+    }
+
+
 def _resolve_instagram_comments_probe_shortcode(account_handle: str) -> str | None:
     try:
         from trr_backend.repositories import social_season_analytics as social_repo
@@ -452,10 +694,23 @@ def verify_modal_readiness(
     probe_instagram_comments_auth_shortcode: str | None = None,
     probe_getty_remote_access: bool = False,
     probe_core_workers: bool = False,
+    remote_probe_timeout_seconds: int = DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    remote_probe_timeout_seconds = max(1, int(remote_probe_timeout_seconds or DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS))
     social_jobs_are_enabled = social_jobs_enabled()
-    secret_names = list_secret_names(modal_environment=modal_environment)
-    app_descriptions = list_app_descriptions(modal_environment=modal_environment)
+    try:
+        secret_names = list_secret_names(modal_environment=modal_environment)
+        app_descriptions = list_app_descriptions(modal_environment=modal_environment)
+    except ModalLookupTimeoutError as exc:
+        return modal_lookup_failure_summary(
+            app_name=app_name,
+            runtime_secret_name=runtime_secret_name,
+            social_secret_name=social_secret_name,
+            function_names=function_names,
+            modal_environment=modal_environment,
+            reason="modal_lookup_timeout",
+            message=str(exc),
+        )
     app_function_handles: dict[str, Any] = {}
     app_lookup_error: str | None = None
     missing_secrets = [
@@ -534,6 +789,7 @@ def verify_modal_readiness(
             remote_auth_probe = invoke_remote_auth_probe(
                 function_handle=probe_handle,
                 platform=probe_remote_auth_platform,
+                timeout_seconds=remote_probe_timeout_seconds,
             )
 
     instagram_posts_auth_probe: dict[str, Any] | None = None
@@ -550,7 +806,19 @@ def verify_modal_readiness(
             }
         else:
             try:
-                payload = probe_handle.remote(probe_instagram_posts_auth_handle)
+                payload = invoke_modal_function_with_timeout(
+                    probe_handle,
+                    probe_instagram_posts_auth_handle,
+                    timeout_seconds=remote_probe_timeout_seconds,
+                )
+            except RemoteProbeTimeoutError:
+                instagram_posts_auth_probe = remote_probe_timeout_payload(
+                    phase="posts_auth_probe",
+                    timeout_seconds=remote_probe_timeout_seconds,
+                    platform="instagram",
+                    account_handle=probe_instagram_posts_auth_handle,
+                )
+                instagram_posts_auth_probe["execution_backend"] = "modal"
             except Exception as exc:  # noqa: BLE001
                 instagram_posts_auth_probe = {
                     "platform": "instagram",
@@ -605,7 +873,21 @@ def verify_modal_readiness(
             }
         else:
             try:
-                payload = probe_handle.remote(probe_instagram_comments_auth_handle, probe_shortcode)
+                payload = invoke_modal_function_with_timeout(
+                    probe_handle,
+                    probe_instagram_comments_auth_handle,
+                    probe_shortcode,
+                    timeout_seconds=remote_probe_timeout_seconds,
+                )
+            except RemoteProbeTimeoutError:
+                instagram_comments_auth_probe = remote_probe_timeout_payload(
+                    phase="comments_auth_probe",
+                    timeout_seconds=remote_probe_timeout_seconds,
+                    platform="instagram",
+                    account_handle=probe_instagram_comments_auth_handle,
+                    shortcode=probe_shortcode,
+                )
+                instagram_comments_auth_probe["execution_backend"] = "modal"
             except Exception as exc:  # noqa: BLE001
                 instagram_comments_auth_probe = {
                     "platform": "instagram",
@@ -646,7 +928,16 @@ def verify_modal_readiness(
             }
         else:
             try:
-                payload = probe_handle.remote()
+                payload = invoke_modal_function_with_timeout(
+                    probe_handle,
+                    timeout_seconds=remote_probe_timeout_seconds,
+                )
+            except RemoteProbeTimeoutError:
+                getty_remote_probe = remote_probe_timeout_payload(
+                    phase="remote_probe",
+                    timeout_seconds=remote_probe_timeout_seconds,
+                    platform="getty",
+                )
             except Exception as exc:  # noqa: BLE001
                 getty_remote_probe = {
                     "platform": "getty",
@@ -683,7 +974,11 @@ def verify_modal_readiness(
                     }
                 )
                 continue
-            probe_payload = invoke_runtime_probe(function_handle=probe_handle, worker_family=worker_family)
+            probe_payload = invoke_runtime_probe(
+                function_handle=probe_handle,
+                worker_family=worker_family,
+                timeout_seconds=remote_probe_timeout_seconds,
+            )
             probe_payload.setdefault("function_name", probe_function_name)
             runtime_probes.append(probe_payload)
 
@@ -749,6 +1044,7 @@ def verify_modal_readiness(
         "runtime_probes": runtime_probes,
         "blocking_probe_failures": blocking_probe_failures,
         "advisory_probe_failures": advisory_probe_failures,
+        "completion_evidence": modal_completion_evidence_contract(),
     }
 
 
@@ -811,6 +1107,11 @@ def _print_text_summary(summary: dict[str, Any]) -> None:
             )
     if summary.get("advisory_probe_failures"):
         print("  Advisory probe failures: " + ", ".join(summary["advisory_probe_failures"]))
+    completion_evidence = summary.get("completion_evidence") or {}
+    if isinstance(completion_evidence, dict):
+        print("  Completion evidence:")
+        print(f"    - Modal update status required: {completion_evidence.get('modal_update_status_required')}")
+        print(f"    - Readiness command: {completion_evidence.get('readiness_command')}")
     print(f"  Core ready: {'yes' if summary.get('core_ok') else 'no'}")
     print(f"  Ready: {'yes' if summary['ok'] else 'no'}")
 
@@ -819,6 +1120,9 @@ def main() -> int:
     apply_workspace_runtime_env(repo_root=Path(REPO_ROOT))
     load_env()
     args = _parse_args()
+    os.environ["TRR_MODAL_LOOKUP_TIMEOUT_SECONDS"] = str(
+        max(1, int(getattr(args, "modal_lookup_timeout_seconds", DEFAULT_MODAL_LOOKUP_TIMEOUT_SECONDS)))
+    )
     summary = verify_modal_readiness(
         app_name=args.app_name,
         runtime_secret_name=args.runtime_secret_name,
@@ -831,6 +1135,9 @@ def main() -> int:
         probe_instagram_comments_auth_shortcode=str(args.probe_instagram_comments_shortcode or "").strip() or None,
         probe_getty_remote_access=bool(args.probe_getty_remote_access),
         probe_core_workers=bool(args.probe_core_workers),
+        remote_probe_timeout_seconds=int(
+            getattr(args, "remote_probe_timeout_seconds", DEFAULT_REMOTE_PROBE_TIMEOUT_SECONDS)
+        ),
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

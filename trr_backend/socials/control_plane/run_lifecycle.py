@@ -323,6 +323,7 @@ def _maybe_start_deferred_comments_followup(
                 max_posts=None,
                 max_comments_per_post=None,
                 refresh_policy=str(followup.get("refresh_policy") or "all_saved_posts"),
+                target_filter=str(followup.get("target_filter") or "").strip() or None,
                 initiated_by="catalog_completion_followup",
                 allow_local_dev_inline_bypass=bool(followup.get("allow_local_dev_inline_bypass")),
                 comments_enable_media_followups=bool(followup.get("comments_enable_media_followups")),

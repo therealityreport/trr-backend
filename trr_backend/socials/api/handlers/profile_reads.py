@@ -186,3 +186,20 @@ def get_catalog_gap_analysis_status(*, platform: str, account_handle: str) -> di
     import trr_backend.socials.social_season_analytics_impl as social_core
 
     return social_core.get_social_account_catalog_gap_analysis_status(platform=platform, account_handle=account_handle)
+
+
+def get_catalog_freshness(
+    *,
+    platform: str,
+    account_handle: str,
+    use_cached_live_total_only: bool = False,
+    statement_timeout_ms: int = 3000,
+) -> dict[str, Any]:
+    import trr_backend.socials.social_season_analytics_impl as social_core
+
+    return social_core.get_social_account_catalog_freshness(
+        platform=platform,
+        account_handle=account_handle,
+        use_cached_live_total_only=use_cached_live_total_only,
+        statement_timeout_ms=statement_timeout_ms,
+    )

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,13 @@ SUPPORTED_SOURCE_SCOPES = ("network", "news", "creator", "community", "bravo")
 SUPPORTED_ACTIONS = ("backfill", "sync_recent", "sync_newer", "fill_missing_posts", "fill_missing_photos")
 SUPPORTED_SELECTED_TASKS = ("post_details", "comments", "media")
 LOCAL_SCRIPT_LABEL = "local-script:local_catalog_action.py"
+BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION = "RUN BRAVOTV INSTAGRAM BACKFILL"
+LOCAL_CATALOG_DB_POOL_DEFAULTS = {
+    "TRR_DB_POOL_MAXCONN": "4",
+    "TRR_SOCIAL_PROFILE_DB_POOL_MAXCONN": "4",
+    "TRR_SOCIAL_CONTROL_DB_POOL_MAXCONN": "4",
+    "TRR_SOCIAL_PROGRESS_DB_POOL_MAXCONN": "4",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -56,6 +64,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Limit comment repair to a specific platform post/source id. Repeat for multiple anchors.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the planned catalog action without launching or executing any jobs.",
+    )
+    parser.add_argument(
+        "--confirm-bravotv-instagram-backfill",
+        default="",
+        help=(
+            "Required confirmation phrase for live BravoTV Instagram full-history backfills: "
+            f"{BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION}"
+        ),
+    )
     return parser.parse_args(argv if argv is not None else sys.argv[1:])
 
 
@@ -63,6 +84,16 @@ def apply_workspace_runtime_env(*, repo_root: Path) -> Any:
     from scripts._workspace_runtime_env import apply_workspace_runtime_env as _apply_workspace_runtime_env
 
     return _apply_workspace_runtime_env(repo_root=repo_root)
+
+
+def apply_local_catalog_db_pool_defaults() -> dict[str, str]:
+    applied: dict[str, str] = {}
+    for key, value in LOCAL_CATALOG_DB_POOL_DEFAULTS.items():
+        if os.environ.get(key):
+            continue
+        os.environ[key] = value
+        applied[key] = value
+    return applied
 
 
 def _load_module(name: str) -> Any:
@@ -75,6 +106,69 @@ def _load_module(name: str) -> Any:
 def _inline_worker_id(platform: str) -> str:
     normalized = str(platform or "").strip().lower() or "unknown"
     return f"local-script:catalog:{normalized}"
+
+
+def _normalize_handle(value: Any) -> str:
+    return str(value or "").strip().lower().lstrip("@")
+
+
+def _is_bravotv_instagram_backfill(args: argparse.Namespace) -> bool:
+    return (
+        str(getattr(args, "action", "") or "").strip().lower() == "backfill"
+        and str(getattr(args, "platform", "") or "").strip().lower() == "instagram"
+        and _normalize_handle(getattr(args, "account", "")) == "bravotv"
+    )
+
+
+def _selected_tasks(args: argparse.Namespace) -> list[str]:
+    return [str(task).strip() for task in list(getattr(args, "selected_tasks", []) or []) if str(task).strip()]
+
+
+def _comment_anchor_source_ids(args: argparse.Namespace) -> list[str]:
+    return [
+        str(item).strip()
+        for item in list(getattr(args, "comment_anchor_source_ids", []) or [])
+        if str(item).strip()
+    ]
+
+
+def _bravotv_backfill_confirmation_valid(args: argparse.Namespace) -> bool:
+    if not _is_bravotv_instagram_backfill(args):
+        return True
+    supplied = str(getattr(args, "confirm_bravotv_instagram_backfill", "") or "").strip()
+    return supplied == BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION
+
+
+def _dry_run_payload(args: argparse.Namespace) -> dict[str, Any]:
+    selected_tasks = _selected_tasks(args)
+    return {
+        "status": "dry_run",
+        "would_launch": False,
+        "would_execute_inline_worker": False,
+        "platform": str(getattr(args, "platform", "") or "").strip().lower(),
+        "account": _normalize_handle(getattr(args, "account", "")),
+        "source_scope": str(getattr(args, "source_scope", "") or "").strip().lower(),
+        "action": str(getattr(args, "action", "") or "").strip().lower(),
+        "selected_tasks": selected_tasks,
+        "default_selected_tasks": ["post_details", "comments", "media"] if not selected_tasks else None,
+        "comment_anchor_source_ids": _comment_anchor_source_ids(args),
+        "confirmation_required": _is_bravotv_instagram_backfill(args),
+        "required_confirmation": (
+            BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION if _is_bravotv_instagram_backfill(args) else None
+        ),
+    }
+
+
+def _blocked_confirmation_payload(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "reason": "bravotv_instagram_backfill_confirmation_required",
+        "platform": str(getattr(args, "platform", "") or "").strip().lower(),
+        "account": _normalize_handle(getattr(args, "account", "")),
+        "action": str(getattr(args, "action", "") or "").strip().lower(),
+        "required_confirmation": BRAVOTV_INSTAGRAM_BACKFILL_CONFIRMATION,
+        "dry_run_hint": "Re-run with --dry-run to inspect the plan without launching jobs.",
+    }
 
 
 def _payload_run_ids(payload: dict[str, Any]) -> list[str]:
@@ -93,20 +187,88 @@ def _payload_run_ids(payload: dict[str, Any]) -> list[str]:
     return run_ids
 
 
-def _execute_run(payload: dict[str, Any], worker_id: str, control_plane: Any) -> int:
+def _cancel_interrupted_runs(
+    *,
+    analytics_repo: Any,
+    platform: str | None,
+    account_handle: str,
+    run_ids: list[str],
+    cancelled_by: str,
+) -> dict[str, Any]:
+    cleanup: dict[str, Any] = {
+        "attempted": False,
+        "cancelled_run_ids": [],
+        "failed_run_ids": [],
+    }
+    if not platform or not run_ids:
+        return cleanup
+    for run_id in run_ids:
+        cleanup["attempted"] = True
+        try:
+            result = analytics_repo.cancel_social_account_catalog_run(
+                platform=platform,
+                account_handle=account_handle,
+                run_id=run_id,
+                cancelled_by=cancelled_by,
+            )
+            cleanup["cancelled_run_ids"].append(str(result.get("run_id") or run_id))
+        except Exception as exc:  # noqa: BLE001
+            cleanup["failed_run_ids"].append({"run_id": run_id, "error": str(exc)})
+    return cleanup
+
+
+def _execute_run(
+    payload: dict[str, Any],
+    worker_id: str,
+    control_plane: Any,
+    *,
+    analytics_repo: Any,
+    account_handle: str,
+) -> int:
     run_ids = _payload_run_ids(payload)
     if not run_ids:
-        print("Catalog action did not return a run_id.", file=sys.stderr)
+        print(json.dumps({"executed_run_ids": [], **payload}, sort_keys=True))
         return 1
     platform = str(payload.get("platform") or "").strip().lower() or None
     supported_platforms = [platform] if platform else None
-    for index, run_id in enumerate(run_ids, start=1):
-        control_plane.execute_run_with_inline_worker_registration(
-            run_id,
-            worker_id=f"{worker_id}:{index}",
+    executed_run_ids: list[str] = []
+    try:
+        for index, run_id in enumerate(run_ids, start=1):
+            executed_run_ids.append(run_id)
+            control_plane.execute_run_with_inline_worker_registration(
+                run_id,
+                worker_id=f"{worker_id}:{index}",
+                platform=platform,
+                supported_platforms=supported_platforms,
+            )
+    except KeyboardInterrupt:
+        cleanup = _cancel_interrupted_runs(
+            analytics_repo=analytics_repo,
             platform=platform,
-            supported_platforms=supported_platforms,
+            account_handle=account_handle,
+            run_ids=executed_run_ids,
+            cancelled_by=f"{LOCAL_SCRIPT_LABEL}:interrupted",
         )
+        print(
+            json.dumps(
+                {
+                    "status": "interrupted",
+                    "executed_run_ids": executed_run_ids,
+                    "interrupted_cleanup": cleanup,
+                },
+                sort_keys=True,
+            )
+        )
+        return 130
+    except Exception:
+        _cancel_interrupted_runs(
+            analytics_repo=analytics_repo,
+            platform=platform,
+            account_handle=account_handle,
+            run_ids=executed_run_ids,
+            cancelled_by=f"{LOCAL_SCRIPT_LABEL}:execution_error",
+        )
+        raise
     print(json.dumps({"run_id": run_ids[0], "executed_run_ids": run_ids, "status": "completed"}, sort_keys=True))
     return 0
 
@@ -208,8 +370,25 @@ def _dispatch_fill_missing_posts(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if bool(getattr(args, "dry_run", False)):
+        print(json.dumps(_dry_run_payload(args), sort_keys=True))
+        return 0
+    if not _bravotv_backfill_confirmation_valid(args):
+        print(json.dumps(_blocked_confirmation_payload(args), sort_keys=True), file=sys.stderr)
+        return 2
+    pool_defaults = apply_local_catalog_db_pool_defaults()
     load_dotenv()
     apply_workspace_runtime_env(repo_root=REPO_ROOT)
+    print(
+        json.dumps(
+            {
+                "local_catalog_db_pool_defaults": pool_defaults,
+                "local_catalog_db_pool_default_keys": sorted(LOCAL_CATALOG_DB_POOL_DEFAULTS),
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
 
     analytics_repo = _load_module("trr_backend.repositories.social_season_analytics")
     worker_id = _inline_worker_id(args.platform)
@@ -223,8 +402,8 @@ def main(argv: list[str] | None = None) -> int:
                 source_scope=args.source_scope,
                 worker_id=worker_id,
                 scope="full_history",
-                selected_tasks=list(getattr(args, "selected_tasks", []) or []),
-                comment_anchor_source_ids=list(getattr(args, "comment_anchor_source_ids", []) or []),
+                selected_tasks=_selected_tasks(args),
+                comment_anchor_source_ids=_comment_anchor_source_ids(args),
             )
         elif args.action == "sync_recent":
             payload = analytics_repo.sync_recent_social_account_catalog(
@@ -257,7 +436,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     control_plane = _load_module("trr_backend.socials.control_plane")
-    return _execute_run(payload, worker_id, control_plane)
+    return _execute_run(
+        payload,
+        worker_id,
+        control_plane,
+        analytics_repo=analytics_repo,
+        account_handle=args.account,
+    )
 
 
 if __name__ == "__main__":

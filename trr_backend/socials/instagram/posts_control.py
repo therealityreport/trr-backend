@@ -105,6 +105,17 @@ def start_instagram_posts_scrapling_scrape(
             "An Instagram account handle is required.",
         )
     _assert_social_account_profile_exists(normalized_platform, normalized_account)
+    cooldown = _active_posts_auth_cooldown(normalized_platform, normalized_account)
+    if cooldown is not None:
+        raise SocialIngestConflictError(
+            "SOCIAL_POSTS_SCRAPLING_AUTH_COOLDOWN_ACTIVE",
+            f"Posts_scrapling start is deferred for @{normalized_account} while Instagram auth cooldown is active.",
+            detail={
+                "platform": normalized_platform,
+                "account_handle": normalized_account,
+                "auth_cooldown": cooldown,
+            },
+        )
 
     lock_key = _social_account_posts_scrapling_start_lock_key(normalized_platform, normalized_account)
     lock_label = f"posts-scrapling-start-lock:instagram:{normalized_account[:48]}"

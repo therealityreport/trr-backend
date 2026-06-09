@@ -63,7 +63,8 @@ def _catalog_progress_stage_graph_payload(
         remaining = max(
             _normalize_non_negative_int(stage.get("jobs_total"))
             - _normalize_non_negative_int(stage.get("jobs_completed"))
-            - _normalize_non_negative_int(stage.get("jobs_failed")),
+            - _normalize_non_negative_int(stage.get("jobs_failed"))
+            - _normalize_non_negative_int(stage.get("jobs_cancelled")),
             0,
         )
         if waiting > 0 or active > 0 or remaining > 0:
@@ -179,6 +180,21 @@ def _catalog_posts_runtime_additive_payload(
         else latest_fetcher_runtime.get("doc_ids_attempted")
     )
     runtime_proxy_pacing = _metadata_dict(latest_fetcher_runtime.get("proxy_pacing"))
+    # Bandwidth metering surfaced from the fetcher runtime (top-level, falling back to
+    # the nested proxy_pacing copy). bytes_total carries the per-job download size and
+    # bytes_by_host the per-destination-host breakdown for cost attribution.
+    runtime_bytes_total = _normalize_non_negative_int(
+        latest_fetcher_runtime.get("bytes_total") or runtime_proxy_pacing.get("bytes_total")
+    )
+    runtime_bytes_by_host_raw = (
+        latest_fetcher_runtime.get("bytes_by_host") or runtime_proxy_pacing.get("bytes_by_host") or {}
+    )
+    runtime_bytes_by_host = {
+        str(host): _normalize_non_negative_int(value)
+        for host, value in (
+            runtime_bytes_by_host_raw.items() if isinstance(runtime_bytes_by_host_raw, Mapping) else []
+        )
+    }
     proxy_fingerprint = (
         str(_metadata_dict(pagination_state).get("proxy_fingerprint") or "").strip()
         or str(latest_fetcher_runtime.get("proxy_fingerprint") or "").strip()
@@ -223,8 +239,17 @@ def _catalog_posts_runtime_additive_payload(
         if isinstance(latest_fetcher_runtime.get("warmup_pool"), dict)
         else None
     )
+    posts_auth_mode = (
+        str(latest_fetcher_runtime.get("auth_state") or "").strip().lower()
+        or str(run_config.get("posts_auth_mode") or run_config.get("instagram_posts_auth_mode") or "").strip().lower()
+        or None
+    )
+    if posts_auth_mode not in {"anonymous", "authenticated"}:
+        posts_auth_mode = None
     return {
         "posts_acceleration_flags": feature_flags,
+        "posts_auth_mode": posts_auth_mode,
+        "instagram_posts_auth_mode": posts_auth_mode,
         "pagination_state": dict(pagination_state) if isinstance(pagination_state, Mapping) else {},
         "resume_cursor_saved": bool(_metadata_dict(pagination_state).get("end_cursor")),
         "listing_progress": listing_progress,
@@ -240,6 +265,8 @@ def _catalog_posts_runtime_additive_payload(
             "proxy_session_key": str(_metadata_dict(pagination_state).get("proxy_session_key") or "").strip()
             or str(latest_fetcher_runtime.get("proxy_session_key") or "").strip()
             or None,
+            "bytes_total": runtime_bytes_total,
+            "bytes_by_host": runtime_bytes_by_host,
         },
         "warmup_pool": warmup_pool,
         "bidirectional_probe": bidirectional_probe,

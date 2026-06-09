@@ -31,8 +31,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
 
-load_dotenv(REPO_ROOT / ".env", override=True)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -46,6 +44,8 @@ logger = logging.getLogger("direct_catalog_backfill")
 
 
 def main() -> int:
+    load_dotenv(REPO_ROOT / ".env", override=True)
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--account", required=True, help="Instagram account handle to backfill (e.g. bravotv)")
     parser.add_argument("--max-pages", type=int, default=600, help="Max pages to scrape (default: 600)")

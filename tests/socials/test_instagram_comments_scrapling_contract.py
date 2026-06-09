@@ -29,8 +29,28 @@ def test_stealthy_fetcher_public_import() -> None:
 
 
 def test_proxy_rotator_public_import() -> None:
-    """Exercises the public ProxyRotator path we switched to in P1-4."""
-    from scrapling.fetchers import ProxyRotator  # noqa: F401
+    """Exercises the public ProxyRotator path used by TRR adapters."""
+    from scrapling.fetchers import ProxyRotator
+
+    assert ProxyRotator.__module__ == "scrapling.engines.toolbelt.proxy_rotation"
+
+
+def test_scrapling_fetcher_import_surface() -> None:
+    """Records the exact Scrapling 0.4.8 import surface used by TRR."""
+    from scrapling.fetchers import DynamicFetcher, Fetcher, ProxyRotator, StealthyFetcher
+
+    resolved = {
+        "Fetcher": f"{Fetcher.__module__}.{Fetcher.__name__}",
+        "DynamicFetcher": f"{DynamicFetcher.__module__}.{DynamicFetcher.__name__}",
+        "StealthyFetcher": f"{StealthyFetcher.__module__}.{StealthyFetcher.__name__}",
+        "ProxyRotator": f"{ProxyRotator.__module__}.{ProxyRotator.__name__}",
+    }
+    assert resolved == {
+        "Fetcher": "scrapling.fetchers.requests.Fetcher",
+        "DynamicFetcher": "scrapling.fetchers.chrome.DynamicFetcher",
+        "StealthyFetcher": "scrapling.fetchers.stealth_chrome.StealthyFetcher",
+        "ProxyRotator": "scrapling.engines.toolbelt.proxy_rotation.ProxyRotator",
+    }
 
 
 def test_stealth_session_contains_all_kwargs_we_use() -> None:

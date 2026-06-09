@@ -170,6 +170,21 @@ def _load_survey_questions(db: SupabaseClient, survey_id: str) -> list[dict[str,
     return questions
 
 
+def _message_indicates_missing_survey(error: object) -> bool:
+    error_msg = str(error).lower()
+    return any(marker in error_msg for marker in ("survey not found", "not found", "pgrst116", "0 rows", "no rows"))
+
+
+def _survey_exists(admin_db: SupabaseAdminClient, survey_id: UUID) -> bool:
+    try:
+        response = admin_db.schema("surveys").table("surveys").select("id").eq("id", str(survey_id)).single().execute()
+    except Exception as exc:
+        if _message_indicates_missing_survey(exc):
+            return False
+        raise
+    return bool(getattr(response, "data", None))
+
+
 # --- Endpoints ---
 
 
@@ -293,13 +308,15 @@ def submit_survey(
             raise HTTPException(
                 status_code=409, detail="You have already submitted a response to this survey"
             ) from None
-        if "not found" in error_msg:
+        if _message_indicates_missing_survey(e):
             raise HTTPException(status_code=404, detail="Survey not found") from None
         if "not accepting" in error_msg:
             raise HTTPException(status_code=400, detail="Survey is not accepting responses") from None
         raise HTTPException(status_code=500, detail=f"Failed to submit survey: {e}") from e
 
     if not rpc_response.data:
+        if not _survey_exists(admin_db, survey_id):
+            raise HTTPException(status_code=404, detail="Survey not found")
         raise HTTPException(status_code=500, detail="Failed to create response")
 
     response_id = rpc_response.data

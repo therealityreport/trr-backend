@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from trr_backend.socials.socialblade.scraper import (
@@ -21,6 +23,7 @@ from trr_backend.socials.socialblade.scraper import (
     _socialblade_profile_url,
     scrape_socialblade,
 )
+from trr_backend.socials.socialblade.service import is_growth_data_fresh
 
 BODY_TEXT = """
 Lisa Barlow
@@ -801,6 +804,18 @@ def test_scrape_socialblade_accepts_tiktok_daily_total_control_capture_without_l
     assert payload["history_source"] == "page_trpc_capture_short"
     assert payload["daily_channel_metrics_60day"]["row_count"] == 56
     assert payload["daily_total_followers_chart"]["date_range"] == {"from": "2026-03-19", "to": "2026-05-14"}
+
+
+def test_socialblade_freshness_accepts_short_capture_with_enough_points() -> None:
+    payload = {
+        "stats_refreshed": True,
+        "scraped_at": datetime.now(UTC).isoformat(),
+        "history_source": "page_trpc_capture_short",
+        "daily_channel_metrics_60day": {"row_count": 60, "data": []},
+        "daily_total_followers_chart": {"total_data_points": 60, "data": []},
+    }
+
+    assert is_growth_data_fresh(payload, freshness_hours=48) is True
 
 
 def test_scrape_socialblade_persists_degraded_attempt_when_login_retry_fails(

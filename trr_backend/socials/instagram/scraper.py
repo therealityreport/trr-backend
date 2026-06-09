@@ -93,6 +93,9 @@ from trr_backend.socials.instagram.resume_state import InstagramResumeState
 
 logger = logging.getLogger(__name__)
 
+INSTAGRAM_AUTH_REPAIR_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
+INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV = "SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION"
+
 _GRAPHQL_RECOVERY_POLICY_BY_ERROR_CODE: dict[str, str] = {
     "instagram_graphql_cursor_rate_limited": "never_browser_fallback",
     "instagram_graphql_checkpoint_required": "browser_fallback",
@@ -768,11 +771,15 @@ class InstagramScraper:
         SOCIAL_INSTAGRAM_COOKIES_FILE (default: data/instagram_cookies.json).
 
         Disabled by default to avoid triggering Instagram security checks.
-        Set SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH=true to enable.
+        Requires SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH=true plus an exact
+        SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION value.
         """
         auto_refresh_enabled = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") or "").strip().lower()
         if auto_refresh_enabled not in {"1", "true", "yes", "on"}:
             return {"refreshed": False, "reason": "auto_refresh_disabled"}
+        confirmation = (os.getenv(INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV) or "").strip()
+        if confirmation != INSTAGRAM_AUTH_REPAIR_CONFIRMATION:
+            return {"refreshed": False, "reason": "instagram_auth_repair_confirmation_required"}
 
         from .cookie_refresh import refresh_instagram_cookies
 
@@ -787,7 +794,7 @@ class InstagramScraper:
             project_root = Path(__file__).resolve().parent.parent.parent.parent
             cookie_path = project_root / cookie_file
 
-        logger.info("[instagram] attempting cookie auto-refresh via Playwright login (%s)", ig_user)
+        logger.info("[instagram] attempting confirmed cookie repair via Playwright login (%s)", ig_user)
         validation_username = str(self.browser_account_id or ig_user).strip().lstrip("@")
 
         def _validate_refreshed_cookies(cookies: dict[str, str]) -> tuple[bool, str | None]:
@@ -800,7 +807,12 @@ class InstagramScraper:
                 delay=0.0,
                 request_timeout=(10, 20),
             )
-            connection = (payload or {}).get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+            payload_data = (payload or {}).get("data") if isinstance(payload, dict) else {}
+            connection = (
+                payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+                if isinstance(payload_data, dict)
+                else {}
+            )
             if connection.get("edges"):
                 return True, None
             error_code = str(validator_scraper.last_retrieval_meta.get("error_code") or "").strip().lower()
@@ -834,10 +846,13 @@ class InstagramScraper:
             for k, v in fresh_cookies.items():
                 self.session.cookies.set(k, v, domain=".instagram.com")
             self._clear_profile_page_context_cache()
-            logger.info("[instagram] cookie auto-refresh succeeded — sessionid=%s…", fresh_cookies["sessionid"][:8])
+            logger.info(
+                "[instagram] confirmed cookie repair succeeded - sessionid=%s...",
+                fresh_cookies["sessionid"][:8],
+            )
             return {"refreshed": True, "reason": None, "cookie_file": str(cookie_path)}
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[instagram] cookie auto-refresh failed: %s", exc)
+            logger.warning("[instagram] confirmed cookie repair failed: %s", exc)
             return {"refreshed": False, "reason": f"refresh_error: {exc}"}
 
     @staticmethod
@@ -872,14 +887,17 @@ class InstagramScraper:
     def _try_interactive_login(self) -> dict[str, Any]:
         """Open Chrome with the user's profile for Instagram auth.
 
-        Auto-enabled when running locally (no Modal env detected).
-        Set SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN=false to disable.
+        Disabled by default to avoid repeated Instagram login/challenge loops.
+        Requires SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN=true plus an exact
+        SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION value.
         Set SOCIAL_INSTAGRAM_BROWSER_MODE=headed|headless to control visibility.
         """
-        # Explicitly disabled?
         explicit = (os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") or "").strip().lower()
-        if explicit in {"0", "false", "no", "off"}:
+        if explicit not in {"1", "true", "yes", "on"}:
             return {"refreshed": False, "reason": "interactive_login_disabled"}
+        confirmation = (os.getenv(INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV) or "").strip()
+        if confirmation != INSTAGRAM_AUTH_REPAIR_CONFIRMATION:
+            return {"refreshed": False, "reason": "instagram_auth_repair_confirmation_required"}
 
         # Never run on Modal workers
         if not self._is_local_environment():
@@ -1106,7 +1124,8 @@ class InstagramScraper:
 
             user = self._user_dict_from_profile_content_payload(payload)
             if user:
-                data_payload = dict(payload.get("data") or {})
+                raw_data_payload = payload.get("data") if isinstance(payload, dict) else {}
+                data_payload = dict(raw_data_payload) if isinstance(raw_data_payload, dict) else {}
                 data_payload.setdefault("user", user)
                 payload = {**payload, "data": data_payload}
                 self.last_retrieval_meta.update(
@@ -1228,8 +1247,11 @@ class InstagramScraper:
                             if cursor and cursor not in post_data:
                                 return
                             payload = response.json()
-                            connection = payload.get("data", {}).get(
-                                "xdt_api__v1__feed__user_timeline_graphql_connection", {}
+                            payload_data = payload.get("data") if isinstance(payload, dict) else {}
+                            connection = (
+                                payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+                                if isinstance(payload_data, dict)
+                                else {}
                             )
                             edges = connection.get("edges") or []
                             count_value = self._coerce_int(connection.get("count"), default=0)
@@ -3041,7 +3063,26 @@ class InstagramScraper:
                         timeout=timeout,
                         sender=self._post,
                     )
-                    connection = payload.get("data", {}).get(self.PROFILE_POSTS_ROOT_FIELD_NAME, {})
+                    if not isinstance(payload, dict):
+                        saw_request_error = True
+                        self.last_retrieval_meta.update(
+                            {
+                                "request_query_type": QUERY_TYPE_GRAPHQL_PROFILE_POSTS,
+                                "error_code": "instagram_graphql_empty_response",
+                                "error_class": type(payload).__name__,
+                                "error_message": "Instagram GraphQL returned an empty response payload.",
+                                "retryable": True,
+                                "graphql_cursor": str(cursor or "").strip() or None,
+                            }
+                        )
+                        logger.warning("Instagram GraphQL doc_id %s returned empty response payload", doc_id)
+                        continue
+                    payload_data = payload.get("data") if isinstance(payload, dict) else {}
+                    connection = (
+                        payload_data.get(self.PROFILE_POSTS_ROOT_FIELD_NAME, {})
+                        if isinstance(payload_data, dict)
+                        else {}
+                    )
                     if connection:
                         self.last_retrieval_meta["graphql_cursor"] = str(cursor or "").strip() or None
                         self.last_retrieval_meta["retrieval_mode"] = "graphql_requests_enriched"
@@ -3145,7 +3186,7 @@ class InstagramScraper:
         _auto_rotation_attempted = getattr(self, "_auto_rotation_attempted_this_scrape", False)
         if error_code in auth_recoverable_errors and not _auto_rotation_attempted and not recovery_disabled:
             logger.warning(
-                "GraphQL auth error for @%s (%s) — attempting auto cookie refresh before interactive login",
+                "GraphQL auth error for @%s (%s) - checking confirmed cookie repair before fallback",
                 username,
                 error_code,
             )
@@ -3265,7 +3306,8 @@ class InstagramScraper:
 
     def _iter_posts_from_profile_info(self, data: dict) -> Iterator[tuple[dict, dict]]:
         """Iterate posts from profile info response."""
-        user = data.get("data", {}).get("user", {})
+        payload_data = data.get("data") if isinstance(data, dict) else {}
+        user = payload_data.get("user", {}) if isinstance(payload_data, dict) else {}
         timeline = user.get("edge_owner_to_timeline_media", {})
         edges = timeline.get("edges", [])
         page_info = timeline.get("page_info", {})
@@ -3275,7 +3317,12 @@ class InstagramScraper:
 
     def _iter_posts_from_graphql(self, data: dict) -> Iterator[tuple[dict, dict]]:
         """Iterate posts from GraphQL response."""
-        connection = data.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+        payload_data = data.get("data") if isinstance(data, dict) else {}
+        connection = (
+            payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+            if isinstance(payload_data, dict)
+            else {}
+        )
         edges = connection.get("edges", [])
         page_info = connection.get("page_info", {})
 
@@ -3283,12 +3330,17 @@ class InstagramScraper:
             yield edge.get("node", {}), page_info
 
     def _extract_profile_total_posts(self, data: dict[str, Any], *, source: str) -> int | None:
+        payload_data = data.get("data") if isinstance(data, dict) else {}
         if source == "profile_info":
-            user = data.get("data", {}).get("user", {})
+            user = payload_data.get("user", {}) if isinstance(payload_data, dict) else {}
             timeline = user.get("edge_owner_to_timeline_media", {})
             total_posts = self._coerce_int(timeline.get("count"), default=0)
             return total_posts if total_posts > 0 else None
-        connection = data.get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+        connection = (
+            payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+            if isinstance(payload_data, dict)
+            else {}
+        )
         total_posts = self._coerce_int(connection.get("count"), default=0)
         return total_posts if total_posts > 0 else None
 
@@ -4651,7 +4703,7 @@ class InstagramScraper:
 
         has_auth = bool(self.cookies.get("sessionid"))
 
-        # ── Auth gate (with auto-refresh) ─────────────────────────────
+        # Auth gate. Cookie repair is blocked unless explicitly confirmed.
         auto_refresh_result: dict[str, Any] | None = None
 
         if not has_auth:
@@ -4665,7 +4717,7 @@ class InstagramScraper:
                     has_auth = True
             if not has_auth and config.require_auth:
                 logger.warning(
-                    "[instagram] scrape aborted for @%s: no sessionid, auto-refresh failed (%s)",
+                    "[instagram] scrape aborted for @%s: no sessionid, auth repair skipped (%s)",
                     config.username,
                     auto_refresh_result.get("reason"),
                 )
@@ -4910,9 +4962,17 @@ class InstagramScraper:
             )
             if not data:
                 # Attempt one session rotation on auth failure before giving up.
-                # Uses interactive Chrome login (pop-up) when running locally —
-                # no SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH env var needed.
+                # Disabled unless the operator explicitly opts into headed login.
                 error_code = self.last_retrieval_meta.get("error_code", "")
+                interactive_login_enabled = (os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") or "").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                interactive_login_confirmed = (
+                    os.getenv(INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV) or ""
+                ).strip() == INSTAGRAM_AUTH_REPAIR_CONFIRMATION
                 if (
                     error_code
                     in {
@@ -4921,10 +4981,12 @@ class InstagramScraper:
                     }
                     and not self._pagination_session_rotated
                     and self._is_local_environment()
+                    and interactive_login_enabled
+                    and interactive_login_confirmed
                 ):
                     self._pagination_session_rotated = True  # guard before attempt — don't retry even if refresh fails
                     logger.warning(
-                        "Auth failure mid-pagination on page %d (%s) — opening Chrome for session refresh",
+                        "Auth failure mid-pagination on page %d (%s) - running operator-enabled Chrome session refresh",
                         page_num,
                         error_code,
                     )
@@ -5039,7 +5101,7 @@ class InstagramScraper:
                 cookie_check = self._validate_cookies()
                 if not cookie_check["valid"]:
                     logger.warning(
-                        "[instagram] cookies expired mid-pagination at page %d — attempting refresh",
+                        "[instagram] cookies expired mid-pagination at page %d - checking confirmed cookie repair",
                         page_num,
                     )
                     rotation_attempts += 1
@@ -5157,7 +5219,9 @@ class InstagramScraper:
                             if not response.ok:
                                 return
                             payload = response.json()
-                            data_obj = payload.get("data", {})
+                            data_obj = payload.get("data") if isinstance(payload, dict) else {}
+                            if not isinstance(data_obj, dict):
+                                return
                             # Try the known connection key first, then scan for
                             # any key containing "timeline" or "feed" as a
                             # fallback in case Instagram renamed the field.

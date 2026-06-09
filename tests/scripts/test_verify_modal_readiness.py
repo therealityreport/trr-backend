@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import time
 import types
 
 import pytest
@@ -34,6 +36,32 @@ class _StubFunctionHandle:
         if self._remote_error:
             raise RuntimeError(self._remote_error)
         return dict(self._remote_payload or {})
+
+
+class _SlowFunctionHandle(_StubFunctionHandle):
+    def remote(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+        time.sleep(5)
+        return {"ready": True}
+
+
+class _TimeoutFunctionCall:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def get(self, *, timeout: float | None = None, index: int = 0) -> dict[str, object]:
+        raise TimeoutError("timed out")
+
+    def cancel(self, terminate_containers: bool = False) -> None:
+        self.cancelled = terminate_containers
+
+
+class _SpawnTimeoutFunctionHandle(_StubFunctionHandle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.call = _TimeoutFunctionCall()
+
+    def spawn(self, *_args: object, **_kwargs: object) -> _TimeoutFunctionCall:
+        return self.call
 
 
 def test_expected_function_names_includes_runtime_probes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,6 +111,67 @@ def test_expected_function_names_skips_social_functions_when_queue_disabled(monk
     assert "run_social_job" not in function_names
     assert "run_social_comments_job" not in function_names
     assert cli.required_social_function_names(enabled=False) == ()
+
+
+def test_run_modal_json_reports_lookup_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRR_MODAL_LOOKUP_TIMEOUT_SECONDS", "1")
+
+    def fake_run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd="modal secret list", timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    with pytest.raises(cli.ModalLookupTimeoutError) as exc_info:
+        cli._run_modal_json("secret", "list")
+
+    assert "Modal command timed out after 1 seconds" in str(exc_info.value)
+
+
+def test_running_in_repo_venv_uses_python_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    repo_venv = tmp_path / ".venv"
+    repo_venv_bin = repo_venv / "bin"
+    repo_venv_bin.mkdir(parents=True)
+    repo_python = repo_venv_bin / "python"
+    repo_python.touch()
+
+    monkeypatch.setattr(cli.sys, "prefix", str(repo_venv))
+    assert cli._running_in_repo_venv(str(repo_python)) is True
+
+    monkeypatch.setattr(cli.sys, "prefix", "/opt/homebrew/opt/python@3.11")
+    assert cli._running_in_repo_venv(str(repo_python)) is False
+
+
+def test_verify_modal_readiness_returns_structured_lookup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_list_secret_names(*, modal_environment: str = "") -> set[str]:
+        raise cli.ModalLookupTimeoutError("Modal lookup timed out after 1 seconds")
+
+    monkeypatch.setattr(cli, "list_secret_names", fake_list_secret_names)
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=("serve_backend_api", "probe_social_remote_auth"),
+    )
+
+    assert summary["ok"] is False
+    assert summary["core_ok"] is False
+    assert summary["app_lookup_error"] == "Modal lookup timed out after 1 seconds"
+    assert summary["blocking_probe_failures"] == ["modal_lookup_timeout"]
+    assert summary["function_results"] == [
+        {
+            "name": "serve_backend_api",
+            "resolved": False,
+            "error": "modal_lookup_timeout",
+        },
+        {
+            "name": "probe_social_remote_auth",
+            "resolved": False,
+            "error": "modal_lookup_timeout",
+        },
+    ]
 
 
 def test_verify_modal_readiness_passes_when_all_resources_exist(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -696,6 +785,57 @@ def test_verify_modal_readiness_reports_remote_probe_failure(
     assert summary["remote_auth_probe"]["reason"] == "probe_invocation_failed"
     assert summary["remote_auth_probe"]["detail"]["exception_class"] == "RuntimeError"
     assert summary["blocking_probe_failures"] == ["probe_invocation_failed"]
+
+
+def test_verify_modal_readiness_times_out_slow_remote_auth_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "list_secret_names",
+        lambda *, modal_environment="": {"trr-backend-runtime", "trr-social-auth"},
+    )
+    monkeypatch.setattr(cli, "list_app_descriptions", lambda *, modal_environment="": {"trr-backend-jobs"})
+    monkeypatch.setattr(
+        cli,
+        "get_app_function_handles",
+        lambda *, app_name, modal_environment="": {
+            "serve_backend_api": _StubFunctionHandle(web_url="https://workspace--trr-backend-api.modal.run"),
+            "probe_social_remote_auth": _SlowFunctionHandle(),
+        },
+    )
+
+    summary = cli.verify_modal_readiness(
+        app_name="trr-backend-jobs",
+        runtime_secret_name="trr-backend-runtime",
+        social_secret_name="trr-social-auth",
+        function_names=("serve_backend_api", "probe_social_remote_auth"),
+        probe_remote_auth_platform="instagram",
+        remote_probe_timeout_seconds=1,
+    )
+
+    assert summary["ok"] is False
+    assert summary["remote_auth_probe"]["platform"] == "instagram"
+    assert summary["remote_auth_probe"]["ready"] is False
+    assert summary["remote_auth_probe"]["reason"] == "probe_timeout"
+    assert summary["remote_auth_probe"]["detail"] == {
+        "phase": "remote_probe",
+        "timeout_seconds": 1,
+    }
+    assert summary["blocking_probe_failures"] == ["probe_timeout"]
+
+
+def test_remote_auth_probe_timeout_cancels_spawned_modal_call() -> None:
+    handle = _SpawnTimeoutFunctionHandle()
+
+    payload = cli.invoke_remote_auth_probe(
+        function_handle=handle,
+        platform="instagram",
+        timeout_seconds=1,
+    )
+
+    assert payload["platform"] == "instagram"
+    assert payload["ready"] is False
+    assert payload["reason"] == "probe_timeout"
+    assert handle.call.cancelled is True
 
 
 def test_verify_modal_readiness_keeps_core_ready_when_only_getty_probe_is_blocked(

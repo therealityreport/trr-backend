@@ -23,10 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.auth import InternalAdminUser
-from api.realtime.broker import init_broker, shutdown_broker
+from api.realtime.broker import broker_runtime_status, init_broker, shutdown_broker
 from trr_backend.db import pg
 from trr_backend.db.connection import (
     DIRECT_DB_ENV,
+    FALLBACK_DB_ENV,
+    SESSION_DB_ENV,
     TRANSACTION_DB_ENV,
     log_database_resolution_summary,
     resolve_database_url_candidate_details,
@@ -55,6 +57,13 @@ configure_runtime_observability(service_name="trr-backend-api")
 logger = logging.getLogger(__name__)
 
 _LOCAL_RUNTIME_MARKERS = frozenset({"local", "dev", "development", "test"})
+_DB_POOL_LANE_LABELS = {
+    "default": "backend_default_pool",
+    "health": "health_pool",
+    "social_profile": "social_profile_pool",
+    "social_control": "social_control_pool",
+    "social_progress": "social_progress_pool",
+}
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -80,6 +89,37 @@ def _is_local_or_dev_runtime() -> bool:
     return raw_local in {"1", "true", "yes", "on"}
 
 
+def _database_url_lane_label(candidate: dict[str, object] | None) -> str:
+    if not candidate:
+        return "missing_database_url"
+    source = str(candidate.get("source") or "")
+    connection_class = str(candidate.get("connection_class") or "")
+    host_class = str(candidate.get("host_class") or "")
+    if source == DIRECT_DB_ENV or connection_class == "direct":
+        return "direct_url"
+    if source == FALLBACK_DB_ENV:
+        return "local_fallback" if host_class == "local" else "fallback_url"
+    if source == SESSION_DB_ENV or connection_class == "session":
+        return "pooler_url"
+    if source == TRANSACTION_DB_ENV or connection_class == "transaction":
+        return "transaction_pooler_url"
+    if connection_class == "local" or host_class == "local":
+        return "local_fallback"
+    return connection_class or host_class or "unknown_database_url"
+
+
+def _database_operator_lane_snapshot(*, pool_name: str) -> dict[str, object]:
+    candidate = next(iter(resolve_database_url_candidate_details()), None)
+    return {
+        "url_lane": _database_url_lane_label(candidate),
+        "url_source": str(candidate.get("source") or "") if candidate else None,
+        "connection_class": str(candidate.get("connection_class") or "") if candidate else None,
+        "host_class": str(candidate.get("host_class") or "") if candidate else None,
+        "pool_name": pool_name,
+        "pool_lane": _DB_POOL_LANE_LABELS.get(pool_name, "unknown_pool"),
+    }
+
+
 def _cast_screentime_stale_sweeper_enabled() -> bool:
     return _env_flag("CAST_SCREENTIME_STALE_SWEEPER_ENABLED", False)
 
@@ -92,6 +132,138 @@ def _cast_screentime_stale_sweeper_interval_seconds() -> int:
     except ValueError:
         return 300
     return 300
+
+
+def _positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = (os.getenv(name) or "").strip()
+    try:
+        if raw:
+            return max(int(raw), minimum)
+    except ValueError:
+        return default
+    return default
+
+
+def _modal_runtime_scheduler_enabled() -> bool:
+    if not _env_flag("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", False):
+        return False
+    try:
+        from trr_backend.modal_dispatch import modal_dispatch_enabled
+
+        return modal_dispatch_enabled()
+    except Exception:
+        logger.exception("[modal-runtime-scheduler] enabled check failed")
+        return False
+
+
+def _modal_maintenance_owner_required() -> bool:
+    return _env_flag("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", False)
+
+
+def _modal_maintenance_owner_names() -> list[str]:
+    owners: list[str] = []
+    if _env_flag("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", False):
+        owners.append("modal_singleton_cron")
+    if _env_flag("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", False):
+        owners.append("api_runtime_scheduler")
+    return owners
+
+
+def _modal_maintenance_owner_fix_message() -> str:
+    return (
+        "Set exactly one owner variable: TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=1 "
+        "for Modal singleton cron maintenance, or TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1 "
+        "for the API runtime scheduler fallback. Keep TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1. "
+        "Then update the runtime secret with: cd TRR-Backend && "
+        "python3.11 scripts/modal/prepare_named_secrets.py --apply"
+    )
+
+
+def _validate_modal_maintenance_owner_config() -> str | None:
+    if not _modal_maintenance_owner_required():
+        return None
+    owners = _modal_maintenance_owner_names()
+    if not owners:
+        raise RuntimeError(
+            "Modal maintenance has no active owner. "
+            + _modal_maintenance_owner_fix_message()
+        )
+    if len(owners) > 1:
+        raise RuntimeError(
+            "Modal maintenance has duplicate active owners: "
+            + ", ".join(owners)
+            + ". Current owner variables: "
+            + f"TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED={os.getenv('TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED')!r}, "
+            + f"TRR_MODAL_RUNTIME_SCHEDULER_ENABLED={os.getenv('TRR_MODAL_RUNTIME_SCHEDULER_ENABLED')!r}. "
+            + _modal_maintenance_owner_fix_message()
+        )
+    return owners[0]
+
+
+def _modal_heartbeat_interval_seconds() -> int:
+    return _positive_int_env("TRR_MODAL_RUNTIME_HEARTBEAT_INTERVAL_SECONDS", 60, minimum=30)
+
+
+def _modal_social_recovery_interval_seconds() -> int:
+    return _positive_int_env("TRR_MODAL_RUNTIME_SOCIAL_RECOVERY_INTERVAL_SECONDS", 120, minimum=60)
+
+
+def _modal_stale_worker_cleanup_interval_seconds() -> int:
+    return _positive_int_env("TRR_MODAL_RUNTIME_STALE_WORKER_CLEANUP_INTERVAL_SECONDS", 24 * 60 * 60, minimum=60)
+
+
+def _run_modal_executor_heartbeat_once() -> dict[str, object]:
+    from trr_backend.modal_dispatch import modal_heartbeat_function_name, spawn_modal_maintenance_function
+
+    return spawn_modal_maintenance_function(
+        function_name=modal_heartbeat_function_name(),
+        log_label="modal executor heartbeat",
+        dispatcher_name="admin",
+        kwargs={"heartbeat_source": "backend_runtime_scheduler"},
+    )
+
+
+def _run_modal_social_recovery_once() -> dict[str, object]:
+    from trr_backend.modal_dispatch import modal_social_recovery_function_name, spawn_modal_maintenance_function
+    from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+
+    return spawn_modal_maintenance_function(
+        function_name=modal_social_recovery_function_name(),
+        log_label="modal social recovery",
+        dispatcher_name="social",
+        supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
+    )
+
+
+def _run_modal_stale_worker_cleanup_once() -> dict[str, object]:
+    from trr_backend.modal_dispatch import modal_stale_worker_cleanup_function_name, spawn_modal_maintenance_function
+    from trr_backend.socials.platforms import SOCIAL_SUPPORTED_PLATFORMS
+
+    return spawn_modal_maintenance_function(
+        function_name=modal_stale_worker_cleanup_function_name(),
+        log_label="modal stale worker cleanup",
+        dispatcher_name="social",
+        supported_platforms=list(SOCIAL_SUPPORTED_PLATFORMS),
+    )
+
+
+async def _run_modal_runtime_scheduler_loop(
+    *,
+    stop_event: asyncio.Event,
+    task_name: str,
+    interval_seconds: int,
+    run_once,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            result = await asyncio.to_thread(run_once)
+            logger.info("[modal-runtime-scheduler] %s result=%s", task_name, result)
+        except Exception:
+            logger.exception("[modal-runtime-scheduler] %s failed", task_name)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            continue
 
 
 async def _run_cast_screentime_stale_sweeper(stop_event: asyncio.Event) -> None:
@@ -117,6 +289,7 @@ async def _run_cast_screentime_stale_sweeper(stop_event: asyncio.Event) -> None:
 
 def _validate_startup_config() -> None:
     """Validate high-impact service env configuration with actionable logs."""
+    _validate_modal_maintenance_owner_config()
     admin_shared_secret = (os.getenv("TRR_INTERNAL_ADMIN_SHARED_SECRET") or "").strip()
     supabase_jwt_secret = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
     log_database_resolution_summary()
@@ -254,12 +427,43 @@ async def lifespan(app: FastAPI):
     await init_broker()
     stale_sweeper_stop: asyncio.Event | None = None
     stale_sweeper_task: asyncio.Task[None] | None = None
+    modal_scheduler_stop: asyncio.Event | None = None
+    modal_scheduler_tasks: list[asyncio.Task[None]] = []
     if _cast_screentime_stale_sweeper_enabled():
         stale_sweeper_stop = asyncio.Event()
         stale_sweeper_task = asyncio.create_task(_run_cast_screentime_stale_sweeper(stale_sweeper_stop))
         logger.info(
             "[startup-config] cast screentime stale-run sweeper enabled interval_seconds=%s",
             _cast_screentime_stale_sweeper_interval_seconds(),
+        )
+    if _modal_runtime_scheduler_enabled():
+        modal_scheduler_stop = asyncio.Event()
+        modal_scheduler_specs = [
+            ("executor_heartbeat", _modal_heartbeat_interval_seconds(), _run_modal_executor_heartbeat_once),
+            ("social_recovery", _modal_social_recovery_interval_seconds(), _run_modal_social_recovery_once),
+            (
+                "stale_worker_cleanup",
+                _modal_stale_worker_cleanup_interval_seconds(),
+                _run_modal_stale_worker_cleanup_once,
+            ),
+        ]
+        for task_name, interval_seconds, run_once in modal_scheduler_specs:
+            modal_scheduler_tasks.append(
+                asyncio.create_task(
+                    _run_modal_runtime_scheduler_loop(
+                        stop_event=modal_scheduler_stop,
+                        task_name=task_name,
+                        interval_seconds=interval_seconds,
+                        run_once=run_once,
+                    )
+                )
+            )
+        logger.info(
+            "[startup-config] modal runtime scheduler enabled heartbeat_interval_seconds=%s "
+            "social_recovery_interval_seconds=%s stale_worker_cleanup_interval_seconds=%s",
+            _modal_heartbeat_interval_seconds(),
+            _modal_social_recovery_interval_seconds(),
+            _modal_stale_worker_cleanup_interval_seconds(),
         )
     yield
     # Shutdown
@@ -271,6 +475,13 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(stale_sweeper_task, timeout=5)
         except TimeoutError:
             stale_sweeper_task.cancel()
+    if modal_scheduler_stop is not None:
+        modal_scheduler_stop.set()
+    for task in modal_scheduler_tasks:
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except TimeoutError:
+            task.cancel()
     await shutdown_broker()
 
 
@@ -360,10 +571,12 @@ from api.routers import (  # noqa: E402
     admin_fandom_sync,
     admin_image_counts,
     admin_media_assets,
+    admin_media_links,
     admin_nbcumv,
     admin_networks_streaming_reads,
     admin_operations,
     admin_people_reads,
+    admin_person_external_ids,
     admin_person_images,
     admin_person_profile,
     admin_recent_people,
@@ -404,9 +617,11 @@ app.include_router(admin_fandom_sync.router, prefix="/api/v1")
 app.include_router(admin_face_references.router, prefix="/api/v1")
 app.include_router(admin_image_counts.router, prefix="/api/v1")
 app.include_router(admin_media_assets.router, prefix="/api/v1")
+app.include_router(admin_media_links.router, prefix="/api/v1")
 app.include_router(admin_networks_streaming_reads.router, prefix="/api/v1")
 app.include_router(admin_operations.router, prefix="/api/v1")
 app.include_router(admin_people_reads.router, prefix="/api/v1")
+app.include_router(admin_person_external_ids.router, prefix="/api/v1")
 app.include_router(admin_recent_people.router, prefix="/api/v1")
 app.include_router(admin_reddit_reads.router, prefix="/api/v1")
 app.include_router(admin_show_reads.router, prefix="/api/v1")
@@ -448,8 +663,11 @@ def health():
             "status": "healthy",
             "service": "trr-backend",
             "database": "connected",
+            "database_lane": _database_operator_lane_snapshot(pool_name="health"),
         }
-    except Exception:
+    except Exception as exc:
+        detail = database_service_unavailable_detail(exc)
+        lane = _database_operator_lane_snapshot(pool_name="health")
         logger.warning("[health] readiness probe failed", exc_info=True)
         return JSONResponse(
             status_code=503,
@@ -457,6 +675,11 @@ def health():
                 "status": "degraded",
                 "service": "trr-backend",
                 "database": "unreachable",
+                "database_lane": lane,
+                "reason": detail.get("reason"),
+                "message": detail.get("message"),
+                "retryable": detail.get("retryable"),
+                "retry_after_ms": detail.get("retry_after_ms"),
             },
         )
 
@@ -535,6 +758,21 @@ def admin_health_db_pressure(_: InternalAdminUser = None) -> dict[str, object]:
     """Internal DB pressure details for admin/operator diagnostics."""
     snapshot = pg.local_pool_pressure_snapshot()
     snapshot["db_activity"] = _db_activity_holder_snapshot()
+    snapshot["operator_failure_lanes"] = {
+        "database": _database_operator_lane_snapshot(pool_name="default"),
+        "health": _database_operator_lane_snapshot(pool_name="health"),
+        "social_profile": _database_operator_lane_snapshot(pool_name="social_profile"),
+        "social_control": _database_operator_lane_snapshot(pool_name="social_control"),
+        "social_progress": _database_operator_lane_snapshot(pool_name="social_progress"),
+        "auth": {
+            "lane": "auth",
+            "signals": ["401", "403", "AUTH_REQUIRED", "FORBIDDEN"],
+        },
+        "modal": {
+            "lane": "modal_deployment_state",
+            "readiness_command": "cd TRR-Backend && .venv/bin/python scripts/modal/verify_modal_readiness.py",
+        },
+    }
     return snapshot
 
 
@@ -547,6 +785,7 @@ async def health_runtime() -> dict[str, object]:
         "status": "alive",
         "service": "trr-backend",
         "background_tasks": background_task_snapshot(),
+        "realtime": broker_runtime_status(),
     }
 
 

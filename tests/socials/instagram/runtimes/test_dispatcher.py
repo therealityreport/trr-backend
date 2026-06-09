@@ -100,7 +100,8 @@ def test_skips_unhealthy_runtimes() -> None:
     assert healthy.fetch_profile_calls == 1
 
 
-def test_skips_unhealthy_scrapling_scaffold_and_uses_fallback() -> None:
+def test_skips_disabled_scrapling_canary_and_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("INSTAGRAM_SCRAPLING_RUNTIME_ENABLED", raising=False)
     fallback = _RuntimeStub("fallback")
     disp = InstagramRuntimeDispatcher(
         factories={"scrapling": ScraplingRuntime, "fallback": lambda: fallback},

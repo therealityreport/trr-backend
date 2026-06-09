@@ -2,6 +2,37 @@
 
 This directory contains repeatable EXPLAIN scaffolding for Supabase connection-capacity work. It is evidence-only: do not add indexes from this directory, and do not treat a candidate index as approved until the route/query evidence and RLS/grants review are recorded.
 
+## `_catalog_recent_runs` Evidence
+
+The Social profile dashboard also depends on the backend-private `_catalog_recent_runs` query. Do not add an index or rewrite for that hot path until the current database plan has been captured from the exact backend query builder.
+
+Generate the parameterized EXPLAIN statement without touching the database:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+./.venv/bin/python scripts/db/catalog_recent_runs_explain.py \
+  --platform instagram \
+  --account-handle bravotv \
+  --limit 10 \
+  --output /tmp/trr-catalog-recent-runs-statement.txt
+```
+
+Capture the current DB planner proof with a read-only plain `EXPLAIN`:
+
+```bash
+cd /Users/thomashulihan/Projects/TRR/TRR-Backend
+./.venv/bin/python scripts/db/catalog_recent_runs_explain.py \
+  --platform instagram \
+  --account-handle bravotv \
+  --limit 10 \
+  --execute \
+  --output /tmp/trr-catalog-recent-runs-explain.txt
+```
+
+The helper resolves database URLs in this order: `TRR_DB_SESSION_URL`, `TRR_DB_URL`, then `TRR_DB_FALLBACK_URL`. It runs in a read-only transaction with local statement and lock timeouts, uses `EXPLAIN (ANALYZE false, BUFFERS false, FORMAT TEXT)`, and reuses `social_season_analytics_impl._catalog_recent_runs_explain_statement` so the evidence follows the current production query shape.
+
+Attach the generated plan to any proposed index or query rewrite review. The review should call out the route, account parameters, whether the problem is a scan/sort/misestimate/repeated nested loop, and the RLS/grants impact for `social.scrape_runs` and `social.scrape_jobs`.
+
 ## Run
 
 Run from `TRR-Backend` with an explicit database URL and route-specific placeholder values:

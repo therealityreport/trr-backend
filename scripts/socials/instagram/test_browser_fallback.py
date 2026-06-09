@@ -17,8 +17,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
 
-load_dotenv(REPO_ROOT / ".env", override=True)
-
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -30,6 +28,8 @@ logger = logging.getLogger("test_browser_fallback")
 
 
 def main() -> int:
+    load_dotenv(REPO_ROOT / ".env", override=True)
+
     from trr_backend.socials.instagram.scraper import InstagramScraper
 
     cookie_file = REPO_ROOT / "data" / "instagram_cookies.json"

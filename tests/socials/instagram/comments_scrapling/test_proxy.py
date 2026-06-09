@@ -123,6 +123,8 @@ def test_global_decodo_credentials_do_not_enable_comments_proxy_without_provider
     monkeypatch.setenv("DECODO_PASSWORD", "global-pass")
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", raising=False)
     monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_URLS", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", raising=False)
 
     assert comments_proxy.select_comments_proxy(session_key="bravotv") is None
 
@@ -133,9 +135,35 @@ def test_explicit_decodo_provider_enables_comments_proxy(monkeypatch):
     monkeypatch.setenv("DECODO_PASSWORD", "global-pass")
     monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
     monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", raising=False)
 
     config = comments_proxy.select_comments_proxy(session_key="bravotv")
 
     assert config is not None
     assert isinstance(config.browser_proxy, dict)
+    assert config.browser_proxy["username"] == "global-user"
+    assert "-session-" not in config.browser_proxy["username"]
+    assert "sessionduration" not in config.api_proxy_url
     assert config.fingerprint == "gate.decodo.com:7000:decodo"
+    assert config.session_mode == "rotating"
+
+
+def test_explicit_decodo_provider_can_opt_into_sticky_comments_proxy(monkeypatch):
+    monkeypatch.setattr(comments_proxy, "_build_proxy_rotator", lambda selected: {"selected": selected})
+    monkeypatch.setenv("DECODO_USERNAME", "global-user")
+    monkeypatch.setenv("DECODO_PASSWORD", "global-pass")
+    monkeypatch.setenv("DECODO_GATEWAY", "gate.decodo.com:7000")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER", "decodo")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY", "true")
+    monkeypatch.setenv("SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS", "600")
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY", raising=False)
+
+    config = comments_proxy.select_comments_proxy(session_key="bravotv")
+
+    assert config is not None
+    assert isinstance(config.browser_proxy, dict)
+    assert config.session_mode == "sticky"
+    assert config.browser_proxy["username"].startswith("global-user-session-")
+    assert "-sessionduration-10" in config.browser_proxy["username"]
+    assert "sessionduration-10" in config.api_proxy_url

@@ -79,7 +79,7 @@ def test_get_post_comments_instagram_filters_missing_comments_and_includes_media
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": "ig-db-1",
             "source_id": "abc123",
             "author": "bravotv",
@@ -168,7 +168,7 @@ def test_run_tiktok_comment_media_mirror_stage_repairs_and_resolves_week_index(
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": "tt-comment-db-1",
             "comment_id": "tt-comment-1",
             "post_id": "tt-post-db-1",
@@ -238,7 +238,7 @@ def test_run_tiktok_comment_media_mirror_stage_skips_when_already_hosted(monkeyp
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": "tt-comment-db-2",
             "comment_id": "tt-comment-2",
             "post_id": "tt-post-db-2",
@@ -276,7 +276,7 @@ def test_run_platform_media_mirror_stage_threads_uses_persisted_raw_data_when_co
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": "threads-post-db-1",
             "source_id": "threads-post-1",
             "thumbnail_url": "",
@@ -374,7 +374,7 @@ def test_run_generic_comment_media_mirror_stage_threads_repairs_from_persisted_r
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": "threads-comment-db-1",
             "comment_id": "threads-comment-1",
             "post_id": "threads-post-db-1",
@@ -443,7 +443,7 @@ def test_run_generic_comment_media_mirror_stage_threads_marks_missing_raw_data_n
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": "threads-comment-db-2",
             "comment_id": "threads-comment-2",
             "post_id": "threads-post-db-2",
@@ -703,7 +703,7 @@ def test_run_platform_media_mirror_stage_clears_auxiliary_only_pending_status(
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": post_id,
             "source_id": "tt-video-1",
             "thumbnail_url": "https://img.test/thumb.jpg",
@@ -792,7 +792,7 @@ def test_run_platform_media_mirror_stage_clears_bad_hosted_media_after_failed_re
         monkeypatch.setattr(
             social_repo.pg,
             "fetch_one",
-            lambda _sql, _params: {
+            lambda _sql, _params, **_kwargs: {
                 "id": post_id,
                 "source_id": "tt-video-1",
                 "thumbnail_url": "https://img.test/thumb.jpg",
@@ -859,14 +859,17 @@ def test_run_platform_media_mirror_stage_instagram_selects_asset_manifest(monkey
     captured_sql: list[str] = []
     captured_asset_meta_updates: list[dict[str, object]] = []
 
-    def _fake_fetch_one(sql: str, _params: list[object]) -> dict[str, object]:
+    def _fake_fetch_one(sql: str, _params: list[object], **_kwargs) -> dict[str, object]:
         captured_sql.append(sql)
         return {
             "id": "ig-post-db-1",
             "source_id": "abc123",
             "thumbnail_url": "https://src.test/thumb.jpg",
             "media_urls": ["https://src.test/media.jpg"],
-            "asset_manifest": {},
+            "asset_manifest": {
+                "hosted_assets": [],
+                "thumbnail_hosted": {"url": "https://cdn.test/old-thumb.jpg"},
+            },
             "post_username": "bravotv",
             "raw_data": {},
             "posted_at": datetime(2026, 2, 20, tzinfo=UTC),
@@ -921,7 +924,7 @@ def test_get_post_comments_facebook_filters_missing_comments(monkeypatch: pytest
     monkeypatch.setattr(
         social_repo.pg,
         "fetch_one",
-        lambda _sql, _params: {
+        lambda _sql, _params, **_kwargs: {
             "id": "fb-post-db-1",
             "source_id": "fb-1",
             "author": "bravotv",
@@ -957,7 +960,7 @@ def test_get_post_comments_facebook_filters_missing_comments(monkeypatch: pytest
 def test_week_summary_fast_facebook_filters_missing_comments(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_sql: list[str] = []
 
-    def _fake_fetch_one(sql: str, _params: list[object]) -> dict[str, int]:
+    def _fake_fetch_one(sql: str, _params: list[object], **_kwargs) -> dict[str, int]:
         seen_sql.append(sql)
         if "saved_comments_total" in sql:
             return {"saved_comments_total": 1}

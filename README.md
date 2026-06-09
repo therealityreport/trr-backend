@@ -86,6 +86,11 @@ PYTHONPATH=. python scripts/sync/sync_season_episode_images.py --all --verbose
 # People photos (multi-source)
 PYTHONPATH=. python scripts/sync/sync_cast_photos.py --imdb-person-id nm11883948 --verbose
 
+# BRAVOTV image runs and gallery media
+PYTHONPATH=. python scripts/media/bravotv_get_images.py --show "Summer House" --season 11 --output /tmp/bravotv-summer-house-s11
+PYTHONPATH=. python scripts/media/bravotv_get_images.py --person "Amanda Batula" --sources all --output /tmp/bravotv-amanda-batula
+PYTHONPATH=. python scripts/media/sync_bravotv_galleries.py --show "Summer House" --person-name "Amanda Batula" --apply
+
 # TMDb resolution + backfill (shows)
 PYTHONPATH=. python scripts/sync/resolve_tmdb_ids_via_find.py --all --verbose
 PYTHONPATH=. python scripts/backfill/backfill_tmdb_show_details.py --all --verbose
@@ -139,6 +144,7 @@ Never commit API keys, AWS credentials, or private keys. Rotate any exposed cred
 - `api/`: FastAPI app (Supabase-backed API + WebSockets)
 - `trr_backend/`: Shared library code (reused by API + pipeline)
   - `trr_backend/integrations/`: External metadata clients (IMDb/TMDb/etc.)
+  - `trr_backend/media/bravotv/`: BRAVOTV image-run pipeline, media candidate normalization, run review artifacts, and admin review action services
   - `trr_backend/pipeline/`: Pipeline orchestration logic
   - `trr_backend/cli/`: CLI entrypoints (Typer)
 - `scripts/`: Data sync scripts and utilities

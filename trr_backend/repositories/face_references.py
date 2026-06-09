@@ -33,6 +33,7 @@ SELECT
   fri.review_notes,
   fri.reviewed_at,
   fri.reviewed_by,
+  (SELECT p.full_name FROM core.people AS p WHERE p.id = fri.person_id) AS person_name,
   fri.duplicate_of_reference_image_id::text AS duplicate_of_reference_image_id,
   fri.embedding_status,
   fri.source_url,
@@ -91,6 +92,47 @@ def list_face_reference_images(*, person_id: str, include_inactive: bool = False
     """
     )
     return pg.fetch_all(sql, [person_id, include_inactive])
+
+
+def list_face_reference_builder_review_queue(*, limit: int = 50) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 200))
+    sql = (
+        _FACE_REFERENCE_SELECT
+        + """
+    WHERE fri.is_active = true
+      AND fri.review_status = 'pending_review'
+      AND (
+        coalesce(fri.metadata->'cast_reference_builder'->>'builder', '') = 'cast_reference_builder'
+        OR coalesce(fri.review_notes->>'builder_review_reason', '') <> ''
+      )
+    ORDER BY fri.updated_at DESC NULLS LAST, fri.created_at DESC
+    LIMIT %s
+    """
+    )
+    return pg.fetch_all(sql, [safe_limit])
+
+
+def list_gallery_face_reference_images_for_rebuild(
+    *,
+    limit: int = 100,
+    person_id: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 1000))
+    return pg.fetch_all(
+        _FACE_REFERENCE_SELECT
+        + """
+    WHERE fri.is_active = true
+      AND (%s = '' OR fri.person_id = %s::uuid)
+      AND coalesce(fri.metadata->>'source', '') IN (
+        'core.media_links.facebank_seed',
+        'core.media_links.facebank_seed.rebuild',
+        ''
+      )
+    ORDER BY fri.updated_at DESC NULLS LAST, fri.created_at DESC
+    LIMIT %s
+    """,
+        [str(person_id or ""), str(person_id or ""), safe_limit],
+    )
 
 
 def resolve_face_reference_image(
@@ -309,6 +351,34 @@ def set_face_reference_review_status(
             normalized_status,
             normalized_status,
             normalized_status,
+            reference_image_id,
+        ],
+    )
+    return rows[0] if rows else None
+
+
+def queue_face_reference_builder_review(
+    *,
+    reference_image_id: str,
+    review_reason: str,
+    review_notes: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    rows = pg.execute_returning(
+        """
+        UPDATE ml.face_reference_images
+        SET approved = false,
+            review_status = 'pending_review',
+            review_notes = coalesce(review_notes, '{}'::jsonb) || %s,
+            embedding_status = 'pending',
+            metadata = coalesce(metadata, '{}'::jsonb) || %s,
+            updated_at = now()
+        WHERE id = %s::uuid
+        RETURNING *
+        """,
+        [
+            _json({"builder_review_reason": review_reason, **(review_notes or {})}),
+            _json({"cast_reference_builder": metadata or {}}),
             reference_image_id,
         ],
     )

@@ -100,6 +100,8 @@ def get_queue_status(
         "by_job_type": {},
         "running_jobs": [],
         "recent_failures": [],
+        "silent_drop_warnings": [],
+        "silent_drop_warnings_total": 0,
         "stuck_jobs": [],
         "stuck_jobs_total": 0,
         "dispatch_blocked_jobs": [],
@@ -323,6 +325,72 @@ def get_queue_status(
         except Exception as exc:  # noqa: BLE001
             repo.logger.warning("Queue status recent-failures query failed: %s", exc)
             errors.append(f"queue_recent_failures_query_failed: {exc}")
+
+    try:
+        with repo.pg.db_connection(label="queue-status:silent-drop-warnings", pool_name=SOCIAL_CONTROL_POOL_NAME) as conn:
+            with repo.pg.db_cursor(conn=conn) as cur:
+                cur.execute("set local statement_timeout = %s", [str(safe_statement_timeout_ms)])
+                silent_drop_warnings = repo.pg.fetch_all_with_cursor(
+                    cur,
+                    """
+                    select
+                      j.id::text as id,
+                      j.run_id::text as run_id,
+                      coalesce(
+                        nullif(j.metadata->'diagnostics'->'post_persist_truthfulness'->>'platform', ''),
+                        nullif(j.platform, ''),
+                        'unknown'
+                      ) as platform,
+                      coalesce(
+                        nullif(j.metadata->'diagnostics'->'post_persist_truthfulness'->>'account', ''),
+                        nullif(j.config->>'account', ''),
+                        nullif(j.metadata->>'account', '')
+                      ) as account_handle,
+                      lower(
+                        coalesce(
+                          nullif(j.config->>'stage', ''),
+                          nullif(j.metadata->>'stage', ''),
+                          nullif(j.job_type, ''),
+                          'unknown'
+                        )
+                      ) as stage,
+                      j.job_type,
+                      j.status,
+                      j.metadata->'diagnostics'->'post_persist_truthfulness'->>'posts_checked' as posts_checked,
+                      j.metadata->'diagnostics'->'post_persist_truthfulness'->>'posts_upserted' as posts_upserted,
+                      j.metadata->'diagnostics'->'post_persist_truthfulness'->>'media_assets_persisted' as media_assets_persisted,
+                      coalesce(j.completed_at, j.created_at) as observed_at
+                    from social.scrape_jobs j
+                    where coalesce(
+                      j.metadata->'diagnostics'->'post_persist_truthfulness'->>'silent_drop_detected',
+                      'false'
+                    ) = 'true'
+                      and coalesce(j.completed_at, j.created_at) >= now() - interval '7 days'
+                    order by coalesce(j.completed_at, j.created_at) desc
+                    limit %s
+                    """,
+                    [min(safe_recent_failures_limit, 20)],
+                )
+        queue_payload["silent_drop_warnings"] = [
+            {
+                "id": str(row.get("id") or ""),
+                "run_id": str(row.get("run_id") or "").strip() or None,
+                "platform": str(row.get("platform") or "").strip().lower() or "unknown",
+                "account_handle": str(row.get("account_handle") or "").strip().lstrip("@") or None,
+                "stage": repo._normalize_social_job_stage_for_stale(row.get("stage")) or "unknown",
+                "job_type": str(row.get("job_type") or "").strip().lower() or "unknown",
+                "status": str(row.get("status") or "").strip().lower() or "unknown",
+                "posts_checked": repo._normalize_non_negative_int(row.get("posts_checked")),
+                "posts_upserted": repo._normalize_non_negative_int(row.get("posts_upserted")),
+                "media_assets_persisted": repo._normalize_non_negative_int(row.get("media_assets_persisted")),
+                "observed_at": repo._iso(repo._coerce_dt(row.get("observed_at"))),
+            }
+            for row in silent_drop_warnings
+        ]
+        queue_payload["silent_drop_warnings_total"] = len(queue_payload["silent_drop_warnings"])
+    except Exception as exc:  # noqa: BLE001
+        repo.logger.warning("Queue status silent-drop warning query failed: %s", exc)
+        queue_payload["silent_drop_warnings_error"] = str(exc)
 
     if safe_include_stuck_jobs and not safe_summary_only:
         try:

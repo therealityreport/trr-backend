@@ -106,19 +106,20 @@ _APP_NAME = str(os.getenv("TRR_MODAL_APP_NAME") or "trr-backend-jobs").strip() o
 _TIMEZONE = str(os.getenv("TRR_MODAL_TIMEZONE") or "America/New_York").strip() or "America/New_York"
 _API_FUNCTION_NAME = str(os.getenv("TRR_MODAL_API_FUNCTION") or "serve_backend_api").strip() or "serve_backend_api"
 _API_LABEL = str(os.getenv("TRR_MODAL_API_LABEL") or "trr-backend-api").strip() or "trr-backend-api"
-_API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "1")))
+_API_MIN_CONTAINERS = max(0, int(os.getenv("TRR_MODAL_API_MIN_CONTAINERS", "0")))
 _API_MAX_CONTAINERS = max(1, int(os.getenv("TRR_MODAL_API_MAX_CONTAINERS", "8")))
-_SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "5")))
+_SOCIAL_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT", "8")))
 _SOCIAL_MEDIA_CONCURRENCY_LIMIT = max(
     1,
     int(os.getenv("TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT", "10")),
 )
 _SOCIAL_RECOVERY_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIAL_RECOVERY_CONCURRENCY_LIMIT", "4")))
-_ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "1")))
+_ADMIN_KEEP_WARM = max(0, int(os.getenv("TRR_MODAL_ADMIN_KEEP_WARM", "0")))
 _ADMIN_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_ADMIN_OPERATION_CONCURRENCY_LIMIT", "8")))
 _GOOGLE_NEWS_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT", "4")))
 _REDDIT_REFRESH_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT", "2")))
 _VISION_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_VISION_CONCURRENCY_LIMIT", "4")))
+_CAST_SCREENTIME_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT", "2")))
 _SOCIALBLADE_CONCURRENCY_LIMIT = max(1, int(os.getenv("TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT", "3")))
 _STALE_WORKER_CLEANUP_CONCURRENCY_LIMIT = max(
     1,
@@ -128,6 +129,10 @@ _ADMIN_OPERATION_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_ADMIN_OP
 _GOOGLE_NEWS_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_GOOGLE_NEWS_TIMEOUT_SECONDS", "1800")))
 _REDDIT_REFRESH_TIMEOUT_SECONDS = max(15 * 60, int(os.getenv("TRR_MODAL_REDDIT_REFRESH_TIMEOUT_SECONDS", "7200")))
 _VISION_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_VISION_TIMEOUT_SECONDS", "1200")))
+_CAST_SCREENTIME_TIMEOUT_SECONDS = max(
+    30 * 60,
+    int(os.getenv("TRR_MODAL_CAST_SCREENTIME_TIMEOUT_SECONDS", str(2 * 60 * 60))),
+)
 _SOCIALBLADE_TIMEOUT_SECONDS = max(5 * 60, int(os.getenv("TRR_MODAL_SOCIALBLADE_TIMEOUT_SECONDS", "900")))
 _STALE_WORKER_CLEANUP_TIMEOUT_SECONDS = max(
     60,
@@ -161,6 +166,13 @@ _SOCIAL_IMAGE_LOCAL_DIRS: Final[tuple[tuple[str, str], ...]] = (
     (str(_BACKEND_ROOT / "scripts" / "socials" / "threads"), "/root/scripts/socials/threads"),
     (str(_BACKEND_ROOT / "scripts" / "socials" / "facebook"), "/root/scripts/socials/facebook"),
 )
+_LEAN_IMAGE_LOCAL_FILES: Final[tuple[tuple[str, str], ...]] = (
+    (str(_BACKEND_ROOT / "scripts" / "__init__.py"), "/root/scripts/__init__.py"),
+    (str(_BACKEND_ROOT / "scripts" / "_sync_common.py"), "/root/scripts/_sync_common.py"),
+)
+_LEAN_IMAGE_LOCAL_DIRS: Final[tuple[tuple[str, str], ...]] = (
+    (str(_BACKEND_ROOT / "scripts" / "sync"), "/root/scripts/sync"),
+)
 _SOCIAL_BROWSER_APT_PACKAGES: Final[tuple[str, ...]] = (
     "libnss3",
     "libnspr4",
@@ -182,11 +194,9 @@ _SOCIAL_BROWSER_APT_PACKAGES: Final[tuple[str, ...]] = (
 _SOCIAL_BROWSER_SETUP_COMMANDS: Final[tuple[str, ...]] = (
     "playwright install chromium",
     # P0-2/P0-3: The Scrapling comments lane uses StealthyFetcher (Patchright-
-    # backed in v0.4+). `scrapling install` resolves whatever browser bits the
-    # installed Scrapling version needs and is a no-op when the binaries are
-    # already present via `playwright install chromium`. Belt and suspenders
-    # so the Modal image stays intact if Scrapling changes its install flow.
-    "scrapling install",
+    # backed in v0.4+). Scrapling v0.4.9 refreshed browsers and fingerprints,
+    # and upstream recommends forcing the asset refresh after upgrades.
+    "scrapling install --force",
 )
 _MODAL_LEAN_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.lean.lock.txt"
 _MODAL_BROWSER_REQUIREMENTS: Final = _BACKEND_ROOT / "requirements.modal.browser.lock.txt"
@@ -224,26 +234,35 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
     "TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION": "probe_social_remote_auth",
     "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
+    "TRR_MODAL_CAST_SCREENTIME_FUNCTION": "run_cast_screentime_analysis",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
     "TRR_MODAL_STALE_WORKER_CLEANUP_FUNCTION": "purge_stale_social_worker_heartbeats",
-    "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "5",
+    "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
     "TRR_MODAL_SOCIAL_MEDIA_JOB_CONCURRENCY_LIMIT": "10",
     "TRR_MODAL_GOOGLE_NEWS_CONCURRENCY_LIMIT": "4",
     "TRR_MODAL_REDDIT_REFRESH_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_VISION_CONCURRENCY_LIMIT": "4",
+    "TRR_MODAL_CAST_SCREENTIME_CONCURRENCY_LIMIT": "2",
     "TRR_MODAL_SOCIALBLADE_CONCURRENCY_LIMIT": "3",
-    "SOCIAL_MODAL_DISPATCH_LIMIT": "16",
-    "SOCIAL_WORKER_POOL_COMMENTS": "2",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "8",
+    "SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY": "true",
+    "SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED": "false",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "decodo",
+    "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "true",
+    "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "false",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "600",
+    "SOCIAL_WORKER_POOL_COMMENTS": "8",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
-    "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "5",
-    "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "3",
+    "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "8",
+    "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "2",
     "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "10",
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
     "SOCIAL_MIRROR_PLATFORM_CAP": "10",
-    "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "6",
-    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "2",
-    "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "2",
+    "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "8",
+    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "8",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
     "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "file_lock",
+    "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED": "true",
     "SOCIAL_THREADS_POSTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS": "180",
     "SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING": "false",
@@ -254,11 +273,16 @@ _CANONICAL_MODAL_RUNTIME_DEFAULTS: Final[dict[str, str]] = {
 
 def _build_lean_image_base(*, image_factory: object | None = None):
     factory = image_factory or modal.Image
-    return (
+    image = (
         factory.debian_slim(python_version="3.11")
         .pip_install_from_requirements(str(_MODAL_LEAN_REQUIREMENTS))
         .add_local_python_source("api", "trr_backend")
     )
+    for local_path, remote_path in _LEAN_IMAGE_LOCAL_FILES:
+        image = image.add_local_file(local_path, remote_path=remote_path)
+    for local_path, remote_path in _LEAN_IMAGE_LOCAL_DIRS:
+        image = image.add_local_dir(local_path, remote_path=remote_path)
+    return image
 
 
 def _build_social_image_base(*, include_browser_runtime: bool = False, image_factory: object | None = None):
@@ -299,6 +323,25 @@ def _modal_capacity_metadata(
     }
 
 
+def modal_completion_evidence_contract() -> dict[str, object]:
+    """Return the non-secret completion evidence expected for Modal-affecting work."""
+    return {
+        "local_verification": [
+            "python3.11 -m pytest tests/api/test_health.py tests/test_modal_jobs.py -q",
+            ".venv/bin/python scripts/modal/verify_modal_readiness.py --json",
+        ],
+        "modal_update_status_required": True,
+        "required_completion_fields": [
+            "local_verification_status",
+            "modal_update_status",
+            "modal_readiness_status",
+            "blocker",
+        ],
+        "blocker_required_when_not_updated": True,
+        "readiness_command": "cd TRR-Backend && .venv/bin/python scripts/modal/verify_modal_readiness.py",
+    }
+
+
 _image = _build_lean_image_base()
 
 _vision_image = (
@@ -327,6 +370,7 @@ _FUNCTION_IMAGE_BINDINGS: Final[dict[str, object]] = {
     "heartbeat_remote_executors": _image,
     "purge_stale_social_worker_heartbeats": _image,
     "run_admin_vision": _vision_image,
+    "run_cast_screentime_analysis": _vision_image,
     "probe_admin_vision_runtime": _vision_image,
 }
 
@@ -336,6 +380,64 @@ def _env_flag(name: str, *, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
+
+
+def _modal_always_on_schedules_enabled() -> bool:
+    return _env_flag("TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED", default=False)
+
+
+def _modal_runtime_scheduler_owner_enabled() -> bool:
+    return _env_flag("TRR_MODAL_RUNTIME_SCHEDULER_ENABLED", default=False)
+
+
+def _modal_maintenance_owner_required() -> bool:
+    return _env_flag("TRR_MODAL_MAINTENANCE_OWNER_REQUIRED", default=False)
+
+
+def _modal_maintenance_owner_names() -> list[str]:
+    owners: list[str] = []
+    if _modal_always_on_schedules_enabled():
+        owners.append("modal_singleton_cron")
+    if _modal_runtime_scheduler_owner_enabled():
+        owners.append("api_runtime_scheduler")
+    return owners
+
+
+def _modal_maintenance_owner_fix_message() -> str:
+    return (
+        "Set exactly one owner variable: TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED=1 "
+        "for Modal singleton cron maintenance, or TRR_MODAL_RUNTIME_SCHEDULER_ENABLED=1 "
+        "for the API runtime scheduler fallback. Keep TRR_MODAL_MAINTENANCE_OWNER_REQUIRED=1. "
+        "Then update the runtime secret with: cd TRR-Backend && "
+        "python3.11 scripts/modal/prepare_named_secrets.py --apply"
+    )
+
+
+def _validate_modal_maintenance_owner_config() -> str | None:
+    if not _modal_maintenance_owner_required():
+        return None
+    owners = _modal_maintenance_owner_names()
+    if not owners:
+        raise RuntimeError(
+            "Modal maintenance has no active owner. "
+            + _modal_maintenance_owner_fix_message()
+        )
+    if len(owners) > 1:
+        raise RuntimeError(
+            "Modal maintenance has duplicate active owners: "
+            + ", ".join(owners)
+            + ". Current owner variables: "
+            + f"TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED={os.getenv('TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED')!r}, "
+            + f"TRR_MODAL_RUNTIME_SCHEDULER_ENABLED={os.getenv('TRR_MODAL_RUNTIME_SCHEDULER_ENABLED')!r}. "
+            + _modal_maintenance_owner_fix_message()
+        )
+    return owners[0]
+
+
+def _modal_cron_schedule_kwargs(expression: str) -> dict[str, object]:
+    if not _modal_always_on_schedules_enabled():
+        return {}
+    return {"schedule": modal.Cron(expression, timezone=_TIMEZONE)}
 
 
 def _runtime_secret_name() -> str:
@@ -480,6 +582,7 @@ def _close_db_pools_after_worker(worker_family: str, **metadata: object) -> None
         logger.exception("[modal_worker_db_cleanup_failed] family=%s metadata=%s", worker_family, metadata)
 
 
+_validate_modal_maintenance_owner_config()
 _secrets = _resolve_modal_secrets()
 _inject_modal_runtime_defaults()
 configure_runtime_observability(service_name="trr-backend-modal-jobs")
@@ -956,7 +1059,7 @@ def run_social_job(job_id: str) -> dict[str, object]:
     retries=0,
     timeout=15 * 60,
     max_containers=_SOCIAL_RECOVERY_CONCURRENCY_LIMIT,
-    schedule=modal.Cron("*/2 * * * *", timezone=_TIMEZONE),
+    **_modal_cron_schedule_kwargs("*/2 * * * *"),
 )
 def sweep_social_dispatch_queue() -> dict[str, object]:
     from trr_backend.socials.control_plane import recover_and_dispatch_due_social_jobs
@@ -983,14 +1086,54 @@ def sweep_social_dispatch_queue() -> dict[str, object]:
 
 
 @app.function(
+    image=_image,
+    secrets=_secrets,
+    retries=0,
+    timeout=5 * 60,
+    max_containers=1,
+    # Daily at 13:30 in the configured TRR timezone (America/New_York by default).
+    **_modal_cron_schedule_kwargs("30 13 * * *"),
+)
+def poll_decodo_proxy_usage() -> dict[str, object]:
+    """Daily Decodo proxy usage poll + budget threshold alert.
+
+    No-op (and reported as such) unless DECODO_API_* credentials are configured. When
+    daily usage exceeds DECODO_DAILY_BUDGET_GB / DECODO_DAILY_BUDGET_USD it logs a
+    WARNING (shipped to Better Stack) and, if available, a Sentry message. Fail-open:
+    poll/parse errors are caught inside ``poll_decodo_usage`` and never crash the cron.
+    """
+    from trr_backend.socials.decodo_usage import poll_decodo_usage
+
+    started_at = _worker_started(
+        "decodo_usage",
+        function_name="poll_decodo_proxy_usage",
+    )
+    try:
+        result = poll_decodo_usage()
+        _worker_finished(
+            "decodo_usage",
+            started_at,
+            result_status=str(result.get("status") or "completed"),
+            alert=result.get("alert"),
+            used_gb=result.get("used_gb"),
+            used_usd=result.get("used_usd"),
+        )
+        return result
+    except Exception as exc:
+        # Defensive: poll_decodo_usage is already fail-open, but never let the cron crash.
+        _worker_failed("decodo_usage", started_at, failure_class=type(exc).__name__)
+        return {"status": "error", "reason": type(exc).__name__, "alert": False}
+
+
+@app.function(
     image=_FUNCTION_IMAGE_BINDINGS["heartbeat_remote_executors"],
     secrets=_secrets,
     retries=0,
     timeout=10 * 60,
     max_containers=1,
-    schedule=modal.Cron("* * * * *", timezone=_TIMEZONE),
+    **_modal_cron_schedule_kwargs("* * * * *"),
 )
-def heartbeat_remote_executors() -> dict[str, object]:
+def heartbeat_remote_executors(heartbeat_source: str = "backend_runtime_scheduler") -> dict[str, object]:
     from trr_backend.modal_dispatch import _record_dispatcher_heartbeat
     from trr_backend.socials.control_plane import get_worker_auth_capabilities, is_queue_enabled
 
@@ -1001,7 +1144,7 @@ def heartbeat_remote_executors() -> dict[str, object]:
     try:
         metadata = {
             "dispatch_enabled": True,
-            "heartbeat_source": "modal_cron",
+            "heartbeat_source": str(heartbeat_source or "backend_runtime_scheduler"),
             "heartbeat_call_id": f"heartbeat:{uuid.uuid4().hex[:8]}",
         }
         _record_dispatcher_heartbeat(
@@ -1127,7 +1270,7 @@ def heartbeat_remote_executors() -> dict[str, object]:
     retries=0,
     timeout=_STALE_WORKER_CLEANUP_TIMEOUT_SECONDS,
     max_containers=_STALE_WORKER_CLEANUP_CONCURRENCY_LIMIT,
-    schedule=modal.Cron("17 4 * * *", timezone=_TIMEZONE),
+    **_modal_cron_schedule_kwargs("17 4 * * *"),
 )
 def purge_stale_social_worker_heartbeats() -> dict[str, object]:
     from collections import Counter
@@ -1249,6 +1392,44 @@ def run_admin_vision(payload: dict[str, object], batch: bool = False) -> dict[st
         }
     finally:
         _close_db_pools_after_worker("admin_vision", batch=batch)
+
+
+@app.function(
+    image=_FUNCTION_IMAGE_BINDINGS["run_cast_screentime_analysis"],
+    secrets=_secrets,
+    retries=0,
+    timeout=_CAST_SCREENTIME_TIMEOUT_SECONDS,
+    max_containers=_CAST_SCREENTIME_CONCURRENCY_LIMIT,
+)
+def run_cast_screentime_analysis(run_id: str) -> dict[str, object]:
+    from trr_backend.services import retained_cast_screentime_runtime
+
+    normalized_run_id = str(run_id or "").strip()
+    started_at = _worker_started(
+        "cast_screentime",
+        function_name="run_cast_screentime_analysis",
+        run_id=normalized_run_id,
+    )
+    try:
+        result = retained_cast_screentime_runtime.run_screentime_analysis(normalized_run_id)
+        _worker_finished(
+            "cast_screentime",
+            started_at,
+            result_status=str(result.get("status") or "completed"),
+            run_id=normalized_run_id,
+        )
+        return result
+    except Exception as exc:
+        _worker_finished(
+            "cast_screentime",
+            started_at,
+            result_status="failed",
+            failure_class=type(exc).__name__,
+            run_id=normalized_run_id,
+        )
+        raise
+    finally:
+        _close_db_pools_after_worker("cast_screentime", run_id=normalized_run_id)
 
 
 @app.function(

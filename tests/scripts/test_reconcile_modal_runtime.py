@@ -17,23 +17,110 @@ def test_reconcile_modal_runtime_skips_when_modal_disabled(monkeypatch: pytest.M
     assert result["reason"] == "modal_disabled"
 
 
-def test_verify_readiness_checks_modal_auth_and_getty_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_verify_readiness_checks_modal_auth_and_skips_expensive_probes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(cli.verify_modal_readiness, "expected_function_names", lambda: ("serve_backend_api",))
+    def _fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured["cwd"] = kwargs.get("cwd")
+        captured["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"ok": True}), stderr="")
 
-    def _fake_verify_modal_readiness(**kwargs: object) -> dict[str, object]:
-        captured.update(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr(cli.verify_modal_readiness, "verify_modal_readiness", _fake_verify_modal_readiness)
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
 
     result = cli.verify_readiness()
 
     assert result == {"ok": True}
-    assert captured["probe_remote_auth_platform"] == "instagram"
-    assert captured["probe_getty_remote_access"] is True
-    assert captured["probe_core_workers"] is True
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:3] == [
+        cli.prepare_named_secrets._python_command(),
+        "scripts/modal/verify_modal_readiness.py",
+        "--json",
+    ]
+    assert command[command.index("--probe-remote-auth") + 1] == "instagram"
+    assert command[command.index("--remote-probe-timeout-seconds") + 1] == "10"
+    assert "--probe-core-workers" not in command
+    assert "--probe-getty-remote-access" not in command
+    assert captured["cwd"] == cli.REPO_ROOT
+    assert captured["timeout"] == cli.readiness_timeout_seconds()
+
+
+def test_verify_readiness_checks_getty_probe_when_remote_transport_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("TRR_GETTY_REMOTE_TRANSPORT_ENABLED", "1")
+
+    def _fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"ok": True}), stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+
+    result = cli.verify_readiness()
+
+    assert result == {"ok": True}
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "--probe-getty-remote-access" in command
+
+
+def test_verify_readiness_checks_core_worker_probes_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("WORKSPACE_RUNTIME_MODAL_PROBE_CORE_WORKERS", "1")
+
+    def _fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"ok": True}), stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+
+    result = cli.verify_readiness()
+
+    assert result == {"ok": True}
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "--probe-core-workers" in command
+
+
+def test_reconcile_modal_runtime_blocks_when_readiness_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORKSPACE_TRR_MODAL_ENABLED", "1")
+    monkeypatch.setenv("WORKSPACE_TRR_REMOTE_EXECUTOR", "modal")
+    monkeypatch.setattr(
+        cli,
+        "verify_readiness",
+        lambda repo_root=cli.REPO_ROOT: {
+            "ok": False,
+            "readiness_timeout": True,
+            "app_lookup_error": "Modal readiness verification timed out after 10 seconds.",
+        },
+    )
+    monkeypatch.setattr(cli, "build_modal_fingerprint", lambda repo_root=cli.REPO_ROOT: "new")
+    monkeypatch.setattr(cli, "load_saved_fingerprint", lambda repo_root=cli.REPO_ROOT: "old")
+    monkeypatch.setattr(
+        cli,
+        "apply_named_secrets",
+        lambda repo_root=cli.REPO_ROOT: pytest.fail("readiness timeout should not trigger secret apply"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "deploy_modal_app",
+        lambda repo_root=cli.REPO_ROOT: pytest.fail("readiness timeout should not trigger deploy"),
+    )
+
+    result = cli.reconcile_modal_runtime()
+
+    assert result["state"] == "blocked"
+    assert result["reason"] == "modal_verify_timeout"
+    assert result["fingerprint_changed"] is True
+    assert result["remediation"] == "Modal readiness verification timed out after 10 seconds."
 
 
 def test_reconcile_modal_runtime_is_ok_when_readiness_passes_and_fingerprint_unchanged(

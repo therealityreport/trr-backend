@@ -37,6 +37,8 @@ INSTAGRAM_AUTH_RESOLVER_SOFT_PASS_TTL_SECONDS = 90
 INSTAGRAM_COMMENTS_AUTH_VALIDATION_ENV = "SOCIAL_INSTAGRAM_COMMENTS_AUTH_VALIDATION"
 INSTAGRAM_COMMENTS_AUTH_VALIDATION_DEFAULT = "comments_endpoint"
 INSTAGRAM_COMMENTS_AUTH_VALIDATION_MODES = {"comments_endpoint", "schema_only", "graphql_profile"}
+INSTAGRAM_AUTH_REPAIR_CONFIRMATION = "I UNDERSTAND INSTAGRAM AUTH RISK"
+INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV = "SOCIAL_INSTAGRAM_AUTH_REPAIR_CONFIRMATION"
 
 _HANDLE_RE = re.compile(r"^[a-z0-9._]{1,30}$")
 _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9]{8,15}$")
@@ -151,15 +153,16 @@ def _auto_refresh_enabled() -> bool:
     if _running_event_loop_active():
         return False
     raw = (os.getenv("SOCIAL_INSTAGRAM_COOKIE_AUTO_REFRESH") or "").strip().lower()
-    if raw:
-        return raw not in {"0", "false", "off", "no"}
-    username, password = _auth_credentials()
-    return bool(username and password)
+    confirmation = (os.getenv(INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV) or "").strip()
+    return raw in {"1", "true", "yes", "on"} and confirmation == INSTAGRAM_AUTH_REPAIR_CONFIRMATION
 
 
 def _interactive_login_enabled() -> bool:
     raw = (os.getenv("SOCIAL_INSTAGRAM_INTERACTIVE_LOGIN") or "").strip().lower()
-    if raw in {"0", "false", "off", "no"}:
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    confirmation = (os.getenv(INSTAGRAM_AUTH_REPAIR_CONFIRMATION_ENV) or "").strip()
+    if confirmation != INSTAGRAM_AUTH_REPAIR_CONFIRMATION:
         return False
     if _running_event_loop_active():
         return False
@@ -480,8 +483,14 @@ def _validate_cookies_via_graphql(
         delay=0.0,
         request_timeout=(10, 20),
         allow_browser_fallback=False,
+        allow_recovery=False,
     )
-    connection = (payload or {}).get("data", {}).get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+    payload_data = (payload or {}).get("data") if isinstance(payload, dict) else {}
+    connection = (
+        payload_data.get("xdt_api__v1__feed__user_timeline_graphql_connection", {})
+        if isinstance(payload_data, dict)
+        else {}
+    )
     if connection.get("edges"):
         result = {
             "validated": True,
@@ -663,7 +672,7 @@ def resolve_instagram_auth_session(
 ) -> InstagramAuthSession:
     session_account_id, normalized_caller_context = _normalize_session_account_id(browser_account_id)
     caller_context = str(caller_context or normalized_caller_context or "").strip() or None
-    validation_context = caller_context if _looks_like_handle(caller_context or "") else normalized_caller_context
+    validation_context = normalized_caller_context
     if not _looks_like_handle(validation_context or ""):
         validation_context = None
     if session_account_id is None and require_validation:
@@ -751,7 +760,7 @@ def resolve_instagram_auth_session(
         if (
             require_validation
             and not validated
-            and validation_category not in {"checkpoint_required", "validation_skipped"}
+            and validation_category not in {"validation_skipped"}
         ):
             if browser_candidate is not None and selected.source != "browser_session":
                 validated_browser, reason_browser, category_browser, stale_ok_browser = _validate_cookies_via_graphql(
@@ -786,7 +795,12 @@ def resolve_instagram_auth_session(
                         require_validation=True,
                     )
 
-            if not validated and validation_category in {"graphql_validation_failed", "unauthorized", "redirect_login"}:
+            if not validated and validation_category in {
+                "checkpoint_required",
+                "graphql_validation_failed",
+                "unauthorized",
+                "redirect_login",
+            }:
                 interactive_cookies, interactive_method = _refresh_interactively(
                     session_account_id=session_account_id,
                     caller_context=validation_context,

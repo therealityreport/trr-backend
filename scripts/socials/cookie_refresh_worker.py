@@ -5,22 +5,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.modal import repair_instagram_auth
 from trr_backend.repositories import social_season_analytics as social_repo
 from trr_backend.socials.instagram import cookie_refresh as instagram_cookie_refresh
 from trr_backend.utils.env import load_env
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 MANUAL_CHECKPOINT_REASONS = {
     "checkpoint_required",
     "challenge_required",
+    "browser_session_invalidated",
+    "email_checkpoint",
     "graphql_validation_challenge",
     "html_challenge_or_auth_required",
+    "login_prompt_detected",
+    "login_required",
+    "manual_auth_required",
     "redirect_to_checkpoint",
+    "redirect_login",
+    "verification_required",
 }
 MANUAL_CHECKPOINT_REASON_CODES = {
     "recent_instagram_graphql_checkpoint_required",
@@ -63,6 +74,13 @@ def _cookie_age_days(refreshed_at: datetime | None) -> float | None:
     return max(0.0, (datetime.now(tz=UTC) - refreshed_at).total_seconds() / 86_400.0)
 
 
+def _cookie_file_mtime(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        return None
+
+
 def _requires_manual_checkpoint(repair_signal: dict[str, Any]) -> bool:
     cookie_validation = repair_signal.get("cookie_validation")
     validation_reason = ""
@@ -85,6 +103,10 @@ def run_worker(
     cookie_file = social_repo._instagram_cookie_refresh_target_path()
     cookie_metadata = instagram_cookie_refresh.read_instagram_cookie_file_metadata(cookie_file)
     refreshed_at = _parse_timestamp(cookie_metadata.get("_cookie_refreshed_at"))
+    refreshed_at_source = "metadata" if refreshed_at is not None else None
+    if refreshed_at is None:
+        refreshed_at = _cookie_file_mtime(cookie_file)
+        refreshed_at_source = "file_mtime" if refreshed_at is not None else None
     cookie_age_days = _cookie_age_days(refreshed_at)
     repair_signal = social_repo.get_instagram_auth_repair_signal(
         failure_lookback_hours=failure_lookback_hours,
@@ -108,6 +130,7 @@ def run_worker(
         "needs_repair": needs_repair,
         "cookie_file": str(cookie_file),
         "cookie_refreshed_at": refreshed_at.isoformat().replace("+00:00", "Z") if refreshed_at else None,
+        "cookie_refreshed_at_source": refreshed_at_source,
         "cookie_age_days": round(cookie_age_days, 3) if cookie_age_days is not None else None,
         "trigger": {
             "reason_codes": trigger_reason_codes,
@@ -118,11 +141,10 @@ def run_worker(
     if not needs_repair:
         return payload
 
-    age_reason_codes = {"cookie_age_exceeded", "cookie_age_unknown"}
-    if _requires_manual_checkpoint(repair_signal) and not (set(trigger_reason_codes) & age_reason_codes):
+    if _requires_manual_checkpoint(repair_signal):
         payload["ok"] = False
-        payload["action"] = "manual_checkpoint_required"
-        payload["failure_reason"] = "manual_checkpoint_required"
+        payload["action"] = "manual_auth_required"
+        payload["failure_reason"] = "manual_auth_required"
         return payload
 
     if check_only:

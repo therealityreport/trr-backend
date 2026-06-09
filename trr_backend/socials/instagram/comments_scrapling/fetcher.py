@@ -69,6 +69,7 @@ from trr_backend.socials.instagram.comments_scrapling.proxy import CommentsProxy
 from trr_backend.socials.instagram.constants import COMMENT_REPLIES_URL, COMMENTS_URL, resolve_comment_sort_order
 from trr_backend.socials.instagram.permalink_metadata import _graphql_doc_ids, _shortcode_to_media_id
 from trr_backend.socials.instagram.scraper import InstagramComment, InstagramScraper
+from trr_backend.socials.scrapling_transport import build_stealthy_fetcher, scrapling_runtime_metadata
 
 logger = logging.getLogger("socials.instagram.comments_scrapling.fetcher")
 
@@ -2587,12 +2588,8 @@ class InstagramCommentsScraplingFetcher:
             maximum=500,
         )
 
-        # Browser fetcher (for warmup only).
-        try:
-            from scrapling.fetchers import StealthyFetcher
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("Scrapling StealthyFetcher is unavailable. Install scrapling[fetchers].") from exc
-        self._fetcher = StealthyFetcher()
+        self._scrapling_runtime_metadata = scrapling_runtime_metadata()
+        self._fetcher = build_stealthy_fetcher()
 
         # httpx client (for API calls). Created lazily after warmup bridges cookies.
         self._http_client: httpx.AsyncClient | None = None
@@ -2606,6 +2603,7 @@ class InstagramCommentsScraplingFetcher:
         """Postmortem data for job metadata. The only way job_runner should
         read internal fetcher state."""
         return {
+            "scrapling_runtime": dict(self._scrapling_runtime_metadata),
             "warmup_cookie_names": sorted(self._warmup_cookie_delta.keys()),
             "warmup_cookie_count": len(self._warmup_cookie_delta),
             "selected_proxy_fingerprint": self._selected_proxy_fingerprint,

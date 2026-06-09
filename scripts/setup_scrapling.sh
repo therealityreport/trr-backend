@@ -3,9 +3,11 @@
 #
 # Installs the Python package (via requirements.lock.txt) AND the browser
 # runtime `StealthyFetcher` depends on (Patchright/Playwright Chromium in
-# Scrapling 0.4.x). The second step is the one that's easy to miss — `pip
+# Scrapling 0.4.x). The second step is the one that's easy to miss: `pip
 # install scrapling[fetchers]` does NOT ship the browser binaries. Without
 # this step, the first live fetch crashes with "browser binary not found".
+# Scrapling 0.4.9 also refreshed browsers/fingerprints, so force the asset
+# refresh after dependency upgrades.
 #
 # Usage:
 #   ./scripts/setup_scrapling.sh              # dev venv at ./.venv
@@ -36,8 +38,8 @@ if [[ ! -x "$SCRAPLING_BIN" ]]; then
   exit 2
 fi
 
-echo "[setup_scrapling] 2/3 — scrapling install (browser runtime)"
-"$SCRAPLING_BIN" install
+echo "[setup_scrapling] 2/3 — scrapling install --force (browser runtime)"
+"$SCRAPLING_BIN" install --force
 
 echo "[setup_scrapling] 3/3 — smoke import"
 "$PYTHON_BIN" -c "import scrapling; from scrapling.fetchers import StealthyFetcher; print(f'scrapling {scrapling.__version__} StealthyFetcher ok')"

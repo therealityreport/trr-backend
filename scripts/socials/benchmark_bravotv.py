@@ -19,8 +19,6 @@ from datetime import UTC, datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # ── BravoTV handles per platform ──────────────────────────────────────
 BRAVO_HANDLES = {
     "facebook": "Bravo",
@@ -169,7 +167,7 @@ def benchmark_instagram():
         max_pages=3,
         fast_mode=True,
         scrape_mode="auto",  # graphql → browser_intercept fallback
-        require_auth=True,  # auto-refresh via Playwright if cookies missing/expired
+        require_auth=True,  # uses existing cookies only unless operator confirmation explicitly enables repair
         max_scrape_seconds=300,  # 5 min cap for benchmarks
     )
 
@@ -352,6 +350,8 @@ BENCHMARKS = {
 
 
 def main():
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Benchmark TRR scrapers with BravoTV handles")
     parser.add_argument("--platform", choices=list(BENCHMARKS) + ["all"], default="all")
     parser.add_argument("--output", type=str, default=None, help="JSON output file path")

@@ -137,6 +137,9 @@ _TERMINAL_MISSING_CLASSIFIED_REASON = "coverage_terminal_missing_classified"
 _PARENTLESS_REPLY_ATTACH_FAILED_REASON = "parentless_reply_attach_failed"
 _PERSISTED_REPLY_TOPOLOGY_GAP_REASON = "persisted_reply_topology_gap"
 _BROWSER_SESSION_INVALIDATED_ERROR_CODE = "instagram_comments_browser_session_invalidated"
+_COMMENTS_PER_POST_CONCURRENCY_ENV = "SOCIAL_INSTAGRAM_COMMENTS_PER_POST_CONCURRENCY"
+_COMMENTS_PER_POST_CONCURRENCY_DEFAULT = 1
+_COMMENTS_PER_POST_CONCURRENCY_MAX = 8
 
 
 @dataclass(slots=True)
@@ -175,6 +178,34 @@ class ScraplingJobLeaseLostError(Exception):
 
     def __str__(self) -> str:
         return self.message
+
+
+@dataclass(slots=True)
+class _CommentsPostFetchWork:
+    index: int
+    shortcode: str
+    post_started_at: float
+    fetch_started_at: float
+    fetch_kwargs: dict[str, Any]
+    target_metadata: Any
+    current_target_fetch: dict[str, Any]
+    activity: dict[str, Any]
+
+
+@dataclass(slots=True)
+class _CommentsPostFetchOutcome:
+    work: _CommentsPostFetchWork
+    result: InstagramCommentsFetchResult | None = None
+    fetch_elapsed_ms: int = 0
+    current_target_fetch: dict[str, Any] | None = None
+    activity: dict[str, Any] | None = None
+    capture_metadata: dict[str, Any] | None = None
+    observed_comment_count: int = 0
+    fetched_parent_count: int = 0
+    fetched_child_count: int = 0
+    fetched_parentless_count: int = 0
+    skipped_complete: bool = False
+    total_elapsed_ms: int = 0
 
 
 def _worker_id_matches_claim(row_worker_id: Any, current_worker_id: str | None) -> bool:
@@ -302,6 +333,15 @@ def _resolve_job_heartbeat_interval_seconds() -> int:
     except (TypeError, ValueError):
         value = _DEFAULT_JOB_HEARTBEAT_INTERVAL_SECONDS
     return max(5, min(value, 300))
+
+
+def _resolve_comments_per_post_concurrency() -> int:
+    raw = os.environ.get(_COMMENTS_PER_POST_CONCURRENCY_ENV, _COMMENTS_PER_POST_CONCURRENCY_DEFAULT)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = _COMMENTS_PER_POST_CONCURRENCY_DEFAULT
+    return max(1, min(value, _COMMENTS_PER_POST_CONCURRENCY_MAX))
 
 
 async def _maintain_comments_job_heartbeat(
@@ -2327,6 +2367,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         1,
         _safe_int(config.get("comments_cancel_check_every_posts")) or _DEFAULT_CANCEL_CHECK_EVERY_POSTS,
     )
+    comments_per_post_concurrency = _resolve_comments_per_post_concurrency()
     skipped_complete_target_source_ids: list[str] = []
     top_level_resume_cursors_by_shortcode = _top_level_resume_cursors_from_job(job)
     top_level_resume_cursor_params_by_shortcode = _top_level_resume_cursor_params_from_job(job)
@@ -2369,6 +2410,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
         "comments_shard_target_count": comments_shard_target_count,
         "comments_load_strategy": comments_load_strategy,
         "comments_session_scope": comments_session_scope,
+        "comments_per_post_concurrency": comments_per_post_concurrency,
     }
     if not account_handle:
         raise CommentsScraplingRuntimeError(
@@ -2799,7 +2841,31 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                 )
                 return True
 
-            for index, shortcode in enumerate(target_source_ids, start=1):
+            def _skipped_complete_outcome(
+                index: int,
+                shortcode: str,
+                post_started_at: float,
+            ) -> _CommentsPostFetchOutcome:
+                work = _CommentsPostFetchWork(
+                    index=index,
+                    shortcode=shortcode,
+                    post_started_at=post_started_at,
+                    fetch_started_at=post_started_at,
+                    fetch_kwargs={},
+                    target_metadata=None,
+                    current_target_fetch={},
+                    activity={},
+                )
+                return _CommentsPostFetchOutcome(
+                    work=work,
+                    skipped_complete=True,
+                    total_elapsed_ms=int((time.monotonic() - post_started_at) * 1000),
+                )
+
+            async def _prepare_post_fetch_work(
+                index: int,
+                shortcode: str,
+            ) -> _CommentsPostFetchWork | _CommentsPostFetchOutcome:
                 post_started_at = time.monotonic()
                 if not lifecycle.touch_job_heartbeat(job_id, worker_id=worker_id):
                     _raise_if_job_lease_lost(
@@ -2832,50 +2898,7 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     elif mid_run_warmup_every_posts > 0 and posts_since_last_warmup >= mid_run_warmup_every_posts:
                         await _maybe_refresh_warmup(reason="post_count_threshold")
                 if shortcode in skipped_complete_target_source_ids:
-                    total_elapsed_ms = int((time.monotonic() - post_started_at) * 1000)
-                    post_latency_samples.append(
-                        {
-                            "shortcode": shortcode,
-                            "fetch_elapsed_ms": 0,
-                            "persist_elapsed_ms": 0,
-                            "total_elapsed_ms": total_elapsed_ms,
-                            "comments_fetched": 0,
-                            "comments_upserted": 0,
-                            "comments_marked_missing": 0,
-                            "fetch_reason": "already_complete",
-                            "is_complete": True,
-                            "completion_reason": "already_complete",
-                            "reported_comment_count": None,
-                            "comments_load_strategy": comments_load_strategy,
-                            "comments_session_scope": comments_session_scope,
-                            "saved_once_per_post": False,
-                        }
-                    )
-                    processed_posts += 1
-                    activity = {
-                        "phase": "comments_scrapling_running",
-                        "posts_checked": processed_posts,
-                        "matched_posts": processed_posts,
-                        "saved_posts": processed_posts,
-                        "total_posts": len(target_source_ids),
-                        **shard_metadata,
-                    }
-                    lifecycle.emit_job_progress(
-                        job_id=job_id,
-                        stage=stage,
-                        platform="instagram",
-                        account=account_handle,
-                        scraped_posts=processed_posts,
-                        scraped_comments=comments_fetched,
-                        posts_upserted=processed_posts,
-                        comments_upserted=comments_upserted,
-                        activity=activity,
-                        progress_state=progress_state,
-                        worker_id=worker_id,
-                        force=index == len(target_source_ids),
-                        extra_metadata=progress_metadata_common(),
-                    )
-                    continue
+                    return _skipped_complete_outcome(index, shortcode, post_started_at)
                 fetch_started_at = time.monotonic()
                 fetch_kwargs: dict[str, Any] = {
                     "max_comments": max_comments_per_post,
@@ -2981,10 +3004,22 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     "fallback_expected": bool(comments_endpoint_probe.get("advisory_continue")),
                     **shard_metadata,
                 }
-                result = await fetcher.fetch_comments_for_shortcode(shortcode, **fetch_kwargs)
-                fetch_elapsed_ms = int((time.monotonic() - fetch_started_at) * 1000)
-                current_target_fetch = {
-                    **current_target_fetch,
+                return _CommentsPostFetchWork(
+                    index=index,
+                    shortcode=shortcode,
+                    post_started_at=post_started_at,
+                    fetch_started_at=fetch_started_at,
+                    fetch_kwargs=fetch_kwargs,
+                    target_metadata=target_metadata,
+                    current_target_fetch=current_target_fetch,
+                    activity=activity,
+                )
+
+            async def _fetch_post_comments(work: _CommentsPostFetchWork) -> _CommentsPostFetchOutcome:
+                result = await fetcher.fetch_comments_for_shortcode(work.shortcode, **work.fetch_kwargs)
+                fetch_elapsed_ms = int((time.monotonic() - work.fetch_started_at) * 1000)
+                fetched_target = {
+                    **work.current_target_fetch,
                     "phase": "fetched",
                     "fetched_at": lifecycle.format_time(lifecycle.now_utc()),
                     "fetch_elapsed_ms": fetch_elapsed_ms,
@@ -2997,22 +3032,147 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                     "retryable": bool(result.retryable),
                     "fetch_reason": result.fetch_reason,
                 }
-                activity = {
+                fetched_activity = {
                     "phase": "comments_scrapling_fetched",
                     "posts_checked": processed_posts,
                     "matched_posts": processed_posts,
                     "saved_posts": processed_posts,
                     "total_posts": len(target_source_ids),
-                    "current_shortcode": shortcode,
-                    "current_post_index": index,
+                    "current_shortcode": work.shortcode,
+                    "current_post_index": work.index,
                     "comments_fetched": len(result.comments),
                     "fetch_reason": result.fetch_reason,
                     **shard_metadata,
                 }
+                return _CommentsPostFetchOutcome(
+                    work=work,
+                    result=result,
+                    fetch_elapsed_ms=fetch_elapsed_ms,
+                    current_target_fetch=fetched_target,
+                    activity=fetched_activity,
+                    capture_metadata=_comment_capture_metadata_from_fetch_result(result),
+                    observed_comment_count=_extract_observed_comment_count(result),
+                    fetched_parent_count=parent_comment_count(result.comments),
+                    fetched_child_count=child_reply_count(result.comments),
+                    fetched_parentless_count=len(_result_parentless_reply_ids(result)),
+                )
+
+            async def _iter_fetch_outcomes():
+                nonlocal current_target_fetch, activity
+                if comments_per_post_concurrency <= 1:
+                    for index, shortcode in enumerate(target_source_ids, start=1):
+                        prepared = await _prepare_post_fetch_work(index, shortcode)
+                        if isinstance(prepared, _CommentsPostFetchOutcome):
+                            yield prepared
+                            continue
+                        current_target_fetch = dict(prepared.current_target_fetch)
+                        activity = dict(prepared.activity)
+                        yield await _fetch_post_comments(prepared)
+                    return
+
+                prepared_index = 0
+                next_to_yield = 1
+                ready: dict[int, _CommentsPostFetchOutcome] = {}
+                pending: dict[int, asyncio.Task[_CommentsPostFetchOutcome]] = {}
+
+                async def fill_pending() -> None:
+                    nonlocal prepared_index, current_target_fetch, activity
+                    while (
+                        prepared_index < len(target_source_ids)
+                        and len(ready) + len(pending) < comments_per_post_concurrency
+                    ):
+                        prepared_index += 1
+                        shortcode = target_source_ids[prepared_index - 1]
+                        prepared = await _prepare_post_fetch_work(prepared_index, shortcode)
+                        if isinstance(prepared, _CommentsPostFetchOutcome):
+                            ready[prepared_index] = prepared
+                            continue
+                        current_target_fetch = dict(prepared.current_target_fetch)
+                        activity = dict(prepared.activity)
+                        pending[prepared_index] = asyncio.create_task(_fetch_post_comments(prepared))
+
+                try:
+                    await fill_pending()
+                    while next_to_yield <= len(target_source_ids):
+                        await fill_pending()
+                        if next_to_yield in ready:
+                            outcome = ready.pop(next_to_yield)
+                        else:
+                            task = pending.pop(next_to_yield)
+                            outcome = await task
+                        yield outcome
+                        next_to_yield += 1
+                        await fill_pending()
+                finally:
+                    if pending:
+                        for task in pending.values():
+                            task.cancel()
+                        await asyncio.gather(*pending.values(), return_exceptions=True)
+
+            async for outcome in _iter_fetch_outcomes():
+                index = outcome.work.index
+                shortcode = outcome.work.shortcode
+                post_started_at = outcome.work.post_started_at
+                fetch_kwargs = outcome.work.fetch_kwargs
+                target_metadata = outcome.work.target_metadata
+                if outcome.skipped_complete:
+                    post_latency_samples.append(
+                        {
+                            "shortcode": shortcode,
+                            "fetch_elapsed_ms": 0,
+                            "persist_elapsed_ms": 0,
+                            "total_elapsed_ms": outcome.total_elapsed_ms,
+                            "comments_fetched": 0,
+                            "comments_upserted": 0,
+                            "comments_marked_missing": 0,
+                            "fetch_reason": "already_complete",
+                            "is_complete": True,
+                            "completion_reason": "already_complete",
+                            "reported_comment_count": None,
+                            "comments_load_strategy": comments_load_strategy,
+                            "comments_session_scope": comments_session_scope,
+                            "saved_once_per_post": False,
+                        }
+                    )
+                    processed_posts += 1
+                    activity = {
+                        "phase": "comments_scrapling_running",
+                        "posts_checked": processed_posts,
+                        "matched_posts": processed_posts,
+                        "saved_posts": processed_posts,
+                        "total_posts": len(target_source_ids),
+                        **shard_metadata,
+                    }
+                    lifecycle.emit_job_progress(
+                        job_id=job_id,
+                        stage=stage,
+                        platform="instagram",
+                        account=account_handle,
+                        scraped_posts=processed_posts,
+                        scraped_comments=comments_fetched,
+                        posts_upserted=processed_posts,
+                        comments_upserted=comments_upserted,
+                        activity=activity,
+                        progress_state=progress_state,
+                        worker_id=worker_id,
+                        force=index == len(target_source_ids),
+                        extra_metadata=progress_metadata_common(),
+                    )
+                    continue
+                result = outcome.result
+                if result is None:
+                    raise RuntimeError("comments fetch outcome missing result")
+                fetch_elapsed_ms = outcome.fetch_elapsed_ms
+                current_target_fetch = dict(outcome.current_target_fetch or {})
+                activity = dict(outcome.activity or {})
+                capture_metadata = dict(outcome.capture_metadata or {})
+                observed_comment_count = outcome.observed_comment_count
+                fetched_parent_count = outcome.fetched_parent_count
+                fetched_child_count = outcome.fetched_child_count
+                fetched_parentless_count = outcome.fetched_parentless_count
                 top_level_checkpoint = getattr(result, "top_level_checkpoint", None)
                 if isinstance(top_level_checkpoint, dict):
                     top_level_checkpoints_by_shortcode[shortcode] = dict(top_level_checkpoint)
-                capture_metadata = _comment_capture_metadata_from_fetch_result(result)
                 comment_phase_counts.update(_counter_from_mapping(capture_metadata.get("phase_counts")))
                 comment_cursor_param_counts.update(_counter_from_mapping(capture_metadata.get("cursor_param_counts")))
                 comment_cursor_shape_counts.update(_counter_from_mapping(capture_metadata.get("cursor_shape_counts")))
@@ -3049,10 +3209,6 @@ def run_instagram_comments_scrapling_job(job: dict[str, Any], *, worker_id: str 
                             "diagnostic_metadata": _fetch_result_diagnostic_metadata(result),
                         },
                     )
-                observed_comment_count = _extract_observed_comment_count(result)
-                fetched_parent_count = parent_comment_count(result.comments)
-                fetched_child_count = child_reply_count(result.comments)
-                fetched_parentless_count = len(_result_parentless_reply_ids(result))
                 if result.auth_failed and not result.comments:
                     normalized_auth_failed_shortcode = str(shortcode or "").strip()
                     if normalized_auth_failed_shortcode:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -50,24 +51,41 @@ CANONICAL_REMOTE_RUNTIME_OVERRIDES = {
     "TRR_MODAL_SOCIAL_AUTH_PROBE_FUNCTION": "probe_social_remote_auth",
     "TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION": "probe_getty_remote_access",
     "TRR_MODAL_VISION_FUNCTION": "run_admin_vision",
+    "TRR_MODAL_CAST_SCREENTIME_FUNCTION": "run_cast_screentime_analysis",
     "TRR_MODAL_SOCIALBLADE_FUNCTION": "run_socialblade_scrape",
+    "SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY": "true",
+    "SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED": "false",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "decodo",
+    "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "true",
+    "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "false",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "600",
+    "TRR_MODAL_MAINTENANCE_OWNER_REQUIRED": "1",
     "TRR_MODAL_RUNTIME_SECRET_NAME": DEFAULT_RUNTIME_SECRET,
     "TRR_MODAL_SOCIAL_SECRET_NAME": DEFAULT_SOCIAL_SECRET,
     "TRR_ADMIN_IMAGE_EXECUTION_BACKEND": "modal",
     "SOCIAL_QUEUE_ENABLED": "true",
 }
+MODAL_ALWAYS_ON_SAFE_DEFAULTS = {
+    "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED": "0",
+    "TRR_MODAL_RUNTIME_SCHEDULER_ENABLED": "1",
+    "TRR_MODAL_API_MIN_CONTAINERS": "0",
+    "TRR_MODAL_ADMIN_KEEP_WARM": "0",
+}
 CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS = {
-    "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "5",
-    "SOCIAL_MODAL_DISPATCH_LIMIT": "5",
+    "TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT": "8",
+    "SOCIAL_MODAL_DISPATCH_LIMIT": "8",
     "SOCIAL_WORKER_POOL_POSTS": "1",
-    "SOCIAL_WORKER_POOL_COMMENTS": "2",
+    "SOCIAL_WORKER_POOL_COMMENTS": "8",
     "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY": "3",
-    "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "5",
+    "SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS": "8",
+    "SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM": "2",
+    "SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP": "8",
     "SOCIAL_WORKER_POOL_MEDIA_MIRROR": "1",
     "SOCIAL_WORKER_POOL_COMMENT_MEDIA_MIRROR": "1",
-    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "2",
-    "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "2",
+    "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "8",
+    "SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT": "8",
     "SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE": "file_lock",
+    "SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED": "true",
     "SOCIAL_THREADS_POSTS_PROXY_PROVIDER": "decodo",
     "SOCIAL_TIKTOK_COMMENT_FETCH_TIMEOUT_SECONDS": "180",
     "SOCIAL_PLATFORM_CAP_PER_ACCOUNT_SCALING": "false",
@@ -116,12 +134,19 @@ def _python_command() -> str:
     return sys.executable or "python3.11"
 
 
+def _default_source_env() -> Path:
+    configured = str(os.getenv("TRR_MODAL_SOURCE_ENV") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return DEFAULT_SOURCE_ENV
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source-env",
         type=Path,
-        default=DEFAULT_SOURCE_ENV,
+        default=_default_source_env(),
         help=f"Source env file to split (default: {DEFAULT_SOURCE_ENV})",
     )
     parser.add_argument(
@@ -171,6 +196,10 @@ def _is_local_only_env_key(key: str) -> bool:
         or normalized.endswith("_FILE")
         or normalized.endswith("_NETSCAPE_FILE")
     )
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_social_auth_env_key(key: str) -> bool:
@@ -295,6 +324,8 @@ def _apply_runtime_overrides(values: dict[str, str], *, disabled: bool) -> dict[
     if disabled:
         return merged
     merged.update(CANONICAL_REMOTE_RUNTIME_OVERRIDES)
+    if not _truthy(os.getenv("WORKSPACE_ALLOW_MODAL_ALWAYS_ON_BILLING")):
+        merged.update(MODAL_ALWAYS_ON_SAFE_DEFAULTS)
     for key, value in CANONICAL_REMOTE_SOCIAL_CAP_DEFAULTS.items():
         merged.setdefault(key, value)
     return merged
@@ -315,7 +346,13 @@ def _modal_secret_create_command(secret_name: str, env_file: Path, *, modal_envi
 
 
 def _run_command(command: list[str]) -> None:
-    subprocess.run(command, check=True)
+    raw_timeout = str(os.getenv("TRR_MODAL_SECRET_CREATE_TIMEOUT_SECONDS") or "120").strip()
+    try:
+        timeout_seconds = int(raw_timeout)
+    except ValueError:
+        timeout_seconds = 120
+    timeout_seconds = max(10, timeout_seconds)
+    subprocess.run(command, check=True, timeout=timeout_seconds)
 
 
 def _cleanup_rendered_files(*paths: Path) -> None:

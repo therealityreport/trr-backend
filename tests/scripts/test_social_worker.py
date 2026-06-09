@@ -91,10 +91,13 @@ def test_apply_post_persist_truthfulness_diagnostics_adds_silent_drop_alert(monk
         "posts_skipped_by_reason": {"canonical_upsert_returned_none": 6},
     }
     assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"] == {
+        "platform": "instagram",
+        "account": "thetraitorsus",
         "posts_checked": 6,
         "posts_upserted": 0,
         "posts_skipped": 6,
         "posts_skipped_by_reason": {"canonical_upsert_returned_none": 6},
+        "media_assets_persisted": 0,
         "silent_drop_detected": True,
         "status_resolution": "completed_with_silent_drop_alert",
         "operator_summary": "Instagram posts persistence completed with zero saved posts after checking live posts.",
@@ -103,7 +106,7 @@ def test_apply_post_persist_truthfulness_diagnostics_adds_silent_drop_alert(monk
         {
             "code": "instagram_posts_persist_zero_saved",
             "severity": "warning",
-            "message": "Instagram posts Scrapling checked 6 posts but persisted 0 for @thetraitorsus.",
+            "message": "Instagram posts persistence completed with zero saved posts after checking live posts.",
         }
     ]
 
@@ -153,6 +156,104 @@ def test_apply_post_persist_truthfulness_diagnostics_surfaces_skip_counters_with
         "posts_skipped_by_reason": {"missing_shortcode": 1},
     }
     assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"]["silent_drop_detected"] is False
+
+
+def test_apply_post_persist_truthfulness_diagnostics_suppresses_alert_when_media_persisted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        worker,
+        "_persist_job_metadata",
+        lambda job_id, metadata: {
+            "id": job_id,
+            "run_id": "run-1",
+            "platform": "instagram",
+            "job_type": "instagram_media_mirror",
+            "status": "completed",
+            "items_found": 11,
+            "error_message": None,
+            "metadata": metadata,
+        },
+    )
+
+    updated_job, silent_drop_alert = worker._apply_post_persist_truthfulness_diagnostics(  # noqa: SLF001
+        {
+            "id": "job-media-1",
+            "run_id": "run-1",
+            "platform": "instagram",
+            "status": "completed",
+            "items_found": 11,
+            "metadata": {
+                "stage": "media_mirror",
+                "account": "bravotv",
+                "stage_counters": {"posts": 1},
+                "persist_counters": {"posts_upserted": 0},
+                "posts_scrapling_persist_diagnostics": {
+                    "posts_upserted": 0,
+                    "posts_skipped": 1,
+                    "posts_skipped_by_reason": {"media_mirror_followup": 1},
+                },
+                "mirror": {
+                    "status": "mirrored",
+                    "mirrored_assets": 9,
+                    "storage_summary": {"object_count": 20, "cdn_url_count": 20},
+                },
+                "alerts": [
+                    {
+                        "code": "instagram_posts_persist_zero_saved",
+                        "severity": "warning",
+                        "message": "stale warning",
+                    }
+                ],
+            },
+        }
+    )
+
+    truthfulness = updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"]
+    assert silent_drop_alert is False
+    assert truthfulness["media_assets_persisted"] == 20
+    assert truthfulness["silent_drop_detected"] is False
+    assert "alerts" not in updated_job["metadata"]
+
+
+def test_apply_post_persist_truthfulness_diagnostics_reads_threads_alias(monkeypatch) -> None:
+    monkeypatch.setattr(
+        worker,
+        "_persist_job_metadata",
+        lambda job_id, metadata: {
+            "id": job_id,
+            "run_id": "run-1",
+            "platform": "threads",
+            "job_type": "posts_scrapling",
+            "status": "completed",
+            "items_found": 2,
+            "error_message": None,
+            "metadata": metadata,
+        },
+    )
+
+    updated_job, silent_drop_alert = worker._apply_post_persist_truthfulness_diagnostics(  # noqa: SLF001
+        {
+            "id": "job-3",
+            "run_id": "run-1",
+            "platform": "threads",
+            "status": "completed",
+            "items_found": 2,
+            "metadata": {
+                "stage": "threads_posts_scrapling",
+                "platform": "threads",
+                "account": "bravotv",
+                "stage_counters": {"posts": 2},
+                "threads_posts_scrapling_persist_diagnostics": {
+                    "posts_upserted": 0,
+                    "posts_skipped": 2,
+                    "posts_skipped_by_reason": {"missing_post_id": 2},
+                },
+            },
+        }
+    )
+
+    assert silent_drop_alert is True
+    assert updated_job["metadata"]["posts_scrapling_persist_diagnostics"]["posts_skipped"] == 2
+    assert updated_job["metadata"]["diagnostics"]["post_persist_truthfulness"]["platform"] == "threads"
 
 
 def test_main_queue_parallel_fanout_spawns_child_workers(monkeypatch) -> None:
@@ -890,7 +991,7 @@ def test_resolve_child_wait_timeout_adds_grace_to_max_run_seconds() -> None:
     assert worker._resolve_child_wait_timeout_seconds(180.0) == 210.0  # noqa: SLF001
 
 
-def test_resolve_worker_execution_limits_uses_task8_defaults_and_new_env_names(monkeypatch) -> None:
+def test_resolve_worker_execution_limits_are_unbounded_by_default_and_use_new_env_names(monkeypatch) -> None:
     monkeypatch.delenv("SOCIAL_EXECUTE_RUN_MAX_JOBS", raising=False)
     monkeypatch.delenv("SOCIAL_EXECUTE_RUN_MAX_SECONDS", raising=False)
     monkeypatch.delenv("SOCIAL_WORKER_MAX_JOBS_PER_INVOCATION", raising=False)
@@ -898,7 +999,7 @@ def test_resolve_worker_execution_limits_uses_task8_defaults_and_new_env_names(m
 
     args = SimpleNamespace(max_jobs_per_invocation=None, max_run_seconds=None)
 
-    assert worker._resolve_worker_execution_limits(args) == (1000, 1800.0)  # noqa: SLF001
+    assert worker._resolve_worker_execution_limits(args) == (None, None)  # noqa: SLF001
 
     monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_JOBS", "25")
     monkeypatch.setenv("SOCIAL_EXECUTE_RUN_MAX_SECONDS", "90")

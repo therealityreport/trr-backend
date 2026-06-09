@@ -118,6 +118,19 @@ def test_resolve_tiktok_media_skips_ytdlp_when_disabled(monkeypatch: pytest.Monk
     assert result.attempts[0]["reason_code"] == "tiktok_ytdlp_skipped"
 
 
+def test_resolve_tiktok_media_rejects_unsafe_canonical_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
+
+    result = media_resolver.resolve_tiktok_media(
+        "12345",
+        canonical_url="http://127.0.0.1/video/12345",
+        session=_FakeSession(html=""),
+    )
+
+    assert result.media_urls == []
+    assert result.attempts[0]["reason_code"] == "tiktok_unsafe_video_url"
+
+
 def test_resolve_tiktok_media_falls_back_to_watch_page_json(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     payload = {
@@ -287,6 +300,11 @@ def test_resolve_tiktok_media_accepts_no_suffix_video_probe_and_records_evidence
 ) -> None:
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     stream_url = "https://v16-webapp-prime.tiktokcdn-us.com/tos-useast5-pve/no-extension-token"
+    monkeypatch.setattr(
+        media_resolver,
+        "_TIKTOK_MEDIA_URL_POLICY",
+        media_resolver.MediaUrlSafetyPolicy(media_resolver.allowed_hosts_for_platform("tiktok"), resolve_dns=False),
+    )
     payload = {
         "__DEFAULT_SCOPE__": {
             "webapp.video-detail": {
@@ -332,6 +350,11 @@ def test_resolve_tiktok_media_rejects_html_probe_response(
 ) -> None:
     monkeypatch.setattr(media_resolver.shutil, "which", lambda _name: None)
     stream_url = "https://v16-webapp-prime.tiktokcdn-us.com/tos-useast5-pve/no-extension-token"
+    monkeypatch.setattr(
+        media_resolver,
+        "_TIKTOK_MEDIA_URL_POLICY",
+        media_resolver.MediaUrlSafetyPolicy(media_resolver.allowed_hosts_for_platform("tiktok"), resolve_dns=False),
+    )
     payload = {
         "__DEFAULT_SCOPE__": {
             "webapp.video-detail": {

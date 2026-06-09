@@ -111,6 +111,27 @@ def _build_fetcher(*, platform: str = "instagram") -> SocialBladeScraplingFetche
     )
 
 
+def test_scrapling_fetcher_builds_browser_fetcher_through_shared_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_fetcher = object()
+    captured: dict[str, bool] = {}
+
+    def fake_build_stealthy_fetcher() -> object:
+        captured["called"] = True
+        return fake_fetcher
+
+    monkeypatch.setattr(
+        "trr_backend.socials.socialblade.fetcher.build_stealthy_fetcher",
+        fake_build_stealthy_fetcher,
+    )
+
+    fetcher = _build_fetcher(platform="instagram")
+
+    assert captured["called"] is True
+    assert fetcher._fetcher is fake_fetcher
+
+
 def test_scrapling_fetcher_uses_direct_instagram_user_url_without_raw_init_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,6 +330,9 @@ def test_scrapling_fetcher_prefers_browser_captured_history_over_http_search(
     assert payload["daily_total_followers_chart"]["total_data_points"] == 75
     assert payload["daily_total_followers_chart"]["date_range"] == {"from": "2026-01-01", "to": "2026-03-16"}
     assert payload["runtime_metadata"]["fallback_chain"] == ["scrapling_warmup", "instagram_page_trpc_capture"]
+    assert payload["runtime_metadata"]["capture_source"] == "html_script"
+    assert payload["runtime_metadata"]["history_source_detail"] == "html_script"
+    assert payload["runtime_metadata"]["profile_source"] == "html_script"
 
 
 def test_scrapling_fetcher_prefers_captured_xhr_history_when_html_capture_is_missing(
@@ -373,6 +397,8 @@ def test_scrapling_fetcher_prefers_captured_xhr_history_when_html_capture_is_mis
     assert payload["daily_channel_metrics_60day"]["row_count"] == 60
     assert payload["daily_total_followers_chart"]["total_data_points"] == 75
     assert payload["runtime_metadata"]["capture_source"] == "scrapling_xhr"
+    assert payload["runtime_metadata"]["history_source_detail"] == "scrapling_xhr"
+    assert payload["runtime_metadata"]["profile_source"] == "scrapling_xhr"
     assert payload["runtime_metadata"]["captured_xhr_count"] == 2
     assert payload["runtime_metadata"]["captured_xhr_paths"] == [
         "/api/trpc/instagram.user,instagram.history",
@@ -580,6 +606,8 @@ def test_scrapling_fetcher_tries_authenticated_api_when_page_capture_is_short(
 
     assert payload["history_source"] == "authenticated_api"
     assert payload["daily_channel_metrics_60day"]["row_count"] == 60
+    assert payload["runtime_metadata"]["history_source_detail"] == "authenticated_api"
+    assert payload["runtime_metadata"]["profile_source"] == "authenticated_api"
     assert payload["runtime_metadata"]["fallback_chain"] == [
         "scrapling_warmup",
         "instagram_page_trpc_capture_short",
@@ -790,6 +818,8 @@ def test_scrapling_fetcher_bridges_warmup_cookies_into_authenticated_requests(mo
     assert payload["history_source"] == "authenticated_api"
     assert payload["profile_stats"]["followers"] == 475444
     assert payload["daily_channel_metrics_60day"]["row_count"] == 2
+    assert payload["runtime_metadata"]["history_source_detail"] == "authenticated_api"
+    assert payload["runtime_metadata"]["profile_source"] == "authenticated_api"
     assert payload["runtime_metadata"]["fallback_chain"] == ["scrapling_warmup", "instagram_trpc_http"]
     assert payload["runtime_metadata"]["request_count"] == 5
 
@@ -848,6 +878,8 @@ def test_scrapling_fetcher_falls_back_to_html_table_when_authenticated_api_chall
 
     assert payload["history_source"] == "table_fallback"
     assert payload["daily_total_followers_chart"]["total_data_points"] == 2
+    assert payload["runtime_metadata"]["history_source_detail"] == "html_table_fallback"
+    assert payload["runtime_metadata"]["profile_source"] == "html_body_fallback"
     assert payload["runtime_metadata"]["fallback_chain"][-1] == "html_table_fallback"
 
 
@@ -892,6 +924,8 @@ def test_scrapling_fetcher_supports_non_instagram_html_fallback_platforms(
     assert payload["history_source"] == "table_fallback"
     assert payload["profile_stats"]["followers"] == expected_followers
     assert payload["chart_metric_label"] == expected_metric_label
+    assert payload["runtime_metadata"]["history_source_detail"] == "html_table_fallback"
+    assert payload["runtime_metadata"]["profile_source"] == "html_body_fallback"
 
 
 def test_scrapling_fetcher_labels_non_chart_table_as_table_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

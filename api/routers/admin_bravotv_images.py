@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.auth import InternalAdminUser
-from trr_backend.bravotv.run_service import (
+from trr_backend.media.bravotv import admin_review_service as review_service
+from trr_backend.media.bravotv.run_service import (
     attach_operation,
     execute_bravotv_image_run_from_request_payload,
     get_bravotv_run,
     get_latest_bravotv_run,
 )
 from trr_backend.db.admin import create_supabase_admin_client
-from trr_backend.media.s3_mirror import get_object_storage_bucket, get_object_storage_client
 from trr_backend.pipeline.admin_operations import operation_stream_response, start_operation_for_stream
 
 router = APIRouter(prefix="/admin/bravotv/images", tags=["admin-bravotv-images"])
@@ -40,6 +41,38 @@ class BravotvImageRunRequest(BaseModel):
     getty_prefetch_mode: str | None = None
     getty_prefetch_auth_mode: str | None = None
     getty_prefetch_auth_warning: str | None = None
+
+
+class ApproveReplacementRequest(BaseModel):
+    media_asset_id: UUID | None = None
+    page_url: str
+    source_domain: str
+    expected_width: int | None = Field(default=None, ge=1)
+    expected_height: int | None = Field(default=None, ge=1)
+    note: str | None = None
+
+
+class BulkApproveReplacementItem(ApproveReplacementRequest):
+    group_id: str
+
+
+class BulkApproveReplacementRequest(BaseModel):
+    items: list[BulkApproveReplacementItem] = Field(default_factory=list, min_length=1, max_length=25)
+    note: str | None = None
+
+
+class ResolveDuplicateRequest(BaseModel):
+    key_type: str
+    key: str
+    group_ids: list[str] = Field(default_factory=list)
+    action: Literal["ignore", "mark_duplicate"] = "ignore"
+    primary_group_id: str | None = None
+    note: str | None = None
+
+
+class BackfillRunRequest(BaseModel):
+    force_all: bool = True
+    note: str | None = None
 
 
 def _bravotv_request_needs_getty_prefetch(payload: BravotvImageRunRequest) -> bool:
@@ -136,6 +169,99 @@ def _sse_event(event_type: str, payload: dict[str, Any]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=True, default=str)}\n\n"
 
 
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return review_service.safe_dict(value)
+
+
+def _safe_list(value: Any) -> list[Any]:
+    return review_service.safe_list(value)
+
+
+def _get_run_or_404(run_id: UUID) -> dict[str, Any]:
+    return review_service.get_run_or_404(str(run_id))
+
+
+def _load_run_artifact_payload(row: dict[str, Any], artifact_name: str) -> Any:
+    return review_service.load_run_artifact_payload(row, artifact_name)
+
+
+def _run_artifact_object(row: dict[str, Any], artifact_name: str) -> dict[str, Any]:
+    return review_service.run_artifact_object(row, artifact_name)
+
+
+def _write_run_artifact_payload(row: dict[str, Any], artifact_name: str, payload: Any) -> dict[str, Any]:
+    return review_service.write_run_artifact_payload(row, artifact_name, payload)
+
+
+def _paginate(items: list[Any], *, offset: int, limit: int) -> dict[str, Any]:
+    return review_service.paginate(items, offset=offset, limit=limit)
+
+
+def _candidate_values(row: dict[str, Any]) -> list[dict[str, Any]]:
+    return review_service.candidate_values(row)
+
+
+def _row_matches_review_filters(
+    row: dict[str, Any],
+    *,
+    section: str,
+    reason: str | None,
+    display_eligible: bool | None,
+    source_role: str | None,
+) -> bool:
+    return review_service.row_matches_review_filters(
+        row,
+        section=section,
+        reason=reason,
+        display_eligible=display_eligible,
+        source_role=source_role,
+    )
+
+
+def _append_action_to_artifact_payload(payload: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    return review_service.append_action_to_artifact_payload(payload, action)
+
+
+def _append_review_action(run_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    return review_service.append_review_action(run_id, action)
+
+
+def _fetch_media_asset(db: Any, asset_id: str) -> dict[str, Any]:
+    return review_service.fetch_media_asset(db, asset_id)
+
+
+def _update_media_asset_metadata(db: Any, asset_id: str, patch: dict[str, Any]) -> None:
+    review_service.update_media_asset_metadata(db, asset_id, patch)
+
+
+def _find_replacement_candidate(
+    row: dict[str, Any],
+    *,
+    group_id: str,
+    media_asset_id: str | None,
+) -> dict[str, Any]:
+    return review_service.find_replacement_candidate(row, group_id=group_id, media_asset_id=media_asset_id)
+
+
+def _approve_replacement_for_run(
+    *,
+    run_id: str,
+    row: dict[str, Any],
+    group_id: str,
+    payload: ApproveReplacementRequest,
+    note: str | None = None,
+    db: Any | None = None,
+) -> dict[str, Any]:
+    return review_service.approve_replacement_for_run(
+        run_id=run_id,
+        row=row,
+        group_id=group_id,
+        payload=payload,
+        note=note,
+        db=db,
+    )
+
+
 def _build_operation_producer(*, request_payload: dict[str, Any]):
     def _producer() -> Any:
         operation_id = str(request_payload.get("operation_id") or "").strip() or None
@@ -222,10 +348,7 @@ def start_bravotv_person_run(
 
 @router.get("/runs/{run_id}")
 def get_run_detail(run_id: UUID, _: InternalAdminUser = None) -> dict[str, Any]:
-    row = get_bravotv_run(str(run_id))
-    if not row:
-        raise HTTPException(status_code=404, detail="BRAVOTV image run not found")
-    return row
+    return _get_run_or_404(run_id)
 
 
 @router.get("/shows/{show_id}/latest")
@@ -252,29 +375,164 @@ def get_run_artifact_preview(
     limit: int = 25,
     _: InternalAdminUser = None,
 ) -> dict[str, Any]:
-    row = get_bravotv_run(str(run_id))
-    if not row:
-        raise HTTPException(status_code=404, detail="BRAVOTV image run not found")
-    artifact_paths = row.get("artifact_paths") if isinstance(row.get("artifact_paths"), dict) else {}
-    artifact = artifact_paths.get(artifact_name)
-    if not isinstance(artifact, dict):
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    key = str(artifact.get("key") or "").strip()
-    if not key:
-        raise HTTPException(status_code=404, detail="Artifact object key missing")
-    client = get_object_storage_client()
-    bucket = get_object_storage_bucket()
-    response = client.get_object(Bucket=bucket, Key=key)
-    raw = response["Body"].read().decode("utf-8")
-    parsed = json.loads(raw)
+    row = _get_run_or_404(run_id)
+    parsed = _load_run_artifact_payload(row, artifact_name)
     if isinstance(parsed, list):
-        safe_offset = max(0, int(offset))
-        safe_limit = max(1, min(int(limit), 100))
-        return {
-            "artifact": artifact_name,
-            "total": len(parsed),
-            "offset": safe_offset,
-            "limit": safe_limit,
-            "items": parsed[safe_offset : safe_offset + safe_limit],
-        }
+        return {"artifact": artifact_name, **_paginate(parsed, offset=offset, limit=limit)}
     return {"artifact": artifact_name, "value": parsed}
+
+
+@router.get("/runs/{run_id}/review")
+def get_run_review_items(
+    run_id: UUID,
+    section: Literal[
+        "review_candidates",
+        "replacement_pending",
+        "duplicate_groups",
+        "unmatched_rows",
+        "failed_acquisitions",
+        "merged_catalog",
+    ] = "review_candidates",
+    reason: str | None = None,
+    display_eligible: bool | None = None,
+    source_role: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=25, ge=1, le=100),
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    row = _get_run_or_404(run_id)
+    artifact_name = "merged_catalog" if section == "merged_catalog" else "run_review"
+    payload = _load_run_artifact_payload(row, artifact_name)
+    raw_items = payload if section == "merged_catalog" else _safe_list(_safe_dict(payload).get(section))
+    items = [
+        _safe_dict(item)
+        for item in raw_items
+        if isinstance(item, dict)
+        and _row_matches_review_filters(
+            item,
+            section=section,
+            reason=reason,
+            display_eligible=display_eligible,
+            source_role=source_role,
+        )
+    ]
+    return {
+        "run_id": str(run_id),
+        "section": section,
+        "filters": {
+            "reason": review_service.canonical_review_reason(reason) if reason else None,
+            "display_eligible": display_eligible,
+            "source_role": source_role,
+        },
+        **_paginate(items, offset=offset, limit=limit),
+    }
+
+
+@router.post("/runs/{run_id}/backfill")
+def backfill_existing_run(
+    run_id: UUID,
+    payload: BackfillRunRequest | None = None,
+    admin_user: InternalAdminUser = None,
+) -> dict[str, Any]:
+    row = _get_run_or_404(run_id)
+    request_payload = _safe_dict(row.get("request_payload"))
+    original_payload = _safe_dict(request_payload.get("payload"))
+    mode = str(row.get("mode") or original_payload.get("mode") or "").strip()
+    if mode not in {"show", "person"}:
+        raise HTTPException(status_code=422, detail="Cannot backfill run with missing mode")
+    show_id = str(row.get("target_show_id") or original_payload.get("show_id") or "").strip() or None
+    person_id = str(row.get("target_person_id") or original_payload.get("person_id") or "").strip() or None
+    body = BravotvImageRunRequest(
+        mode=mode,  # type: ignore[arg-type]
+        show_id=UUID(show_id) if show_id else None,
+        person_id=UUID(person_id) if person_id else None,
+        season=row.get("season") or original_payload.get("season"),
+        episode=row.get("episode") or original_payload.get("episode"),
+        sources=["getty"],
+        getty_limit=int(original_payload.get("getty_limit") or 200),
+        nbcumv_limit=int(original_payload.get("nbcumv_limit") or 300),
+        bravo_limit=int(original_payload.get("bravo_limit") or 300),
+        supplemental_limit=int(original_payload.get("supplemental_limit") or 100),
+        force_all=bool((payload.force_all if payload else True)),
+        getty_prefetch_mode=str(original_payload.get("getty_prefetch_mode") or "full").strip() or "full",
+    )
+    body = _hydrate_bravotv_getty_prefetch(body)
+    actor = str((admin_user or {}).get("email") or (admin_user or {}).get("id") or "admin")
+    backfill_payload = {
+        "mode": body.mode,
+        "show_id": str(body.show_id) if body.show_id else None,
+        "person_id": str(body.person_id) if body.person_id else None,
+        "payload": body.model_dump(mode="json"),
+        "initiated_by": actor,
+        "backfill_source_run_id": str(run_id),
+        "backfill_note": payload.note if payload else None,
+    }
+    new_run = execute_bravotv_image_run_from_request_payload(backfill_payload)
+    action = {
+        "type": "nup_backfill_run_created",
+        "run_id": str(run_id),
+        "backfill_run_id": str(new_run.get("id") or ""),
+        "note": payload.note if payload else None,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    try:
+        _append_review_action(str(run_id), action)
+    except HTTPException:
+        pass
+    return {"source_run_id": str(run_id), "run": new_run, "action": action}
+
+
+@router.post("/runs/{run_id}/replacement-candidates/{group_id}/approve")
+def approve_replacement_candidate(
+    run_id: UUID,
+    group_id: str,
+    payload: ApproveReplacementRequest,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    row = _get_run_or_404(run_id)
+    return _approve_replacement_for_run(run_id=str(run_id), row=row, group_id=group_id, payload=payload)
+
+
+@router.post("/runs/{run_id}/replacement-candidates/approve-bulk")
+def approve_replacement_candidates_bulk(
+    run_id: UUID,
+    payload: BulkApproveReplacementRequest,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    row = _get_run_or_404(run_id)
+    db = create_supabase_admin_client()
+    approved: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for item in payload.items:
+        try:
+            approved.append(
+                _approve_replacement_for_run(
+                    run_id=str(run_id),
+                    row=row,
+                    group_id=item.group_id,
+                    payload=item,
+                    note=item.note or payload.note,
+                    db=db,
+                )
+            )
+            row = _get_run_or_404(run_id)
+        except HTTPException as exc:
+            failed.append({"group_id": item.group_id, "status_code": exc.status_code, "detail": exc.detail})
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"group_id": item.group_id, "status_code": 500, "detail": str(exc)})
+    return {
+        "run_id": str(run_id),
+        "approved_count": len(approved),
+        "failed_count": len(failed),
+        "approved": approved,
+        "failed": failed,
+    }
+
+
+@router.post("/runs/{run_id}/duplicates/resolve")
+def resolve_duplicate_group(
+    run_id: UUID,
+    payload: ResolveDuplicateRequest,
+    _: InternalAdminUser = None,
+) -> dict[str, Any]:
+    return review_service.resolve_duplicate_group(run_id=str(run_id), payload=payload)

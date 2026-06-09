@@ -495,6 +495,7 @@ def test_scrape_applies_max_results_before_ytdlp_enrichment(monkeypatch) -> None
 
     monkeypatch.setattr(scraper, "_enrich_videos_via_ytdlp", _fake_enrich)
     monkeypatch.setattr(scraper, "_process_video_data", _fake_process_video_data)
+    monkeypatch.setattr("trr_backend.socials.youtube.scraper.shutil.which", lambda _name: "/usr/bin/yt-dlp")
 
     videos = scraper.scrape(
         YouTubeScrapeConfig(
@@ -502,6 +503,7 @@ def test_scrape_applies_max_results_before_ytdlp_enrichment(monkeypatch) -> None
             keywords=[],
             delay_seconds=0,
             max_results=2,
+            allow_ytdlp_video_enrichment=True,
         )
     )
 

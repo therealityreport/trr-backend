@@ -2,6 +2,8 @@
 
 This document describes how to run the FastAPI-based TRR Backend API locally and deployment considerations.
 For the current production-target hosting plan, use `/Users/thomashulihan/Projects/TRR/TRR-Backend/docs/deploy/render.md`.
+For backend runtime ownership boundaries, use
+[Backend Runtime Ownership](../../../docs/workspace/backend-runtime-ownership.md).
 
 ## Required Environment Variables
 
@@ -31,27 +33,36 @@ The API requires the following environment variables to be set:
 | `TRR_INTERNAL_ADMIN_JWT_ISSUER` | Optional issuer override for internal admin JWT verification | `trr-app-internal` |
 | `TRR_INTERNAL_ADMIN_JWT_AUDIENCE` | Optional audience override for internal admin JWT verification | `trr-backend-internal-admin` |
 
-For internal admin routes such as `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`, backend accepts:
+For internal admin routes such as `PUT /api/v1/admin/people/{person_id}/external-ids`
+and `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`, backend accepts:
 - allowlisted user JWT (`ADMIN_EMAIL_ALLOWLIST`), or
 - a signed internal admin JWT from TRR-APP with the configured issuer/audience and `scope=internal_admin`.
 
-### Redis (Optional)
+### Redis (Optional locally, required for multi-worker realtime)
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `REDIS_URL` | Redis connection URL for pub/sub (optional) | `redis://localhost:6379` |
+| `REDIS_URL` | Redis connection URL for ephemeral realtime pub/sub, presence/typing, short TTL state, and cross-instance invalidation. | `redis://localhost:6379` |
 
-If `REDIS_URL` is not set, the API uses an in-memory broker for WebSocket pub/sub. This is fine for local development and single-instance deployments. For multi-instance production deployments, set `REDIS_URL` to enable cross-instance real-time event delivery.
+If `REDIS_URL` is not set, the API uses an in-memory broker for WebSocket
+pub/sub. This is fine for local development and single-instance deployments.
+For multi-worker or multi-instance deployments, set `REDIS_URL` so realtime
+events, presence, typing, and invalidation are shared across API processes.
+
+Redis is not a durable queue or cache of record. Durable jobs, runs, locks,
+retries, analytics outputs, persisted cache state, and migration history belong
+in Postgres/Supabase. Long-running scraping, social, media, vision, and
+scheduled execution belongs in Modal.
 
 ### Backend runtime behavior
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `TRR_BACKEND_WORKERS` | Number of uvicorn worker processes. Defaults to `1` for local stability. | `4` |
-| `TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER` | When `1`, blocks multi-worker startup unless `REDIS_URL` is present, forcing `1` worker to avoid websocket broker fragmentation. | `1` |
+| `TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER` | When `1`, blocks multi-worker startup unless `REDIS_URL` is present. Local/dev launchers fall back to one worker; deployed launchers fail fast. | `1` |
 | `TRR_BACKEND_RELOAD` | Enables uvicorn `--reload` in local mode. | `0` / `1` |
 
-By default, `TRR_BACKEND_WORKERS` is `1` and `TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER=1`, so multi-worker mode is only enabled when `REDIS_URL` is configured. If `TRR_BACKEND_WORKERS > 1` is requested while `REDIS_URL` is missing, startup logs explicitly warn and fall back to a single worker.
+By default, `TRR_BACKEND_WORKERS` is `1` and `TRR_BACKEND_REQUIRE_REDIS_FOR_MULTI_WORKER=1`, so multi-worker mode is only enabled when `REDIS_URL` is configured. If `TRR_BACKEND_WORKERS > 1` is requested while `REDIS_URL` is missing, local/dev startup logs explicitly warn and fall back to a single worker. Deployed startup exits with an error so realtime state is not split across workers.
 
 Container deployments use the same `start-api.sh` launcher in non-reload mode. The default container contract is a single `uvicorn` process per container; only raise `TRR_BACKEND_WORKERS` when you have a concrete reason and a Redis-backed realtime plane.
 
@@ -161,10 +172,10 @@ FastAPI ships with interactive API docs and an OpenAPI schema:
 | Client | Auth Header | Notes |
 | --- | --- | --- |
 | TRR App | `Authorization: Bearer <Supabase access token>` | Use for user-scoped endpoints under `/api/v1/*`. |
-| TRR App internal proxy (facebank toggle) | `Authorization: Bearer <internal admin JWT>` | Allowed only for `PATCH /api/v1/admin/person/{person_id}/gallery/{link_id}/facebank-seed`; TRR-APP signs the JWT with `TRR_INTERNAL_ADMIN_SHARED_SECRET`. |
+| TRR App internal proxy | `Authorization: Bearer <internal admin JWT>` | Used by backend-owned admin routes such as person external-ID writes and facebank toggles; TRR-APP signs the JWT with `TRR_INTERNAL_ADMIN_SHARED_SECRET`. |
 
 Admin allowlist
-- Facebank seed toggle endpoint requires either an allowlisted user JWT or a valid internal admin JWT signed with `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
+- Backend-owned admin endpoints require either an allowlisted user JWT or a valid internal admin JWT signed with `TRR_INTERNAL_ADMIN_SHARED_SECRET`.
 
 **CORS guidance**
 

@@ -96,7 +96,7 @@ def select_socialblade_proxy(*, session_key: str | None = None) -> SocialBladePr
             username, password, gateway = creds
             sticky_username, session_mode = apply_decodo_session_affinity(
                 username,
-                use_sticky_proxy=env_truthy("SOCIALBLADE_USE_STICKY_PROXY", True),
+                use_sticky_proxy=env_truthy("SOCIALBLADE_USE_STICKY_PROXY", False),
                 session_ttl_seconds=resolve_positive_int_env(
                     "SOCIALBLADE_PROXY_SESSION_TTL_SECONDS",
                     600,

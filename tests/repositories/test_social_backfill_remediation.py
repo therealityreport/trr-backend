@@ -14,7 +14,7 @@ def test_execute_run_with_inline_worker_registration_registers_and_stops(monkeyp
     monkeypatch.setattr(
         social_repo,
         "get_worker_auth_capabilities",
-        lambda: {"instagram_authenticated": True, "tiktok_authenticated": True},
+        lambda *_args, **_kwargs: {"instagram_authenticated": True, "tiktok_authenticated": True},
     )
 
     def _fake_heartbeat(worker_id: str, **kwargs):  # noqa: ANN001

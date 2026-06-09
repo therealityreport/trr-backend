@@ -79,6 +79,50 @@ def test_list_face_references_by_person(client, monkeypatch):
     assert payload["items"][0]["review_status"] == "pending_review"
 
 
+def test_list_face_reference_review_queue(client, monkeypatch):
+    monkeypatch.setattr(
+        face_references,
+        "list_face_reference_builder_review_queue",
+        lambda **_kwargs: [
+            {
+                "id": "ref-1",
+                "person_id": "person-1",
+                "person_name": "Person One",
+                "media_link_id": "link-1",
+                "media_asset_id": "asset-1",
+                "legacy_screenalytics_face_bank_image_id": None,
+                "is_active": True,
+                "approved": False,
+                "review_status": "pending_review",
+                "review_notes": {"builder_review_reason": "multiple_faces_requires_human_selection"},
+                "reviewed_at": None,
+                "reviewed_by": None,
+                "duplicate_of_reference_image_id": None,
+                "embedding_status": "pending",
+                "source_url": "https://example.com/source.jpg",
+                "hosted_url": "https://cdn.example.com/source.jpg",
+                "hosted_sha256": "sha",
+                "metadata": {
+                    "cast_reference_builder": {
+                        "candidate_faces": [{"face_index": 0}, {"face_index": 1}],
+                    }
+                },
+                "last_enqueued_at": None,
+                "deactivated_at": None,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "updated_at": "2026-04-03T00:00:00+00:00",
+            }
+        ],
+    )
+
+    response = client.get("/api/v1/admin/face-references/review-queue?limit=10")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"][0]["person_name"] == "Person One"
+    assert payload["items"][0]["review_notes"]["builder_review_reason"] == "multiple_faces_requires_human_selection"
+
+
 def test_review_face_reference_updates_status(client, monkeypatch):
     monkeypatch.setattr(
         face_references,

@@ -1,0 +1,16 @@
+[
+  {
+    "group_id": "bridge-00001",
+    "strategy": "A_nup_filename",
+    "confidence": "high",
+    "bridge_key": "NUP_181952_5",
+    "records": ["getty:928663262", "nbcumv:70761487"]
+  },
+  {
+    "group_id": null,
+    "strategy": "manual_review",
+    "confidence": "needs_review",
+    "reason": "caption_match_ambiguous",
+    "records": ["getty:ambiguous", "bravo:bravo-media-1"]
+  }
+]

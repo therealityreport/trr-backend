@@ -295,35 +295,88 @@ def test_adapt_xdt_media_dict_media_repost_count_snake_case_persists():
     assert dto.media_repost_count == 15
 
 
+def test_batch_upsert_instagram_posts_chunks_and_syncs_canonical(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trr_backend.socials.social_season_analytics_impl as core
+    from trr_backend.socials.instagram import catalog_ingest
+
+    class _Post:
+        def __init__(self, shortcode: str) -> None:
+            self.shortcode = shortcode
+
+    posts = [_Post(f"post-{index}") for index in range(205)]
+    batch_sizes: list[int] = []
+    synced_shortcodes: list[str] = []
+
+    def _fake_payload(_context, *, job_id, account, post, conn):  # noqa: ANN001
+        del _context, job_id, conn
+        return {
+            "shortcode": post.shortcode,
+            "caption": post.shortcode,
+            "source_account": account,
+        }
+
+    def _fake_upsert_many(table, payloads, *, conflict_col, conn):  # noqa: ANN001
+        del conn
+        assert table == "instagram_posts"
+        assert conflict_col == "shortcode"
+        batch_sizes.append(len(payloads))
+        return [{"id": f"id-{payload['shortcode']}", "shortcode": payload["shortcode"]} for payload in payloads]
+
+    def _fake_sync(*, legacy_row, payload, post, conn):  # noqa: ANN001
+        del legacy_row, post, conn
+        synced_shortcodes.append(str(payload["shortcode"]))
+
+    monkeypatch.setattr(catalog_ingest, "_instagram_post_payload", _fake_payload)
+    monkeypatch.setattr(core, "_pg_upsert_many", _fake_upsert_many)
+    monkeypatch.setattr(core, "_sync_instagram_canonical_post", _fake_sync)
+
+    rows = catalog_ingest._batch_upsert_instagram_posts(
+        None,
+        job_id="job-1",
+        account="traitors",
+        posts=posts,
+        conn=object(),
+    )
+
+    assert len(rows) == 205
+    assert batch_sizes == [100, 100, 5]
+    assert len(synced_shortcodes) == 205
+    assert synced_shortcodes[0] == "post-0"
+    assert synced_shortcodes[-1] == "post-204"
+
+
 def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from trr_backend.db import pg
-    from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram import catalog_ingest
     from trr_backend.socials.instagram.posts_scrapling.persistence import persist_instagram_posts
 
     @contextmanager
     def _fake_conn(*, label: str | None = None):
         del label
-        yield object()
+        yield fake_conn
 
     captured_updates: list[dict[str, object]] = []
+    captured_queries: list[tuple[str, object | None]] = []
+    fake_conn = object()
 
     monkeypatch.setattr(pg, "db_connection", _fake_conn)
-    monkeypatch.setattr(repo, "get_season_context", lambda _season_id: None)
+    monkeypatch.setattr(
+        "trr_backend.repositories.social_season_analytics.get_season_context",
+        lambda _season_id: None,
+    )
 
-    def _fake_upsert(_context, *, job_id, account, post, conn):  # noqa: ANN001
-        del job_id, account, conn
-        shortcode = str(getattr(post, "shortcode", "") or "")
-        if shortcode == "keep-me":
-            return {"id": "post-1"}
-        if shortcode == "drop-me":
-            return None
-        raise RuntimeError("db write failed")
+    def _fake_batch_upsert(_context, *, job_id, account, posts, conn):  # noqa: ANN001
+        del _context, job_id, account, conn
+        assert [post.shortcode for post in posts] == ["keep-me", "drop-me"]
+        return [{"id": "post-1", "shortcode": "keep-me"}]
 
-    def _fake_fetch_one(sql, params):  # noqa: ANN001
+    def _fake_fetch_one(sql, params, **kwargs):  # noqa: ANN001
         normalized = " ".join(str(sql).split()).lower()
+        captured_queries.append((normalized, kwargs.get("conn")))
         if normalized.startswith("select metadata from social.scrape_jobs"):
+            assert "for update" in normalized
             return {
                 "metadata": {
                     "posts_scrapling_persist_diagnostics": {
@@ -338,7 +391,7 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
             return {"id": "job-1"}
         raise AssertionError(f"Unexpected SQL: {sql}")
 
-    monkeypatch.setattr(repo, "_upsert_instagram_post", _fake_upsert)
+    monkeypatch.setattr(catalog_ingest, "_batch_upsert_instagram_posts", _fake_batch_upsert)
     monkeypatch.setattr(pg, "fetch_one", _fake_fetch_one)
 
     result = persist_instagram_posts(
@@ -363,9 +416,10 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
                 "id": "drop-1",
             },
             {
-                "shortcode": "explode-me",
+                "__typename": "XDTMediaDict",
+                "code": "explode-me",
+                "like_count": "not-a-number",
                 "taken_at_timestamp": 1700000000,
-                "__typename": "GraphImage",
                 "display_url": "https://example.com/explode.jpg",
                 "owner": {"username": "traitors"},
                 "id": "explode-1",
@@ -382,7 +436,7 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
         "invalid_node_type": 1,
         "missing_shortcode": 1,
         "canonical_upsert_returned_none": 1,
-        "canonical_upsert_exception": 1,
+        "dto_adaptation_exception": 1,
     }
     assert captured_updates[-1]["posts_scrapling_persist_diagnostics"] == {
         "posts_upserted": 3,
@@ -390,12 +444,81 @@ def test_persist_instagram_posts_tracks_skip_reasons_and_accumulates_job_metadat
         "inline_comments_upserted": 0,
         "inline_comments_skipped": 0,
         "posts_skipped_by_reason": {
-            "canonical_upsert_exception": 1,
             "canonical_upsert_returned_none": 1,
+            "dto_adaptation_exception": 1,
             "invalid_node_type": 1,
             "missing_shortcode": 2,
         },
     }
+    assert [query_conn for _query, query_conn in captured_queries] == [fake_conn, fake_conn]
+
+
+def test_persist_instagram_posts_merges_existing_reverse_diagnostics_under_row_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trr_backend.db import pg
+    from trr_backend.socials.instagram.posts_scrapling.persistence import persist_instagram_posts
+
+    fake_conn = object()
+    captured_queries: list[tuple[str, object | None]] = []
+    captured_updates: list[dict[str, object]] = []
+
+    @contextmanager
+    def _fake_conn(*, label: str | None = None):
+        del label
+        yield fake_conn
+
+    def _fake_fetch_one(sql, params, **kwargs):  # noqa: ANN001
+        normalized = " ".join(str(sql).split()).lower()
+        captured_queries.append((normalized, kwargs.get("conn")))
+        if normalized.startswith("select metadata from social.scrape_jobs"):
+            assert "for update" in normalized
+            return {
+                "metadata": {
+                    "other_key": "preserved",
+                    "posts_scrapling_persist_diagnostics": {
+                        "posts_upserted": 4,
+                        "posts_skipped": 2,
+                        "posts_skipped_by_reason": {"reverse_missing_shortcode": 2},
+                        "inline_comments_upserted": 7,
+                        "inline_comments_skipped": 1,
+                    },
+                }
+            }
+        if normalized.startswith("update social.scrape_jobs"):
+            captured_updates.append(json.loads(str(params[0])))
+            return {"id": "job-1"}
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    monkeypatch.setattr(pg, "db_connection", _fake_conn)
+    monkeypatch.setattr(pg, "fetch_one", _fake_fetch_one)
+
+    result = persist_instagram_posts(
+        account_handle="traitors",
+        post_nodes=[
+            "not-a-dict",
+            {"__typename": "GraphImage"},
+        ],
+        run_id="run-1",
+        job_id="job-1",
+        season_id=None,
+    )
+
+    assert result.posts_upserted == 0
+    assert result.posts_skipped == 2
+    assert captured_updates[-1]["other_key"] == "preserved"
+    assert captured_updates[-1]["posts_scrapling_persist_diagnostics"] == {
+        "posts_upserted": 4,
+        "posts_skipped": 4,
+        "posts_skipped_by_reason": {
+            "invalid_node_type": 1,
+            "missing_shortcode": 1,
+            "reverse_missing_shortcode": 2,
+        },
+        "inline_comments_upserted": 7,
+        "inline_comments_skipped": 1,
+    }
+    assert [query_conn for _query, query_conn in captured_queries] == [fake_conn, fake_conn]
 
 
 def test_persist_instagram_posts_persists_inline_comment_samples(
@@ -403,6 +526,7 @@ def test_persist_instagram_posts_persists_inline_comment_samples(
 ) -> None:
     from trr_backend.db import pg
     from trr_backend.repositories import social_season_analytics as repo
+    from trr_backend.socials.instagram import catalog_ingest
     from trr_backend.socials.instagram.posts_scrapling.persistence import persist_instagram_posts
 
     @contextmanager
@@ -410,24 +534,31 @@ def test_persist_instagram_posts_persists_inline_comment_samples(
         del label
         yield object()
 
-    captured_comments: list[Any] = []
+    captured_comment_batches: list[tuple[str, list[Any]]] = []
     captured_updates: list[dict[str, object]] = []
     fake_context = object()
 
     monkeypatch.setattr(pg, "db_connection", _fake_conn)
     monkeypatch.setattr(repo, "get_season_context", lambda _season_id: fake_context)
-    monkeypatch.setattr(repo, "_upsert_instagram_post", lambda *_args, **_kwargs: {"id": "post-1"})
+
+    def _fake_batch_upsert(_context, *, job_id, account, posts, conn):  # noqa: ANN001
+        del _context, job_id, account, conn
+        assert [post.shortcode for post in posts] == ["INLINE123", "INLINE456"]
+        return [
+            {"id": "post-1", "shortcode": "INLINE123"},
+            {"id": "post-2", "shortcode": "INLINE456"},
+        ]
 
     def _fake_batch_comments(_context, **kwargs):  # noqa: ANN001
         assert _context is fake_context
-        assert kwargs["post_id"] == "post-1"
         assert kwargs["run_id"] == "run-1"
         assert kwargs["job_id"] == "job-1"
         assert kwargs["enable_media_followups"] is False
-        captured_comments.extend(kwargs["comments"])
+        captured_comment_batches.append((kwargs["post_id"], list(kwargs["comments"])))
         return len(kwargs["comments"])
 
-    def _fake_fetch_one(sql, params):  # noqa: ANN001
+    def _fake_fetch_one(sql, params, **kwargs):  # noqa: ANN001
+        del kwargs
         normalized = " ".join(str(sql).split()).lower()
         if normalized.startswith("select metadata from social.scrape_jobs"):
             return {"metadata": {}}
@@ -436,6 +567,7 @@ def test_persist_instagram_posts_persists_inline_comment_samples(
             return {"id": "job-1"}
         raise AssertionError(f"Unexpected SQL: {sql}")
 
+    monkeypatch.setattr(catalog_ingest, "_batch_upsert_instagram_posts", _fake_batch_upsert)
     monkeypatch.setattr(repo, "_batch_upsert_instagram_comments", _fake_batch_comments)
     monkeypatch.setattr(pg, "fetch_one", _fake_fetch_one)
 
@@ -459,6 +591,22 @@ def test_persist_instagram_posts_persists_inline_comment_samples(
                     }
                 ],
                 "firstComment": {"id": "first-1", "text": "first sample", "ownerUsername": "firstviewer"},
+            },
+            {
+                "__typename": "XDTMediaDict",
+                "code": "INLINE456",
+                "pk": "inline-pk-2",
+                "media_type": 1,
+                "taken_at": 1776272483,
+                "image_versions2": {"candidates": [{"url": "https://cdn.example.com/inline-2.jpg"}]},
+                "user": {"username": "traitors"},
+                "latestComments": [
+                    {
+                        "id": "latest-2",
+                        "text": "second sample",
+                        "ownerUsername": "otherviewer",
+                    }
+                ],
             }
         ],
         run_id="run-1",
@@ -466,12 +614,15 @@ def test_persist_instagram_posts_persists_inline_comment_samples(
         season_id="season-1",
     )
 
-    assert result.posts_upserted == 1
-    assert [comment.comment_id for comment in captured_comments] == ["latest-1", "first-1"]
+    assert result.posts_upserted == 2
+    assert [post_id for post_id, _comments in captured_comment_batches] == ["post-1", "post-2"]
+    captured_comments = [comment for _post_id, comments in captured_comment_batches for comment in comments]
+    assert [comment.comment_id for comment in captured_comments] == ["latest-1", "first-1", "latest-2"]
     assert [comment.source_snapshot_type for comment in captured_comments] == [
+        "listing_inline_sample",
         "listing_inline_sample",
         "listing_inline_sample",
     ]
     assert captured_comments[0].owner_full_name == "Viewer Name"
-    assert captured_updates[-1]["posts_scrapling_persist_diagnostics"]["inline_comments_upserted"] == 2
+    assert captured_updates[-1]["posts_scrapling_persist_diagnostics"]["inline_comments_upserted"] == 3
     assert captured_updates[-1]["posts_scrapling_persist_diagnostics"]["inline_comments_skipped"] == 0

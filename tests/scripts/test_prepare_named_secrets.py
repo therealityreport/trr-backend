@@ -5,6 +5,13 @@ import pytest
 from scripts.modal import prepare_named_secrets as cli
 
 
+def test_default_source_env_can_follow_guardrail_source_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    source_env = tmp_path / "deploy.env"
+    monkeypatch.setenv("TRR_MODAL_SOURCE_ENV", str(source_env))
+
+    assert cli._default_source_env() == source_env
+
+
 def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -42,7 +49,9 @@ def test_split_env_excludes_modal_deploy_tokens_from_runtime_secret(
     }
 
 
-def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
+def test_apply_runtime_overrides_injects_canonical_modal_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WORKSPACE_ALLOW_MODAL_ALWAYS_ON_BILLING", raising=False)
+
     result = cli._apply_runtime_overrides({"TRR_DB_URL": "postgresql://example"}, disabled=False)
 
     assert result["TRR_DB_URL"] == "postgresql://example"
@@ -70,13 +79,28 @@ def test_apply_runtime_overrides_injects_canonical_modal_defaults() -> None:
         result["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
         == cli.CANONICAL_REMOTE_RUNTIME_OVERRIDES["TRR_MODAL_GETTY_REMOTE_PROBE_FUNCTION"]
     )
-    assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "5"
-    assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "5"
-    assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "2"
+    assert result["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
+    assert result["SOCIAL_INSTAGRAM_POSTS_ANONYMOUS_ENABLED"] == "false"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
+    assert result["TRR_MODAL_MAINTENANCE_OWNER_REQUIRED"] == "1"
+    assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
+    assert result["TRR_MODAL_RUNTIME_SCHEDULER_ENABLED"] == "1"
+    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "0"
+    assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
+    assert result["TRR_MODAL_SOCIAL_JOB_CONCURRENCY_LIMIT"] == "8"
+    assert result["SOCIAL_MODAL_DISPATCH_LIMIT"] == "8"
+    assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "8"
     assert result["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_DISCOVERY"] == "3"
-    assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "2"
-    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "2"
+    assert result["SOCIAL_WORKER_POOL_SHARED_ACCOUNT_POSTS"] == "8"
+    assert result["SOCIAL_SHARED_ACCOUNT_POSTS_PLATFORM_CAP_INSTAGRAM"] == "2"
+    assert result["SOCIAL_CATALOG_RUN_IN_FLIGHT_CAP"] == "8"
+    assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "8"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROFILE_SHARD_COUNT"] == "8"
     assert result["SOCIAL_INSTAGRAM_COMMENTS_GLOBAL_RATE_LIMIT_MODE"] == "file_lock"
+    assert result["SOCIAL_THREADS_POSTS_SCRAPLING_ENABLED"] == "true"
     assert result["SOCIAL_THREADS_POSTS_PROXY_PROVIDER"] == "decodo"
     assert "SOCIALBLADE_PROXY_PROVIDER" not in result
     assert "SOCIALBLADE_USE_STICKY_PROXY" not in result
@@ -92,13 +116,63 @@ def test_apply_runtime_overrides_preserves_explicit_social_caps() -> None:
             "TRR_DB_POOL_MAXCONN": "1",
             "SOCIAL_WORKER_POOL_COMMENTS": "4",
             "SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM": "4",
+            "SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY": "true",
+            "SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER": "none",
+            "SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY": "false",
+            "SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY": "true",
+            "SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS": "120",
         },
         disabled=False,
     )
 
     assert result["SOCIAL_WORKER_POOL_COMMENTS"] == "4"
     assert result["SOCIAL_POSTS_COMMENTS_PLATFORM_CAP_INSTAGRAM"] == "4"
+    assert result["SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY"] == "true"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_PROVIDER"] == "decodo"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_FORCE_ROTATING_PROXY"] == "true"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_USE_STICKY_PROXY"] == "false"
+    assert result["SOCIAL_INSTAGRAM_COMMENTS_PROXY_SESSION_TTL_SECONDS"] == "600"
     assert result["TRR_DB_POOL_MAXCONN"] == "2"
+
+
+def test_apply_runtime_overrides_resets_always_on_billing_values_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WORKSPACE_ALLOW_MODAL_ALWAYS_ON_BILLING", raising=False)
+
+    result = cli._apply_runtime_overrides(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED": "True",
+            "TRR_MODAL_API_MIN_CONTAINERS": "2",
+            "TRR_MODAL_ADMIN_KEEP_WARM": "1",
+        },
+        disabled=False,
+    )
+
+    assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "0"
+    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "0"
+    assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "0"
+
+
+def test_apply_runtime_overrides_preserves_always_on_billing_values_with_break_glass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ALLOW_MODAL_ALWAYS_ON_BILLING", "1")
+
+    result = cli._apply_runtime_overrides(
+        {
+            "TRR_DB_URL": "postgresql://example",
+            "TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED": "1",
+            "TRR_MODAL_API_MIN_CONTAINERS": "2",
+            "TRR_MODAL_ADMIN_KEEP_WARM": "1",
+        },
+        disabled=False,
+    )
+
+    assert result["TRR_MODAL_ALWAYS_ON_SCHEDULES_ENABLED"] == "1"
+    assert result["TRR_MODAL_API_MIN_CONTAINERS"] == "2"
+    assert result["TRR_MODAL_ADMIN_KEEP_WARM"] == "1"
 
 
 def test_apply_runtime_overrides_can_be_disabled() -> None:

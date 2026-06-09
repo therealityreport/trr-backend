@@ -25,6 +25,11 @@
     "name": "cancel_social_ingest_active_jobs"
   },
   {
+    "method": "GET",
+    "path": "/admin/socials/ingest/backfill-health",
+    "name": "get_social_ingest_backfill_health"
+  },
+  {
     "method": "POST",
     "path": "/admin/socials/ingest/dispatch-blocked-jobs/cancel",
     "name": "cancel_social_ingest_dispatch_blocked_jobs"
@@ -126,11 +131,6 @@
   },
   {
     "method": "POST",
-    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/apify-backfill",
-    "name": "post_social_account_apify_backfill_route"
-  },
-  {
-    "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/backfill",
     "name": "post_social_account_catalog_backfill_route"
   },
@@ -196,6 +196,11 @@
   },
   {
     "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/manual-auth",
+    "name": "post_social_account_catalog_run_repair_auth_route"
+  },
+  {
+    "method": "POST",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/catalog/runs/{run_id}/repair-auth",
     "name": "post_social_account_catalog_run_repair_auth_route"
   },
@@ -230,9 +235,24 @@
     "name": "post_social_account_comments_run_cancel_route"
   },
   {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/jobs/{job_id}/cancel",
+    "name": "post_social_account_comments_job_cancel_route"
+  },
+  {
     "method": "GET",
     "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/progress",
     "name": "get_social_account_comments_scrape_progress_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/rebalance",
+    "name": "post_social_account_comments_run_rebalance_route"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/socials/profiles/{platform}/{account_handle}/comments/runs/{run_id}/resume",
+    "name": "post_social_account_comments_run_resume_route"
   },
   {
     "method": "POST",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from trr_backend.services import retained_cast_screentime_runtime as runtime
 
 
@@ -133,6 +135,98 @@ def test_run_screentime_analysis_persists_retained_outputs_and_finalizes(monkeyp
         "person_metrics.json",
     } <= persisted_keys
     assert uploaded_evidence == [("review/evidence/runs/run-123/segment-1/still_00000000.jpg", b"jpeg", "image/jpeg")]
+
+
+def test_analyze_run_contract_counts_sample_window_duration(monkeypatch) -> None:
+    class _FakeCapture:
+        def __init__(self) -> None:
+            self._frame_idx = 0
+
+        def isOpened(self) -> bool:  # noqa: N802 - mirrors cv2.VideoCapture
+            return True
+
+        def get(self, prop: int) -> float:
+            if prop == _FakeCv2.CAP_PROP_FPS:
+                return 5.0
+            if prop == _FakeCv2.CAP_PROP_FRAME_COUNT:
+                return 10.0
+            return 0.0
+
+        def read(self):
+            if self._frame_idx >= 10:
+                return False, None
+            self._frame_idx += 1
+            return True, object()
+
+        def release(self) -> None:
+            return None
+
+    class _FakeCv2:
+        CAP_PROP_FPS = 1
+        CAP_PROP_FRAME_COUNT = 2
+
+        @staticmethod
+        def VideoCapture(_path: str):  # noqa: N802 - mirrors cv2 module
+            return _FakeCapture()
+
+    monkeypatch.setattr(runtime, "_lazy_cv2", lambda: _FakeCv2)
+    monkeypatch.setattr(runtime, "_localize_source_video", lambda _contract, work_dir: Path(work_dir) / "video.mp4")
+    monkeypatch.setattr(runtime, "_encode_evidence_crop", lambda _frame, _bbox: b"jpeg")
+    monkeypatch.setattr(
+        runtime.screen_time_face_matching,
+        "detect_faces",
+        lambda _frame: (
+            1,
+            "deepface:ArcFace:retinaface:cosine:512d:l2_unit",
+            [{"bbox": [0, 0, 10, 10], "confidence": 0.95, "square_crop_bbox": [0, 0, 10, 10]}],
+        ),
+    )
+    monkeypatch.setattr(
+        runtime.screen_time_face_matching,
+        "filter_faces_for_screen_time",
+        lambda raw_faces, *, image: (raw_faces, []),
+    )
+    monkeypatch.setattr(
+        runtime.screen_time_face_matching,
+        "match_faces_to_cast",
+        lambda *_args, **_kwargs: [{"person_id": "person-1", "similarity": 0.91, "match_status": "matched"}],
+    )
+    monkeypatch.setattr(
+        runtime.screen_time_face_matching,
+        "normalize_screen_time_detections",
+        lambda *_args, **_kwargs: [
+            {
+                "person_id": "person-1",
+                "person_name": "Person One",
+                "match_status": "matched",
+                "match_reason": "threshold",
+                "confidence": 0.95,
+                "match_similarity": 0.91,
+                "bbox": [0, 0, 10, 10],
+                "square_crop_bbox": [0, 0, 10, 10],
+                "filter_decision": "accepted",
+            }
+        ],
+    )
+
+    analysis = runtime.analyze_run_contract(
+        {
+            "id": "run-123",
+            "run_type": "cast_screentime",
+            "run_config_json": {"processing_mode": "balanced"},
+            "candidate_cast_snapshot_json": [{"person_id": "person-1", "display_name": "Person One"}],
+            "source_json": {"object_key": "source/videos/asset-1/original.mp4"},
+            "duration_seconds": 2.0,
+        }
+    )
+
+    assert [shot["duration_ms"] for shot in analysis["shots"]] == [1000, 1000]
+    assert [segment["duration_ms"] for segment in analysis["segments"]] == [1000, 1000]
+    assert analysis["metrics"][0]["person_id"] == "person-1"
+    assert analysis["metrics"][0]["screen_time_seconds"] == 2.0
+    assert analysis["metrics"][0]["frame_count"] == 2
+    assert analysis["metrics"][0]["confidence_avg"] == 0.95
+    assert analysis["metrics"][0]["metadata"] == {"display_name": "Person One", "segment_count": 2}
 
 
 def test_generate_segment_clip_persists_backend_generated_clip(monkeypatch) -> None:

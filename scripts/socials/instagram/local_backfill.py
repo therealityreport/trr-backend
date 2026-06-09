@@ -23,8 +23,6 @@ sys.path.insert(0, str(REPO_ROOT))
 # Load .env before any trr_backend imports
 from dotenv import load_dotenv  # noqa: E402
 
-load_dotenv(REPO_ROOT / ".env", override=True)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -33,6 +31,8 @@ logger = logging.getLogger("local_backfill")
 
 
 def main() -> int:
+    load_dotenv(REPO_ROOT / ".env", override=True)
+
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

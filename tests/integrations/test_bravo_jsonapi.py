@@ -3,6 +3,31 @@ from __future__ import annotations
 from trr_backend.integrations import bravo_jsonapi
 
 
+def test_find_person_uuid_falls_back_to_contains_title_match(monkeypatch):
+    calls: list[dict[str, str]] = []
+
+    def fake_get_json(client, url, params=None):  # noqa: ARG001
+        calls.append(params or {})
+        if params == {"filter[title]": "Ciara Miller", "page[limit]": "1"}:
+            return {"data": []}
+        return {
+            "data": [
+                {
+                    "id": "person-uuid",
+                    "attributes": {
+                        "title": "Ciara Miller",
+                        "path": {"alias": "/the-daily-dish/ciara-miller"},
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(bravo_jsonapi, "_get_json", fake_get_json)
+
+    assert bravo_jsonapi.find_person_uuid("Ciara Miller") == "person-uuid"
+    assert calls[1]["filter[title-contains][condition][operator]"] == "CONTAINS"
+
+
 def test_fetch_show_galleries_normalizes_media_and_file_records(monkeypatch):
     detail_payload = {
         "data": {
@@ -274,3 +299,116 @@ def test_fetch_gallery_assets_resolves_portia_anchor_from_gallery_html(monkeypat
     assert assets[0]["source_page_url"] == (
         "https://www.bravotv.com/the-real-housewives-of-beverly-hills/photos/portias-drama-filled-birthday-party#9799496"
     )
+
+
+def test_fetch_gallery_assets_appends_original_urls_from_legacy_gallery_html(monkeypatch):
+    detail_payload = {
+        "data": {
+            "id": "gallery-uuid",
+            "relationships": {"field_media_items": {"data": []}},
+        },
+        "included": [],
+    }
+
+    monkeypatch.setattr(bravo_jsonapi, "_get_json", lambda client, url, params=None: detail_payload)
+    monkeypatch.setattr(
+        bravo_jsonapi,
+        "_get_html",
+        lambda client, url: (
+            """
+        <script data-drupal-selector="drupal-settings-json">
+        {"ls_adobe_analytics":{"showSite":"Summer House","season":"Season 4","people":"Ciara Miller"}}
+        </script>
+        <img src="/sites/bravo/files/styles/media_gallery_computer/public/field_media_items/2020/02/summer-house-ciara.jpg?itok=abc" />
+        """
+        ),
+    )
+
+    assets = bravo_jsonapi.fetch_gallery_assets(
+        {"uuid": "gallery-uuid", "title": "Summer House Photo Exclusive", "path": "/summer-house/photos/example"}
+    )
+
+    assert assets == [
+        {
+            "gallery_uuid": "gallery-uuid",
+            "gallery_title": "Summer House Photo Exclusive",
+            "gallery_path": "/summer-house/photos/example",
+            "gallery_anchor_resolved": False,
+            "gallery_position": 0,
+            "gallery_people_names": ["Ciara Miller"],
+            "gallery_show_name": "Summer House",
+            "gallery_season_name": "Season 4",
+            "season_number": 4,
+            "file_url": "https://www.bravotv.com/sites/bravo/files/field_media_items/2020/02/summer-house-ciara.jpg",
+            "file_name": "summer-house-ciara.jpg",
+            "source_page_url": "https://www.bravotv.com/summer-house/photos/example",
+            "bravotv_unanchored": True,
+            "bravotv_html_fallback": True,
+            "bravotv_html_original_url": True,
+        }
+    ]
+
+
+def test_fetch_person_image_assets_reads_cover_photo_relationship(monkeypatch):
+    detail_payload = {
+        "data": {
+            "id": "person-uuid",
+            "attributes": {
+                "title": "Ciara Miller",
+                "drupal_internal__nid": 123,
+                "path": {"alias": "/people/ciara-miller"},
+            },
+            "relationships": {
+                "field_person_cover_photo": {"data": {"type": "media--image", "id": "media-1"}},
+            },
+        },
+        "included": [
+            {
+                "type": "media--image",
+                "id": "media-1",
+                "attributes": {"drupal_internal__mid": 456, "name": "ciara.jpg"},
+                "relationships": {
+                    "field_media_image": {
+                        "data": {"type": "file--file", "id": "file-1", "meta": {"alt": "Ciara Miller"}}
+                    }
+                },
+            },
+            {
+                "type": "file--file",
+                "id": "file-1",
+                "attributes": {
+                    "filename": "ciara.jpg",
+                    "filemime": "image/jpeg",
+                    "uri": {"url": "/sites/bravo/files/2025/12/ciara.jpg"},
+                },
+            },
+        ],
+    }
+
+    monkeypatch.setattr(bravo_jsonapi, "_get_json", lambda client, url, params=None: detail_payload)
+
+    assets = bravo_jsonapi.fetch_person_image_assets("person-uuid")
+
+    assert assets == [
+        {
+            "gallery_uuid": "person-uuid",
+            "gallery_title": "Ciara Miller profile images",
+            "gallery_nid": 123,
+            "gallery_path": "/people/ciara-miller",
+            "gallery_anchor_resolved": False,
+            "gallery_position": 0,
+            "gallery_people_names": ["Ciara Miller"],
+            "gallery_page_title": "Ciara Miller",
+            "media_internal_id": "456",
+            "media_uuid": "media-1",
+            "media_name": "ciara.jpg",
+            "field_media_image_alt": "Ciara Miller",
+            "file_uuid": "file-1",
+            "file_url": "https://www.bravotv.com/sites/bravo/files/2025/12/ciara.jpg",
+            "file_name": "ciara.jpg",
+            "file_mime": "image/jpeg",
+            "source_page_url": "https://www.bravotv.com/people/ciara-miller",
+            "bravotv_unanchored": True,
+            "bravotv_person_image_field": "field_person_cover_photo",
+        }
+    ]

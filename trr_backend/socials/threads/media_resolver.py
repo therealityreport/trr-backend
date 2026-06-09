@@ -13,10 +13,16 @@ from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
+from trr_backend.socials.media_url_safety import (
+    MediaUrlSafetyPolicy,
+    allowed_hosts_for_platform,
+    safe_requests_head,
+)
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 _VALID_MEDIA_CONTENT_TYPE_PREFIXES = ("image/", "video/")
+_THREADS_MEDIA_URL_POLICY = MediaUrlSafetyPolicy(allowed_hosts_for_platform("threads"))
 
 
 @dataclass
@@ -84,7 +90,13 @@ def _probe_media_url(
     """Verify a media URL is accessible and has an image/video content type."""
     evidence: dict[str, Any] = {"url": url}
     try:
-        resp = session.head(url, timeout=timeout, allow_redirects=True)
+        resp = safe_requests_head(
+            session,
+            url,
+            policy=_THREADS_MEDIA_URL_POLICY,
+            timeout=timeout,
+            allow_redirects=True,
+        )
         status_code = int(resp.status_code)
         content_type = _normalize_content_type((getattr(resp, "headers", None) or {}).get("content-type"))
         evidence.update(

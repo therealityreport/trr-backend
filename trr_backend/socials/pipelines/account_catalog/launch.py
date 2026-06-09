@@ -105,6 +105,30 @@ def _public_posts_launch_auth_metadata(metadata: Mapping[str, Any] | None) -> di
     }
 
 
+def _posts_auth_probe_requires_manual_checkpoint(probe: Mapping[str, Any] | None) -> bool:
+    reason = str(_metadata_dict(probe).get("reason") or "").strip().lower()
+    return reason in {
+        "checkpoint_required",
+        "challenge_required",
+        "instagram_graphql_checkpoint_required",
+        "instagram_posts_warmup_auth_failed",
+    }
+
+
+def _posts_launch_probe_failure_status(*, reason: str | None, retryable: bool) -> str:
+    normalized_reason = str(reason or "").strip().lower()
+    if retryable or normalized_reason in {
+        "requests_fallback_no_connection",
+        "requests_fallback_unavailable",
+        "requests_fallback_reverse_unsupported",
+        "instagram_posts_warmup_transport_error",
+        "transport_error",
+        "transport_timeout",
+    }:
+        return "transport_blocked"
+    return "fetch_blocked"
+
+
 def _probe_instagram_posts_endpoint_for_launch(*, account_handle: str) -> dict[str, Any]:
     """Probe the profile-post GraphQL endpoint without persisting any posts."""
 
@@ -118,6 +142,30 @@ def _probe_instagram_posts_endpoint_for_launch(*, account_handle: str) -> dict[s
             caller_context=f"posts_launch_auth_probe:{account_handle}",
         )
         cookie_fingerprint = _instagram_cookie_fingerprint(session.auth_session.cookies)[:16]
+        validation_reason = str(getattr(session.auth_session, "validation_reason", "") or "").strip().lower()
+        validation_category = str(getattr(session.auth_session, "validation_category", "") or "").strip().lower()
+        if not bool(getattr(session.auth_session, "validated", False)) and (
+            validation_reason in {"checkpoint_required", "challenge_required"}
+            or validation_category in {"checkpoint_required", "challenge_required"}
+        ):
+            return {
+                "mode": "profile_posts_endpoint",
+                "account_handle": account_handle,
+                "status": "auth_blocked",
+                "result": "auth_blocked",
+                "reason": "checkpoint_required",
+                "retryable": False,
+                "request_count": 0,
+                "posts_seen": 0,
+                "has_next_page": False,
+                "doc_id_used": None,
+                "profile_posts_doc_ids": None,
+                "proxy_identity": None,
+                "cookie_fingerprint": cookie_fingerprint,
+                "cookie_fingerprint_algorithm": "sha256:16",
+                "auth_source": str(session.auth_session.source or "").strip() or None,
+                "auth_validation_category": validation_category or None,
+            }
         proxy_session_key = str(session.browser_account_id or account_handle).strip().lower().lstrip("@")
         fetcher = InstagramPostsScraplingFetcher(
             cookies=session.cookies,
@@ -125,6 +173,7 @@ def _probe_instagram_posts_endpoint_for_launch(*, account_handle: str) -> dict[s
             browser_account_id=session.browser_account_id,
             proxy_config=select_posts_proxy(session_key=proxy_session_key or account_handle),
             fast_mode=True,
+            allow_requests_recovery=False,
         )
         try:
             await fetcher.warmup(account_handle)
@@ -133,7 +182,10 @@ def _probe_instagram_posts_endpoint_for_launch(*, account_handle: str) -> dict[s
             if bool(result.auth_failed):
                 status = "auth_blocked"
             elif bool(result.fetch_failed):
-                status = "transport_blocked" if bool(result.retryable) else "fetch_blocked"
+                status = _posts_launch_probe_failure_status(
+                    reason=str(result.fetch_reason or "").strip() or None,
+                    retryable=bool(result.retryable),
+                )
             else:
                 status = "valid"
             return {
@@ -197,6 +249,13 @@ def _ensure_instagram_posts_auth_ready_for_launch(*, account_handle: str) -> dic
         return _posts_launch_auth_metadata(
             status="skipped",
             reason=str(first_probe.get("reason") or first_status or "posts_auth_probe_not_valid").strip() or None,
+            probe=first_probe,
+        )
+    if _posts_auth_probe_requires_manual_checkpoint(first_probe):
+        return _posts_launch_auth_metadata(
+            attempted=False,
+            status="failed",
+            reason="checkpoint_required",
             probe=first_probe,
         )
 
@@ -315,7 +374,9 @@ def _blocked_instagram_posts_launch_payload(
 
 def _instagram_catalog_backfill_force_detail_fetch_enabled() -> bool:
     raw = (os.getenv("SOCIAL_INSTAGRAM_CATALOG_BACKFILL_FORCE_DETAIL_FETCH") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    if raw:
+        return raw in {"1", "true", "yes", "on"}
+    return True
 
 
 _CATALOG_STAGE_GRAPH_STAGES = (
@@ -579,6 +640,9 @@ def start_social_account_catalog_backfill(
     social_account_post_details_only: bool = False,
     details_refresh_skip_detail_fetch: bool | None = None,
     details_refresh_force_detail_fetch: bool | None = None,
+    details_refresh_worker_count: int | None = None,
+    comments_worker_count: int | None = None,
+    comments_enable_media_followups: bool | None = None,
     details_refresh_skip_media_followups: bool | None = None,
     tiktok_comments_in_posts_stage: bool = False,
     tiktok_direct_comment_api_override: bool = False,
@@ -632,6 +696,8 @@ def start_social_account_catalog_backfill(
                     resume_frontier_cursor=normalized_resume_cursor,
                     catalog_action=normalized_catalog_action,
                     catalog_action_scope=normalized_catalog_action_scope,
+                    comments_worker_count=comments_worker_count,
+                    comments_enable_media_followups=comments_enable_media_followups,
                     task_resolution_pending=False,
                     comment_anchor_source_ids=comment_anchor_source_ids,
                 ),
@@ -712,6 +778,7 @@ def start_social_account_catalog_backfill(
             "social_account_post_details_only": social_account_post_details_only,
             "details_refresh_skip_detail_fetch": details_refresh_skip_detail_fetch,
             "details_refresh_force_detail_fetch": details_refresh_force_detail_fetch,
+            "details_refresh_worker_count": details_refresh_worker_count,
             "details_refresh_skip_media_followups": details_refresh_skip_media_followups,
             "tiktok_comments_in_posts_stage": tiktok_comments_in_posts_stage,
             "tiktok_direct_comment_api_override": tiktok_direct_comment_api_override,
@@ -722,6 +789,15 @@ def start_social_account_catalog_backfill(
             "existing_run_id": run_id,
             "defer_initial_dispatch": not reserved_here,
         }
+        ingest_shared_account_args = getattr(
+            getattr(ingest_shared_accounts, "__code__", None),
+            "co_varnames",
+            (),
+        )
+        if "comments_worker_count" in ingest_shared_account_args:
+            ingest_kwargs["comments_worker_count"] = comments_worker_count
+        if "comments_enable_media_followups" in ingest_shared_account_args:
+            ingest_kwargs["comments_enable_media_followups"] = comments_enable_media_followups
         if "twitter_comments_in_posts_stage" in getattr(
             getattr(ingest_shared_accounts, "__code__", None),
             "co_varnames",
@@ -770,6 +846,9 @@ def begin_social_account_catalog_backfill_launch(
     allow_local_dev_inline_bypass: bool = False,
     execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     selected_tasks: Sequence[Any] | None = None,
+    details_refresh_worker_count: int | None = None,
+    comments_worker_count: int | None = None,
+    comments_enable_media_followups: bool | None = None,
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     _sync_core_overrides()
@@ -807,6 +886,9 @@ def begin_social_account_catalog_backfill_launch(
                 catalog_action=action_seed["catalog_action"],
                 catalog_action_scope=action_seed["catalog_action_scope"],
                 selected_tasks=normalized_selected_tasks,
+                details_refresh_worker_count=details_refresh_worker_count,
+                comments_worker_count=comments_worker_count,
+                comments_enable_media_followups=comments_enable_media_followups,
                 comment_anchor_source_ids=comment_anchor_source_ids,
                 task_resolution_pending=True,
             ),
@@ -877,6 +959,9 @@ def finalize_social_account_catalog_backfill_launch(
     allow_local_dev_inline_bypass: bool = False,
     execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     selected_tasks: Sequence[Any] | None = None,
+    details_refresh_worker_count: int | None = None,
+    comments_worker_count: int | None = None,
+    comments_enable_media_followups: bool | None = None,
     launch_group_id: str | None = None,
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
     catalog_action: str | None = None,
@@ -908,6 +993,9 @@ def finalize_social_account_catalog_backfill_launch(
             allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
             execution_preference=execution_preference,
             selected_tasks=selected_tasks,
+            details_refresh_worker_count=details_refresh_worker_count,
+            comments_worker_count=comments_worker_count,
+            comments_enable_media_followups=comments_enable_media_followups,
             comment_anchor_source_ids=comment_anchor_source_ids,
             existing_catalog_run_id=run_id,
             launch_group_id_override=launch_group_id,
@@ -949,6 +1037,9 @@ def launch_social_account_catalog_backfill(
     allow_local_dev_inline_bypass: bool = False,
     execution_preference: Literal["auto", "prefer_local_inline"] = "auto",
     selected_tasks: Sequence[Any] | None = None,
+    details_refresh_worker_count: int | None = None,
+    comments_worker_count: int | None = None,
+    comments_enable_media_followups: bool | None = None,
     existing_catalog_run_id: str | None = None,
     launch_group_id_override: str | None = None,
     comment_anchor_source_ids: dict[str, list[str]] | None = None,
@@ -1410,7 +1501,7 @@ def launch_social_account_catalog_backfill(
     )
     posts_auth_metadata: dict[str, Any] = {}
     public_posts_auth_metadata: dict[str, Any] = {}
-    if catalog_selected and not catalog_details_refresh_only:
+    if catalog_selected:
         posts_auth_metadata = _ensure_instagram_posts_auth_ready_for_launch(account_handle=normalized_account)
         public_posts_auth_metadata = _public_posts_launch_auth_metadata(posts_auth_metadata)
         if public_posts_auth_metadata.get("auth_repair_status") == "failed":
@@ -1427,12 +1518,6 @@ def launch_social_account_catalog_backfill(
                     "total_ms": round((time_module.perf_counter() - launch_started_at) * 1000, 1),
                 },
             )
-    elif catalog_selected:
-        public_posts_auth_metadata = {
-            "auth_repair_status": "skipped",
-            "auth_repair_reason": "details_refresh_only_existing_catalog",
-            "auth_repair_attempted": False,
-        }
 
     if not catalog_selected and not any(task in effective_selected_tasks for task in ("comments", "media")):
         no_work_payload = _complete_catalog_launch_no_work(
@@ -1497,6 +1582,8 @@ def launch_social_account_catalog_backfill(
             social_account_post_details_only=catalog_details_refresh_only,
             details_refresh_skip_detail_fetch="post_details" not in catalog_tasks,
             details_refresh_force_detail_fetch=force_detail_fetch,
+            details_refresh_worker_count=details_refresh_worker_count,
+            comments_worker_count=comments_worker_count,
             details_refresh_skip_media_followups="media" not in catalog_tasks,
             selected_tasks=normalized_selected_tasks,
             effective_selected_tasks=effective_selected_tasks,
@@ -1510,6 +1597,19 @@ def launch_social_account_catalog_backfill(
                 source="catalog_media_mirror",
                 status=str((catalog_result or {}).get("status") or "queued").strip().lower() or "queued",
             )
+
+    effective_comments_enable_media_followups = (
+        bool(comments_enable_media_followups)
+        if comments_enable_media_followups is not None
+        else "media" in effective_selected_tasks
+    )
+    comments_followup_target_filter = (
+        "incomplete"
+        if normalized_platform == "instagram"
+        and normalized_catalog_action == "backfill"
+        and not instagram_targeted_comment_source_ids
+        else None
+    )
 
     if "comments" in effective_selected_tasks:
         comments_launch_started_at = time_module.perf_counter()
@@ -1544,7 +1644,9 @@ def launch_social_account_catalog_backfill(
                 "account_handle": normalized_account,
                 "source_scope": source_scope,
                 "refresh_policy": "stale_or_missing",
-                "comments_enable_media_followups": "media" in effective_selected_tasks,
+                "target_filter": comments_followup_target_filter,
+                "comments_enable_media_followups": effective_comments_enable_media_followups,
+                "comments_worker_count": comments_worker_count,
                 "allow_local_dev_inline_bypass": bool(allow_local_dev_inline_bypass),
                 "launch_group_id": launch_group_id,
                 "runtime_version": _metadata_dict(catalog_run_config.get("required_runtime_version"))
@@ -1604,13 +1706,15 @@ def launch_social_account_catalog_backfill(
                     max_posts=None,
                     max_comments_per_post=None,
                     refresh_policy="stale_or_missing",
+                    target_filter=comments_followup_target_filter,
                     initiated_by=initiated_by,
                     inline_worker_id=None if catalog_result else inline_worker_id,
                     allow_local_dev_inline_bypass=allow_local_dev_inline_bypass,
-                    comments_enable_media_followups="media" in effective_selected_tasks,
+                    comments_enable_media_followups=effective_comments_enable_media_followups,
                     launch_group_id=launch_group_id,
                     skip_launch_auth_probe=bool(catalog_result) or bool(instagram_targeted_comment_source_ids),
                     target_source_ids=instagram_targeted_comment_source_ids or None,
+                    comments_worker_count=comments_worker_count,
                 )
             except SocialIngestConflictError as exc:
                 if exc.code == "SOCIAL_ACCOUNT_COMMENTS_LAUNCH_IN_PROGRESS":

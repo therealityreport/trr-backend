@@ -28,6 +28,7 @@ def test_select_posts_proxy_explicit_url(monkeypatch):
 def test_select_posts_proxy_decodo(monkeypatch):
     """DECODO credentials → dict-based browser proxy + URL-encoded API proxy."""
     monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_PROXY_URLS", raising=False)
+    monkeypatch.delenv("SOCIAL_INSTAGRAM_POSTS_USE_STICKY_PROXY", raising=False)
     monkeypatch.setenv("SOCIAL_INSTAGRAM_POSTS_PROXY_PROVIDER", "decodo")
     monkeypatch.setenv("DECODO_USERNAME", "user1")
     monkeypatch.setenv("DECODO_PASSWORD", "p@ss!")
@@ -41,6 +42,8 @@ def test_select_posts_proxy_decodo(monkeypatch):
     assert result.browser_proxy["username"] == "user1"
     assert result.browser_proxy["password"] == "p@ss!"
     assert "p%40ss%21" in result.api_proxy_url
+    assert "-session-" not in result.browser_proxy["username"]
+    assert "sessionduration" not in result.api_proxy_url
     assert result.fingerprint == "gate.decodo.com:7000:decodo"
     assert result.session_mode == "rotating"
 
